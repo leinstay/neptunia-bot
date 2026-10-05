@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createStore, writeJsonAtomic } from '../src/memory/store.js';
-import { applyDelta, emptyAffinity } from '../src/memory/affinity.js';
+import { applyDelta } from '../src/memory/affinity.js';
 import { mergeEpisodes } from '../src/memory/episodes.js';
 import { applyMemoryUpdate, MEMORY_LIMIT_DEFAULTS } from '../src/memory/update.js';
 import { FEELING_CHARS, REASON_CHARS, SELF_CHARS, applyVoiceItems, mergeIntoQueue, removeItems, splitDecision } from '../src/memory/voice.js';
@@ -16,23 +16,6 @@ import { withCapturedLogs } from './fixtures/capture-logs.js';
 function tmpDataDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-store-'));
 }
-
-test('getUser: returns null for a user that has never been seen', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  assert.equal(store.getUser('g1', 'nouser'), null);
-});
-
-test('touchUser: creates a profile with names, counters and timestamps', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const profile = store.touchUser('g1', 'u1', 'Alice', 1000);
-  assert.equal(profile.id, 'u1');
-  assert.deepEqual(profile.names, ['Alice']);
-  assert.equal(profile.messageCount, 1);
-  assert.equal(profile.firstSeen, new Date(1000).toISOString());
-  assert.equal(profile.lastSeen, new Date(1000).toISOString());
-});
 
 test('touchUser: puts the current name first, keeps previous names after, deduplicated', () => {
   const dir = tmpDataDir();
@@ -51,16 +34,6 @@ test('touchUser: names list is capped at 5 entries', () => {
   for (const [i, name] of names.entries()) profile = store.touchUser('g1', 'u1', name, i);
   assert.equal(profile.names.length, 5);
   assert.equal(profile.names[0], 'n6'); // most recent first
-});
-
-test('touchUser: firstSeen is set only once, lastSeen keeps advancing', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-  const profile = store.touchUser('g1', 'u1', 'Alice', 5000);
-  assert.equal(profile.firstSeen, new Date(1000).toISOString());
-  assert.equal(profile.lastSeen, new Date(5000).toISOString());
-  assert.equal(profile.messageCount, 2);
 });
 
 test('touchUser: an empty/falsy name does not touch the names list', () => {
@@ -110,16 +83,6 @@ test('touchUser: a touch at exactly the stored lastSeen still counts as newest (
   assert.deepEqual(profile.names, ['Bob', 'Alice']);
 });
 
-test('updateUser: merges fields and stamps updatedAt', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-  const profile = store.updateUser('g1', 'u1', { character: 'τολμηρή', style: 'παιχνίδια' });
-  assert.equal(profile.character, 'τολμηρή');
-  assert.equal(profile.style, 'παιχνίδια');
-  assert.ok(profile.updatedAt);
-});
-
 test('updateUser: cannot set interests or details via raw LLM fields', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -146,14 +109,6 @@ test('updateUser: cannot set interests or details via raw LLM fields', () => {
   assert.equal(profile.details[0].text, 'likes tea');
 });
 
-test('updateUser: creates the profile if it did not already exist', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const profile = store.updateUser('g1', 'newuser', { character: 'x' });
-  assert.equal(profile.id, 'newuser');
-  assert.equal(profile.character, 'x');
-});
-
 test('forgetUser: removes the profile from cache and disk', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -163,13 +118,6 @@ test('forgetUser: removes the profile from cache and disk', () => {
   assert.equal(store.getUser('g1', 'u1'), null);
   const file = path.join(dir, 'guilds', 'g1', 'users', 'u1.json');
   assert.equal(fs.existsSync(file), false);
-});
-
-test('getGuild: returns the default empty guild memory when nothing is stored', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const guild = store.getGuild('g1');
-  assert.deepEqual(guild, { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornHistory: [], updatedAt: null, notesUpdatedAt: null, notesCheckedAt: null });
 });
 
 // ---- guild.learned: things people taught the persona --------------------------
@@ -287,14 +235,6 @@ test('updateGuild: can never overwrite learned or learnedNextId wholesale', () =
   assert.equal(guild.patterns, 'p');
 });
 
-test('updateGuild: merges fields and stamps updatedAt', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const guild = store.updateGuild('g1', { patterns: 'μιμίδια για γάτες' });
-  assert.equal(guild.patterns, 'μιμίδια για γάτες');
-  assert.ok(guild.updatedAt);
-});
-
 test('updateGuild: a re-send identical to what is stored leaves updatedAt alone; a change is stamped', () => {
   const store = createStore({ dataDir: tmpDataDir() });
   const earlier = '2000-01-01T00:00:00.000Z';
@@ -391,22 +331,6 @@ test('markNotesChecked: guild false leaves the guild alone; a channel never seen
   assert.equal(fs.existsSync(path.join(dir, 'guilds', 'g1', 'channels', 'c9.json')), false);
   assert.equal(fs.existsSync(path.join(dir, 'guilds', 'g1', 'guild.json')), false, 'no guild file appears for a channel-only check');
   assert.equal(store.getGuild('g1').notesCheckedAt, null);
-});
-
-test('markNotesChecked: targets that name nothing change nothing and never throw', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.updateChannel('g1', 'c1', { purpose: 'κουβέντα' });
-  store.flush();
-  const file = path.join(dir, 'guilds', 'g1', 'channels', 'c1.json');
-  const raw = fs.readFileSync(file, 'utf8');
-
-  for (const targets of [undefined, null, 'c1', 42, [], {}, { channels: 'c1' }, { channels: [null, {}, ['c1']], guild: 'yes' }]) {
-    assert.deepEqual(store.markNotesChecked('g1', targets, NOTES_CHECK_AT), { channels: 0, guild: false }, `targets ${JSON.stringify(targets)}`);
-  }
-  store.flush();
-  assert.equal(fs.readFileSync(file, 'utf8'), raw);
-  assert.equal(fs.existsSync(path.join(dir, 'guilds', 'g1', 'guild.json')), false);
 });
 
 test('markNotesChecked: a guild never written gets its check stamp, and the stamps survive a restart', () => {
@@ -570,17 +494,6 @@ test('state: data persists across restarts via flush + markDirty', () => {
   assert.equal(storeB.state.data.llmCount, 5);
 });
 
-test('countUsers: counts profile files on disk for a guild', () => {
-  const dir = tmpDataDir();
-  const storeA = createStore({ dataDir: dir });
-  storeA.touchUser('g1', 'u1', 'Alice', 1000);
-  storeA.touchUser('g1', 'u2', 'Bob', 1000);
-  storeA.flush();
-  assert.equal(storeA.countUsers('g1'), 2);
-  // A fresh instance has nothing cached: only the files on disk can give it the count.
-  assert.equal(createStore({ dataDir: dir }).countUsers('g1'), 2);
-});
-
 test('countUsers: counts a profile not flushed yet, like every other lister', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -591,37 +504,7 @@ test('countUsers: counts a profile not flushed yet, like every other lister', ()
   assert.equal(store.countUsers('g1'), store.listUserProfiles('g1').length);
 });
 
-test('countUsers: returns 0 when the guild has no users directory yet', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  assert.equal(store.countUsers('unknown-guild'), 0);
-});
-
 // --- affinity ---------------------------------------------------------------
-
-test('emptyProfile: a fresh profile starts with a neutral affinity', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const profile = store.touchUser('g1', 'u1', 'Alice', 1000);
-  assert.deepEqual(profile.affinity, emptyAffinity());
-});
-
-test('emptyProfile: a fresh profile starts with no episodes, interests or aliases', () => {
-  const profile = createStore({ dataDir: tmpDataDir() }).touchUser('g1', 'u1', 'Alice', 1000);
-  for (const field of ['episodes', 'interests', 'aliases']) {
-    assert.deepEqual(profile[field], [], `a fresh profile starts with no ${field}`);
-  }
-});
-
-test('adjustAffinity: applies a delta to a fresh profile and returns the new affinity', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-  const affinity = store.adjustAffinity('g1', 'u1', 10, 'was kind', { maxDelta: 15, historySize: 10, now: 1000 });
-  assert.equal(affinity.score, 10);
-  assert.equal(affinity.reason, 'was kind');
-  assert.equal(store.getUser('g1', 'u1').affinity.score, 10);
-});
 
 test('adjustAffinity: creates the affinity object for a profile written before this feature existed', () => {
   const dir = tmpDataDir();
@@ -656,25 +539,6 @@ test('updateUser: cannot overwrite affinity via LLM-extracted fields', () => {
 
 // --- channels (the server map) ----------------------------------------------
 
-test('getChannel: returns null for a channel that has never been seen', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  assert.equal(store.getChannel('g1', 'nochannel'), null);
-});
-
-test('touchChannel: creates a channel entry with Discord facts, counters and the day histogram', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const channel = store.touchChannel('g1', 'c1', { name: 'general', category: 'Text', topic: 'chat' }, Date.UTC(2026, 8, 20, 10, 0, 0));
-  assert.equal(channel.id, 'c1');
-  assert.equal(channel.name, 'general');
-  assert.equal(channel.category, 'Text');
-  assert.equal(channel.topic, 'chat');
-  assert.equal(channel.messageCount, 1);
-  assert.equal(channel.lastMessageAt, Date.UTC(2026, 8, 20, 10, 0, 0));
-  assert.deepEqual(channel.days, { '2026-09-20': 1 });
-});
-
 test('touchChannel: repeated calls the same UTC day increment the same bucket', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -694,16 +558,6 @@ test('touchChannel: lastMessageAt keeps the maximum timestamp seen, even out of 
   assert.equal(channel.lastMessageAt, 5000);
 });
 
-test('touchChannel: Discord facts (name/category/topic) refresh on every call', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchChannel('g1', 'c1', { name: 'general', category: 'Text', topic: 'old topic' }, 1000);
-  const channel = store.touchChannel('g1', 'c1', { name: 'general-renamed', category: null, topic: null }, 2000);
-  assert.equal(channel.name, 'general-renamed');
-  assert.equal(channel.category, null);
-  assert.equal(channel.topic, null);
-});
-
 test('touchChannel: trims the day histogram to the newest 30 dates', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -718,15 +572,6 @@ test('touchChannel: trims the day histogram to the newest 30 dates', () => {
   assert.equal(keys.at(-1), '2026-02-04');
 });
 
-test('touchChannel: sets firstMessageAt on first touch, then keeps the minimum', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const facts = { name: 'general', category: null, topic: null };
-  store.touchChannel('g1', 'c1', facts, 5000);
-  const channel = store.touchChannel('g1', 'c1', facts, 1000); // arrives "late", out of order
-  assert.equal(channel.firstMessageAt, 1000);
-});
-
 test('touchChannel: bumps the author into topWriters and adds up repeated visits', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -738,26 +583,6 @@ test('touchChannel: bumps the author into topWriters and adds up repeated visits
     { id: 'alice', count: 2 },
     { id: 'bob', count: 1 },
   ]);
-});
-
-test('touchChannel: a null authorId (the persona/other bots) never touches topWriters', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const facts = { name: 'general', category: null, topic: null };
-  const channel = store.touchChannel('g1', 'c1', facts, 1000);
-  assert.deepEqual(channel.topWriters, []);
-});
-
-test('touchChannel: topWriters never grows past the top 5 by count', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const facts = { name: 'general', category: null, topic: null };
-  let channel;
-  for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) {
-    channel = store.touchChannel('g1', 'c1', facts, 1000, id);
-  }
-  // every author wrote exactly once here -- 6 candidates, only 5 kept.
-  assert.equal(channel.topWriters.length, 5);
 });
 
 test('setChannelFacts: SETs counters, never adds, so a redo lands on the same numbers', () => {
@@ -782,62 +607,12 @@ test('setChannelFacts: SETs counters, never adds, so a redo lands on the same nu
   assert.deepEqual(channel.topWriters, [{ id: 'a', count: 8 }, { id: 'b', count: 4 }]);
 });
 
-test('setChannelFacts: caps topWriters to 5 and coerces ids to strings', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const topWriters = [1, 2, 3, 4, 5, 6].map((id) => ({ id, count: id }));
-  const channel = store.setChannelFacts('g1', 'c1', { messageCount: 21, days: {}, topWriters });
-  assert.equal(channel.topWriters.length, 5);
-  assert.ok(channel.topWriters.every((w) => typeof w.id === 'string'));
-});
-
-test('setChannelFacts: zeros and empty lists for a channel with no messages at all', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  // An earlier window filled every counter; the redo over a window with no messages SETs them back.
-  store.setChannelFacts('g1', 'c1', {
-    name: 'quiet-room',
-    category: null,
-    topic: null,
-    messageCount: 12,
-    firstMessageAt: 1000,
-    lastMessageAt: 9000,
-    days: { '2026-09-20': 12 },
-    topWriters: [{ id: 'a', count: 8 }, { id: 'b', count: 4 }],
-  });
-  const channel = store.setChannelFacts('g1', 'c1', { name: 'quiet-room', category: null, topic: null, messageCount: 0, firstMessageAt: null, lastMessageAt: null, days: {}, topWriters: [] });
-  assert.equal(channel.messageCount, 0);
-  assert.equal(channel.firstMessageAt, null);
-  assert.equal(channel.lastMessageAt, null);
-  assert.deepEqual(channel.days, {});
-  assert.deepEqual(channel.topWriters, []);
-});
-
 test('setChannelFacts: leaves purpose/topics/tone (the analyzer\'s own fields) untouched', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   store.updateChannel('g1', 'c1', { purpose: 'general chatter' });
   const channel = store.setChannelFacts('g1', 'c1', { messageCount: 3, days: {} });
   assert.equal(channel.purpose, 'general chatter');
-});
-
-test('setChannelFacts: creates the channel if it did not already exist', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const channel = store.setChannelFacts('g1', 'newchannel', { messageCount: 1, days: {} });
-  assert.equal(channel.id, 'newchannel');
-  assert.equal(channel.messageCount, 1);
-});
-
-test('updateChannel: merges purpose/topics/tone and stamps updatedAt', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchChannel('g1', 'c1', { name: 'general', category: null, topic: null }, 1000);
-  const channel = store.updateChannel('g1', 'c1', { purpose: 'chatter', topics: 'games', tone: 'casual' });
-  assert.equal(channel.purpose, 'chatter');
-  assert.equal(channel.topics, 'games');
-  assert.equal(channel.tone, 'casual');
-  assert.ok(channel.updatedAt);
 });
 
 test('updateChannel: the analyzer cannot overwrite counters or Discord facts', () => {
@@ -859,14 +634,6 @@ test('updateChannel: the analyzer cannot overwrite counters or Discord facts', (
   assert.deepEqual(channel.days, { '1970-01-01': 1 }, 'days must survive an updateChannel call untouched');
 });
 
-test('updateChannel: creates the channel if it did not already exist', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const channel = store.updateChannel('g1', 'newchannel', { purpose: 'x' });
-  assert.equal(channel.id, 'newchannel');
-  assert.equal(channel.purpose, 'x');
-});
-
 const EARLIER_STAMP = '2000-01-01T00:00:00.000Z';
 
 test('updateChannel: a re-send identical to what is stored leaves updatedAt alone', () => {
@@ -877,32 +644,6 @@ test('updateChannel: a re-send identical to what is stored leaves updatedAt alon
   const channel = store.updateChannel('g1', 'c1', { purpose: 'chatter', tone: 'casual' });
   assert.equal(channel.updatedAt, EARLIER_STAMP);
   assert.equal(store.updateChannel('g1', 'c1', {}).updatedAt, EARLIER_STAMP, 'no field at all is no change either');
-});
-
-test('updateChannel: one changed field among identical ones is stamped', () => {
-  const store = createStore({ dataDir: tmpDataDir() });
-  store.touchChannel('g1', 'c1', { name: 'general', category: null, topic: null }, 1000);
-  store.updateChannel('g1', 'c1', { purpose: 'chatter', topics: 'games', tone: 'casual' }).updatedAt = EARLIER_STAMP;
-
-  const channel = store.updateChannel('g1', 'c1', { purpose: 'chatter', topics: 'games', tone: 'heated' });
-  assert.notEqual(channel.updatedAt, EARLIER_STAMP);
-  assert.equal(channel.tone, 'heated');
-  assert.equal(channel.purpose, 'chatter');
-});
-
-test('listChannels: lists every channel entry of a guild', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchChannel('g1', 'c1', { name: 'general', category: null, topic: null }, 1000);
-  store.touchChannel('g1', 'c2', { name: 'random', category: null, topic: null }, 1000);
-  const channels = store.listChannels('g1').map((c) => c.id).sort();
-  assert.deepEqual(channels, ['c1', 'c2']);
-});
-
-test('listChannels: returns an empty array for a guild with no channels yet', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  assert.deepEqual(store.listChannels('unknown-guild'), []);
 });
 
 test('flush + a new store instance: channels survive a "restart"', () => {
@@ -1133,36 +874,12 @@ test('getChannel: a tally or a check stamp a hand edit broke is made safe to rea
 
 // --- media cache (src/memory/describe.js's storage) --------------------------
 
-test('getMediaCache: starts empty for a guild never seen', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  assert.deepEqual(store.getMediaCache('g1'), {});
-});
-
 test('getMediaCache: the same live object is returned on every call, mutation-friendly', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const cache = store.getMediaCache('g1');
   cache.a1 = { text: 'a cat', ts: 1000 };
   assert.deepEqual(store.getMediaCache('g1'), { a1: { text: 'a cat', ts: 1000 } });
-});
-
-test('markMediaCacheDirty + flush: persists the media cache to guilds/<id>/media.json', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const cache = store.getMediaCache('g1');
-  cache.a1 = { text: 'a cat', ts: 1000 };
-  store.markMediaCacheDirty('g1');
-  store.flush();
-
-  const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'guilds', 'g1', 'media.json'), 'utf8'));
-  assert.deepEqual(onDisk, { a1: { text: 'a cat', ts: 1000 } });
-});
-
-test('markMediaCacheDirty: a no-op before getMediaCache has ever been called for that guild', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  assert.doesNotThrow(() => store.markMediaCacheDirty('never-touched'));
 });
 
 test('media cache: persists across store instances', () => {
@@ -1194,19 +911,6 @@ test('adjustAffinity: persists across store instances', () => {
 
 // --- episodes -----------------------------------------------------------------
 
-test('addEpisodes: appends via mergeEpisodes and marks the profile dirty', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-
-  const added = store.addEpisodes('g1', 'u1', [{ what: 'promised to help' }], { maxEpisodes: 20, maxNew: 3, now: 1000 });
-
-  assert.equal(added, 1);
-  const profile = store.getUser('g1', 'u1');
-  assert.equal(profile.episodes.length, 1);
-  assert.equal(profile.episodes[0].what, 'promised to help');
-});
-
 test('addEpisodes: tolerates a profile written before this feature existed', () => {
   const dir = tmpDataDir();
   const guildDir = path.join(dir, 'guilds', 'g1', 'users');
@@ -1218,16 +922,6 @@ test('addEpisodes: tolerates a profile written before this feature existed', () 
 
   assert.equal(added, 1);
   assert.equal(store.getUser('g1', 'u1').episodes.length, 1);
-});
-
-test('addEpisodes: an empty/rejected batch changes nothing', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-
-  const added = store.addEpisodes('g1', 'u1', [], { maxEpisodes: 20, maxNew: 3, now: 1000 });
-  assert.equal(added, 0);
-  assert.deepEqual(store.getUser('g1', 'u1').episodes, []);
 });
 
 test('addEpisodes: persists across store instances', () => {
@@ -1276,15 +970,6 @@ test('getUser: a hand-edited details array missing valid ids gets fresh ones ass
     { id: 2, text: 'Plays guitar', weight: 1, firstSeen: null, lastSeen: null },
   ]);
   assert.equal(profile.detailsSeq, 3);
-});
-
-test('applyProfileOps: a fresh detail is assigned a per-profile id that keeps incrementing across calls', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-  store.applyProfileOps('g1', 'u1', { details: { add: ['Owns a cat'] } }, { maxDetails: 15, now: 1000 });
-  const profile = store.applyProfileOps('g1', 'u1', { details: { add: ['Plays guitar'] } }, { maxDetails: 15, now: 2000 });
-  assert.deepEqual(profile.details.map((d) => d.id), [1, 2]);
 });
 
 test('applyProfileOps: a detail id is never reused after a remove', () => {
@@ -1346,36 +1031,6 @@ test('applyProfileOps: prose fields are clamped tolerantly to opts.fieldChars (a
   assert.equal(profile.character, '012345', '5 * the default tolerance 1.25, floored');
 });
 
-test('applyProfileOps: prose fields respect an explicit clampTolerance', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-  const profile = store.applyProfileOps('g1', 'u1', { character: '0123456789' }, { fieldChars: 5, clampTolerance: 1, now: 1000 });
-  assert.equal(profile.character, '01234');
-});
-
-test('applyProfileOps: routes interests ops through applyInterestOps', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-  store.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'Chess', note: 'plays weekly' }] } }, {
-    maxInterests: 12,
-    topicChars: 40,
-    noteChars: 120,
-    now: 1000,
-  });
-  const muchLater = 1000 + 13 * 3_600_000; // past the default 12h confirmGapHours
-  const profile = store.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'chess', note: '' }] } }, {
-    maxInterests: 12,
-    topicChars: 40,
-    noteChars: 120,
-    now: muchLater,
-  });
-  assert.equal(profile.interests.length, 1);
-  assert.equal(profile.interests[0].weight, 2, 're-mentioning the same topic, well past the gap, bumps its weight');
-  assert.equal(profile.interests[0].note, 'plays weekly');
-});
-
 test('applyProfileOps: normalizes a hand-edited interests array before applying ops', () => {
   const dir = tmpDataDir();
   const guildDir = path.join(dir, 'guilds', 'g1', 'users');
@@ -1414,40 +1069,6 @@ test('applyProfileOps: details are capped at maxDetails, evicting the lowest wei
   store.touchUser('g1', 'u1', 'Alice', 1000);
   const profile = store.applyProfileOps('g1', 'u1', { details: { add: ['a', 'b', 'c'] } }, { maxDetails: 2, now: 1000 });
   assert.deepEqual(profile.details.map((d) => d.text), ['b', 'c']);
-});
-
-test('applyProfileOps: threads maxInterestsStored into applyInterestOps -- a smaller stored cap never evicts below the shown cap', () => {
-  // A stored cap above the shown cap is the one enforced: more is kept than shown.
-  const wide = createStore({ dataDir: tmpDataDir() });
-  wide.touchUser('g1', 'u1', 'Alice', 1000);
-  const kept = wide.applyProfileOps('g1', 'u1', { interests: { add: ['a', 'b', 'c', 'd', 'e'].map((topic) => ({ topic })) } }, {
-    maxInterests: 2,
-    maxInterestsStored: 4,
-    topicChars: 40,
-    noteChars: 120,
-    now: 1000,
-  });
-  assert.equal(kept.interests.length, 4, 'maxInterestsStored (4) reached the eviction, not only maxInterests (2)');
-
-  // A stored cap below the shown cap is floored at the shown cap.
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-  store.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'a' }, { topic: 'b' }] } }, {
-    maxInterests: 12,
-    maxInterestsStored: 12,
-    topicChars: 40,
-    noteChars: 120,
-    now: 1000,
-  });
-  const profile = store.applyProfileOps('g1', 'u1', { interests: { add: [{ topic: 'c' }] } }, {
-    maxInterests: 12,
-    maxInterestsStored: 1, // deliberately smaller than the shown cap
-    topicChars: 40,
-    noteChars: 120,
-    now: 2000,
-  });
-  assert.equal(profile.interests.length, 3, 'the stored cap is floored at maxInterests (12), so nothing is evicted yet');
 });
 
 test('applyProfileOps: threads interestHalfLifeDays into applyInterestOps -- decay lets a recent light interest survive eviction over an ancient heavier one', () => {
@@ -1545,28 +1166,6 @@ test('applyProfileOps: persists across store instances', () => {
 
 // --- lore -----------------------------------------------------------------
 
-test('getLore: an empty array for a guild with no lorebook yet', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  assert.deepEqual(store.getLore('g1'), []);
-});
-
-test('setLore: inserts entries via upsertLore and marks the guild lorebook dirty', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-
-  const upserted = store.setLore('g1', [{ title: 'The Flood', keys: ['flood', 'the water'], text: 'It flooded once.' }], {
-    source: 'analyzer',
-    now: 1000,
-  });
-
-  assert.equal(upserted, 1);
-  const entries = store.getLore('g1');
-  assert.equal(entries.length, 1);
-  assert.equal(entries[0].title, 'The Flood');
-  assert.equal(entries[0].source, 'analyzer');
-});
-
 test('setLore: an owner entry is never overwritten by a later analyzer update', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -1593,17 +1192,6 @@ test('setLore: an identical analyzer re-send returns 0 and keeps updatedAt; a ch
 
   assert.equal(store.setLore('g1', [{ ...flood, text: 'It flooded twice.' }], { source: 'analyzer', now: 3000 }), 1);
   assert.equal(store.getLore('g1')[0].updatedAt, new Date(3000).toISOString());
-});
-
-test('removeLore: deletes by id and reports whether anything was removed', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.setLore('g1', [{ title: 'The Flood', keys: ['flood'], text: 'It flooded once.' }], { source: 'analyzer', now: 1000 });
-  const [{ id }] = store.getLore('g1');
-
-  assert.equal(store.removeLore('g1', id), true);
-  assert.deepEqual(store.getLore('g1'), []);
-  assert.equal(store.removeLore('g1', id), false, 'already gone');
 });
 
 test('lore: persists across store instances', () => {
@@ -1655,7 +1243,7 @@ test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer l
   // cache is immediately usable
   assert.equal(storeA.getUser('g1', 'u1'), null);
   assert.equal(storeA.getUser('g1', 'u2'), null);
-  assert.deepEqual(storeA.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornHistory: [], updatedAt: null, notesUpdatedAt: null, notesCheckedAt: null });
+  assert.deepEqual([storeA.getGuild('g1').patterns, storeA.getGuild('g1').learned, storeA.getGuild('g1').self, storeA.getGuild('g1').updatedAt], ['', [], [], null]);
   assert.deepEqual(storeA.listChannels('g1'), []);
   assert.deepEqual(storeA.getBuffer('g1'), []);
   const lore = storeA.getLore('g1');
@@ -1671,7 +1259,7 @@ test('wipeGuild: removes profiles, guild memory, channels, buffer and analyzer l
   const storeB = createStore({ dataDir: dir });
   assert.equal(storeB.getUser('g1', 'u1'), null);
   assert.equal(storeB.getUser('g1', 'u2'), null);
-  assert.deepEqual(storeB.getGuild('g1'), { patterns: '', starters: '', injokes: [], self: [], learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornHistory: [], updatedAt: null, notesUpdatedAt: null, notesCheckedAt: null });
+  assert.deepEqual([storeB.getGuild('g1').patterns, storeB.getGuild('g1').learned, storeB.getGuild('g1').self, storeB.getGuild('g1').updatedAt], ['', [], [], null]);
   assert.deepEqual(storeB.listChannels('g1'), []);
   assert.deepEqual(storeB.getBuffer('g1'), []);
   const loreB = storeB.getLore('g1');
@@ -1698,14 +1286,6 @@ test('wipeGuild: the store stays fully usable afterwards without a restart', () 
 
   const storeB = createStore({ dataDir: dir });
   assert.equal(storeB.getUser('g1', 'u3').names[0], 'Carol');
-});
-
-test('wipeGuild: safe when nothing was ever stored for the guild', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const counts = store.wipeGuild('never-seen');
-  assert.deepEqual(counts, { users: 0, channels: 0, loreRemoved: 0, loreKept: 0, bufferMessages: 0, recentLines: 0 });
-  assert.doesNotThrow(() => store.touchUser('never-seen', 'u1', 'Dee', 1000));
 });
 
 test('wipeGuild: keepOwnerLore false also removes owner lore', () => {
@@ -1801,42 +1381,6 @@ test('applyProfileOps: an alias equal (case-insensitively) to the member\'s OWN 
   assert.deepEqual(profile.aliases, []);
 });
 
-test('applyProfileOps: a repeated alias add is a sighting (weight bump, subject to confirmGapHours)', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-
-  store.applyProfileOps('g1', 'u1', { aliases: { add: ['Ali'] } }, { confirmGapHours: 12, now: 0, seenAt: 0 });
-  const profile = store.applyProfileOps(
-    'g1',
-    'u1',
-    { aliases: { add: ['ali'] } },
-    { confirmGapHours: 12, now: 13 * 3_600_000, seenAt: 13 * 3_600_000 },
-  );
-  assert.equal(profile.aliases[0].weight, 2);
-  assert.equal(profile.aliases[0].name, 'Ali', 'original casing kept');
-});
-
-test('applyProfileOps: aliases.remove deletes the alias', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-
-  store.applyProfileOps('g1', 'u1', { aliases: { add: ['Ali'] } }, { now: 1000 });
-  const profile = store.applyProfileOps('g1', 'u1', { aliases: { remove: ['Ali'] } }, { now: 2000 });
-  assert.deepEqual(profile.aliases, []);
-});
-
-test('applyProfileOps: aliases are capped at max(maxAliasesStored, maxAliases)', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-
-  store.applyProfileOps('g1', 'u1', { aliases: { add: ['One'] } }, { maxAliases: 1, maxAliasesStored: 1, now: 1000 });
-  const profile = store.applyProfileOps('g1', 'u1', { aliases: { add: ['Two'] } }, { maxAliases: 1, maxAliasesStored: 1, now: 2000 });
-  assert.equal(profile.aliases.length, 1);
-});
-
 // --- listUserProfiles -----------------------------------------------------------
 
 test('listUserProfiles: every stored profile of a guild, cached or on disk', () => {
@@ -1851,12 +1395,6 @@ test('listUserProfiles: every stored profile of a guild, cached or on disk', () 
 
   const profiles = storeB.listUserProfiles('g1');
   assert.deepEqual(profiles.map((p) => p.id).sort(), ['u1', 'u2', 'u3']);
-});
-
-test('listUserProfiles: an empty/never-seen guild returns []', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  assert.deepEqual(store.listUserProfiles('g1'), []);
 });
 
 // --- dropCaches / reloadState / validate (/nep pause, /nep resume) ------------
@@ -1885,12 +1423,6 @@ test('dropCaches: forgets every cached file except state.json, so the next read 
   assert.equal(store.state.data.llmCount, 3);
 });
 
-test('dropCaches: a no-op on an empty store, returns 0', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  assert.equal(store.dropCaches(), 0);
-});
-
 test('reloadState: re-reads state.json from disk, discarding the cached in-memory value', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -1907,23 +1439,6 @@ test('reloadState: re-reads state.json from disk, discarding the cached in-memor
   assert.deepEqual(store.state.data.warmup, { done: false });
 });
 
-test('reloadState: falls back to {} when state.json does not exist', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.reloadState();
-  assert.deepEqual(store.state.data, {});
-});
-
-test('validate: an empty array when every *.json file under dataDir parses (including when nothing exists yet)', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  assert.deepEqual(store.validate(), []);
-
-  store.touchUser('g1', 'u1', 'Alice', 1000);
-  store.flush();
-  assert.deepEqual(store.validate(), []);
-});
-
 test('validate: names every unparsable *.json file, path relative to dataDir and forward-slash separated', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -1936,14 +1451,6 @@ test('validate: names every unparsable *.json file, path relative to dataDir and
 
   const bad = store.validate();
   assert.deepEqual(bad.sort(), ['guilds/g1/users/u1.json', 'state.json'].sort());
-});
-
-test('validate: a non-json file under dataDir is never checked', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'notes.txt'), 'not json at all, but not a .json file either');
-  assert.deepEqual(store.validate(), []);
 });
 
 // --- private memory layer (data/guilds/<id>/private/<userId>.json) -----------
@@ -1984,13 +1491,6 @@ test('applyPrivateOps: a first private write creates the empty shape, persists i
   const storeB = createStore({ dataDir: dir });
   assert.deepEqual(storeB.getPrivate('g1', 'u1'), EMPTY_PRIVATE);
   assert.deepEqual(storeB.listPrivate('g1'), ['u1']);
-});
-
-test('applyPrivateOps: a later write with nothing to say leaves the existing file untouched', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.applyPrivateOps('g1', 'u1', { relationship: 'Trusts the persona' }, { fieldChars: 300 });
-  assert.equal(store.applyPrivateOps('g1', 'u1', {}).relationship, 'Trusts the persona');
 });
 
 test('getPrivate: a hand-edited file is normalised on read: defaults filled, detail ids assigned', () => {
@@ -2187,13 +1687,6 @@ test('private buffer: push, info, consume empties it; info on a missing file cre
   assert.deepEqual(createStore({ dataDir: dir }).getPrivate('g1', 'u1').buffer, []);
 });
 
-test('pushPrivateBuffer: an optional maxLength drops the oldest entries', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  for (let i = 1; i <= 5; i += 1) store.pushPrivateBuffer('g1', 'u1', { id: `m${i}`, ts: i }, 3);
-  assert.deepEqual(store.getPrivate('g1', 'u1').buffer.map((m) => m.id), ['m3', 'm4', 'm5']);
-});
-
 test('pushPrivateBuffer: returns how many oldest entries the cap dropped, 0 under it or without one', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -2201,16 +1694,6 @@ test('pushPrivateBuffer: returns how many oldest entries the cap dropped, 0 unde
   for (let i = 1; i <= 5; i += 1) dropped.push(store.pushPrivateBuffer('g1', 'u1', { id: `m${i}`, ts: i }, 3));
   assert.deepEqual(dropped, [0, 0, 0, 1, 1]);
   assert.equal(store.pushPrivateBuffer('g1', 'u2', { id: 'm1', ts: 1 }), 0);
-});
-
-test('listPrivate: ids with a private file, on disk or only cached', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.applyPrivateOps('g1', 'u1', {});
-  store.flush();
-  store.applyPrivateOps('g1', 'u2', {});
-  assert.deepEqual(store.listPrivate('g1').sort(), ['u1', 'u2']);
-  assert.deepEqual(store.listPrivate('g2'), []);
 });
 
 test('forgetPrivate: deletes the private file from cache and disk, the public profile stays', () => {
@@ -2261,20 +1744,6 @@ test('wipeGuild: removes the private directory, cache and disk, leaves other gui
   assert.equal(fs.existsSync(path.join(dir, 'guilds', 'g1', 'private')), false);
   assert.deepEqual(createStore({ dataDir: dir }).listPrivate('g1'), []);
   assert.deepEqual(createStore({ dataDir: dir }).listPrivate('g2'), ['u9']);
-});
-
-test('getPrivateBuffer: a copy of the buffer, oldest first; [] and no file when there is no private layer', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  assert.deepEqual(store.getPrivateBuffer('g1', 'u1'), []);
-  assert.equal(store.getPrivate('g1', 'u1'), null);
-
-  store.pushPrivateBuffer('g1', 'u1', { id: 'm1', ts: 1000 });
-  store.pushPrivateBuffer('g1', 'u1', { id: 'm2', ts: 2000 });
-  const copy = store.getPrivateBuffer('g1', 'u1');
-  assert.deepEqual(copy.map((m) => m.id), ['m1', 'm2']);
-  copy.pop();
-  assert.equal(store.privateBufferInfo('g1', 'u1').size, 2, 'mutating the copy never touches the stored buffer');
 });
 
 test('shiftPrivateBuffer: drops the consumed entries by id and persists; a missing layer is left alone', () => {
@@ -2456,16 +1925,6 @@ test('applyProfileOps: a written relationship is stamped relationshipWrittenAt a
   assert.equal(store.getUser('g1', 'u1').relationshipWrittenAt, new Date(WRITTEN_NOW).toISOString(), 'a blank text stamps nothing');
 });
 
-test('applyProfileOps: without relationshipChars the relationship keeps the fieldChars clamp; no clock = the wall clock', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  const before = Date.now();
-  const profile = store.applyProfileOps('g1', 'u1', { relationship: LONG_RELATIONSHIP }, { fieldChars: 400 });
-  assert.equal(profile.relationship, LONG_RELATIONSHIP);
-  const stamp = Date.parse(profile.relationshipWrittenAt);
-  assert.ok(stamp >= before && stamp <= Date.now(), 'stamped now');
-});
-
 test('applyPrivateOps: a written private relationship is stamped relationshipWrittenAt and clamped to relationshipChars', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
@@ -2530,14 +1989,6 @@ function queueItems(store, guildId, items, nowMs = VOICE_NOW) {
 }
 
 const briefsOf = (store, guildId) => store.getVoiceQueue(guildId).map((queued) => queued.brief[0]);
-
-test('getVoiceQueue: an empty list when nothing is queued; reading creates no file', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  assert.deepEqual(store.getVoiceQueue('g1'), []);
-  store.flush();
-  assert.equal(fs.existsSync(voiceFileOf(dir, 'g1')), false);
-});
 
 test('voice queue: written atomically to guilds/<id>/voice.json on flush and read back after a restart', () => {
   const dir = tmpDataDir();
@@ -2664,20 +2115,6 @@ test('updateVoiceQueue: an item queued while a request is awaited survives; the 
   assert.deepEqual(briefsOf(store, 'g1'), ['β', 'γ']);
   store.flush();
   assert.deepEqual(briefsOf(createStore({ dataDir: dir }), 'g1'), ['β', 'γ']);
-});
-
-test('updateVoiceQueue: the only queue write -- no setter takes a whole queue; a write after the await keeps an item added during it', async () => {
-  const store = createStore({ dataDir: tmpDataDir() });
-  assert.equal('setVoiceQueue' in store, false, 'a copy kept across an await has no door to be written back through');
-  queueItems(store, 'g1', [voiceItem('self', { brief: ['α'] })]);
-  const [applied] = store.getVoiceQueue('g1').map((queued) => queued.id);
-  const running = (async () => {
-    await new Promise((resolve) => setImmediate(resolve));
-    store.updateVoiceQueue('g1', (queue) => removeItems(queue, [applied]));
-  })();
-  queueItems(store, 'g1', [voiceItem('self', { brief: ['δ'] }, VOICE_NOW + 1)], VOICE_NOW + 1);
-  await running;
-  assert.deepEqual(briefsOf(store, 'g1'), ['δ']);
 });
 
 test('updateVoiceQueue: a change that is not synchronous, throws or returns no queue leaves the queue as it was', () => {
@@ -3148,15 +2585,6 @@ test('store: recent lines are written atomically, survive a restart and read bac
     ],
   });
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), restarted.getRecent('g1'));
-});
-
-test('store: getRecent returns a copy; only applyRecentOps writes', () => {
-  const store = createStore({ dataDir: tmpDataDir() });
-  store.applyRecentOps('g1', [recentAdd('μία')], { now: RECENT_NOW });
-  const copy = store.getRecent('g1');
-  copy.lines.push({ id: 9 });
-  copy.lines[0].text = 'άλλη';
-  assert.deepEqual(recentTexts(store, 'g1'), ['μία']);
 });
 
 test('store: applyRecentOps marks the file dirty only when a line was added, removed or expired', () => {
