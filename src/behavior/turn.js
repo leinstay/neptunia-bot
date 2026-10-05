@@ -15,20 +15,20 @@ import {
   audienceOf,
   canAttach,
   canReact,
-  canSend,
-  channelAllowed,
   fetchHistory,
   fetchNeighbors,
+  isWritableChannel,
   PAGE as HISTORY_PAGE,
   withTextPreviews,
 } from '../discord/collect.js';
-import { captionPulled, checkPull, fetchPull } from '../discord/pull-fetch.js';
+import { audienceAllows, captionPulled, checkPull, fetchPull } from '../discord/pull-fetch.js';
 import { buildDrawPrompt, buildRequest, fillPromptTemplate } from './prompt.js';
 import { channelPullOn, pullSettings, pullTargets } from './pull.js';
 import { audienceCovers, markSeen, messageLink, resolveDestination, stampPings } from './elsewhere.js';
 import { classifierTextModel } from './mention.js';
+import { turnRequestInput } from './turn-input.js';
 import { parseOutput } from '../llm/parse.js';
-import { DailyCapError, TokenLimitError, RETRY_STATUS, sleep } from '../llm/openrouter.js';
+import { DailyCapError, TokenLimitError, RETRY_STATUS, helperRequestOptions, sleep } from '../llm/openrouter.js';
 import { ImageCapError, ImageGenError } from '../llm/images.js';
 import { limitOf, mirrorChannelLabel, mirrorDryRun, postLimitNotice } from './limits.js';
 import { between, typingMs } from './random.js';
@@ -47,6 +47,7 @@ import { log } from '../log.js';
 import { clampChars, oneLine } from '../memory/clamp.js';
 import { gifPostsToday } from '../memory/gif-watch.js';
 import { liveRecent, recentSettings } from '../memory/recent.js';
+import { isVideoVisionOn } from '../memory/youtube-check.js';
 import { bumpDaily, utcDay } from '../time.js';
 
 /**
@@ -71,10 +72,46 @@ import { bumpDaily, utcDay } from '../time.js';
  * Whether a turn of `triggerKind` posts plain, never as a Discord reply: the
  * address classifier's turns (a follow-up, an overheard line), whose model
  * `reply="#n"` quotes nothing for messages, the GIF and the picture alike (a
- * pulled line it points at still gets its jump link: replyTarget).
+ * pulled line it points at still gets its jump link: replyTarget). The
+ * drawFailed turn after such a turn posts plain too: runTurn hands it the
+ * first turn's kind. Exported so a limit notice can quote by the same rule.
+ * @param {TriggerKind|null|undefined} triggerKind
+ * @returns {boolean}
  */
-function postsPlain(triggerKind) {
+export function postsPlain(triggerKind) {
   return triggerKind === 'followUp' || triggerKind === 'overheard';
+}
+
+/** `mentor.anchor.ledgerSize` when it is missing or unusable: config.json's value. */
+const POST_LEDGER_SIZE_FALLBACK = 300;
+
+/**
+ * How many entries the post ledger (`state.json` `postLedger`) keeps:
+ * `mentor.anchor.ledgerSize` read from `config` (the live config), floored;
+ * 0 keeps none; missing or not a non-negative number -> 300 (config.json's value).
+ * @param {object} config
+ * @returns {number}
+ */
+export function postLedgerSize(config) {
+  const size = config?.mentor?.anchor?.ledgerSize;
+  return Number.isFinite(size) && size >= 0 ? Math.floor(size) : POST_LEDGER_SIZE_FALLBACK;
+}
+
+/**
+ * The post ledger with `entry` appended, cut to its newest `size` entries.
+ * The ledger tells the mentor (src/mentor/anchor.js#ledgerEntryFor) which
+ * turn a posted message of the persona belonged to. A value that is not a
+ * list counts as an empty ledger. Pure: the given list is not changed.
+ * @param {unknown} ledger
+ * @param {{ messageId: string, channelId: string, mode: string, triggerKind: string|null,
+ *   triggerId: string|null, newestHistoryId: string|null, sourceChannelId: string|null, at: number }} entry
+ * @param {number} size
+ * @returns {object[]}
+ */
+export function appendPostLedger(ledger, entry, size) {
+  if (!(size > 0)) return [];
+  const list = Array.isArray(ledger) ? ledger : [];
+  return [...list, entry].slice(-size);
 }
 
 /**
@@ -223,24 +260,32 @@ function createLinker({ guildId, pulledIds, sourceTarget }) {
 const DISCORD_MESSAGE_CHARS = 2000;
 
 /**
- * `text` with `link` joined through `labels.elsewhere.link` (`{text}` `{link}`);
- * without the label, a newline between them. The link always fits: when the
- * joined post would outgrow one Discord message, `text` is cut at its end,
- * never inside a `<...>` token (a mention, a custom emoji). parse.js leaves
- * only a small margin under the limit, meant for the mentions and custom
- * emoji expanded after it, which a link alone almost fills.
+ * `text` cut to `max` characters at its end, never inside a `<...>` token (a
+ * mention, a custom emoji); unchanged when it fits.
  */
-function withLink(text, link, labels) {
-  if (!link) return text;
-  const template = labels?.elsewhere?.link;
-  const join = (body) => (typeof template === 'string' && template ? fill(template, { text: body, link }) : `${body}\n${link}`);
-  let body = clampChars(text, Math.max(0, DISCORD_MESSAGE_CHARS - [...join('')].length));
+function cutPost(text, max) {
+  let body = clampChars(text, max);
   if (body.length < text.length) {
     const open = body.lastIndexOf('<');
     if (open > body.lastIndexOf('>')) body = body.slice(0, open);
     body = body.trimEnd();
   }
-  return join(body);
+  return body;
+}
+
+/**
+ * `text` with `link` joined through `labels.elsewhere.link` (`{text}` `{link}`);
+ * without the label, a newline between them. Every post fits one Discord
+ * message: `text` is cut at its end (cutPost) when it would outgrow it --
+ * with a link, so that the link always fits; without one, after the mentions
+ * and custom emoji expanded into it (parse.js leaves only a small margin for
+ * them, which a few long ones or a link outgrow).
+ */
+function withLink(text, link, labels) {
+  if (!link) return cutPost(text, DISCORD_MESSAGE_CHARS);
+  const template = labels?.elsewhere?.link;
+  const join = (body) => (typeof template === 'string' && template ? fill(template, { text: body, link }) : `${body}\n${link}`);
+  return join(cutPost(text, Math.max(0, DISCORD_MESSAGE_CHARS - [...join('')].length)));
 }
 
 const REWATCH_QUESTION_CHARS = 300;
@@ -398,11 +443,12 @@ function describableCandidates(history, picked, { includePicked = false } = {}) 
  * Where the persona's words about a channel it cannot write in go (a call
  * from there, a remark on it), read from `config` (the live config) at the
  * call: the first id of `memory.mainChannelIds`
- * (src/behavior/elsewhere.js#resolveDestination) that is a text channel of
- * `guild`, not a thread, allowed by `bot.channels`, where the bot can send,
- * and not `exceptId` (the channel the words are about). The one copy of the
- * rule: `<senses>` names this channel, and whatever routes a call there asks
- * the same function.
+ * (src/behavior/elsewhere.js#resolveDestination) that is a channel of
+ * `guild` the persona may write in (src/discord/collect.js#isWritableChannel:
+ * a text channel, not a thread, allowed by `bot.channels`, never the dry-run
+ * mirror, its history readable, the bot can send) and not `exceptId` (the
+ * channel the words are about). The one copy of the rule: `<senses>` names
+ * this channel, and whatever routes a call there asks the same function.
  * @param {object|null} guild  The discord.js guild; none (a private chat) has no destination.
  * @param {object} config      The live config.
  * @param {{ exceptId?: string|null }} [options]
@@ -413,14 +459,7 @@ export function usableDestination(guild, config, { exceptId = null } = {}) {
   const channelOf = (id) => guild?.channels?.cache?.get?.(id) ?? null;
   const usable = (id) => {
     const target = channelOf(id);
-    return (
-      Boolean(target) &&
-      id !== exceptId &&
-      target.isTextBased?.() === true &&
-      target.isThread?.() !== true &&
-      channelAllowed(target, config?.bot ?? {}) &&
-      canSend(target)
-    );
+    return Boolean(target) && id !== exceptId && typeof target.isTextBased === 'function' && isWritableChannel(target, config?.bot ?? {});
   };
   const { destinationId, reason } = resolveDestination(config, usable);
   return destinationId ? { channel: channelOf(destinationId), reason: null } : { channel: null, reason };
@@ -436,7 +475,14 @@ export function usableDestination(guild, config, { exceptId = null } = {}) {
  * `features.webLookup` not true, no link is read and no search is made.
  *
  * `now` (default Date.now) is the turn's clock: its own time, `{{today}}` of
- * the search classifier, the daily GIF counter and every `lastPostAt` stamp.
+ * the search classifier, the daily GIF counter, every `lastPostAt` stamp and
+ * the post ledger's times.
+ *
+ * With features.mentor true every message, GIF and picture a turn posts in a
+ * server channel is recorded in `state.json` `postLedger` (recordPost; at
+ * most `mentor.anchor.ledgerSize`, nothing while paused or in a dry run): `{
+ * messageId, channelId, mode, triggerKind, triggerId, newestHistoryId,
+ * sourceChannelId, at }`, read by src/mentor/anchor.js#ledgerEntryFor.
  *
  * `emoji` (src/discord/emoji.js#createEmojiIndex) is optional: absent, or
  * `features.customEmoji` false (a missing key counts as on), no `:name:` is
@@ -465,7 +511,8 @@ export function usableDestination(guild, config, { exceptId = null } = {}) {
  * `getSelfName` (src/index.js) is the persona's display name in a guild;
  * default: the client's cached guild member, else the bot user's name.
  *
- * `routeChannels` (the route classifier's hook) is optional:
+ * `routeChannels` (the route classifier's hook; src/index.js passes
+ * src/behavior/route-channel.js#createChannelRouter's) is optional:
  * `({ guildId, channel, history, trigger, triggerKind, selfName, config }) => Promise<string[]>`,
  * the ids of channels the conversation is about; `triggerKind` is the turn's
  * TriggerKind (null on a turn without a trigger), so the hook can decline
@@ -524,18 +571,20 @@ export function createTurnRunner({
    * The same routing as act(): a reaction on a pulled line names its channel
    * (`source`) or is dropped where the bot may not react there, a message, the
    * GIF or the picture answering a pulled line carries its jump link
-   * (`linkFor`) and no reply.
+   * (`linkFor`) and no reply. Like act(), a reaction stamps no `lastPostAt`.
+   * The mirror header names the mode, the trigger kind (none on a spontaneous
+   * turn), then `react to <name>` for a reaction and `to <name>` for a message
+   * that answers a line (a reply or a linked pulled line); nothing more for
+   * one that answers none.
    * @param {{ channel: object, parsed: object, idByIndex: Map<number, string>,
-   *   mode: string, triggerKind: TriggerKind|null, selfName: string, pulledIds: Map<string, string>,
+   *   mode: string, triggerKind: TriggerKind|null, plain: boolean, selfName: string, pulledIds: Map<string, string>,
    *   lines: object[], linkFor: (pulledId: string|null) => string|null }} args
-   *   `lines`: the lines shown of the pulled channels, then this chat's history (names and authors).
+   *   `plain`: the turn quotes no chat line (postsPlain); `lines`: the lines shown of the pulled
+   *   channels, then this chat's history (names and authors).
    */
-  async function dryAct({ channel, parsed, idByIndex, mode, triggerKind, selfName, pulledIds, lines, linkFor }) {
+  async function dryAct({ channel, parsed, idByIndex, mode, triggerKind, plain, selfName, pulledIds, lines, linkFor }) {
     const channelName = channel.name ?? null;
     const where = mirrorChannelLabel(channel);
-    // A follow-up or an overheard turn never posts as a Discord reply, in this
-    // mirror either -- the model's reply="#n" quotes nothing, the same as in act() below.
-    const plain = postsPlain(triggerKind);
     // Every triggered turn shares the mode `reply`: the header names its
     // trigger kind (a call, a follow-up, an overheard line...); a spontaneous
     // turn has none.
@@ -555,21 +604,20 @@ export function createTurnRunner({
       // the persona's own output, not a user's, and only while dry-run is on.
       log.info('dry-run: would react', { channel: channel.id, channelName, source: route.source, to: targetId, emoji: reaction.emoji });
       const elsewhere = route.source ? ` in ${mirrorChannelLabel(route.target)}` : '';
-      await mirror(`${head} · reply to ${authorName}`, `reacts with ${reaction.emoji} to ${authorName}${elsewhere}`);
-      lastPostAt.set(channel.id, clock());
+      await mirror(`${head} · react to ${authorName}`, `reacts with ${reaction.emoji} to ${authorName}${elsewhere}`);
     }
 
     for (const message of parsed.messages) {
       const { replyId, pulledId } = replyTarget(message.replyTo, { plain, idByIndex, pulledIds });
       const answeredId = replyId ?? pulledId;
-      const authorName = answeredId ? (authorNameFor(lines, answeredId) ?? '—') : '—';
+      const to = answeredId ? ` · to ${authorNameFor(lines, answeredId) ?? '—'}` : '';
       const link = linkFor(pulledId);
       // Same deliberate exception as above: the persona's own output, dry-run only.
       const text = withLink(renderCustomEmoji(resolveMentions(message.text, lines).text, emojiLookup()), link, labels);
       log.info('dry-run: would send', { channel: channel.id, channelName, mode, trigger: triggerKind ?? null, replyTo: replyId, link, text });
       // The mirror shows @name as the model wrote it: resolving it to a real
       // mention here would ping someone in a channel meant to be invisible to them.
-      await mirror(`${head} · reply to ${authorName}`, withLink(renderCustomEmoji(message.text, emojiLookup()), link, labels));
+      await mirror(`${head}${to}`, withLink(renderCustomEmoji(message.text, emojiLookup()), link, labels));
       lastPostAt.set(channel.id, clock());
     }
 
@@ -636,8 +684,8 @@ export function createTurnRunner({
    * read now) with the request clamped to `image.maxPromptChars`, the avatar as
    * reference for a picture the persona is in (`image.reference: 'avatar'`),
    * then one generation and one upload. No typing indicator while it works.
-   * Resolves `{ posted: true, pulledId }` when posted (`pulledId`: the pulled
-   * line it answers, or null), `{ drawFailed: reason }`
+   * Resolves `{ posted: true, pulledId, message }` when posted (`pulledId`: the pulled
+   * line it answers, or null; `message`: what channel.send resolved), `{ drawFailed: reason }`
    * otherwise (a generation failure keeps its reason, `empty` counts as
    * `error`; anything else, the upload included, is `error`). A refusal by an
    * image cap (`ImageCapError`) resolves `{}`: the senses line already told the
@@ -648,14 +696,13 @@ export function createTurnRunner({
    * `linkFor` gives it, asked once the picture is ready, is its content. On a
    * turn about another channel (`sourceId`) the trigger, if any, is a call
    * written there: the limit notice is posted here as a plain message, never as
-   * a Discord reply across channels.
+   * a Discord reply across channels. `plain`: the turn quotes no chat line (postsPlain).
    */
-  async function draw({ channel, parsed, idByIndex, pulledIds, linkFor, trigger, triggerKind, selfName, sourceId = null }) {
+  async function draw({ channel, parsed, idByIndex, pulledIds, linkFor, trigger, triggerKind, plain, selfName, sourceId = null }) {
     const config = hot.config;
     const self = parsed.draw.self === true;
     const prompt = drawPromptFor(selfName, parsed.draw);
     const asked = askedFor(trigger, triggerKind);
-    const plain = postsPlain(triggerKind);
     try {
       let reference = null;
       if (self && config.image?.reference === 'avatar') {
@@ -666,7 +713,7 @@ export function createTurnRunner({
       const picture = await images.generate({ prompt, reference, userId: asked ? (trigger.authorId ?? null) : null });
       const { replyId, pulledId } = replyTarget(parsed.draw.replyTo, { plain, idByIndex, pulledIds });
       const link = linkFor(pulledId);
-      await channel.send({
+      const message = await channel.send({
         ...(link ? { content: link } : {}),
         files: [{ attachment: picture.buffer, name: imageFileName(picture.mediaType) }],
         reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
@@ -681,7 +728,7 @@ export function createTurnRunner({
         bytes: picture.buffer?.length ?? 0,
         ...(link ? { link: true } : {}),
       });
-      return { posted: true, pulledId };
+      return { posted: true, pulledId, message };
     } catch (err) {
       if (err instanceof ImageCapError) {
         const limit = limitOf(err);
@@ -773,17 +820,18 @@ export function createTurnRunner({
    * Post the persona's GIF (after its messages): a link GIF as its stored
    * URL (Discord embeds tenor/giphy links), an attached one as a fresh URL of
    * its attachment, the stored one when that fails. Counted against
-   * `gifs.maxPerDay` once sent. Never throws; resolves whether it was sent.
+   * `gifs.maxPerDay` once sent. Never throws; resolves what channel.send
+   * resolved (an object, `{}` when it resolved nothing) once sent, else null.
    * `replyId`: the chat line it quotes as a Discord reply (replyTarget), or
    * null; `link`: the jump link it carries after its URL (withLink, so the
    * URL comes first and still embeds), or null.
-   * @returns {Promise<boolean>}
+   * @returns {Promise<object|null>}
    */
   async function postGif(channel, gif, replyId, link) {
     const { entry } = gif;
     try {
       const fresh = entry.kind === 'attachment' ? await freshAttachmentUrl(channel, entry) : null;
-      await channel.send({
+      const message = await channel.send({
         content: withLink(fresh ?? entry.url, link, hot.prompts?.labels),
         reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
         allowedMentions: { parse: [] },
@@ -791,11 +839,29 @@ export function createTurnRunner({
       countGif();
       lastPostAt.set(channel.id, clock());
       log.info('turn: gif sent', { channel: channel.id, gif: entry.id, kind: entry.kind, fresh: Boolean(fresh), ...(link ? { link: true } : {}) });
-      return true;
+      return message ?? {};
     } catch (err) {
       log.warn('turn: gif failed', { channel: channel.id, gif: entry.id, error: err });
-      return false;
+      return null;
     }
+  }
+
+  /**
+   * Record one message the persona posted in the post ledger (`state.json`
+   * `postLedger`, appendPostLedger, capped at postLedgerSize): `post` (the
+   * turn's mode, trigger kind and id, the newest line of its history, its
+   * source channel) with the posted message's id and the time. Only with
+   * features.mentor true (read now, like the size), never while paused (the
+   * owner may be editing data/), never without a message id; marks the state
+   * dirty. The mentor reads it to replay a moment as the turn it was.
+   */
+  function recordPost(sent, post) {
+    if (hot.config.features?.mentor !== true) return;
+    const data = store.state.data;
+    const messageId = sent?.id;
+    if (data.paused || typeof messageId !== 'string' || !messageId) return;
+    data.postLedger = appendPostLedger(data.postLedger, { messageId, ...post, at: clock() }, postLedgerSize(hot.config));
+    store.state.markDirty();
   }
 
   /**
@@ -837,27 +903,49 @@ export function createTurnRunner({
    * answering a pulled line posts plain, never as a Discord reply across
    * channels, and each post carries the jump link `linkFor` gives it (a message
    * and the GIF through `labels.elsewhere.link`, read now; the picture as its
-   * content). `@name` resolves over `lines`.
+   * content). `@name` resolves over `lines`. Every message is cut to fit one
+   * Discord message once its mentions and custom emoji are expanded (withLink).
+   *
+   * A message whose send fails ends the posting: `turn: send failed`
+   * (`channel`, `index` -- 0-based among the turn's messages --, `error`), no
+   * later message, GIF or picture, and the turn resolves what reached the chat
+   * before it (the pass ahead starts on those lines).
+   *
+   * In a server channel every posted message, GIF and picture is recorded in
+   * the post ledger (recordPost) with `mode`, the trigger, the newest line of
+   * `history` and `sourceId`.
    * @param {{ channel: object, guildId: string, privateChat: boolean, parsed: object,
-   *   idByIndex: Map<number, string>, history: object[], startedAt: number,
-   *   triggerKind: TriggerKind|null, trigger: object|null, selfName: string,
+   *   idByIndex: Map<number, string>, history: object[], startedAt: number, mode: string,
+   *   triggerKind: TriggerKind|null, plain: boolean, trigger: object|null, selfName: string,
    *   pulledIds: Map<string, string>, lines: object[], linkFor: (pulledId: string|null) => string|null,
    *   sourceId: string|null }} args
-   *   `lines`: the lines shown of the pulled channels, then `history` (a chat author wins a
-   *   display name both share); `sourceId`: the channel the turn is about (its `source`),
-   *   logged on every message sent; with it a refused drawing's limit notice quotes nothing
-   *   (the trigger of a routed turn lives in that channel).
+   *   `plain`: the turn quotes no chat line (postsPlain); `lines`: the lines shown of the
+   *   pulled channels, then `history` (a chat author wins a display name both share);
+   *   `sourceId`: the channel the turn is about (its `source`), logged on every message sent;
+   *   with it a refused drawing's limit notice quotes nothing (the trigger of a routed turn
+   *   lives in that channel).
    */
-  async function act({ channel, guildId, privateChat, parsed, idByIndex, history, startedAt, triggerKind, trigger, selfName, pulledIds, lines, linkFor, sourceId }) {
+  async function act({ channel, guildId, privateChat, parsed, idByIndex, history, startedAt, mode, triggerKind, plain, trigger, selfName, pulledIds, lines, linkFor, sourceId }) {
     const cfg = hot.config.typing;
     const typingOn = hot.config.features?.typingSimulation !== false;
-    // A follow-up or an overheard turn (postsPlain) never posts as a Discord
-    // reply -- the model's reply="#n" (if any) quotes nothing, plain messages only.
-    const plain = postsPlain(triggerKind);
     // Whether anything reached the chat (the caller of a routed turn marks its call by it), and
     // the pulled lines it answered (the ring of calls marks them by it).
     let delivered = false;
     const answered = new Set();
+    // What the post ledger records of each post of this turn (server channels only).
+    const ledgerPost = privateChat
+      ? null
+      : {
+          channelId: channel.id,
+          mode,
+          triggerKind: triggerKind ?? null,
+          triggerId: trigger?.id ?? null,
+          newestHistoryId: history.at(-1)?.id ?? null,
+          sourceChannelId: sourceId ?? null,
+        };
+    const record = (sent) => {
+      if (ledgerPost) recordPost(sent, ledgerPost);
+    };
 
     for (const reaction of parsed.reactions) {
       const targetId = idByIndex.get(reaction.to);
@@ -881,10 +969,9 @@ export function createTurnRunner({
     // Each posted message as the next fetchHistory will normalize it (its own id and time, the
     // persona's text as written): the lines the pass ahead looks at.
     const ownPosted = [];
-    let first = true;
-    for (const message of parsed.messages) {
-      if (!first && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
-      first = false;
+    let sendFailed = false;
+    for (const [index, message] of parsed.messages.entries()) {
+      if (index > 0 && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
 
       const { replyId, pulledId } = replyTarget(message.replyTo, { plain, idByIndex, pulledIds });
       const link = linkFor(pulledId);
@@ -899,14 +986,22 @@ export function createTurnRunner({
         await sleep(typingMs(spoken, cfg, rng));
       }
 
-      const posted = await channel.send({
-        content: text,
-        reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
-        allowedMentions: { parse: [], users: userIds, repliedUser: true },
-      });
+      let posted;
+      try {
+        posted = await channel.send({
+          content: text,
+          reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
+          allowedMentions: { parse: [], users: userIds, repliedUser: true },
+        });
+      } catch (err) {
+        log.warn('turn: send failed', { channel: channel.id, index, error: err });
+        sendFailed = true;
+        break;
+      }
       delivered = true;
       if (pulledId) answered.add(pulledId);
       lastPostAt.set(channel.id, clock());
+      record(posted);
       ownPosted.push({
         id: posted?.id ?? null,
         ts: Number.isFinite(posted?.createdTimestamp) ? posted.createdTimestamp : clock(),
@@ -920,13 +1015,13 @@ export function createTurnRunner({
       // in a pulled channel, else the trigger).
       if (variety && channel.guild) {
         const answeredId = replyId ?? pulledId;
-        const answered = answeredId ? lines.find((m) => m.id === answeredId) : trigger;
+        const answeredLine = answeredId ? lines.find((m) => m.id === answeredId) : trigger;
         variety.record(channel.guild.id, {
           id: posted?.id ?? null,
           ts: clock(),
           channelId: channel.id,
           text: message.text,
-          to: typeof answered?.content === 'string' ? answered.content : undefined,
+          to: typeof answeredLine?.content === 'string' ? answeredLine.content : undefined,
         });
       }
       log.info('turn: sent', {
@@ -940,21 +1035,27 @@ export function createTurnRunner({
       });
     }
     startAhead({ guildId, channelId: channel.id, history, posted: ownPosted, selfName, privateChat });
+    if (sendFailed) return { delivered, answered };
 
     // The GIF right after the messages.
     if (parsed.gif) {
       if (parsed.messages.length > 0 && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
       const { replyId, pulledId } = replyTarget(parsed.gif.replyTo, { plain, idByIndex, pulledIds });
-      if (await postGif(channel, parsed.gif, replyId, linkFor(pulledId))) {
+      const sent = await postGif(channel, parsed.gif, replyId, linkFor(pulledId));
+      if (sent) {
         delivered = true;
         if (pulledId) answered.add(pulledId);
+        record(sent);
       }
     }
 
     // The picture comes last, once every message is out.
     if (!parsed.draw) return { delivered, answered };
-    const drawn = await draw({ channel, parsed, idByIndex, pulledIds, linkFor, trigger, triggerKind, selfName, sourceId });
-    if (drawn.posted === true && drawn.pulledId) answered.add(drawn.pulledId);
+    const drawn = await draw({ channel, parsed, idByIndex, pulledIds, linkFor, trigger, triggerKind, plain, selfName, sourceId });
+    if (drawn.posted === true) {
+      if (drawn.pulledId) answered.add(drawn.pulledId);
+      record(drawn.message);
+    }
     return { delivered: delivered || drawn.posted === true, answered, ...(drawn.drawFailed ? { drawFailed: drawn.drawFailed } : {}) };
   }
 
@@ -1008,12 +1109,26 @@ export function createTurnRunner({
    * `<videos>` carries the last `media.video.rewatch.contextMessages` messages before the
    * trigger (0 omits it), with the video states and captions this turn already has. Never throws: any failure leaves
    * `videos` as it was. The question and the answer are data: never logged;
-   * every early stop logs `rewatch: skipped` with its reason.
+   * every early stop logs `rewatch: skipped` with its reason. The classifier is
+   * not asked when its answer could not run (`reason: 'cap'`): the describer's
+   * `videoCapsLeft()` (when it has one; read only) says no video slot is left
+   * today, or no re-watch slot is left and no failed video can be retried --
+   * with only the re-watch slots spent, only the videos that did not load are
+   * offered. The classifier's request is a helper's (helperRequestOptions).
    */
   async function maybeRewatch({ config, guildId, channelId, selfName, history, trigger, videos, descriptions, candidates }) {
     const prompt = hot.prompts?.rewatch;
     if (!prompt) {
       log.info('rewatch: skipped', { channel: channelId, reason: 'no-prompt' });
+      return;
+    }
+    // A retry requested by the person has its own slot, outside media.video.maxPerTurn.
+    const canRetry = typeof describer.describeVideo === 'function';
+    // Today's slots, when the describer can tell: both a second look and a retry take a video slot.
+    const slots = typeof describer.videoCapsLeft === 'function' ? describer.videoCapsLeft() : null;
+    const questionsOn = !slots || slots.rewatch > 0;
+    if (slots && (!(slots.video > 0) || (!questionsOn && !canRetry))) {
+      log.info('rewatch: skipped', { channel: channelId, reason: 'cap' });
       return;
     }
     const system = fillPromptTemplate(prompt, { name: selfName ?? '' });
@@ -1026,8 +1141,6 @@ export function createTurnRunner({
     }
     // `candidates` is already newest first, so the cap keeps the newest videos.
     const maxCandidates = Math.max(1, Math.floor(rewatchCfg.maxCandidates ?? 6));
-    // A retry requested by the person has its own slot, outside media.video.maxPerTurn.
-    const canRetry = typeof describer.describeVideo === 'function';
     const recentIds = new Set(history.slice(-recent).map((m) => m.id));
     const seen = new Set();
     const watched = [];
@@ -1035,7 +1148,7 @@ export function createTurnRunner({
       if (watched.length >= maxCandidates) break;
       if (seen.has(item.itemId) || !recentIds.has(item.messageId)) continue;
       const state = videos.get(item.itemId)?.state;
-      if (state !== 'watched' && !(state === 'error' && canRetry)) continue;
+      if (!(state === 'watched' && questionsOn) && !(state === 'error' && canRetry)) continue;
       seen.add(item.itemId);
       watched.push(item);
     }
@@ -1071,11 +1184,7 @@ export function createTurnRunner({
         ],
         {
           model: classifierTextModel(config),
-          role: 'classifier.text',
-          maxOutputTokens: rewatchCfg.classifierMaxOutputTokens ?? 120,
-          timeoutMs: config.llm?.timeoutMs,
-          countAgainstDailyCap: true,
-          skipCalibration: true,
+          ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: rewatchCfg.classifierMaxOutputTokens ?? 120, purpose: 'rewatch' }),
         },
       );
     } catch (err) {
@@ -1124,7 +1233,10 @@ export function createTurnRunner({
    * search result or null. The query and the transcript are data: never
    * logged; every early stop logs `lookup: skipped` with its reason; an
    * empty or blank answer is a failed call (`lookup: classifier failed`,
-   * `reason: 'empty'`), no query.
+   * `reason: 'empty'`), no query. The classifier is not asked when no search
+   * could run today (`reason: 'cap'`): the lookup's `webCapLeft()` (when it
+   * has one; read only) says the web slots (`web.maxPerDay`) are spent. Its
+   * request is a helper's (helperRequestOptions).
    */
   async function maybeLookup({ config, guildId, channelId, selfName, history, trigger, descriptions, videos, reads }) {
     const prompt = hot.prompts?.lookup;
@@ -1133,6 +1245,7 @@ export function createTurnRunner({
     if (!prompt) skip = 'no-prompt';
     else if ((searchCfg.maxPerTurn ?? 1) < 1) skip = 'no-slot';
     else if (typeof lookup.hasSearch === 'function' && !lookup.hasSearch()) skip = 'no-key';
+    else if (typeof lookup.webCapLeft === 'function' && !(lookup.webCapLeft() > 0)) skip = 'cap';
     if (skip) {
       log.info('lookup: skipped', { channel: channelId, reason: skip });
       return null;
@@ -1160,14 +1273,7 @@ export function createTurnRunner({
           { role: 'system', content: fillPromptTemplate(prompt, { today: todayDate(), name: selfName ?? '' }) },
           { role: 'user', content: user },
         ],
-        {
-          model,
-          role: 'classifier.text',
-          maxOutputTokens: searchCfg.classifierMaxOutputTokens ?? 60,
-          timeoutMs: config.llm?.timeoutMs,
-          countAgainstDailyCap: true,
-          skipCalibration: true,
-        },
+        { model, ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: searchCfg.classifierMaxOutputTokens ?? 60, purpose: 'lookup' }) },
       );
     } catch (err) {
       log.warn('lookup: classifier failed', { channel: channelId, status: err.statusCode ?? null, name: err.name });
@@ -1195,7 +1301,7 @@ export function createTurnRunner({
       return await fetchPull(args);
     } catch (err) {
       log.warn('pull: failed', { channel: args.destination?.id ?? null, source: args.channelId, pullReason: args.reason, error: err });
-      return { pulled: null, channel: null, skip: 'error' };
+      return { pulled: null, skip: 'error' };
     }
   }
 
@@ -1472,7 +1578,8 @@ export function createTurnRunner({
    *   delivered?: boolean, limit?: { key: string, used: number, cap: number }|null }>}
    *   `drawFailed` (the reason) when the persona's picture could not be posted; `delivered` on a
    *   `spoke` turn posted for real: whether anything reached the chat (a reaction put, a message,
-   *   the GIF or the picture posted -- by the drawFailed turn too); `limit` on `outcome:
+   *   the GIF or the picture posted -- by the drawFailed turn too; a send that fails stops the
+   *   posting and the turn still ends `spoke` with what reached the chat); `limit` on `outcome:
    *   'refused'` (a request or token cap), for the caller's limit notice. A `skip`, or a `spoke`
    *   turn posted for real, stamps the calls of the ring it showed (stampShownCalls) -- every
    *   one but a routed turn's own call, which the caller stamps by this outcome.
@@ -1490,7 +1597,8 @@ export function createTurnRunner({
     // same predicate as runTurnOnce's hand-off): the failure is only logged.
     // A turn about another channel keeps its source: a routed call is still
     // answered here, with the call shown and linked -- what that turn posts
-    // reached the chat for the call too (`delivered`).
+    // reached the chat for the call too (`delivered`). It posts plain when the
+    // first turn did (a follow-up): it carries that turn's kind.
     if (askedFor(trigger, triggerKind)) {
       try {
         const second = await runTurnOnce({
@@ -1500,6 +1608,7 @@ export function createTurnRunner({
           trigger,
           triggerKind: 'drawFailed',
           drawReason: first.drawFailed,
+          drawFailedAfter: triggerKind,
           source,
           holdIdle: true,
         });
@@ -1536,8 +1645,10 @@ export function createTurnRunner({
 
   /**
    * One turn, as described on runTurn. Internal for the `drawFailed` turn:
-   * `drawReason`, and `holdIdle` -- leave the idle notifications to the
-   * caller (runTurn fires them once the second turn is over).
+   * `drawReason`, `drawFailedAfter` (the first turn's trigger kind: the
+   * second posts plain when the first did, postsPlain), and `holdIdle` --
+   * leave the idle notifications to the caller (runTurn fires them once the
+   * second turn is over).
    */
   async function runTurnOnce({
     channel,
@@ -1550,6 +1661,7 @@ export function createTurnRunner({
     source = null,
     focus = null,
     drawReason = null,
+    drawFailedAfter = null,
     holdIdle = false,
   }) {
     // A server channel carries its guild; a private chat is served on behalf of the pinned one.
@@ -1665,10 +1777,7 @@ export function createTurnRunner({
         const picked = features.vision !== false ? selectPictures({ trigger, history, visionCfg, now, channelId: channel.id }) : [];
         const includePicked = features.attachedDescriptions !== false;
         const candidates = describableCandidates(history, picked, { includePicked });
-        const described = await describer.describeMany(guildId, candidates, {
-          maxNew: config.media?.maxPerTurn ?? 6,
-          countAgainstDailyCap: true,
-        });
+        const described = await describer.describeMany(guildId, candidates, { maxNew: config.media?.maxPerTurn ?? 6 });
         descriptions = described.descriptions;
       }
       // What the search classifier reads around the trigger (routedPull above).
@@ -1679,19 +1788,14 @@ export function createTurnRunner({
       // by the video describer, newest first, at most media.video.maxPerTurn
       // NEW ones per turn; cached results and limit/error states are free.
       let videos;
-      // Both switches, like the senses line (src/behavior/prompt.js#renderSenses); a missing
-      // videoDescriptions counts as on.
-      const videoOn = features.mediaDescriptions === true && features.videoDescriptions !== false;
-      if (videoOn && typeof describer?.describeVideos === 'function') {
+      // Both switches (isVideoVisionOn), like the senses line; a missing videoDescriptions counts as on.
+      if (isVideoVisionOn(config) && typeof describer?.describeVideos === 'function') {
         const videoCfg = config.media?.video ?? {};
         const candidates = [];
         for (let i = history.length - 1; i >= 0; i -= 1) {
           candidates.push(...collectVideos(history[i], { videoSites: videoCfg.sites }));
         }
-        const watched = await describer.describeVideos(guildId, candidates, {
-          maxNew: videoCfg.maxPerTurn ?? 1,
-          countAgainstDailyCap: true,
-        });
+        const watched = await describer.describeVideos(guildId, candidates, { maxNew: videoCfg.maxPerTurn ?? 1 });
         videos = watched.videos;
 
         // A second look when the trigger asks about a watched video: a
@@ -1760,8 +1864,17 @@ export function createTurnRunner({
         }
       }
 
-      // A private chat has no neighbouring channels.
-      const neighbors = isPrivate ? [] : await fetchNeighbors(channel, config, selfId, now);
+      // A private chat has no neighbouring channels. A neighbour passes the audience rail the
+      // pulls pass (audienceAllows, context.pull.sameAudience): everyone who can read this channel
+      // can read it. One refused takes no slot, costs no fetch, and never reaches `<server>`
+      // either (buildRequest maps only the neighbours it is given); counted on the answer's log.
+      let neighborsHidden = 0;
+      const acceptNeighbor = (other) => {
+        const allowed = audienceAllows(channel, other, config);
+        if (!allowed) neighborsHidden += 1;
+        return allowed;
+      };
+      const neighbors = isPrivate ? [] : await fetchNeighbors(channel, config, selfId, now, { accept: acceptNeighbor });
       // A neighbour's pictures get only the captions the cache already holds, under the
       // chat captions' switch: cachedDescriptions never sends a request or counts a day.
       const neighborDescriptions =
@@ -1783,59 +1896,62 @@ export function createTurnRunner({
       const worn = await wornPending;
       // `<recent>`: the guild's live recent lines (none: an empty list) and the channels this turn may show them from.
       const recent = memoryOn ? recentInput({ channel, guildId, isPrivate, config, now }) : NO_RECENT;
-      const request = buildRequest({
-        config,
-        prompts: hot.prompts,
-        calibrator,
-        mode: finalMode,
-        forced,
-        now,
-        selfName,
-        history,
-        neighbors,
-        trigger,
-        triggerKind,
-        guildMemory: memoryOn ? store.getGuild(guildId) : {},
-        interlocutor: memoryOn && trigger ? store.getUser(guildId, trigger.authorId) : null,
-        // A private chat: the partner's private layer joins their public profile (only there).
-        privateChat: isPrivate ? { userId: trigger?.authorId ?? null } : null,
-        privateProfile: isPrivate && memoryOn && trigger ? store.getPrivate(guildId, trigger.authorId) : null,
-        otherProfiles: memoryOn
-          ? pickOtherProfiles(store, guildId, history, trigger?.authorId, config.context.otherProfiles)
-          : [],
-        candidateProfiles: memoryOn ? store.listUserProfiles(guildId) : [],
-        nameOf: memoryOn ? (id) => store.getUser(guildId, id)?.names?.[0] ?? null : undefined,
-        channels: memoryOn ? store.listChannels(guildId) : [],
-        loreEntries: memoryOn ? store.getLore(guildId) : [],
-        currentChannelId: channel.id,
-        descriptions,
-        neighborDescriptions,
-        videos,
-        reads,
-        lookup: lookupResult,
-        searchAvailable: features.webLookup === true && typeof lookup?.hasSearch === 'function' && lookup.hasSearch() === true,
-        drawQuota,
-        drawReason,
-        // The `<emoji>` block: the index's emoji (ranked by guildMemory.emojiUsage) and their cached captions.
-        customEmoji: emoji ? emoji.list() : [],
-        // The `<gifs>` block and the transcript's GIF handles: the guild's library (features.gifs).
-        gifs: features.gifs !== false && typeof store.getGifs === 'function' ? store.getGifs(guildId) : null,
-        // The cached captions of both lists.
-        mediaCache:
-          emoji || (features.gifs !== false && typeof store.getGifs === 'function') ? store.getMediaCache(guildId) : null,
-        // The `<worn>` block: what this turn's variety pass named, or nothing.
-        worn,
-        // `<channel_view>`: the channels pulled into this turn, the one it is about, the chat
-        // line put to the room, where a call from a read-only channel is answered.
-        pulled,
-        source,
-        focus,
-        elsewhereDestination: destination?.name ? { name: destination.name } : null,
-        readOnlyIds,
-        // `<recent>`: the last hours, its live lines and the members' moments (no block without the store).
-        recentLines: recent.lines,
-        recentAudience: recent.audience,
-      });
+      // Every input named (turnRequestInput throws on one left undefined); null marks an absent one.
+      const request = buildRequest(
+        turnRequestInput({
+          config,
+          prompts: hot.prompts,
+          calibrator,
+          mode: finalMode,
+          forced,
+          now,
+          selfName,
+          history,
+          neighbors,
+          trigger,
+          triggerKind,
+          guildMemory: memoryOn ? store.getGuild(guildId) : {},
+          interlocutor: memoryOn && trigger ? (store.getUser(guildId, trigger.authorId) ?? null) : null,
+          // A private chat: the partner's private layer joins their public profile (only there).
+          privateChat: isPrivate ? { userId: trigger?.authorId ?? null } : null,
+          privateProfile: isPrivate && memoryOn && trigger ? (store.getPrivate(guildId, trigger.authorId) ?? null) : null,
+          otherProfiles: memoryOn
+            ? pickOtherProfiles(store, guildId, history, trigger?.authorId, config.context.otherProfiles)
+            : [],
+          candidateProfiles: memoryOn ? store.listUserProfiles(guildId) : [],
+          nameOf: memoryOn ? (id) => store.getUser(guildId, id)?.names?.[0] ?? null : null,
+          channels: memoryOn ? store.listChannels(guildId) : [],
+          loreEntries: memoryOn ? store.getLore(guildId) : [],
+          currentChannelId: channel.id,
+          descriptions: descriptions ?? null,
+          neighborDescriptions: neighborDescriptions ?? null,
+          videos: videos ?? null,
+          reads: reads ?? null,
+          lookup: lookupResult ?? null,
+          searchAvailable: features.webLookup === true && typeof lookup?.hasSearch === 'function' && lookup.hasSearch() === true,
+          drawQuota: drawQuota ?? null,
+          drawReason,
+          // The `<emoji>` block: the index's emoji (ranked by guildMemory.emojiUsage) and their cached captions.
+          customEmoji: emoji ? (emoji.list() ?? []) : [],
+          // The `<gifs>` block and the transcript's GIF handles: the guild's library (features.gifs).
+          gifs: features.gifs !== false && typeof store.getGifs === 'function' ? (store.getGifs(guildId) ?? null) : null,
+          // The cached captions of both lists.
+          mediaCache:
+            emoji || (features.gifs !== false && typeof store.getGifs === 'function') ? (store.getMediaCache(guildId) ?? null) : null,
+          // The `<worn>` block: what this turn's variety pass named, or nothing.
+          worn: worn ?? null,
+          // `<channel_view>`: the channels pulled into this turn, the one it is about, the chat
+          // line put to the room, where a call from a read-only channel is answered.
+          pulled,
+          source,
+          focus,
+          elsewhereDestination: destination?.name ? { name: destination.name } : null,
+          readOnlyIds,
+          // `<recent>`: the last hours, its live lines and the members' moments (no block without the store).
+          recentLines: recent.lines ?? null,
+          recentAudience: recent.audience ?? null,
+        }),
+      );
       // What `<recent>` showed, held back or cut: counts only.
       if (request.recent) log.info('recent: shown', { channel: channel.id, ...request.recent });
 
@@ -1916,6 +2032,8 @@ export function createTurnRunner({
         ...(source ? { source: source.channelId ?? null } : {}),
         ...(pulled.length > 0 ? { pulled: pulled.length } : {}),
         ...(focus ? { focus: true } : {}),
+        // Active neighbours the audience rail left out.
+        ...(neighborsHidden > 0 ? { neighborsHidden } : {}),
         secondsToAnswer: Math.round((clock() - startedAt) / 100) / 10,
         channel: channel.id,
         estimated: completion.estimated,
@@ -1961,7 +2079,10 @@ export function createTurnRunner({
         pulledIds,
         sourceTarget: isPrivate ? null : sourceLinkTarget({ source, trigger, pulledKept: shownPulled }),
       });
-      const routing = { pulledIds, lines, linkFor };
+      // A follow-up or an overheard turn (postsPlain) never posts as a Discord reply -- the
+      // model's reply="#n" quotes nothing --, nor does the drawFailed turn after one.
+      const plain = postsPlain(triggerKind) || postsPlain(drawFailedAfter);
+      const routing = { pulledIds, lines, linkFor, plain };
       // Read fresh right here, not from the `features` snapshot taken at the
       // top of this turn: unlike the other switches this one defaults to OFF,
       // and whether to actually post is the very last decision of a turn.
@@ -1978,6 +2099,7 @@ export function createTurnRunner({
         idByIndex,
         history,
         startedAt,
+        mode: finalMode,
         triggerKind,
         trigger,
         selfName,

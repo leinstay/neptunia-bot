@@ -280,17 +280,16 @@ test("fetchPull: the window ends at the channel's newest message", async () => {
     messages: [{ ts: LAST - 180 * MIN }, { ts: LAST - 150 * MIN }, ...burst(LAST - 60 * MIN, LAST, 10)],
   });
   const { result, logs } = await withCapturedLogs(() => pull(guild, diary.id));
-  const { pulled, channel, skip } = result;
+  const { pulled, skip } = result;
   assert.equal(skip, null);
-  assert.equal(channel, diary, 'the discord.js channel comes back beside the record');
+  assert.deepEqual(Object.keys(result).sort(), ['pulled', 'skip'], 'the record and the skip code, no discord.js channel');
   assert.deepEqual(
     pulled.messages.map((m) => m.ts),
     burst(LAST - 60 * MIN, LAST, 10).map((spec) => spec.ts),
     'every message of 9:00-10:00 two days ago, nothing older, nothing measured from now',
   );
   assert.equal(pulled.olderNotShown, true);
-  assert.equal(pulled.newestId, idAt(diary, LAST));
-  assert.equal(pulled.newestTs, LAST);
+  assert.equal(pulled.messages.at(-1).id, idAt(diary, LAST));
   assert.equal(pulled.channelId, diary.id);
   assert.equal(pulled.channelName, 'ημερολόγιο');
   assert.equal(pulled.reason, 'mention');
@@ -317,7 +316,7 @@ test('fetchPull: an explicit anchor ends the window at that message', async () =
     'the hour before the anchor, nothing after it',
   );
   assert.equal(pulled.olderNotShown, true);
-  assert.equal(pulled.newestId, anchorId);
+  assert.equal(pulled.messages.at(-1).id, anchorId);
   assert.equal(diary.fetchCalls.length, 1);
   assert.equal(BigInt(diary.fetchCalls[0].before), BigInt(anchorId) + 1n, 'the page ends at the anchor inclusive');
 });
@@ -338,14 +337,15 @@ test('fetchPull: a malformed anchor is not found, an anchor older than a positiv
   assert.equal(diary.fetchCalls.length, 1, 'only the last pull fetched');
 });
 
-test('fetchPull: the bot permissions give readOnly and canReact', async () => {
+test('fetchPull: the bot permissions give readOnly; the record carries no unread field', async () => {
   const guild = fakeGuild();
   mainChannel(guild);
   const diary = addChannel(guild, { id: '760000000000000003', granted: [READ, REACT], messages: [{ ts: LAST }] });
   const talk = addChannel(guild, { id: '760000000000000004', granted: [READ, SEND], messages: [{ ts: LAST }] });
   const { result } = await withCapturedLogs(async () => [await pull(guild, diary.id), await pull(guild, talk.id)]);
-  assert.deepEqual([result[0].pulled.readOnly, result[0].pulled.canReact], [true, true]);
-  assert.deepEqual([result[1].pulled.readOnly, result[1].pulled.canReact], [false, false]);
+  assert.equal(result[0].pulled.readOnly, true);
+  assert.equal(result[1].pulled.readOnly, false);
+  for (const field of ['canReact', 'newestId', 'newestTs']) assert.equal(field in result[0].pulled, false, field);
 });
 
 // ---- skips ------------------------------------------------------------------------
@@ -367,7 +367,7 @@ test('fetchPull: an unknown, thread, unreadable or denied channel is skipped wit
   ];
   for (const [channelId, code] of cases) {
     const { result, logs } = await withCapturedLogs(() => pull(guild, channelId, { config: cfg }));
-    assert.deepEqual(result, { pulled: null, channel: null, skip: code }, code);
+    assert.deepEqual(result, { pulled: null, skip: code }, code);
     const line = logs.find((entry) => entry.msg === 'pull: skipped');
     assert.deepEqual(
       { channel: line.channel, source: line.source, reason: line.reason, pullReason: line.pullReason },
@@ -382,7 +382,7 @@ test('fetchPull: the dry-run channel is skipped with its own reason', async () =
   mainChannel(guild);
   const mirror = addChannel(guild, { id: MIRROR_ID, messages: [{ ts: LAST }] });
   const { result, logs } = await withCapturedLogs(() => pull(guild, MIRROR_ID, { config: config({ bot: { dryRunChannelId: MIRROR_ID } }) }));
-  assert.deepEqual(result, { pulled: null, channel: null, skip: 'dry-run-channel' });
+  assert.deepEqual(result, { pulled: null, skip: 'dry-run-channel' });
   assert.equal(logs.find((entry) => entry.msg === 'pull: skipped').reason, 'dry-run-channel');
   assert.deepEqual(mirror.fetchCalls, []);
 });
@@ -393,8 +393,8 @@ test('fetchPull: an empty channel and a failed fetch return their own skip codes
   const empty = addChannel(guild, { id: '760000000000000021' });
   const broken = addChannel(guild, { id: '760000000000000022', fail: true, messages: [{ ts: LAST }] });
   const { result, logs } = await withCapturedLogs(async () => [await pull(guild, empty.id), await pull(guild, broken.id)]);
-  assert.deepEqual(result[0], { pulled: null, channel: null, skip: 'empty' });
-  assert.deepEqual(result[1], { pulled: null, channel: null, skip: 'fetch-failed' });
+  assert.deepEqual(result[0], { pulled: null, skip: 'empty' });
+  assert.deepEqual(result[1], { pulled: null, skip: 'fetch-failed' });
   assert.deepEqual(
     logs.filter((entry) => entry.msg === 'pull: skipped').map((entry) => entry.reason),
     ['empty', 'fetch-failed'],
@@ -409,7 +409,7 @@ test('fetchPull: a channel quieter than maxAgeDays is skipped, maxAgeDays 0 pull
     await pull(guild, old.id, { config: config({ pull: { maxAgeDays: 30 } }) }),
     await pull(guild, old.id, { config: config({ pull: { maxAgeDays: 0 } }) }),
   ]);
-  assert.deepEqual(result[0], { pulled: null, channel: null, skip: 'too-old' });
+  assert.deepEqual(result[0], { pulled: null, skip: 'too-old' });
   assert.equal(old.fetchCalls.length, 1, 'only the second pull fetched: the too-old refusal made no request');
   assert.equal(result[1].skip, null);
   assert.equal(result[1].pulled.messages.length, 4);
@@ -429,7 +429,7 @@ test('fetchPull: the audience rail blocks a narrower source', async () => {
     messages: [{ ts: LAST }],
   });
   const { result, logs } = await withCapturedLogs(() => pull(guild, narrow.id));
-  assert.deepEqual(result, { pulled: null, channel: null, skip: 'audience' });
+  assert.deepEqual(result, { pulled: null, skip: 'audience' });
   assert.equal(logs.find((entry) => entry.msg === 'pull: skipped').reason, 'audience');
   assert.deepEqual(narrow.fetchCalls, []);
 });
@@ -549,8 +549,8 @@ test('fetchPull: a routed trigger deleted before the pull is not shown', async (
     await pull(guild, diary.id, { reason: 'routed', trigger: inside }),
     await pull(guild, diary.id, { reason: 'routed', trigger: older }),
   ]);
-  assert.deepEqual(result[0], { pulled: null, channel: null, skip: 'trigger-gone' });
-  assert.deepEqual(result[1], { pulled: null, channel: null, skip: 'trigger-gone' });
+  assert.deepEqual(result[0], { pulled: null, skip: 'trigger-gone' });
+  assert.deepEqual(result[1], { pulled: null, skip: 'trigger-gone' });
   assert.deepEqual(
     diary.fetchCalls,
     [{ limit: 100 }, { limit: 100 }, older.id],
@@ -698,7 +698,7 @@ test('fetchPull: cached captions are used for every picture, fresh ones only wit
   const { result, logs } = await withCapturedLogs(() => pull(guild, channel.id, { config: cfg, describer, turnCertain: true }));
   const { pulled } = result;
   assert.deepEqual(describer.calls.cached, [{ guildId: GUILD_ID, ids: ['p5', 'p4', 'p3', 'p2', 'p1'] }], 'the cache is asked for every picture');
-  assert.deepEqual(describer.calls.many, [{ guildId: GUILD_ID, ids: ['p5'], options: { maxNew: 1, countAgainstDailyCap: true } }]);
+  assert.deepEqual(describer.calls.many, [{ guildId: GUILD_ID, ids: ['p5'], options: { maxNew: 1 } }]);
   assert.deepEqual(
     [...pulled.descriptions].sort(),
     [
@@ -882,7 +882,7 @@ test('fetchPull: a page message that cannot be read skips with fetch-failed', as
   const diary = addChannel(guild, { id: '760000000000000082', messages: burst(LAST - 30 * MIN, LAST, 10) });
   diary.raws[1] = unreadable(diary.raws[1]);
   const { result, logs } = await withCapturedLogs(() => pull(guild, diary.id));
-  assert.deepEqual(result, { pulled: null, channel: null, skip: 'fetch-failed' });
+  assert.deepEqual(result, { pulled: null, skip: 'fetch-failed' });
   const warn = logs.find((entry) => entry.msg === 'pull: page unreadable');
   assert.deepEqual([warn.level, warn.source, warn.channel], ['warn', diary.id, '750000000000000001']);
   assert.equal(logs.find((entry) => entry.msg === 'pull: skipped').reason, 'fetch-failed');

@@ -22,7 +22,7 @@
 // runner.
 
 import { localHour } from '../discord/format.js';
-import { readableChannels, canSend, lastActivity, channelAllowed } from '../discord/collect.js';
+import { readableChannels, canSend, lastActivity, channelAllowed, isWritableChannel } from '../discord/collect.js';
 import { audienceAllows } from '../discord/pull-fetch.js';
 import { usableDestination } from './turn.js';
 import { chooseElsewhereMode, elsewhereSettings, hasUnseen, mayBeLive } from './elsewhere.js';
@@ -259,8 +259,13 @@ export function createSpontaneous({
     return null;
   }
 
+  /**
+   * Whether the persona may speak unprompted in `channel` now: one it may
+   * write in (src/discord/collect.js#isWritableChannel: readable, never the
+   * dry-run mirror, the bot can send) and destinationBlock finds nothing.
+   */
   function passesFilters(channel, config, cfg, t) {
-    return destinationBlock(channel, config, cfg, t) === null;
+    return isWritableChannel(channel, config.bot ?? {}) && destinationBlock(channel, config, cfg, t) === null;
   }
 
   /** The seen mark of a source (state.json `elsewhereSeen`), read now; null without one. */
@@ -442,8 +447,8 @@ export function createSpontaneous({
   /**
    * The eavesdrop rails of `channel`, `config` read by the caller now: not
    * paused (`/nep pause`), eavesdropAllowed, a channel of the served guild
-   * and passesFilters (allowed, canSend, spontaneous.channels,
-   * minGapMinutes, one attention).
+   * and passesFilters (writable -- readable, not the dry-run mirror, allowed,
+   * canSend --, spontaneous.channels, minGapMinutes, one attention).
    */
   function eavesdropRails(channel, config, t) {
     // /nep pause: no eavesdrop scheduling while paused.

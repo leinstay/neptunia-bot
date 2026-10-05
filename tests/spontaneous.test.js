@@ -594,6 +594,31 @@ test('onMessage: ignores a message from a guild other than the one this instance
   assert.equal(calls, 0);
 });
 
+test('onMessage: no eavesdrop in the dry-run mirror or a channel whose history the bot cannot read', async () => {
+  const guild = fakeGuild('g1');
+  const read = PermissionFlagsBits.ReadMessageHistory;
+  const channels = {
+    mirror: fakeChannel('mirror1', guild),
+    unreadable: fakeChannel('c2', guild, { permissionsFor: () => ({ has: (flag) => flag !== read }) }),
+    open: fakeChannel('c3', guild),
+  };
+  const config = eagerEavesdropConfig();
+  config.bot = { ...config.bot, dryRunChannelId: 'mirror1' };
+  const spontaneous = createSpontaneous({
+    hot: { config },
+    store: fakeStore(),
+    client: {},
+    turns: fakeTurns(),
+    getGuildId: () => 'g1',
+    rng: () => 0,
+    now: () => Date.UTC(2026, 0, 5, 12, 0, 0),
+  });
+  const scheduled = Object.fromEntries(Object.entries(channels).map(([name, channel]) => [name, spontaneous.onMessage(channel, { self: false, bot: false })]));
+  spontaneous.stop();
+
+  assert.deepEqual(scheduled, { mirror: false, unreadable: false, open: true });
+});
+
 // ---------------------------------------------------------------------------
 // status / stop / force
 
