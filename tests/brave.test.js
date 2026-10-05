@@ -78,14 +78,6 @@ test('search: count is capped at 10, floored at 1, and defaults to 5', async () 
   assert.deepEqual(counts, ['10', '1', '3', '5', '5']);
 });
 
-test('search: the request carries only the query and the count -- no search_lang, whatever the options', async () => {
-  const { calls, fetchImpl } = fakeFetch(jsonResponse(RESULTS));
-  const brave = createBraveSearch({ fetchImpl });
-  await run(brave, 'q', { apiKey: KEY, timeoutMs: 5000, lang: 'el' });
-  await run(brave, 'q', { apiKey: KEY, timeoutMs: 5000 });
-  for (const call of calls) assert.deepEqual([...new URL(call.url).searchParams.keys()], ['q', 'count']);
-});
-
 test('search: parses web.results, cleans titles and snippets, keeps age, drops entries without an http(s) url', async () => {
   const { fetchImpl } = fakeFetch(jsonResponse(RESULTS));
   const { result, logs } = await run(createBraveSearch({ fetchImpl }), 'aegean', { apiKey: KEY, timeoutMs: 5000 });

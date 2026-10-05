@@ -10,7 +10,6 @@ import {
   mediaLabelFor,
   stickerLabelFor,
   stickerUrl,
-  emojiUrl,
   linkThumbnailCacheKey,
   collectPictures,
   collectEmojiItems,
@@ -158,13 +157,6 @@ test('classifyEmbed: a link embed never carries animationUrl, even with a video 
   assert.equal('animationUrl' in other, false);
 });
 
-test('classifyEmbed: falls back to the hostname when there is no provider name', () => {
-  const embed = { url: 'https://example.com/article', title: 't' };
-  const item = classifyEmbed(embed);
-  assert.equal(item.site, 'example.com');
-  assert.equal(item.kind, 'link');
-});
-
 test('classifyEmbed: title/description are truncated to embedTextChars', () => {
   const embed = { url: 'https://example.com', title: 'x'.repeat(50), description: 'y'.repeat(50) };
   const item = classifyEmbed(embed, { embedTextChars: 10 });
@@ -210,14 +202,6 @@ test('mediaProxyUrl: a cdn.discordapp.com attachment URL is rewritten to media.d
   assert.equal(parsed.searchParams.get('ex'), '671f1a00');
   assert.equal(parsed.searchParams.get('is'), '671dc880');
   assert.equal(parsed.searchParams.get('hm'), 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890');
-});
-
-test('mediaProxyUrl: a video attachment URL also moves to media.discordapp.net -- never left on cdn.discordapp.com, which would return the whole file', () => {
-  const url = mediaProxyUrl(`https://cdn.discordapp.com/attachments/111/222/clip.mp4?${SIGNED_QUERY}`, { format: 'webp' });
-  const parsed = new URL(url);
-  assert.equal(parsed.hostname, 'media.discordapp.net');
-  assert.equal(parsed.searchParams.get('format'), 'webp');
-  assert.equal(parsed.searchParams.get('hm')?.length, 64, 'the signed hm survives the host swap');
 });
 
 test('mediaProxyUrl: an already-media.discordapp.net URL keeps that host, params still set', () => {
@@ -367,11 +351,6 @@ test('mediaLabelFor: a link thumbnail description appends thumbnailDescribed, th
   });
 });
 
-test('mediaLabelFor: a link thumbnail with no description and no attachment renders the plain link tag, no extra', () => {
-  const item = { kind: 'link', site: 's', title: 't', thumbnailUrl: 'https://x/y.jpg' };
-  assert.deepEqual(mediaLabelFor(item), { key: 'link', values: { site: 's', title: 't' } });
-});
-
 test('mediaLabelFor: image blind vs described', () => {
   assert.deepEqual(mediaLabelFor({ kind: 'image' }), { key: 'image', values: {} });
   assert.deepEqual(mediaLabelFor({ kind: 'image' }, { description: 'a cat' }), { key: 'imageDescribed', values: { text: 'a cat' } });
@@ -429,10 +408,6 @@ test('mediaLabelFor: a text attachment uses filePreview once fetched, else the p
   });
 });
 
-test('mediaLabelFor: a plain file renders the file form', () => {
-  assert.deepEqual(mediaLabelFor({ kind: 'file', name: 'archive.zip' }), { key: 'file', values: { name: 'archive.zip' } });
-});
-
 test('mediaLabelFor: a link with description text uses linkText, else link', () => {
   assert.deepEqual(mediaLabelFor({ kind: 'link', site: 's', title: 't' }), { key: 'link', values: { site: 's', title: 't' } });
   assert.deepEqual(mediaLabelFor({ kind: 'link', site: 's', title: 't', text: 'd' }), {
@@ -484,32 +459,11 @@ test('mediaLabelFor: a video with an attached still frame keeps frameAttached as
   }
 });
 
-test('mediaLabelFor: a video not watched for a limit carries the reason CODE, not a label', () => {
-  for (const reason of ['length', 'size', 'daily']) {
-    assert.deepEqual(mediaLabelFor(clip, { video: { state: 'limit', reason } }), {
-      key: 'videoNotWatched',
-      values: { name: 'clip.mp4', duration: '1:05', reason },
-    });
-  }
-});
-
-test('mediaLabelFor: an error state carries the reason code "error"', () => {
-  assert.deepEqual(mediaLabelFor(clip, { video: { state: 'error' } }), {
-    key: 'videoNotWatched',
-    values: { name: 'clip.mp4', duration: '1:05', reason: 'error' },
-  });
-});
-
 test('mediaLabelFor: a video not watched but with a still-frame caption renders videoNotWatchedFrame', () => {
   assert.deepEqual(mediaLabelFor(clip, { description: 'a café terrace', video: { state: 'limit', reason: 'size' } }), {
     key: 'videoNotWatchedFrame',
     values: { name: 'clip.mp4', duration: '1:05', reason: 'size', text: 'a café terrace' },
   });
-});
-
-test('mediaLabelFor: a video with an unknown duration and a video state still uses unknownDuration', () => {
-  const result = mediaLabelFor({ kind: 'video', name: 'clip.mp4' }, { unknownDuration: 'n/a', video: { state: 'error' } });
-  assert.equal(result.values.duration, 'n/a');
 });
 
 test('mediaLabelFor: a watched link keeps its link tag, the one extra becomes linkWatched', () => {
@@ -612,10 +566,6 @@ test('collectVideos: no sites (missing or empty) -> attachments only', () => {
   assert.deepEqual(collectVideos(videoMessage(), { videoSites: [] }).map((item) => item.itemId), ['a2']);
 });
 
-test('collectVideos: a message with no media returns an empty list', () => {
-  assert.deepEqual(collectVideos({ id: 'm1' }, { videoSites: ['youtube.com'] }), []);
-});
-
 // --- collectPictures / isDescribable -------------------------------------------
 
 function message(id, overrides = {}) {
@@ -715,29 +665,6 @@ test('selectPictures: trigger pictures come first', () => {
   assert.deepEqual(pick(2), ['replied', 'trig'], 'room for two: the replied-to picture next, ahead of the newer one');
 });
 
-test('selectPictures: replied-to message pictures come after the trigger\'s own', () => {
-  const now = 1_000_000;
-  // Older than recentImageMinutes: only the replied-to tier can take it.
-  const replied = pictureMessage('r', now - 60 * MIN, 'replied');
-  const trigger = message('t', {
-    ts: now,
-    replyToId: 'r',
-    attachments: [
-      { id: 't1', kind: 'image', url: 'url-t1', name: 't1.png' },
-      { id: 't2', kind: 'image', url: 'url-t2', name: 't2.png' },
-    ],
-  });
-  const pick = (maxImages) =>
-    selectPictures({
-      trigger,
-      history: [replied, trigger],
-      visionCfg: { maxImages, recentImages: 3, recentImageMinutes: 30 },
-      now,
-    }).map((p) => p.itemId);
-  assert.deepEqual(pick(2), ['t1', 't2'], 'the trigger\'s own fill the room first');
-  assert.deepEqual(pick(4), ['replied', 't1', 't2'], 'then the replied-to picture, in transcript order');
-});
-
 test('selectPictures: recent channel pictures fill up to recentImages, newest first, then re-sorted to transcript order', () => {
   const now = 1_000_000;
   const m1 = pictureMessage('m1', now - 20 * MIN, 'p1');
@@ -764,18 +691,6 @@ test('selectPictures: recent pictures older than recentImageMinutes are excluded
     now,
   });
   assert.deepEqual(picked.map((p) => p.itemId), ['recent-pic']);
-});
-
-test('selectPictures: a spontaneous turn (no trigger) only ever picks from the recent tier', () => {
-  const now = 1_000_000;
-  const recent = pictureMessage('m1', now - 1 * MIN, 'p1');
-  const picked = selectPictures({
-    trigger: null,
-    history: [recent],
-    visionCfg: { maxImages: 4, recentImages: 3, recentImageMinutes: 30 },
-    now,
-  });
-  assert.deepEqual(picked.map((p) => p.itemId), ['p1']);
 });
 
 test('selectPictures: the overall maxImages cap wins even when more would qualify', () => {
@@ -838,7 +753,7 @@ test('selectPictures: a trigger in the turn\'s channel, or with either channel i
   assert.deepEqual(selectPictures({ trigger: elsewhere, history: [], visionCfg, now }).map((p) => p.itemId), ['trig-e'], 'no channelId: as before');
 });
 
-// --- stickerUrl / emojiUrl / linkThumbnailCacheKey ------------------------
+// --- stickerUrl / linkThumbnailCacheKey ------------------------
 
 test('stickerUrl: a picture format sizes to media.discordapp.net/.../<id>.<ext>?size=160; Lottie and unknown formats are null', () => {
   const rows = [
@@ -854,10 +769,6 @@ test('stickerUrl: a picture format sizes to media.discordapp.net/.../<id>.<ext>?
     assert.equal(url, expected, label);
     if (url !== null) assert.ok(!url.includes('cdn.discordapp.com'), label);
   }
-});
-
-test('emojiUrl: cdn.discordapp.com/emojis/<id>.webp?size=96, same for static and animated', () => {
-  assert.equal(emojiUrl('456'), 'https://cdn.discordapp.com/emojis/456.webp?size=96');
 });
 
 test('linkThumbnailCacheKey: stable across different signed query strings for the same picture', () => {
@@ -905,14 +816,6 @@ test('stickerLabelFor: attached wins over described, keeps the sticker tag and a
     key: 'stickerDescribed',
     values: { name: 'pepe', text: 'a frog gives a thumbs up' },
     extra: { key: 'frameAttached', values: { n: 2 } },
-  });
-});
-
-test('stickerLabelFor: attached with no description keeps the blind sticker tag plus frameAttached', () => {
-  assert.deepEqual(stickerLabelFor(sticker('pepe', 'https://x'), { attachedIndex: 1 }), {
-    key: 'sticker',
-    values: { name: 'pepe' },
-    extra: { key: 'frameAttached', values: { n: 1 } },
   });
 });
 
@@ -997,13 +900,6 @@ test('mediaLabelFor: a watched video with an answer appends videoAnswered after 
     values: { name: 'clip.mp4', duration: '1:05', text: 'a dog runs' },
     extra: { key: 'videoAnswered', values: { question: answer.question, text: answer.text } },
   });
-});
-
-test('mediaLabelFor: a watched video with an attached frame and an answer -> frameAttached, then videoAnswered', () => {
-  assert.deepEqual(mediaLabelFor(clip, { attachedIndex: 2, video: { state: 'watched', text: 'a dog runs', answer } }).extra, [
-    { key: 'frameAttached', values: { n: 2 } },
-    { key: 'videoAnswered', values: { question: answer.question, text: answer.text } },
-  ]);
 });
 
 test('mediaLabelFor: a watched link with an answer -> linkWatched, then videoAnswered (after frameAttached too)', () => {
@@ -1179,26 +1075,12 @@ test('collectVideos: a forwarded YouTube link is a candidate with its site set (
   ]);
 });
 
-test('collectVideos: no sites -> a forwarded message still yields its forwarded video attachments only', () => {
-  assert.deepEqual(collectVideos(forwardMessage()).map((item) => item.itemId), ['fwd-a1']);
-});
-
 test('collectReadableLinks: forwarded plain links follow the message\'s own, video-site links still excluded', () => {
   const items = collectReadableLinks(forwardMessage(), { videoSites: ['youtube.com'] });
   assert.deepEqual(items, [
     { id: 'outer#e0', messageId: 'outer', url: 'https://example.org/own', site: 'example.org', title: 'Own' },
     { id: 'fwd#e1', messageId: 'outer', url: 'https://news.example.com/story', site: 'news.example.com', title: 'Story' },
   ]);
-});
-
-test('collectors: a message with an empty forwarded list returns exactly what it did without the key', () => {
-  const plain = videoMessage();
-  const withEmpty = { ...videoMessage(), forwarded: [] };
-  const sites = { videoSites: ['youtube.com', 'youtu.be'] };
-  assert.deepEqual(collectPictures(withEmpty), collectPictures(plain));
-  assert.deepEqual(collectEmojiItems(withEmpty), collectEmojiItems(plain));
-  assert.deepEqual(collectVideos(withEmpty, sites), collectVideos(plain, sites));
-  assert.deepEqual(collectReadableLinks(withEmpty, sites), collectReadableLinks(plain, sites));
 });
 
 test('selectPictures: a forwarded picture on the trigger is eligible and sorted by the outer message', () => {

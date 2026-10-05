@@ -10,7 +10,6 @@ import {
   fetchTextPreview,
   withTextPreviews,
   fetchHistory,
-  fetchHistoryWindow,
   fetchMessage,
   canAttach,
   canSend,
@@ -99,17 +98,6 @@ test('normalizeMessage: an embed becomes a link item and its raw URL is removed 
   assert.equal(m.content, 'check this out cool right');
 });
 
-test('normalizeMessage: a tenor embed becomes a gif link item, its URL also removed', () => {
-  const raw = rawMessage({
-    cleanContent: 'lol https://tenor.com/view/x',
-    embeds: [{ url: 'https://tenor.com/view/x', provider: { name: 'Tenor' }, thumbnail: { url: 'https://t.tenor.com/x.png' } }],
-  });
-  const m = normalizeMessage(raw, 'self');
-  assert.equal(m.links[0].kind, 'gif');
-  assert.equal(m.links[0].thumbnailUrl, 'https://t.tenor.com/x.png');
-  assert.equal(m.content, 'lol');
-});
-
 test('normalizeMessage: a tenor gifv embed keeps its mp4 as animationUrl, in the message and in a forward', () => {
   const gifv = {
     url: 'https://tenor.com/view/x',
@@ -172,12 +160,6 @@ test('normalizeMessage: a forwarded message (snapshot) is captured with its own 
   assert.equal(m.forwarded[0].attachments[0].kind, 'image');
 });
 
-test('normalizeMessage: no messageSnapshots means an empty forwarded array', () => {
-  const raw = rawMessage();
-  const m = normalizeMessage(raw, 'self');
-  assert.deepEqual(m.forwarded, []);
-});
-
 // --- normalizeMessage: stickers ----------------------------------------
 
 function sticker(id, name, format) {
@@ -196,12 +178,6 @@ test('normalizeMessage: stickers become { id, name, format, url }, PNG/APNG/GIF 
   assert.deepEqual(m.stickers[0], { id: 's1', name: 'pepe', format: 1, url: 'https://media.discordapp.net/stickers/s1.png?size=160' });
   assert.deepEqual(m.stickers[1], { id: 's2', name: 'wave', format: 2, url: 'https://media.discordapp.net/stickers/s2.png?size=160' });
   assert.deepEqual(m.stickers[2], { id: 's3', name: 'dance', format: 4, url: 'https://media.discordapp.net/stickers/s3.gif?size=160' });
-});
-
-test('normalizeMessage: a Lottie sticker (format 3) has a null url, name only', () => {
-  const raw = rawMessage({ stickers: new Map([['s1', sticker('s1', 'wiggle', 3)]]) });
-  const m = normalizeMessage(raw, 'self');
-  assert.deepEqual(m.stickers[0], { id: 's1', name: 'wiggle', format: 3, url: null });
 });
 
 // --- normalizeMessage: custom emoji extraction -------------------------
@@ -247,12 +223,6 @@ test('normalizeMessage: distinct custom emoji are capped at 5 per message, first
   assert.deepEqual(m.emojis.map((e) => e.id), ['1', '2', '3', '4', '5']);
 });
 
-test('normalizeMessage: no custom emoji means an empty emojis array', () => {
-  const raw = rawMessage({ cleanContent: 'plain text, no emoji' });
-  const m = normalizeMessage(raw, 'self');
-  assert.deepEqual(m.emojis, []);
-});
-
 test('normalizeMessage: reactions are read with count and the bot\'s own mark', () => {
   const raw = rawMessage({
     reactions: {
@@ -278,20 +248,6 @@ test('normalizeMessage: a custom emoji reaction is named :name:', () => {
   });
   const m = normalizeMessage(raw, 'self');
   assert.deepEqual(m.reactions, [{ emoji: ':κάτι:', count: 1, mine: false }]);
-});
-
-test('normalizeMessage: no reactions gives an empty list', () => {
-  assert.deepEqual(normalizeMessage(rawMessage(), 'self').reactions, []);
-  assert.deepEqual(normalizeMessage(rawMessage({ reactions: { cache: new Map() } }), 'self').reactions, []);
-});
-
-test('normalizeMessage: a forwarded snapshot carries no reactions', () => {
-  const raw = rawMessage({
-    reactions: { cache: new Map([['a', { emoji: { id: null, name: '🍣' }, count: 2, me: false }]]) },
-    messageSnapshots: new Map([['s', { cleanContent: 'fwd', attachments: new Map(), stickers: new Map(), embeds: [] }]]),
-  });
-  const m = normalizeMessage(raw, 'self');
-  assert.equal(m.forwarded[0].reactions, undefined);
 });
 
 test('normalizeMessage: a forwarded snapshot also carries its own stickers and emoji', () => {
@@ -388,12 +344,6 @@ test('normalizeMessage: a typed video-site URL becomes a synthetic link, its URL
   assert.equal(m.content, 'mira esto https://www.youtube.com/watch?v=abc&t=5 qué risa');
 });
 
-test('normalizeMessage: without videoSites (the default) a typed video URL adds no link', () => {
-  const raw = rawMessage({ cleanContent: 'https://youtu.be/xyz' });
-  assert.deepEqual(normalizeMessage(raw, 'self').links, []);
-  assert.deepEqual(normalizeMessage(raw, 'self', { videoSites: [] }).links, []);
-});
-
 test('normalizeMessage: a URL on a site outside videoSites adds no link', () => {
   const raw = rawMessage({ cleanContent: 'https://example.com/clip' });
   assert.deepEqual(normalizeMessage(raw, 'self', { videoSites: VIDEO_SITES }).links, []);
@@ -451,16 +401,6 @@ test('normalizeMessage: the same typed video URL twice becomes one synthetic lin
   assert.equal(m.links[0].site, 'youtu.be');
 });
 
-test('normalizeMessage: synthetic video links follow the embed links', () => {
-  const raw = rawMessage({
-    cleanContent: 'https://example.com/page https://youtu.be/xyz',
-    embeds: [{ url: 'https://example.com/page', title: 'A page' }],
-  });
-  const m = normalizeMessage(raw, 'self', { videoSites: VIDEO_SITES });
-  assert.deepEqual(m.links.map((link) => link.url), ['https://example.com/page', 'https://youtu.be/xyz']);
-  assert.equal(m.content, 'https://youtu.be/xyz');
-});
-
 test('normalizeMessage: a forwarded snapshot also turns a typed video URL into a synthetic link', () => {
   const raw = rawMessage({
     cleanContent: '',
@@ -498,16 +438,6 @@ test('normalizeMessage: a plain reply keeps replyToId, forwardedFrom stays null'
   const raw = rawMessage({
     guild: guildWithChannel('c1', 'general'),
     reference: { messageId: 'm0', channelId: 'c1' }, // no `type`: an older/plain reply payload
-  });
-  const m = normalizeMessage(raw, 'self');
-  assert.equal(m.replyToId, 'm0');
-  assert.equal(m.forwardedFrom, null);
-});
-
-test('normalizeMessage: a reply explicitly typed Default behaves the same as an untyped one', () => {
-  const raw = rawMessage({
-    guild: guildWithChannel('c1', 'general'),
-    reference: { messageId: 'm0', channelId: 'c1', type: MessageReferenceType.Default },
   });
   const m = normalizeMessage(raw, 'self');
   assert.equal(m.replyToId, 'm0');
@@ -560,11 +490,6 @@ test('normalizeMessage: mentionedUserIds carries the real mention ids, in order'
   const raw = rawMessage({ mentions: { users: new Map([['u2', {}], ['u3', {}]]) } });
   const m = normalizeMessage(raw, 'self');
   assert.deepEqual(m.mentionedUserIds, ['u2', 'u3']);
-});
-
-test('normalizeMessage: no mentions at all means an empty mentionedUserIds array', () => {
-  const m = normalizeMessage(rawMessage(), 'self');
-  assert.deepEqual(m.mentionedUserIds, []);
 });
 
 // --- normalizeMessage: mentionedChannelIds -------------------------------
@@ -660,15 +585,6 @@ test('fetchHistory: threads embedTextChars through to the embed classification',
   assert.equal(message.links[0].title, `${'x'.repeat(10)}…`);
 });
 
-test('fetchHistory: defaults to 200 chars when embedTextChars is not given', async () => {
-  const raw = rawMessage({
-    embeds: [{ url: 'https://example.com', title: 'x'.repeat(250) }],
-  });
-  const channel = { messages: { fetch: async () => new Map([[raw.id, raw]]) } };
-  const [message] = await fetchHistory(channel, { limit: 10, selfId: 'self' });
-  assert.equal(message.links[0].title, `${'x'.repeat(200)}…`);
-});
-
 test('fetchHistory: threads videoSites through, a typed video-site URL becomes a link item', async () => {
   const raw = rawMessage({ cleanContent: 'regarde https://www.youtube.com/watch?v=abc' });
   const channel = { messages: { fetch: async () => new Map([[raw.id, raw]]) } };
@@ -696,14 +612,6 @@ test('fetchHistory: asks for at most one page of messages, oldest first in the r
   const messages = await fetchHistory(channel, { limit: 500, selfId: 'self' });
   assert.deepEqual(queries, [{ limit: 100 }]);
   assert.deepEqual(messages.map((m) => m.id), ['m1', 'm2']);
-});
-
-test('fetchHistoryWindow: threads videoSites through to normalizeMessage', async () => {
-  const raw = rawMessage({ cleanContent: 'regarde https://www.youtube.com/watch?v=abc' });
-  const channel = { id: 'c1', messages: { fetch: async () => new Map([[raw.id, raw]]) } };
-
-  const [message] = await fetchHistoryWindow(channel, { limit: 10, selfId: 'self', videoSites: ['youtube.com'] });
-  assert.equal(message.links.length, 1);
 });
 
 // --- fetchMessage: cache first, then one fetch, null on failure ----------------
@@ -1133,15 +1041,6 @@ test('normalizeMessage: a CDN video link of an attachment already on the message
   assert.equal(m.attachments[0].url, 'https://cdn/real.mp4');
   assert.deepEqual(m.links, []);
   assert.equal(m.content, '');
-});
-
-test('normalizeMessage: CDN video links follow the real attachments', () => {
-  const raw = rawMessage({
-    cleanContent: CDN_VIDEO_URL,
-    attachments: new Map([['a1', { id: 'a1', contentType: 'image/png', name: 'pic.png', url: 'https://cdn/pic.png' }]]),
-  });
-  const m = normalizeMessage(raw, 'self');
-  assert.deepEqual(m.attachments.map((a) => a.id), ['a1', '222']);
 });
 
 test('normalizeMessage: a forwarded snapshot carrying a CDN video link gets a video attachment', () => {

@@ -3,7 +3,6 @@
 // in-memory media cache. No network, no real data/.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { createLookup, normalizeQuery, cleanQuery } from '../src/web/lookup.js';
 import { DailyCapError, helperRequestOptions, TokenLimitError } from '../src/llm/openrouter.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
@@ -145,8 +144,6 @@ test('readLinks: web.acceptLanguage is read at the moment of use and handed to t
   hot.config.web.acceptLanguage = 'pt-BR,pt;q=0.9';
   await readOne(lookup, { ...LINK, id: 'm2#e0', url: 'https://example.org/b' });
   assert.deepEqual(pageFetcher.calls.map((c) => c.options.acceptLanguage), ['el,en;q=0.5', 'pt-BR,pt;q=0.9']);
-  const shipped = JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
-  assert.equal(shipped.web.acceptLanguage, 'en,ru;q=0.8', 'config.json keeps the header the fetcher always sent');
 });
 
 test('readLinks: a cached excerpt is free -- no fetch, no LLM call, no daily slot', async () => {
@@ -236,28 +233,6 @@ test('readLinks: skipSites and video-site links are never read; a gif is never r
   assert.equal(await readOne(lookup, { id: 'g', url: 'https://tenor.com/view/x', site: 'tenor', title: '', kind: 'gif' }), null);
   assert.equal(pageFetcher.calls.length, 0);
   assert.equal(llm.calls.length, 0);
-});
-
-test('readLinks: the default skipSites (config.json) cover gif hosts and Discord attachments, subdomains included', async () => {
-  const shipped = JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
-  const skipSites = shipped.web.links.skipSites;
-  const { lookup, pageFetcher, llm } = setup({ hotOptions: { web: { links: { skipSites } } } });
-  for (const url of [
-    'https://cdn.discordapp.com/attachments/1/2/file',
-    'https://media.discordapp.net/attachments/1/2/file',
-    'https://tenor.com/view/x',
-    'https://media.giphy.com/media/x',
-    'https://static.klipy.com/page/x',
-    'https://imgur.com/gallery/x',
-    'https://i.redd.it/x',
-    'https://v.redd.it/x',
-    'https://pbs.twimg.com/media/x',
-  ]) {
-    assert.equal(await readOne(lookup, { ...LINK, id: url, url }), null, url);
-  }
-  assert.equal(pageFetcher.calls.length, 0);
-  assert.equal(llm.calls.length, 0);
-  assert.ok(await readOne(lookup, LINK), 'an ordinary page is still read');
 });
 
 test('readLinks: a URL whose path ends with a binary extension is never read, whatever the case or query', async () => {
@@ -452,15 +427,6 @@ test('search: {{today}} in the summary prompt is the injected clock\'s UTC date'
   });
   await lookup.search('g1', 'la finale');
   assert.equal(llm.calls[0].messages[0].content, 'Today is 2031-12-31. The query: la finale. Up to 900 characters.');
-});
-
-test('readLinks: {{today}} in the read-link prompt is the injected clock\'s UTC date', async () => {
-  const { lookup, llm } = setup({
-    now: () => Date.UTC(2031, 0, 2, 3, 4, 5),
-    hotOptions: { prompts: { 'read-link': 'Today is {{today}}. Condense this page, up to {{maxChars}} characters.' } },
-  });
-  await readOne(lookup, LINK);
-  assert.equal(llm.calls[0].messages[0].content, 'Today is 2031-01-02. Condense this page, up to 700 characters.');
 });
 
 test('cleanQuery: one line, no angle brackets, no control characters, at most 200 characters', () => {

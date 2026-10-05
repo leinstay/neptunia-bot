@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { GIF_MAX_PER_DAY_FALLBACK, GIF_POSTS_PER_DAY_FALLBACK, gifPostsToday, gifWatchBlocker, gifWatchCap, gifWatchPrompt, gifWatchesToday } from '../src/memory/gif-watch.js';
 
 const ON = { features: { mediaDescriptions: true }, media: { gif: { watch: true } } };
@@ -30,13 +31,12 @@ test('gifWatchPrompt: describe-gif when present, else describe-video', () => {
 });
 
 test('gifWatchCap: media.gif.maxPerDay, a missing or invalid value means the fallback', () => {
-  assert.equal(GIF_MAX_PER_DAY_FALLBACK, 200);
   assert.equal(gifWatchCap({ media: { gif: { maxPerDay: 12 } } }), 12);
   assert.equal(gifWatchCap({ media: { gif: { maxPerDay: 0 } } }), 0, 'zero is a valid cap: no watches');
-  assert.equal(gifWatchCap({ media: { gif: {} } }), 200);
-  assert.equal(gifWatchCap({ media: { gif: { maxPerDay: -1 } } }), 200);
-  assert.equal(gifWatchCap({ media: { gif: { maxPerDay: 'many' } } }), 200);
-  assert.equal(gifWatchCap(undefined), 200);
+  assert.equal(gifWatchCap({ media: { gif: {} } }), GIF_MAX_PER_DAY_FALLBACK);
+  assert.equal(gifWatchCap({ media: { gif: { maxPerDay: -1 } } }), GIF_MAX_PER_DAY_FALLBACK);
+  assert.equal(gifWatchCap({ media: { gif: { maxPerDay: 'many' } } }), GIF_MAX_PER_DAY_FALLBACK);
+  assert.equal(gifWatchCap(undefined), GIF_MAX_PER_DAY_FALLBACK);
 });
 
 test('gifWatchesToday: today\'s count against the cap; another day counts as zero', () => {
@@ -44,7 +44,7 @@ test('gifWatchesToday: today\'s count against the cap; another day counts as zer
   assert.deepEqual(gifWatchesToday({ gifWatchDay: '2026-10-01', gifWatchCount: 7 }, config, '2026-10-01'), { used: 7, cap: 50 });
   assert.deepEqual(gifWatchesToday({ gifWatchDay: '2026-09-30', gifWatchCount: 7 }, config, '2026-10-01'), { used: 0, cap: 50 });
   assert.deepEqual(gifWatchesToday({}, config, '2026-10-01'), { used: 0, cap: 50 });
-  assert.deepEqual(gifWatchesToday(undefined, undefined, '2026-10-01'), { used: 0, cap: 200 });
+  assert.deepEqual(gifWatchesToday(undefined, undefined, '2026-10-01'), { used: 0, cap: GIF_MAX_PER_DAY_FALLBACK });
   // The video counter is a different one.
   assert.deepEqual(gifWatchesToday({ videoDay: '2026-10-01', videoCount: 40 }, config, '2026-10-01'), { used: 0, cap: 50 });
 });
@@ -54,7 +54,7 @@ test('gifPostsToday: the posts of today against gifs.maxPerDay; another day coun
   assert.deepEqual(gifPostsToday({ gifDay: today, gifCount: 3 }, { gifs: { maxPerDay: 5 } }, today), { used: 3, cap: 5 });
   assert.deepEqual(gifPostsToday({ gifDay: '2026-10-02', gifCount: 3 }, { gifs: { maxPerDay: 0 } }, today), { used: 0, cap: 0 });
   assert.deepEqual(gifPostsToday({ gifDay: today, gifCount: 'x' }, {}, today), { used: 0, cap: GIF_POSTS_PER_DAY_FALLBACK });
-  assert.deepEqual(gifPostsToday(undefined, undefined, today), { used: 0, cap: 40 });
+  assert.deepEqual(gifPostsToday(undefined, undefined, today), { used: 0, cap: GIF_POSTS_PER_DAY_FALLBACK });
 });
 
 test('gifWatchesToday, gifPostsToday: a stored count that is not a finite number >= 0 reads as 0, and nothing is written', () => {
@@ -69,4 +69,10 @@ test('gifWatchesToday, gifPostsToday: a stored count that is not a finite number
   gifWatchesToday(stale, {}, today);
   gifPostsToday(stale, {}, today);
   assert.deepEqual(stale, { gifWatchDay: '2026-10-02', gifWatchCount: 9, gifDay: '2026-10-02', gifCount: 4 });
+});
+
+test('gif caps: the code fallbacks equal the values shipped in config.json', () => {
+  const shipped = JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(GIF_MAX_PER_DAY_FALLBACK, shipped.media.gif.maxPerDay);
+  assert.equal(GIF_POSTS_PER_DAY_FALLBACK, shipped.gifs.maxPerDay);
 });
