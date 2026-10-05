@@ -27,6 +27,8 @@
     "mentor": false,
     "variety": true,
     "varietyPrecompute": true,
+    "portraitRefresh": true,
+    "memoryTwoStage": false,
     "promptCache": false,
     "channelPull": true,
     "elsewhere": true,
@@ -141,6 +143,7 @@
     "maxInjokes": 15,
     "maxSelfFacts": 20,
     "maxEpisodes": 20,
+    "keepNewestEpisodes": 5,
     "maxNewEpisodes": 3,
     "maxInterests": 12,
     "maxInterestsStored": 40,
@@ -164,7 +167,13 @@
     "mainChannelIds": [],
     "clampTolerance": 1.25,
     "portraitRefreshHours": 24,
-    "portraitRefreshPerDay": 20
+    "portraitRefreshMessages": 300,
+    "portraitRefreshDays": 3,
+    "portraitRefreshPerDay": 3,
+    "portraitRetryHours": 24,
+    "portraitCheckMinutes": 60,
+    "voiceModel": null,
+    "voice": { "maxItems": 24, "maxPerDay": 100, "maxOutputTokens": 3000, "retryMinutes": 15, "maxAttempts": 4, "queueMax": 100, "queueHours": 24 }
   },
   "lore": {
     "maxEntries": 500,
@@ -180,7 +189,11 @@
     "dampingPower": 1,
     "decayPerDay": 0.04,
     "decayPower": 1,
-    "rewriteOnBandChange": true
+    "rewriteOnBandChange": true,
+    "rewriteOnDrift": 8,
+    "rewriteAfterMoves": 6,
+    "bandHysteresis": 2,
+    "textChars": 600
   },
   "media": {
     "maxOutputTokens": 120,
