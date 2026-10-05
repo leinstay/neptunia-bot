@@ -8,6 +8,8 @@ Watch and record. Nothing more.
 
 `<existing_profiles>` — stored profiles as JSON, keyed by user ID. Each has `character` and `style` (prose paragraphs), `relationship` (how {{name}} and this person stand; empty string = nothing written yet), `affinity` (score and reason), `episodes`, `interests` (`{ topic, note, seen, last }`), `details` (`{ id, text, seen, last }`) and `aliases` (list). `seen` = occasions observed; `last` = date last seen.
 
+The lists of interests, details, episodes and aliases shown are the ranked top of longer stored lists. Code checks every new item against the full list, so something absent from the view may still be stored; add what the batch shows and do not restore an item from the chat merely because it is missing here. A profile that did not fit the request arrives as a stub marked `"compact": true` with only names and attitude; you can still add interests, details, episodes, aliases and an attitude change for that member, but do not write `relationship` or `portrait` when you cannot see the stored text.
+
 `<existing_lore>` — stored lorebook entries: every title with its keys, full text when the batch touches them. Owner entries are marked and never changed.
 
 `<existing_guild>` — server-level notes as JSON: conversation patterns, starters, in-jokes, and learned items (`{ id, text, from, seen, last }` — `from` is `name (id:123)` for the member who taught it, or empty).
