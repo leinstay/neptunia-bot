@@ -7,9 +7,26 @@
 // ignore someone it likes, and by the analyzer's request builder to decide
 // when the stored relationship text no longer matches the score
 // (`relationshipStaleOf`). See docs/en/prompt-contract.md, "The analyzer".
+// It is also the one home of the two attitude rules the two-stage analyzer
+// (src/memory/voice.js) must apply as the store does: the reason's length
+// (`REASON_CHARS`) and the reading of the delta cap (`deltaCapOf`).
 
 import { clampText } from './clamp.js';
 import { DAY_MS } from '../time.js';
+
+/** How long an attitude reason may be, in characters, before `memory.clampTolerance`. */
+export const REASON_CHARS = 200;
+
+/**
+ * The size a delta is clamped to (`relationships.maxDeltaPerUpdate`, read by the caller): the
+ * absolute value of a finite number, else Infinity -- a cap that is not a number caps nothing.
+ * The caller applies its own fallback (config.json's 15) to a missing key before calling.
+ * @param {unknown} maxDelta
+ * @returns {number}
+ */
+export function deltaCapOf(maxDelta) {
+  return Number.isFinite(maxDelta) ? Math.abs(maxDelta) : Infinity;
+}
 
 /** A member's attitude before anything has been observed about them. A stored affinity may also
  * carry `decayedAt` (ISO string, see `decayAffinity`); every function here keeps it. */
@@ -214,13 +231,20 @@ export function roundScore(score) {
  *
  * @param {object} affinity           Current `{ score, reason, history }`, or malformed/undefined.
  * @param {number} delta              Raw delta from the model; coerced to an integer (unless `opts.truncate` is false).
- * @param {string} reason             One-line reason for this change.
+ * @param {string} reason             One-line reason for this change, trimmed and clamped. The new
+ *   history entry records it as given (`''` when there is none, e.g. a two-stage move whose
+ *   reason the voice run fills in later through src/memory/store.js#fillAffinityReason). It also
+ *   becomes `affinity.reason`; with none, `affinity.reason` keeps the previous one. The newest
+ *   entry's reason is therefore not always the stored one: a reader that restores an earlier
+ *   state from the history (src/mentor/moment.js#affinityBefore) has to look past the entries
+ *   without a reason.
  * @param {object} opts
- * @param {number} opts.maxDelta      `delta` is clamped to +-this BEFORE damping, and before it is applied.
+ * @param {number} opts.maxDelta      `delta` is clamped to +-`deltaCapOf(maxDelta)` BEFORE damping,
+ *   and before it is applied.
  * @param {number} opts.historySize   History is trimmed to the last N entries.
  * @param {number} [opts.now]         Epoch ms for the history entry's timestamp.
- * @param {number} [opts.clampTolerance]  How far `reason` (free text) may run over its 200-char
- *   limit before being cut, at a clean boundary -- see src/memory/clamp.js.
+ * @param {number} [opts.clampTolerance]  How far `reason` (free text) may run over its
+ *   `REASON_CHARS` limit before being cut, at a clean boundary -- see src/memory/clamp.js.
  * @param {boolean} [opts.damping=false]  `relationships.damping`. When true, `dampedDelta` above
  *   decides how much of the (already clamped) delta actually lands; when false (or omitted), the
  *   whole clamped delta is applied, same as before this option existed.
@@ -245,7 +269,7 @@ export function applyDelta(
   const numeric = Number(delta);
   let rawDelta = Number.isFinite(numeric) ? numeric : 0;
   if (truncate) rawDelta = Math.trunc(rawDelta);
-  const cap = Number.isFinite(maxDelta) ? Math.abs(maxDelta) : Infinity;
+  const cap = deltaCapOf(maxDelta);
   const clampedDelta = clamp(rawDelta, -cap, cap);
 
   const appliedRaw = damping ? dampedDelta(base.score, clampedDelta, dampingPower) : clampedDelta;
@@ -253,10 +277,11 @@ export function applyDelta(
   const appliedDelta = round2(newScore - base.score);
   if (appliedDelta === 0) return affinity && typeof affinity === 'object' && !Array.isArray(affinity) ? affinity : base;
 
-  const trimmedReason = typeof reason === 'string' ? clampText(reason, 200, { tolerance: clampTolerance }) : '';
+  const trimmedReason = typeof reason === 'string' ? clampText(reason, REASON_CHARS, { tolerance: clampTolerance }) : '';
   const finalReason = trimmedReason || base.reason;
 
-  const entry = { ts: new Date(now).toISOString(), delta: clampedDelta, appliedDelta, score: newScore, reason: finalReason };
+  // The entry is this move's own record: an earlier reason is never copied onto a move it did not cause.
+  const entry = { ts: new Date(now).toISOString(), delta: clampedDelta, appliedDelta, score: newScore, reason: trimmedReason };
   const size = Number.isFinite(historySize) && historySize > 0 ? historySize : 0;
   const history = size > 0 ? [...base.history, entry].slice(-size) : [];
 
