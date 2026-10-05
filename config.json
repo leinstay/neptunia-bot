@@ -28,6 +28,7 @@
     "variety": true,
     "varietyPrecompute": true,
     "portraitRefresh": true,
+    "recent": true,
     "memoryTwoStage": false,
     "promptCache": false,
     "channelPull": true,
@@ -76,8 +77,9 @@
     "reactionsPerMessage": 6,
     "otherProfiles": 6,
     "askedAboutProfiles": 3,
+    "askedAboutEpisodes": 3,
     "tempo": { "liveMessages10min": 4, "deadSilenceMinutes": 45 },
-    "caps": { "interlocutor": 6000, "aboutChat": 2500, "people": 9000, "neighbors": 3000, "server": 4000, "lore": 1500, "emoji": 800, "gifs": 600, "pulled": 4000 },
+    "caps": { "interlocutor": 6000, "aboutChat": 2500, "people": 9000, "neighbors": 3000, "server": 4000, "lore": 1500, "emoji": 800, "gifs": 600, "pulled": 4000, "recent": 1200 },
     "pull": { "windowMinutes": 60, "minMessages": 5, "maxMessages": 60, "maxPictures": 10, "maxNewDescriptions": 8, "describeTimeoutMs": 15000, "scanMessages": 20, "maxChannels": 1, "maxAgeDays": 0, "sameAudience": true },
     "customEmoji": { "max": 30, "storeMax": 200, "halfLifeDays": 30, "backfillMessages": 500 },
     "channelActivity": { "liveMessagesPerDay": 20, "deadAfterDays": 7 },
@@ -144,6 +146,11 @@
     "maxSelfFacts": 20,
     "maxEpisodes": 20,
     "keepNewestEpisodes": 5,
+    "recentHours": 72,
+    "maxRecentStored": 150,
+    "maxNewRecent": 3,
+    "recentChars": 160,
+    "recentShown": 12,
     "maxNewEpisodes": 3,
     "maxInterests": 12,
     "maxInterestsStored": 40,
@@ -289,7 +296,6 @@
     "maxOutputTokens": 6000,
     "maxTokens": 6000000,
     "rateLimitWaitMinutes": 10,
-    "rateLimitMaxWaits": 36,
-    "refreshMessages": 400
+    "rateLimitMaxWaits": 36
   }
 }
