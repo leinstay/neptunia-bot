@@ -29,7 +29,20 @@
 // unless the owner forces it), with the stored portrait as the `<draft>`;
 // it is started by src/memory/portrait.js's scheduler (by counters), by the
 // stream analyzer's cue (src/memory/update.js's `onPortraitRequest`) and by
-// `/nep memory refresh`, all under one daily cap. A missing `prompts.profile` /
+// `/nep memory refresh`, all under one daily cap.
+//
+// Two-stage mode (`features.memoryTwoStage`, DECISIONS-R4): no text in the
+// persona's voice is asked of `memory.model` (`warmupRoute`). The portrait
+// refresh splits like the stream analyzer: stage A (`prompts/portrait.md` on
+// `memory.model`) returns the merged `style`, stored at once, and lists about
+// the character that become one voice item for the voice run
+// (src/memory/voice.js, src/memory/update.js#runVoice), which words it on
+// `memory.voiceModel` and only then stamps the portrait; a newer portrait
+// decision stored here meanwhile (a later refresh, a warmup person run) takes
+// that item out of the queue unworded. The warmup's person
+// and server requests, which word a portrait, episode feelings and the server's
+// notes, go out on `memory.voiceModel` whole; its channel requests (neutral
+// notes) stay on `memory.model`. A missing `prompts.profile` /
 // `prompts.channel` / `prompts.server` is reported (reason `no-prompt`), never
 // thrown; a missing or broken labels.json fails loudly (a throw), exactly as it
 // does for the stream analyzer. An in-memory-only `activity` snapshot (`{ phase,
@@ -44,6 +57,7 @@ import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { fitSections, SectionsTooLargeError } from '../llm/budget.js';
 import { estimateTokens, estimateMessages } from '../llm/tokens.js';
 import { parseJsonObject } from '../llm/parse.js';
+import { isPlainObject } from '../config.js';
 import {
   MEMORY_LIMIT_DEFAULTS,
   analyzerTemperature,
@@ -51,6 +65,7 @@ import {
   characterText,
   detailOf,
   errorNameOf,
+  feedsCalibration,
   looksTruncated,
   mainChannelSet,
   requireLabels,
@@ -61,6 +76,7 @@ import { clampText } from './clamp.js';
 import { normalizeTopic } from './interests.js';
 import { toTokens, fromTokens } from './mentions.js';
 import { PORTRAIT_SLOTS, llmCapReached, portraitSettings, stampMs, storedCount } from './portrait.js';
+import { mergeIntoQueue } from './voice.js';
 import { DailyCapError, TokenLimitError } from '../llm/openrouter.js';
 import { log } from '../log.js';
 import { HOUR_MS, bumpDaily, dailyCounter, utcDay } from '../time.js';
@@ -75,6 +91,17 @@ const PORTRAIT_SHRINK = 0.8;
 
 // A portrait refresh's outcomes that drop an answer on purpose rather than fail (see refreshPortrait).
 const PORTRAIT_STOOD_DOWN = new Set(['paused', 'warming-up', 'gone', 'changed']);
+
+// The prompts a two-stage portrait refresh needs: its stage A (prompts/portrait.md), and the voice
+// model's (prompts/memory-voice.md), without which the character item it queues is never worded.
+const PORTRAIT_TWO_STAGE_PROMPTS = ['portrait', 'memory-voice'];
+
+// The owner-facing message of a portrait refresh with no prompt to send (`no-prompt`).
+const PROFILE_PROMPT_MISSING = 'prompt file missing: prompts/profile.md (or prompts.local/profile.md) is not configured yet';
+
+// The four lists of a stage A portrait answer: `keep` and `add` hold notes, `revise` holds
+// `{ old, now }`, `drop` holds `{ old }` (see clampPortraitDecision).
+const PORTRAIT_LISTS = ['keep', 'revise', 'add', 'drop'];
 
 // Bumped whenever `state.warmup`'s shape changes incompatibly -- a stored
 // object whose `version` does not match this is foreign (written by an older
@@ -142,6 +169,66 @@ function profileTemplateValues(config, selfName) {
     interestNoteChars: memoryCfg.interestNoteChars ?? MEMORY_LIMIT_DEFAULTS.interestNoteChars,
     maxNewEpisodes: memoryCfg.maxNewEpisodes ?? MEMORY_LIMIT_DEFAULTS.maxNewEpisodes,
   };
+}
+
+/** Whether `value` is a string with something in it. The same test as src/memory/portrait.js's
+ * module-private `hasText` (a prompt and a portrait count as present by one rule): use that one
+ * here once portrait.js exports it. */
+function hasText(value) {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+/**
+ * The model, role and calibration flag of one request of the warmup's family (its channel, person
+ * and server requests and the portrait refresh), read from the live config at the moment of use.
+ * With `features.memoryTwoStage` off (read `=== true`): `memory.model` (null = `llm.model`) as
+ * role `analyzer`, as always. With it on, no text in the persona's voice is asked of
+ * `memory.model` (DECISIONS-R4): a request whose answer holds one (`voice: true`: a portrait's
+ * `character`, an episode's `feeling`, the server's `patterns` and `starters`) goes out on
+ * `memory.voiceModel` (null = `llm.model`) as role `voice`, the role whose provider route the
+ * owner pins, as the stream analyzer's are (src/memory/update.js); a neutral one (channel notes,
+ * the portrait refresh's stage A) stays on `memory.model` as role `analyzer` with the settings of
+ * the stream analyzer's stage A: `memory.reasoning` when that is a plain object, and
+ * `memory.maxOutputTokens` as its output budget (a reasoning model spends that budget on its
+ * reasoning too); both skip calibration off the talk model (src/memory/update.js#feedsCalibration).
+ * The voice-role requests of this module are not counted in `memory.voice.maxPerDay` (that rail is
+ * src/memory/update.js's, for its voice runs and its batches' fallback): the warmup's person and
+ * server requests are railed by `warmup.maxTokens`, the portrait refresh's fallback by
+ * `memory.portraitRefreshPerDay` and `llm.maxRequestsPerDay`. Pure.
+ * @param {object} [config]  The live config.
+ * @param {{ voice?: boolean }} [opts]
+ * @returns {{ model: string|undefined, role: 'analyzer'|'voice', skipCalibration?: boolean, reasoning?: object,
+ *   maxOutputTokens?: number }}  `maxOutputTokens` only on the neutral two-stage route (the caller's
+ *   own budget otherwise).
+ */
+export function warmupRoute(config, { voice = false } = {}) {
+  const memoryCfg = config?.memory ?? {};
+  if (config?.features?.memoryTwoStage !== true) return { model: memoryCfg.model ?? config?.llm?.model, role: 'analyzer' };
+  if (voice) {
+    const model = memoryCfg.voiceModel || config?.llm?.model;
+    return { model, role: 'voice', skipCalibration: !feedsCalibration(config, model) };
+  }
+  const model = memoryCfg.model || config?.llm?.model;
+  const route = { model, role: 'analyzer', skipCalibration: !feedsCalibration(config, model), maxOutputTokens: memoryCfg.maxOutputTokens ?? 20000 };
+  if (isPlainObject(memoryCfg.reasoning)) route.reasoning = memoryCfg.reasoning;
+  return route;
+}
+
+/**
+ * Which request a portrait refresh sends, read from the live config and prompts at the moment of
+ * use. `two` (stage A, prompts/portrait.md on `memory.model`, the character queued for the voice
+ * model) only when `features.memoryTwoStage` is exactly true AND both PORTRAIT_TWO_STAGE_PROMPTS
+ * are non-blank. Otherwise `single`, today's prompts/profile.md request that writes the portrait
+ * itself: as always with the switch off; with it on (a prompt `missing`), on the voice model
+ * (`voiceModel: true`), since its answer words the character. Pure.
+ * @param {object} [config]   The live config.
+ * @param {object} [prompts]  The live prompts.
+ * @returns {{ stage: 'single'|'two', voiceModel: boolean, missing: string[] }}
+ */
+export function portraitMode(config, prompts) {
+  if (config?.features?.memoryTwoStage !== true) return { stage: 'single', voiceModel: false, missing: [] };
+  const missing = PORTRAIT_TWO_STAGE_PROMPTS.filter((key) => !hasText(prompts?.[key]));
+  return missing.length === 0 ? { stage: 'two', voiceModel: false, missing } : { stage: 'single', voiceModel: true, missing };
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +675,54 @@ export function clampProfileResult(raw, config, nameOf = () => null) {
   return { character, style, interests, details, episodes, aliases };
 }
 
+/**
+ * Validate and clamp a two-stage refresh's stage A answer (prompts/portrait.md): `{ "style":
+ * "<the whole merged text>", "character": { "keep": [""], "revise": [{ "old": "", "now": "" }],
+ * "add": [""], "drop": [{ "old": "" }] } }`. `style` is clamped and resolved like
+ * `clampProfileResult`'s (it is stored at once); every note of the lists is tokenized (`name
+ * (id:...)` -> `<@id>`, the form a voice item's brief keeps) and clamped to `memory.fieldChars`;
+ * a blank note, a `revise` entry without `now` and a `drop` entry without `old` are left out (a
+ * bare string in `drop` is its `old`). `brief`: only the lists that say something, the
+ * character voice item's brief. `changed`: whether the character needs the voice model at all --
+ * something to revise, add or drop, or, with no stored portrait (`storedCharacter` blank), any
+ * note; `keep` alone restates the stored text (prompts/portrait.md's shape for "nothing
+ * changed"). `null` when `raw` or its `character` is not a plain object: that answer cannot be
+ * read. Nothing here is stored. Pure.
+ * @param {unknown} raw
+ * @param {object} config  Live config (`memory.fieldChars`, `memory.clampTolerance`).
+ * @param {(id: string) => (string|null)} [nameOf]
+ * @param {{ storedCharacter?: string }} [opts]
+ * @returns {{ style: string, brief: Record<string, Array<string|{ old?: string, now?: string }>>, changed: boolean } | null}
+ */
+export function clampPortraitDecision(raw, config, nameOf = () => null, { storedCharacter = '' } = {}) {
+  if (!isPlainObject(raw) || !isPlainObject(raw.character)) return null;
+  const memoryCfg = config?.memory ?? {};
+  const tolerance = memoryCfg.clampTolerance;
+  const fieldChars = memoryCfg.fieldChars ?? MEMORY_LIMIT_DEFAULTS.fieldChars;
+  const tokenize = makeTokenizer(nameOf);
+  const note = (value) => (typeof value === 'string' ? clampText(String(tokenize(value.trim()) ?? ''), fieldChars, { tolerance }) : '');
+  const entries = (value) => (Array.isArray(value) ? value : []);
+
+  const lists = {
+    keep: entries(raw.character.keep).map(note).filter(Boolean),
+    revise: entries(raw.character.revise)
+      .map((entry) => {
+        const now = isPlainObject(entry) ? note(entry.now) : '';
+        if (!now) return null;
+        const old = note(entry.old);
+        return old ? { old, now } : { now };
+      })
+      .filter(Boolean),
+    add: entries(raw.character.add).map(note).filter(Boolean),
+    drop: entries(raw.character.drop)
+      .map((entry) => ({ old: note(isPlainObject(entry) ? entry.old : entry) }))
+      .filter((entry) => entry.old),
+  };
+  const brief = Object.fromEntries(PORTRAIT_LISTS.filter((key) => lists[key].length > 0).map((key) => [key, lists[key]]));
+  const changed = lists.revise.length + lists.add.length + lists.drop.length > 0 || (lists.keep.length > 0 && !hasText(storedCharacter));
+  return { style: clampResolvedField(raw.style, fieldChars, tolerance, tokenize, nameOf), brief, changed };
+}
+
 /** Validate and clamp the model's `channel.md` JSON. `null` on garbage input; nothing stored. */
 export function clampChannelResult(raw, config) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
@@ -826,6 +961,9 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
   let currentAbort = null; // the AbortController for whichever model call is in flight right now
   // (callWithRails), or null between calls -- `stop()` aborts it so the request itself is cancelled,
   // not just the loop stopped after it finishes.
+  // Whether the two-stage switch is on while a portrait prompt of that mode is missing (refreshes
+  // then send the single request, see portraitMode): warned once each time this turns true.
+  let portraitTwoStageUnavailable = false;
 
   // In-memory-only run activity: exposed via status() as `activity` so `/nep warmup
   // status` can show WHICH phase a run is actually in right now (fetching history, describing a
@@ -991,15 +1129,17 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     return Math.floor(warmupMaxRequestTokens() * (hot.config.llm?.safetyMargin ?? 0.9));
   }
 
-  /** The `llm.complete` options every warmup request shares, read at the call: the analyzer
-   * model, role and temperature (`memory.temperature`), `warmup.maxOutputTokens`, the warmup's request
-   * cap and `memory.timeoutMs` (a profile.md answer can take as long as a stream batch). */
-  function analyzerRequestOptions() {
+  /** The `llm.complete` options every warmup request shares, read at the call: the model, role
+   * and calibration flag of `warmupRoute` (`voice`: the answer words a text in the persona's
+   * voice), the analyzer temperature (`memory.temperature`), `warmup.maxOutputTokens` (the
+   * route's own budget on the neutral two-stage route), the warmup's request cap and
+   * `memory.timeoutMs` (a profile.md answer can take as long as a stream batch). */
+  function analyzerRequestOptions({ voice = false } = {}) {
+    const route = warmupRoute(hot.config, { voice });
     return {
-      model: hot.config.memory?.model ?? hot.config.llm?.model,
-      role: 'analyzer',
+      ...route,
       temperature: analyzerTemperature(hot.config),
-      maxOutputTokens: hot.config.warmup?.maxOutputTokens ?? 6000,
+      maxOutputTokens: route.maxOutputTokens ?? hot.config.warmup?.maxOutputTokens ?? 6000,
       maxRequestTokens: warmupRequestCap(),
       timeoutMs: hot.config.memory?.timeoutMs ?? hot.config.llm?.timeoutMs,
     };
@@ -1007,8 +1147,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
 
   /** A portrait refresh's options: the warmup's, minus its request cap -- a refresh is live
    * behaviour, so `llm.maxRequestTokens` (the 50k rail) and the daily request cap apply. */
-  function portraitRequestOptions() {
-    const { maxRequestTokens: _warmupCap, ...options } = analyzerRequestOptions();
+  function portraitRequestOptions({ voice = false } = {}) {
+    const { maxRequestTokens: _warmupCap, ...options } = analyzerRequestOptions({ voice });
     return options;
   }
 
@@ -1019,10 +1159,10 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
    * resumable), and the 3-consecutive-other-failures abort. Progress (`tokensUsed`/`requests`) is
    * persisted after every completed request. Never throws: every outcome is reported. Every
    * `warmup.*` rail is read at the call, never from the run's start, so `/nep set` reaches a run
-   * already in flight.
+   * already in flight. `voice`: the answer words a text in the persona's voice (see warmupRoute).
    * @returns {Promise<{ ok: true, completion: object } | { ok: false, stop?: boolean, reason: string, error?: Error }>}
    */
-  async function callWithRails(messages) {
+  async function callWithRails(messages, { voice = false } = {}) {
     const progress = warmupState(store);
     const estimate = calibrator.apply(estimateMessages(messages));
     const configuredMax = hot.config.warmup?.maxTokens;
@@ -1049,7 +1189,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       const controller = new AbortController();
       currentAbort = controller;
       try {
-        completion = await llm.complete(messages, { ...analyzerRequestOptions(), countAgainstDailyCap: false, signal: controller.signal });
+        completion = await llm.complete(messages, { ...analyzerRequestOptions({ voice }), countAgainstDailyCap: false, signal: controller.signal });
       } catch (err) {
         currentAbort = null;
         // /nep warmup stop aborted THIS call -- report it as a clean stop, never a failure
@@ -1176,7 +1316,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
    * `buildPersonWriteIterations`) -- attitude/relationship untouched. An answer that carries a
    * portrait stamps it like a refresh does (`portraitRefreshedAt` = `readAtMs`, when the run's
    * history read began, and `portraitMessageCount` = the message count this run just SET from its
-   * window, see src/memory/portrait.js). An answer without one moves an existing count stamp by
+   * window, see src/memory/portrait.js), and settles a character item a two-stage refresh queued
+   * for the member (see stampPortrait). An answer without one moves an existing count stamp by
    * as much as the SET moved the count, so the own messages since the last portrait stay what
    * they were. */
   function writePersonAnswer(guildId, member, answer, readAtMs) {
@@ -1207,6 +1348,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       );
     }
     if (answer?.character || answer?.style) {
+      // A newer portrait: a character merge still queued for the voice model is settled with it.
       stampPortrait(guildId, member.id, readAtMs);
     } else if (ownBefore !== null) {
       const count = storedCount(store.getUser(guildId, member.id)?.messageCount);
@@ -1216,16 +1358,32 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     return { iterations: iterations.length };
   }
 
-  /** The stamps of a portrait just written: `portraitRefreshedAt` = `readAtMs`, when the history
-   * it was drawn from began to be read (the next refresh samples own lines from then on, so a
-   * line written after that read is never skipped; now when not given), the member's message
-   * count it covers (read now, see src/memory/portrait.js#portraitDue), and no pending attempt. */
+  /** The stamps of a portrait decision just stored (a portrait written, or a two-stage check that
+   * changes nothing): `portraitRefreshedAt` = `readAtMs`, when the history it was drawn from
+   * began to be read (the next refresh samples own lines from then on, so a line written after
+   * that read is never skipped; now when not given), the member's message count it covers (read
+   * now, see src/memory/portrait.js#portraitDue), and no pending attempt. In the same synchronous
+   * step the member's queued character item goes (`dropQueuedCharacter`): it is older than this
+   * decision, which read every line it was drawn from. */
   function stampPortrait(guildId, userId, readAtMs) {
     store.updateUser(guildId, userId, {
       portraitRefreshedAt: new Date(Number.isFinite(readAtMs) ? readAtMs : now()).toISOString(),
       portraitMessageCount: storedCount(store.getUser(guildId, userId)?.messageCount),
       portraitAttemptAt: null,
     });
+    dropQueuedCharacter(guildId, userId);
+  }
+
+  /** Take the member's public `character` voice item (a two-stage refresh's brief the voice model
+   * has not worded yet) out of the guild's queue, in one synchronous read-modify-write
+   * (`store.updateVoiceQueue`; nothing changes, and nothing is written, when none is queued).
+   * Called whenever a newer portrait decision is stored for the member, so the voice run never
+   * merges the stale brief over it nor dates the portrait back to the item's `createdAt`; an
+   * answer for the item already in flight is dropped too, since the voice run writes only the
+   * sent items still queued (src/memory/update.js#applyVoiceAnswer). */
+  function dropQueuedCharacter(guildId, userId) {
+    const id = String(userId);
+    store.updateVoiceQueue(guildId, (queue) => queue.filter((item) => !(item.kind === 'character' && item.userId === id && !item.layer)));
   }
 
   /** Stamp an attempt that ended without a stored portrait, so the member backs off
@@ -1377,7 +1535,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
         { role: 'user', content: user },
       ];
 
-      const result = await callWithRails(messages);
+      // A profile answer words the character and each episode's feeling: the persona's voice.
+      const result = await callWithRails(messages, { voice: true });
       if (!result.ok) {
         if (result.stop) return result;
         return { ok: false, reason: result.reason }; // llm-error, not (yet) a run-aborting streak -- retry this person next run
@@ -1469,7 +1628,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       { role: 'user', content: user },
     ];
 
-    const result = await callWithRails(messages);
+    // A server answer words the patterns and starters notes: the persona's voice.
+    const result = await callWithRails(messages, { voice: true });
     if (!result.ok) return result;
 
     let parsed;
@@ -1835,8 +1995,9 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
   }
 
   /**
-   * Rewrite one member's portrait (`character`/`style` only) from `profile.md`: `<draft>` = the
-   * stored portrait (the base the answer merges into), `<hint>` = `reason` when given (member
+   * Rewrite one member's portrait (`character`/`style` only). Single mode (the switch off, or the
+   * fallback below) asks `profile.md`, two-stage mode `portrait.md` (below), from the same blocks:
+   * `<draft>` = the stored portrait (the base the answer merges into), `<hint>` = `reason` when given (member
    * tokens resolved as in the draft), `<snippets>` = the member's own lines since their last
    * portrait (`portraitRefreshedAt`) and never older than the profile (`firstSeen`: a profile
    * re-created after a forget or wipe does not read the lines from before it); every line of the
@@ -1846,6 +2007,30 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
    * stream analyzer's own ops (docs/en/prompt-contract.md, "Data model"). Started by
    * src/memory/portrait.js's scheduler, the stream analyzer's cue and `/nep memory refresh`
    * (`force`).
+   *
+   * Two-stage mode (`portraitMode`: `features.memoryTwoStage` on, prompts/portrait.md and
+   * prompts/memory-voice.md present): the same blocks go to prompts/portrait.md on `memory.model`
+   * (stage A, `warmupRoute`'s neutral route), whose answer (`clampPortraitDecision`) is the merged
+   * `style`, stored at once, and four lists about the character. When the lists change anything,
+   * they become ONE `character` voice item (the brief; its `old` is the stored portrait, read when
+   * the voice run words it) queued in one synchronous step (`store.updateVoiceQueue`, replacing a
+   * queued character item of the member; nothing the queue held is pushed out, see
+   * queueCharacter), dated when the history was read; the voice run (src/memory/update.js#runVoice,
+   * on `memory.voiceModel`) words it, writes `character` and only then the portrait stamps, so the
+   * member keeps its attempt stamp meanwhile and backs off `memory.portraitRetryHours`. When they
+   * change nothing, nothing is queued and the member is stamped as checked (the portrait stamps,
+   * dated when the history was read). An answer with neither a style nor a change is
+   * `empty-answer`; one that is cut, does not parse or has no `character` object stores nothing
+   * (`truncated`, `bad-json`); a forced refresh of a member with no profile whose answer brings no
+   * style queues nothing (`no-profile`: no profile for the item to land in). With the switch on
+   * but a portrait prompt missing, the single request goes out instead, on the voice model, warned
+   * once per change of that state (`warmup: portrait two-stage unavailable`). The mode is decided
+   * after the history read, in the same synchronous stretch as the request's prompt and route; a
+   * prompt gone by then is `no-prompt` (the slot goes back, no back-off).
+   *
+   * Every portrait decision stored here or by a warmup person run (a portrait written, a check
+   * that changes nothing) takes the member's queued character item out of the queue (see
+   * stampPortrait): it is older than the decision, which read every line the item came from.
    *
    * Rails: never while a warmup run is in flight or paused; one refresh per member at a time;
    * unless `force`d, only for a member with a stored profile, and not within
@@ -1866,9 +2051,12 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
    *
    * Stamps: `portraitAttemptAt` when the request is sent and on every outcome that ends without a
    * stored portrait for the member's own reasons (`nothing-to-sample`, `thin-sample`, `over-cap`,
-   * `token-limit`, a failed or unusable answer), so they back off; a success stamps
+   * `token-limit`, a failed or unusable answer), so they back off; a success that stored the
+   * portrait decision (single mode, or a two-stage check that changes nothing) stamps
    * `portraitRefreshedAt` (when the history the sample came from began to be read, so the next
-   * sample misses nothing written since), `portraitMessageCount` and clears the attempt. An
+   * sample misses nothing written since), `portraitMessageCount` and clears the attempt. A
+   * two-stage success that queued a character item (`characterQueued`) writes none of these: the
+   * voice run does once it applies the item, and the member keeps the attempt stamp meanwhile. An
    * answer that is empty or cut (`empty-answer`, `truncated`) is never stored.
    * @param {string} guildId
    * @param {string} userId
@@ -1878,8 +2066,11 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
    *   needed, and the whole window is sampled; never the daily caps. `windows`: the history to
    *   sample (no guild check, no fetch). `crawl`: an object shared by the refreshes of one
    *   scheduler cycle, see portraitWindows.
-   * @returns {Promise<{ ok: true, userId: string, own: number, context: number, shrunk: number } |
+   * @returns {Promise<{ ok: true, userId: string, own: number, context: number, shrunk: number,
+   *   stage?: 'single'|'two', characterQueued?: boolean } |
    *   { ok: false, reason: string, cap?: 'portrait'|'llm', message?: string }>}
+   *   `stage` and `characterQueued` only while `features.memoryTwoStage` is on (`stage` single:
+   *   the fallback, which wrote the portrait itself).
    *   `reason`: `warming-up`, `paused`, `busy`, `no-profile`, `too-soon`, `retry-wait`,
    *   `no-prompt`, `no-guild`, `daily-cap` (`cap`: whose), `gone`, `nothing-to-sample`,
    *   `thin-sample`, `over-cap`, `token-limit`, `llm-error`, `bad-json`, `truncated`,
@@ -1904,9 +2095,11 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       if (attemptAt !== null && now() - attemptAt < settings.retryHours * HOUR_MS) return portraitNotDone(id, 'retry-wait');
     }
 
-    if (!hot.prompts?.profile) {
+    // A first look, so a refresh with no prompt to send takes no slot and reads no history. The
+    // mode itself is decided after the read (refreshWithSlot), together with the request's route.
+    if (!portraitTemplate(portraitModeNow())) {
       log.info('warmup: portrait refresh skipped', { userId: id, reason: 'no-prompt', sent: false });
-      return { ok: false, reason: 'no-prompt', message: 'prompt file missing: prompts/profile.md (or prompts.local/profile.md) is not configured yet' };
+      return { ok: false, reason: 'no-prompt', message: PROFILE_PROMPT_MISSING };
     }
     const labels = requireLabels(hot.prompts);
     const guild = givenWindows ? null : resolvedGuild(guildId);
@@ -1937,6 +2130,38 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     }
   }
 
+  /** `portraitMode` now, warning once each time the two-stage switch is on while a prompt of that
+   * mode is missing (the refreshes then send the single request on the voice model). */
+  function portraitModeNow() {
+    const mode = portraitMode(hot.config, hot.prompts);
+    const unavailable = mode.missing.length > 0;
+    if (unavailable && !portraitTwoStageUnavailable) {
+      log.warn('warmup: portrait two-stage unavailable', { reason: 'no-prompt', missing: mode.missing });
+    }
+    portraitTwoStageUnavailable = unavailable;
+    return mode;
+  }
+
+  /** The system template a refresh in `mode` sends, read now: prompts/portrait.md for stage A
+   * (non-blank whenever portraitMode says `two`), prompts/profile.md otherwise; '' when that one
+   * is missing (`no-prompt`). */
+  function portraitTemplate(mode) {
+    return (mode.stage === 'two' ? hot.prompts?.portrait : hot.prompts?.profile) || '';
+  }
+
+  /** Queue one member's `character` voice item (a two-stage refresh's lists as its brief), in one
+   * synchronous read-modify-write of the guild's queue (src/memory/voice.js#mergeIntoQueue: it
+   * replaces a character item of the member queued earlier), dated `createdAt` (when the history
+   * the brief came from was read: the voice run stamps the portrait with it). An item it would
+   * push out past `memory.voice.queueMax` stays queued: the stream analyzer's next merge sends it
+   * down the degraded path (src/memory/update.js), which this module cannot run. */
+  function queueCharacter(guildId, userId, brief, createdAt) {
+    store.updateVoiceQueue(guildId, (queue) => {
+      const merged = mergeIntoQueue(queue, [{ kind: 'character', userId, brief, createdAt }], now(), hot.config);
+      return { ...merged, queue: [...merged.overflow, ...merged.queue] };
+    });
+  }
+
   /** refreshPortrait's work once its daily slot is held; see refreshPortrait. `startProfile`: the
    * stored profile when the refresh started (null for a forced refresh of a member with none). */
   async function refreshWithSlot({ guildId, id, reason, force, givenWindows, crawl, guild, labels, slot, startProfile }) {
@@ -1956,6 +2181,13 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     if (!sameProfile()) return unsent('gone', { stamp: false });
     // Fetched windows carry when their read began; injected ones are as of this call.
     const readAt = readAtOf.get(windows) ?? startedAt;
+
+    // The mode, its system template and (portraitRequestOptions, at the send) the request's route
+    // are read from here on with no await until the request goes out: one config and one set of
+    // prompts, however long the history read took and whatever a hot reload changed meanwhile.
+    const mode = portraitModeNow();
+    const template = portraitTemplate(mode);
+    if (!template) return unsent('no-prompt', { stamp: false, message: PROFILE_PROMPT_MISSING });
 
     const config = hot.config;
     const settings = portraitSettings(config);
@@ -1983,7 +2215,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       character: fromTokens(stored.character, draftNameOf, 'analyzer'),
       style: fromTokens(stored.style, draftNameOf, 'analyzer'),
     };
-    const system = fillPromptTemplate(hot.prompts.profile, profileTemplateValues(config, selfName));
+    // Stage A (two-stage mode) reads the same blocks under its own system message.
+    const system = fillPromptTemplate(template, profileTemplateValues(config, selfName));
     const fixedBlocks = [
       block('character', characterText(hot.prompts, selfName)),
       block('member', memberLine(member)),
@@ -2020,7 +2253,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     slot.sent = true;
     let completion;
     try {
-      completion = await llm.complete(messages, portraitRequestOptions());
+      completion = await llm.complete(messages, portraitRequestOptions({ voice: mode.voiceModel }));
     } catch (err) {
       if (err instanceof DailyCapError) {
         // The LLM's daily cap says nothing about this member: no back-off.
@@ -2039,32 +2272,65 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       const why = looksTruncated(completion.text, completion.finishReason) ? 'truncated' : 'bad-json';
       return portraitNotDone(id, why, { sent: true, detail: errorNameOf(err) });
     }
+    // Right before the write, with no await left until it is done: what happened while the
+    // request was in flight wins -- a pause, a warmup run, a forget/wipe, a newer portrait.
+    const standDown = () => {
+      if (store.state.data.paused) return portraitNotDone(id, 'paused', { sent: true });
+      if (running) return portraitNotDone(id, 'warming-up', { sent: true });
+      if (!sameProfile()) return portraitNotDone(id, 'gone', { sent: true });
+      if ((profile?.character ?? '') !== stored.character || (profile?.style ?? '') !== stored.style) {
+        return portraitNotDone(id, 'changed', { sent: true });
+      }
+      return null;
+    };
+    const seenAt = Number.isFinite(member.lastTs) ? member.lastTs : now();
+    const writePortrait = (ops) =>
+      applyMemoryUpdate(store, guildId, { users: { [id]: ops } }, hot.config.memory ?? {}, new Set([id]), {
+        timing: { seenAtByUser: new Map([[id, seenAt]]), seenAt },
+        batchAuthorNames: new Map([[id, member.name]]),
+        portraitFields: true,
+      });
+    // `stage` and `characterQueued` are said only while the two-stage switch was on when the
+    // refresh started (stage A, or the fallback on the voice model): with it off, as before.
+    const marker = (characterQueued) => (mode.stage === 'two' || mode.voiceModel ? { stage: mode.stage, characterQueued } : {});
+    const done = (characterQueued) => {
+      const counts = { own: sample.ownCount, context: sample.contextCount, shrunk };
+      log.info('warmup: portrait refreshed', { userId: id, hinted: Boolean(reason), forced: force, ...counts, ...marker(characterQueued) });
+      return { ok: true, userId: id, ...counts, ...marker(characterQueued) };
+    };
+
+    if (mode.stage === 'two') {
+      const decision = clampPortraitDecision(parsed, hot.config, draftNameOf, { storedCharacter: stored.character });
+      if (!decision) return portraitNotDone(id, 'bad-json', { sent: true });
+      if (!decision.style && !decision.changed) return portraitNotDone(id, 'empty-answer', { sent: true });
+      const stoodDown = standDown();
+      if (stoodDown) return stoodDown;
+      // The style is neutral: stored at once. The character waits for the voice model, and so do
+      // the portrait stamps (the voice run writes them once it is applied); a check that changes
+      // nothing is stamped now, so the member is not due again at once (and an older character
+      // item still queued goes, see stampPortrait).
+      if (decision.style) writePortrait({ style: decision.style });
+      // A forced refresh of a member with no profile whose answer brought no style to start one:
+      // the voice run would find no profile for the character item and drop it as gone.
+      if (!store.getUser(guildId, id)) return portraitNotDone(id, 'no-profile', { sent: true });
+      if (decision.changed) queueCharacter(guildId, id, decision.brief, readAt);
+      else stampPortrait(guildId, id, readAt);
+      store.flush();
+      return done(decision.changed);
+    }
+
     const clamped = clampProfileResult(parsed, hot.config, nameOf);
     const ops = {};
     if (clamped?.character) ops.character = clamped.character;
     if (clamped?.style) ops.style = clamped.style;
     if (Object.keys(ops).length === 0) return portraitNotDone(id, 'empty-answer', { sent: true });
-
-    // Right before the write, with no await left until it is done: what happened while the
-    // request was in flight wins -- a pause, a warmup run, a forget/wipe, a newer portrait.
-    if (store.state.data.paused) return portraitNotDone(id, 'paused', { sent: true });
-    if (running) return portraitNotDone(id, 'warming-up', { sent: true });
-    if (!sameProfile()) return portraitNotDone(id, 'gone', { sent: true });
-    if ((profile?.character ?? '') !== stored.character || (profile?.style ?? '') !== stored.style) {
-      return portraitNotDone(id, 'changed', { sent: true });
-    }
-
-    const seenAt = Number.isFinite(member.lastTs) ? member.lastTs : now();
-    applyMemoryUpdate(store, guildId, { users: { [id]: ops } }, hot.config.memory ?? {}, new Set([id]), {
-      timing: { seenAtByUser: new Map([[id, seenAt]]), seenAt },
-      batchAuthorNames: new Map([[id, member.name]]),
-      portraitFields: true,
-    });
+    const stoodDown = standDown();
+    if (stoodDown) return stoodDown;
+    writePortrait(ops);
+    // Also settles a character item an earlier two-stage refresh queued (see stampPortrait).
     stampPortrait(guildId, id, readAt);
     store.flush();
-
-    log.info('warmup: portrait refreshed', { userId: id, hinted: Boolean(reason), forced: force, own: sample.ownCount, context: sample.contextCount, shrunk });
-    return { ok: true, userId: id, own: sample.ownCount, context: sample.contextCount, shrunk };
+    return done(false);
   }
 
   return {

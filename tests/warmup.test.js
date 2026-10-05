@@ -2,9 +2,11 @@
 // (pickPeople, memberStats, splitNewestOlder, sampleMember,
 // selectChannelMessages, markOwnContext, buildChannelRequest,
 // clampProfileResult, clampChannelResult, clampServerResult,
-// takeFittingPrefix, buildPersonWriteIterations) are tested directly; the
-// factory is tested against a fake discord.js guild/channel, a fake LLM
-// client and a real (temp-dir) store. No network, no real prompts/ or data/.
+// takeFittingPrefix, buildPersonWriteIterations, warmupRoute, portraitMode,
+// clampPortraitDecision) are tested directly; the factory is tested against a
+// fake discord.js guild/channel, a fake LLM client and a real (temp-dir)
+// store, and the two-stage portrait refresh end to end with the stream
+// analyzer's voice run. No network, no real prompts/ or data/.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -25,11 +27,16 @@ import {
   clampServerResult,
   takeFittingPrefix,
   buildPersonWriteIterations,
+  clampPortraitDecision,
+  portraitMode,
+  warmupRoute,
   createWarmup,
 } from '../src/memory/warmup.js';
 import { createCalibrator, estimateMessages } from '../src/llm/tokens.js';
 import { DailyCapError, TokenLimitError } from '../src/llm/openrouter.js';
 import { createPortraitScheduler, portraitDue, portraitSettings } from '../src/memory/portrait.js';
+import { createMemoryUpdater } from '../src/memory/update.js';
+import { mergeIntoQueue } from '../src/memory/voice.js';
 import { labels } from './fixtures/labels.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
@@ -3387,4 +3394,654 @@ test('writePersonAnswer: a person run with no portrait keeps the own messages si
   assert.equal(profile.messageCount, 3, 'the run SETS the count from its window');
   assert.equal(profile.portraitMessageCount, 2, 'the stamp moved with it');
   assert.equal(profile.portraitRefreshedAt, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Two-stage mode (features.memoryTwoStage): the portrait refresh's stage A on memory.model, its
+// character worded later by the voice run, and every warmup text in the persona's voice on
+// memory.voiceModel.
+// ---------------------------------------------------------------------------
+
+const BRANOS = '222222222222222222';
+
+/** A live view with the two-stage switch on: neutral requests on `memory.model`, the persona's
+ * voice on `memory.voiceModel`; `prompts` overrides (undefined removes a prompt). */
+function twoStageHot({ prompts = {}, memory = {} } = {}) {
+  const hot = fakeHot({ prompts: { portrait: 'PORTRAIT {{name}} {{fieldChars}}', 'memory-voice': 'VOICE {{name}}', ...prompts } });
+  hot.config.features = { memoryTwoStage: true };
+  Object.assign(hot.config.memory, { model: 'gpt/decider', voiceModel: 'opus/voice', voice: { maxPerDay: 100 }, ...memory });
+  return hot;
+}
+
+/** A stage A answer of prompts/portrait.md. */
+function portraitAnswer(style, character = {}) {
+  return { style, character: { keep: [], revise: [], add: [], drop: [], ...character } };
+}
+
+/** A fake llm for both stages: a voice request (it carries `<items>`) gets `word(item)` for each
+ * item it holds, any other request `decision` as JSON (or `decision(messages)` when it is a
+ * function). */
+function stagedLlm({ decision, word = () => null }) {
+  const calls = [];
+  return {
+    calls,
+    complete: async (messages, opts) => {
+      calls.push({ messages, opts });
+      const items = /<items>\n([\s\S]*?)\n<\/items>/.exec(messages[1].content);
+      if (!items) {
+        const answer = typeof decision === 'function' ? decision(messages) : decision;
+        return { text: JSON.stringify(answer), usage: {}, estimated: 0, finishReason: 'stop' };
+      }
+      const worded = {};
+      for (const item of JSON.parse(items[1])) {
+        const text = word(item);
+        if (typeof text === 'string') worded[item.id] = text;
+      }
+      return { text: JSON.stringify({ items: worded }), usage: {}, estimated: 0, finishReason: 'stop' };
+    },
+  };
+}
+
+const itemsOf = (call) => JSON.parse(/<items>\n([\s\S]*?)\n<\/items>/.exec(call.messages[1].content)[1]);
+
+test('warmupRoute: with memoryTwoStage off every request goes out on memory.model as the analyzer role, as before', () => {
+  const config = { llm: { model: 'talk/model' }, memory: { model: null, voiceModel: 'opus/voice', reasoning: { effort: 'low' } } };
+  assert.deepEqual(warmupRoute(config), { model: 'talk/model', role: 'analyzer' });
+  assert.deepEqual(warmupRoute(config, { voice: true }), { model: 'talk/model', role: 'analyzer' }, 'the voice model is two-stage mode only');
+  config.memory.model = 'gpt/decider';
+  config.features = { memoryTwoStage: 'yes' }; // read === true
+  assert.deepEqual(warmupRoute(config, { voice: true }), { model: 'gpt/decider', role: 'analyzer' });
+});
+
+test('warmupRoute: in two-stage mode a voice text goes to memory.voiceModel as role voice, a neutral one stays on memory.model with stage A\'s memory.reasoning and memory.maxOutputTokens; calibration only on the talk model', () => {
+  const config = {
+    features: { memoryTwoStage: true },
+    llm: { model: 'talk/model' },
+    memory: { model: 'gpt/decider', voiceModel: 'opus/voice', reasoning: { effort: 'low' }, maxOutputTokens: 18000 },
+  };
+  assert.deepEqual(warmupRoute(config, { voice: true }), { model: 'opus/voice', role: 'voice', skipCalibration: true }, 'the caller\'s own output budget');
+  assert.deepEqual(warmupRoute(config), { model: 'gpt/decider', role: 'analyzer', skipCalibration: true, maxOutputTokens: 18000, reasoning: { effort: 'low' } });
+
+  config.memory.voiceModel = null; // null = the talk model, never memory.model
+  assert.deepEqual(warmupRoute(config, { voice: true }), { model: 'talk/model', role: 'voice', skipCalibration: false });
+  config.memory.model = null;
+  config.memory.reasoning = 'low'; // not a plain object: not sent
+  delete config.memory.maxOutputTokens; // config.json's 20000
+  assert.deepEqual(warmupRoute(config), { model: 'talk/model', role: 'analyzer', skipCalibration: false, maxOutputTokens: 20000 });
+});
+
+test('portraitMode: two only with the switch on and both the portrait and the voice prompt present; otherwise the single request, on the voice model while the switch is on', () => {
+  const prompts = { profile: 'P', portrait: 'A', 'memory-voice': 'V' };
+  assert.deepEqual(portraitMode({}, prompts), { stage: 'single', voiceModel: false, missing: [] });
+  assert.deepEqual(portraitMode({ features: { memoryTwoStage: true } }, prompts), { stage: 'two', voiceModel: false, missing: [] });
+  assert.deepEqual(portraitMode({ features: { memoryTwoStage: true } }, { ...prompts, portrait: '  ' }), { stage: 'single', voiceModel: true, missing: ['portrait'] });
+  assert.deepEqual(portraitMode({ features: { memoryTwoStage: true } }, { profile: 'P' }), { stage: 'single', voiceModel: true, missing: ['portrait', 'memory-voice'] });
+});
+
+test('clampPortraitDecision: null on garbage or a character that is not an object of lists', () => {
+  assert.equal(clampPortraitDecision(null, fakeHot().config), null);
+  assert.equal(clampPortraitDecision([], fakeHot().config), null);
+  assert.equal(clampPortraitDecision({ style: 'ύφος' }, fakeHot().config), null);
+  assert.equal(clampPortraitDecision({ style: 'ύφος', character: 'ένα κείμενο' }, fakeHot().config), null);
+});
+
+test('clampPortraitDecision: the lists are tokenized and clamped, empty entries dropped; only the lists that say something make the brief', () => {
+  const config = fakeHot().config; // fieldChars 400
+  const nameOf = (id) => (id === BRANOS ? 'Βράνος' : null);
+  const long = 'λέξη '.repeat(200);
+  const decision = clampPortraitDecision(
+    portraitAnswer('  μακριές προτάσεις  ', {
+      keep: ['μιλάει πολύ', '', 7],
+      revise: [{ old: 'ήσυχη', now: `μαλώνει με τον Βράνος (id:${BRANOS})` }, { old: 'χωρίς νέο' }, { now: 'μόνο νέο' }],
+      add: [long],
+      drop: [{ old: 'αργεί' }, 'σιωπά', {}],
+    }),
+    config,
+    nameOf,
+    { storedCharacter: 'μιλάει πολύ' },
+  );
+
+  assert.equal(decision.style, 'μακριές προτάσεις');
+  assert.deepEqual(decision.brief.keep, ['μιλάει πολύ']);
+  assert.deepEqual(decision.brief.revise, [{ old: 'ήσυχη', now: `μαλώνει με τον <@${BRANOS}>` }, { now: 'μόνο νέο' }]);
+  assert.equal(decision.brief.add.length, 1);
+  assert.ok(decision.brief.add[0].length <= 400 * 1.25, 'clamped to memory.fieldChars');
+  assert.deepEqual(decision.brief.drop, [{ old: 'αργεί' }, { old: 'σιωπά' }]);
+  assert.equal(decision.changed, true);
+
+  const quiet = clampPortraitDecision(portraitAnswer('ύφος', { keep: ['μιλάει πολύ'] }), config, nameOf, { storedCharacter: 'μιλάει πολύ' });
+  assert.deepEqual(quiet.brief, { keep: ['μιλάει πολύ'] });
+  assert.equal(quiet.changed, false, 'keep alone restates the stored portrait: nothing to word');
+  assert.equal(clampPortraitDecision(portraitAnswer('ύφος', { keep: ['μιλάει πολύ'] }), config, nameOf).changed, true, 'with no stored portrait, keep is the first one');
+  const empty = clampPortraitDecision(portraitAnswer(''), config, nameOf, { storedCharacter: 'μιλάει πολύ' });
+  assert.deepEqual([empty.style, empty.brief, empty.changed], ['', {}, false]);
+});
+
+test('refreshPortrait (two-stage): stage A on memory.model stores style and queues one character item with the brief; the portrait stamps wait for the voice run', async () => {
+  const now = T0 + 30 * 3_600_000;
+  const hot = twoStageHot({ memory: { reasoning: { effort: 'low' }, maxOutputTokens: 18000 } });
+  const llm = scriptedLlm([portraitAnswer('μακριές προτάσεις', { keep: ['μιλάει πολύ'], add: [`ρωτάει πάντα τον Βράνος (id:${BRANOS})`] })]);
+  const { warmup, store } = portraitWarmup({ hot, llm, now: () => now });
+  store.touchUser('g1', BRANOS, 'Βράνος', T0);
+  seedPortrait(store, 'a', { messageCount: 420, portraitRefreshedAt: iso(T0 - 5 * 86_400_000) });
+
+  const { result, logs } = await withCapturedLogs(() => warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] }));
+
+  assert.deepEqual([result.ok, result.stage, result.characterQueued], [true, 'two', true]);
+  assert.equal(llm.calls.length, 1, 'one stage A request');
+  const [call] = llm.calls;
+  assert.equal(call.messages[0].content, 'PORTRAIT Nept 400', 'prompts/portrait.md with {{name}} and {{fieldChars}}');
+  assert.deepEqual([call.opts.model, call.opts.role, call.opts.skipCalibration], ['gpt/decider', 'analyzer', true]);
+  assert.deepEqual(call.opts.reasoning, { effort: 'low' }, 'stage A\'s reasoning setting');
+  assert.equal(call.opts.maxOutputTokens, 18000, 'stage A\'s output budget, not warmup.maxOutputTokens');
+  assert.equal(call.opts.maxRequestTokens, undefined, 'the 50k rail applies');
+  const draft = JSON.parse(/<draft>\n([\s\S]*?)\n<\/draft>/.exec(call.messages[1].content)[1]);
+  assert.deepEqual(draft, { character: 'μιλάει πολύ', style: 'σύντομα' }, 'the stored portrait is the draft');
+  assert.equal(ownLinesOf(call).length, 5);
+
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.style, 'μακριές προτάσεις', 'style (neutral) is stored at once');
+  assert.equal(profile.character, 'μιλάει πολύ', 'character waits for the voice model');
+  assert.equal(profile.portraitRefreshedAt, iso(T0 - 5 * 86_400_000), 'no portrait stamp until the item is applied');
+  assert.equal(profile.portraitMessageCount, undefined);
+  assert.equal(profile.portraitAttemptAt, iso(now), 'the attempt stamp holds the member back meanwhile');
+  assert.equal(portraitDue(profile, now, portraitSettings(hot.config)).reason, 'retry-wait');
+
+  const queue = store.getVoiceQueue('g1');
+  assert.equal(queue.length, 1);
+  assert.deepEqual(
+    { kind: queue[0].kind, userId: queue[0].userId, brief: queue[0].brief, createdAt: queue[0].createdAt },
+    { kind: 'character', userId: 'a', brief: { keep: ['μιλάει πολύ'], add: [`ρωτάει πάντα τον <@${BRANOS}>`] }, createdAt: now },
+    'one item: the lists as the brief (member tokens), dated when the history was read',
+  );
+  assert.equal(store.state.data.portraitCount, 1);
+
+  const line = logs.find((entry) => entry.msg === 'warmup: portrait refreshed');
+  assert.deepEqual([line.stage, line.characterQueued], ['two', true]);
+  assert.equal(JSON.stringify(logs).includes('μακριές'), false, 'logs carry counts, never the text');
+});
+
+test('refreshPortrait (two-stage): the voice run words the queued character on memory.voiceModel from the old text and the brief, rewrites character only and stamps the portrait when it is applied', async () => {
+  let nowMs = T0 + 30 * 3_600_000;
+  const readAt = nowMs;
+  const hot = twoStageHot();
+  const llm = stagedLlm({
+    decision: portraitAnswer('νέο ύφος', { keep: ['μιλάει πολύ'], add: ['γράφει τη νύχτα'] }),
+    word: (item) => (item.kind === 'character' ? 'μιλάει πολύ και γράφει τη νύχτα' : null),
+  });
+  const { warmup, store } = portraitWarmup({ hot, llm, now: () => nowMs });
+  seedPortrait(store, 'a', { messageCount: 420 });
+  store.applyProfileOps('g1', 'a', { relationship: 'φίλοι' }, { fieldChars: 400 });
+
+  assert.equal((await warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] })).characterQueued, true);
+  nowMs += 10 * 60_000;
+  store.updateUser('g1', 'a', { messageCount: 450 });
+  const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => nowMs });
+  await withCapturedLogs(() => updater.runVoice('g1'));
+
+  assert.equal(llm.calls.length, 2);
+  const voice = llm.calls[1];
+  assert.deepEqual([voice.opts.model, voice.opts.role], ['opus/voice', 'voice'], 'never memory.model');
+  const [item] = itemsOf(voice);
+  assert.equal(item.kind, 'character');
+  assert.equal(item.old, 'μιλάει πολύ', 'the stored portrait goes in as the base');
+  assert.deepEqual(item.brief, { keep: ['μιλάει πολύ'], add: ['γράφει τη νύχτα'] });
+
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.character, 'μιλάει πολύ και γράφει τη νύχτα');
+  assert.equal(profile.style, 'νέο ύφος');
+  assert.equal(profile.relationship, 'φίλοι', 'nothing else rewritten');
+  assert.equal(profile.portraitRefreshedAt, iso(readAt), 'stamped when applied, dated when the history was read');
+  assert.equal(profile.portraitMessageCount, 450, 'the count when it was applied');
+  assert.equal(profile.portraitAttemptAt, null);
+  assert.deepEqual(store.getVoiceQueue('g1'), []);
+  assert.equal(portraitDue(profile, nowMs, portraitSettings(hot.config)).due, false);
+});
+
+test('refreshPortrait (two-stage): empty lists, or keep alone, leave character unchanged, queue nothing and stamp the member as checked', async () => {
+  for (const character of [{}, { keep: ['μιλάει πολύ'] }]) {
+    const now = T0 + 30 * 3_600_000;
+    const llm = scriptedLlm([portraitAnswer('νέο ύφος', character)]);
+    const { warmup, store, hot } = portraitWarmup({ hot: twoStageHot(), llm, now: () => now });
+    seedPortrait(store, 'a', { messageCount: 420, portraitAttemptAt: iso(now - 25 * 3_600_000) });
+
+    const result = await warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+
+    assert.deepEqual([result.ok, result.characterQueued], [true, false]);
+    const profile = store.getUser('g1', 'a');
+    assert.equal(profile.character, 'μιλάει πολύ');
+    assert.equal(profile.style, 'νέο ύφος');
+    assert.deepEqual(store.getVoiceQueue('g1'), [], 'nothing for the voice model');
+    assert.equal(profile.portraitRefreshedAt, iso(now));
+    assert.equal(profile.portraitMessageCount, 420);
+    assert.equal(profile.portraitAttemptAt, null);
+    assert.equal(portraitDue(profile, now + 3_600_000, portraitSettings(hot.config)).due, false, 'not due again at once');
+  }
+});
+
+test('refreshPortrait (two-stage): an empty answer queues nothing and backs the member off; a cut or unparsable answer stores nothing', async () => {
+  const llm = textLlm([
+    { text: JSON.stringify(portraitAnswer('  ')) },
+    { text: JSON.stringify(portraitAnswer('', { keep: ['μιλάει πολύ'] })) },
+    { text: JSON.stringify(portraitAnswer('μισό', { add: ['μισό'] })), finishReason: 'length' },
+    { text: '{"style": "μισ' },
+    { text: 'όχι json' },
+    { text: JSON.stringify({ style: 'ύφος', character: 'ένα κείμενο' }) },
+  ]);
+  const { warmup, store } = portraitWarmup({ hot: twoStageHot(), llm });
+  seedPortrait(store, 'a');
+  const windows = [win('c1', lines('c1', 'a', 5, T0))];
+
+  const reasons = [];
+  for (let i = 0; i < 6; i += 1) reasons.push((await warmup.refreshPortrait('g1', 'a', '', { windows, force: true })).reason);
+
+  assert.deepEqual(reasons, ['empty-answer', 'empty-answer', 'truncated', 'truncated', 'bad-json', 'bad-json']);
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.character, 'μιλάει πολύ');
+  assert.equal(profile.style, 'σύντομα');
+  assert.deepEqual(store.getVoiceQueue('g1'), []);
+  assert.equal(profile.portraitRefreshedAt ?? null, null);
+  assert.ok(profile.portraitAttemptAt, 'backs off');
+  assert.equal(store.state.data.portraitCount, 6, 'every request was sent');
+});
+
+test('refreshPortrait (two-stage): a missing portrait prompt falls back to the single request on the voice model and warns once', async () => {
+  const now = T0 + 30 * 3_600_000;
+  const hot = twoStageHot({ prompts: { portrait: undefined }, memory: { reasoning: { effort: 'low' }, maxOutputTokens: 18000 } });
+  const llm = scriptedLlm([
+    (i, messages) => (messages[0].content.startsWith('PORTRAIT') ? portraitAnswer('ύφος Α', { add: ['νέα συνήθεια'] }) : { character: `χαρακτήρας ${i}`, style: `ύφος ${i}` }),
+  ]);
+  const { warmup, store } = portraitWarmup({ hot, llm, now: () => now });
+  seedPortrait(store, 'a', { messageCount: 420 });
+  const windows = [win('c1', lines('c1', 'a', 5, T0))];
+  const refresh = () => warmup.refreshPortrait('g1', 'a', '', { windows, force: true });
+
+  const { logs } = await withCapturedLogs(async () => {
+    const first = await refresh();
+    assert.deepEqual([first.ok, first.stage, first.characterQueued], [true, 'single', false]);
+    assert.equal((await refresh()).ok, true);
+    hot.prompts.portrait = 'PORTRAIT {{name}} {{fieldChars}}'; // back: stage A again
+    assert.equal((await refresh()).stage, 'two');
+    delete hot.prompts['memory-voice']; // the voice prompt is part of two-stage mode too
+    assert.equal((await refresh()).stage, 'single');
+  });
+
+  assert.deepEqual(
+    llm.calls.map((call) => [call.messages[0].content.split(' ')[0], call.opts.model, call.opts.role, 'reasoning' in call.opts, call.opts.maxOutputTokens]),
+    [
+      ['SYSTEM', 'opus/voice', 'voice', false, 6000],
+      ['SYSTEM', 'opus/voice', 'voice', false, 6000],
+      ['PORTRAIT', 'gpt/decider', 'analyzer', true, 18000],
+      ['SYSTEM', 'opus/voice', 'voice', false, 6000],
+    ],
+    'the fallback words the character itself, on the voice model, never on memory.model, without stage A\'s settings',
+  );
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.character, 'χαρακτήρας 3', 'the fallback stores the portrait at once');
+  assert.equal(profile.portraitRefreshedAt, iso(now));
+  const warnings = logs.filter((entry) => entry.msg === 'warmup: portrait two-stage unavailable');
+  assert.deepEqual(
+    warnings.map((entry) => [entry.reason, entry.missing]),
+    [['no-prompt', ['portrait']], ['no-prompt', ['memory-voice']]],
+    'once per change of state, not once per refresh',
+  );
+
+  // Without the profile prompt either, there is nothing to fall back to.
+  delete hot.prompts.profile;
+  const before = store.state.data.portraitCount;
+  const missing = await refresh();
+  assert.deepEqual([missing.ok, missing.reason], [false, 'no-prompt']);
+  assert.equal(llm.calls.length, 4, 'nothing sent');
+  assert.equal(store.state.data.portraitCount, before, 'no slot taken');
+});
+
+test('refreshPortrait (two-stage): the character item is queued in one synchronous step: an item queued during the request stays', async () => {
+  const now = T0 + 30 * 3_600_000;
+  const hot = twoStageHot();
+  const llm = gatedLlm(portraitAnswer('νέο ύφος', { add: ['γράφει τη νύχτα'] }));
+  const { warmup, store } = portraitWarmup({ hot, llm, now: () => now });
+  seedPortrait(store, 'a');
+
+  const pending = warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+  await waitFor(() => llm.calls.length === 1);
+  store.updateVoiceQueue('g1', (queue) => mergeIntoQueue(queue, [{ kind: 'self', brief: ['μου αρέσει ο καφές'] }], now, hot.config));
+  llm.release();
+  assert.equal((await pending).characterQueued, true);
+
+  assert.deepEqual(store.getVoiceQueue('g1').map((item) => item.kind).sort(), ['character', 'self']);
+});
+
+test('refreshPortrait (two-stage): a full queue loses nothing to the character item; the overflow is left for the analyzer\'s next merge', async () => {
+  const now = T0 + 30 * 3_600_000;
+  const hot = twoStageHot({ memory: { voice: { maxPerDay: 100, queueMax: 2 } } });
+  const llm = scriptedLlm([portraitAnswer('νέο ύφος', { add: ['γράφει τη νύχτα'] })]);
+  const { warmup, store } = portraitWarmup({ hot, llm, now: () => now });
+  seedPortrait(store, 'a');
+  store.updateVoiceQueue('g1', (queue) => mergeIntoQueue(queue, [{ kind: 'self', brief: ['πρώτο'] }, { kind: 'self', brief: ['δεύτερο'] }], now - 60_000, hot.config));
+
+  assert.equal((await warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] })).characterQueued, true);
+
+  assert.deepEqual(store.getVoiceQueue('g1').map((item) => item.brief), [['πρώτο'], ['δεύτερο'], { add: ['γράφει τη νύχτα'] }]);
+});
+
+test('refreshPortrait (two-stage): an answer that lands while paused, after a forget or over a changed portrait stores no style and queues nothing', async () => {
+  for (const meanwhile of ['pause', 'forget', 'change']) {
+    const dir = tmpDataDir();
+    const store = createStore({ dataDir: dir });
+    const llm = gatedLlm(portraitAnswer('νέο ύφος', { add: ['γράφει τη νύχτα'] }));
+    const { warmup } = portraitWarmup({ hot: twoStageHot(), store, llm });
+    seedPortrait(store, 'a');
+
+    const pending = warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+    await waitFor(() => llm.calls.length === 1);
+    if (meanwhile === 'pause') store.state.data.paused = true;
+    if (meanwhile === 'forget') store.forgetUser('g1', 'a');
+    if (meanwhile === 'change') store.applyProfileOps('g1', 'a', { character: 'από την προθέρμανση' }, { fieldChars: 400 });
+    llm.release();
+    const result = await pending;
+
+    assert.deepEqual([result.ok, result.reason], [false, { pause: 'paused', forget: 'gone', change: 'changed' }[meanwhile]], meanwhile);
+    assert.deepEqual(store.getVoiceQueue('g1'), [], `${meanwhile}: nothing queued`);
+    if (meanwhile !== 'forget') assert.equal(store.getUser('g1', 'a').style, 'σύντομα', `${meanwhile}: style kept`);
+  }
+});
+
+test('createWarmup (two-stage): the person and server runs word on memory.voiceModel as role voice, the channel run stays on memory.model; a null voice model is the talk model', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const history = [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' }), rawMessage(3000, { authorId: 'a' })];
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history)]));
+  const hot = twoStageHot({ memory: { reasoning: { effort: 'low' }, maxOutputTokens: 18000 } });
+  const llm = scriptedLlm([
+    { purpose: 'p' },
+    { character: 'c', style: 's', episodes: [{ date: '2026-10-01', what: 'κάτι', feeling: 'χαρά' }] },
+    { patterns: 'x', starters: 'y' },
+    { character: 'c2', style: 's2' },
+  ]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  assert.equal((await warmup.run('g1')).ok, true);
+  assert.deepEqual(
+    llm.calls.map((call) => [call.messages[0].content.split(' ')[0], call.opts.model, call.opts.role, call.opts.skipCalibration]),
+    [
+      ['CHANNEL', 'gpt/decider', 'analyzer', true],
+      ['SYSTEM', 'opus/voice', 'voice', true],
+      ['SERVER', 'opus/voice', 'voice', true],
+    ],
+    'no voice text on memory.model',
+  );
+  assert.deepEqual(
+    llm.calls.map((call) => [call.opts.reasoning ?? null, call.opts.maxOutputTokens]),
+    [
+      [{ effort: 'low' }, 18000],
+      [null, 6000],
+      [null, 6000],
+    ],
+    'the neutral channel request carries stage A\'s settings, the voice requests keep warmup.maxOutputTokens and no reasoning',
+  );
+  for (const call of llm.calls) {
+    assert.equal(call.opts.countAgainstDailyCap, false, 'the warmup keeps its own rails');
+    assert.equal(call.opts.maxRequestTokens, 45000, 'and its own request cap');
+  }
+
+  hot.config.memory.voiceModel = null;
+  assert.equal((await warmup.runPerson('g1', 'a')).ok, true);
+  assert.deepEqual([llm.calls[3].opts.model, llm.calls[3].opts.role, llm.calls[3].opts.skipCalibration], ['talk/model', 'voice', false]);
+});
+
+test('createWarmup: with memoryTwoStage off no warmup or portrait request carries skipCalibration or reasoning', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const history = [rawMessage(1000, { authorId: 'a' }), rawMessage(2000, { authorId: 'a' }), rawMessage(3000, { authorId: 'a' })];
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history)]));
+  const hot = fakeHot({ prompts: { portrait: 'PORTRAIT', 'memory-voice': 'VOICE' } });
+  hot.config.memory.model = 'gpt/decider';
+  hot.config.memory.voiceModel = 'opus/voice';
+  hot.config.memory.reasoning = { effort: 'low' };
+  const llm = scriptedLlm([{ purpose: 'p' }, { character: 'c', style: 's' }, { patterns: 'x' }, { character: 'c2', style: 's2' }]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  await warmup.run('g1');
+  const refreshed = await warmup.refreshPortrait('g1', 'a', '', { force: true });
+
+  assert.equal(refreshed.ok, true);
+  assert.equal(refreshed.stage, undefined, 'the outcome is as before');
+  assert.deepEqual(store.getVoiceQueue('g1'), []);
+  assert.equal(llm.calls[3].messages[0].content, 'SYSTEM Nept', 'profile.md, not the portrait prompt');
+  for (const call of llm.calls) {
+    assert.deepEqual([call.opts.model, call.opts.role, 'skipCalibration' in call.opts, 'reasoning' in call.opts], ['gpt/decider', 'analyzer', false, false]);
+  }
+});
+
+test('refreshPortrait (two-stage): the character item is dated when the history read began, and the voice run stamps the portrait with that, not with the answer\'s time', async () => {
+  let nowMs = T0 + 3_600_000;
+  const readStart = nowMs;
+  const history = Array.from({ length: 3 }, (_, i) => rawMessage(T0 + i * 60_000, { authorId: 'a', content: `παλιό ${i}` }));
+  const guild = fakeGuild('g1', [fakeChannel('c1', history)]);
+  const hot = twoStageHot();
+  const llm = stagedLlm({
+    decision: () => {
+      nowMs += 20 * 60_000; // the answer takes 20 minutes
+      return portraitAnswer('νέο ύφος', { add: ['γράφει τη νύχτα'] });
+    },
+    word: (item) => (item.kind === 'character' ? 'μιλάει πολύ και γράφει τη νύχτα' : null),
+  });
+  const { warmup, store } = portraitWarmup({ hot, llm, client: fakeClient(guild), now: () => nowMs });
+  seedPortrait(store, 'a', { at: T0 });
+
+  assert.equal((await warmup.refreshPortrait('g1', 'a', '')).characterQueued, true);
+  assert.equal(nowMs, readStart + 20 * 60_000, 'the answer came 20 minutes after the read');
+  const [item] = store.getVoiceQueue('g1');
+  assert.equal(item.createdAt, readStart, 'dated when the history read began, not when the answer came');
+
+  const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => nowMs });
+  await withCapturedLogs(() => updater.runVoice('g1'));
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.character, 'μιλάει πολύ και γράφει τη νύχτα');
+  assert.equal(profile.portraitRefreshedAt, iso(readStart), 'stamped with the read, not the answer nor the voice run');
+});
+
+test('refreshPortrait (two-stage): a check that changes nothing is stamped when the history read began, not when the answer came', async () => {
+  let nowMs = T0 + 3_600_000;
+  const readStart = nowMs;
+  const history = Array.from({ length: 3 }, (_, i) => rawMessage(T0 + i * 60_000, { authorId: 'a', content: `παλιό ${i}` }));
+  const guild = fakeGuild('g1', [fakeChannel('c1', history)]);
+  const llm = stagedLlm({
+    decision: () => {
+      nowMs += 20 * 60_000;
+      return portraitAnswer('νέο ύφος', { keep: ['μιλάει πολύ'] });
+    },
+  });
+  const { warmup, store } = portraitWarmup({ hot: twoStageHot(), llm, client: fakeClient(guild), now: () => nowMs });
+  seedPortrait(store, 'a', { at: T0 });
+
+  const result = await warmup.refreshPortrait('g1', 'a', '');
+  assert.deepEqual([result.ok, result.characterQueued], [true, false]);
+  assert.notEqual(iso(readStart), iso(nowMs));
+  assert.equal(store.getUser('g1', 'a').portraitRefreshedAt, iso(readStart), 'the read, not the answer');
+});
+
+test('refreshPortrait: a newer portrait written while a character item waits (the switch rolled back) takes the item out: the voice run never merges the stale brief nor dates the portrait back', async () => {
+  let nowMs = T0 + 30 * 3_600_000;
+  const queuedAt = nowMs;
+  const hot = twoStageHot();
+  const llm = stagedLlm({
+    decision: (messages) =>
+      messages[0].content.startsWith('PORTRAIT') ? portraitAnswer('ύφος Α', { add: ['παλιά συνήθεια'] }) : { character: 'νεότερο πορτρέτο', style: 'νεότερο ύφος' },
+    word: () => 'παλιό συγχωνευμένο',
+  });
+  const { warmup, store } = portraitWarmup({ hot, llm, now: () => nowMs });
+  seedPortrait(store, 'a', { messageCount: 420 });
+  const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => nowMs });
+  const windows = () => [win('c1', lines('c1', 'a', 5, T0))];
+
+  assert.equal((await warmup.refreshPortrait('g1', 'a', '', { windows: windows() })).characterQueued, true);
+  hot.config.features.memoryTwoStage = false; // the owner rolls the switch back
+  assert.equal((await withCapturedLogs(() => updater.runVoice('g1'))).result.reason, 'off');
+  assert.equal(store.getVoiceQueue('g1').length, 1, 'a character item never expires');
+
+  nowMs += 5 * 86_400_000; // days later, a refresh by the counters in single mode
+  const newer = await warmup.refreshPortrait('g1', 'a', '', { windows: windows() });
+  assert.deepEqual([newer.ok, newer.stage], [true, undefined]);
+  assert.deepEqual(store.getVoiceQueue('g1'), [], 'the stale item went with the newer portrait');
+
+  hot.config.features.memoryTwoStage = true; // and on again
+  await withCapturedLogs(() => updater.runVoice('g1'));
+  assert.equal(llm.calls.length, 2, 'no voice request: nothing left to word');
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.character, 'νεότερο πορτρέτο');
+  assert.equal(profile.portraitRefreshedAt, iso(nowMs), 'the newer stamp stands');
+  assert.ok(Date.parse(profile.portraitRefreshedAt) > queuedAt);
+});
+
+test('refreshPortrait (two-stage): a later check that changes nothing settles a character item still queued; the voice run then has nothing to word', async () => {
+  let nowMs = T0 + 30 * 3_600_000;
+  const hot = twoStageHot();
+  let answer = portraitAnswer('ύφος Α', { add: ['παλιά συνήθεια'] });
+  const llm = stagedLlm({ decision: () => answer, word: () => 'παλιό συγχωνευμένο' });
+  const { warmup, store } = portraitWarmup({ hot, llm, now: () => nowMs });
+  seedPortrait(store, 'a', { messageCount: 420 });
+  const windows = () => [win('c1', lines('c1', 'a', 5, T0))];
+
+  assert.equal((await warmup.refreshPortrait('g1', 'a', '', { windows: windows() })).characterQueued, true);
+  nowMs += 25 * 3_600_000; // past memory.portraitRetryHours
+  answer = portraitAnswer('ύφος Β', { keep: ['μιλάει πολύ'] });
+  const check = await warmup.refreshPortrait('g1', 'a', '', { windows: windows() });
+  assert.deepEqual([check.ok, check.characterQueued], [true, false]);
+  assert.deepEqual(store.getVoiceQueue('g1'), [], 'the older brief is settled by the newer verdict');
+
+  const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => nowMs });
+  await withCapturedLogs(() => updater.runVoice('g1'));
+  assert.equal(llm.calls.length, 2, 'no voice request');
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.character, 'μιλάει πολύ');
+  assert.equal(profile.style, 'ύφος Β');
+  assert.equal(profile.portraitRefreshedAt, iso(nowMs));
+});
+
+test('writePersonAnswer (two-stage): a person run that writes a portrait while a voice request for the member\'s character item is in flight wins; the late answer is not applied', async () => {
+  let nowMs = T0 + 30 * 3_600_000;
+  const store = createStore({ dataDir: tmpDataDir() });
+  const history = Array.from({ length: 3 }, (_, i) => rawMessage(T0 + i * 60_000, { authorId: 'a' }));
+  const client = fakeClient(fakeGuild('g1', [fakeChannel('c1', history)]));
+  const hot = twoStageHot();
+  const llm = scriptedLlm([
+    (i, messages) =>
+      messages[0].content.startsWith('PORTRAIT') ? portraitAnswer('ύφος Α', { add: ['παλιά συνήθεια'] }) : { character: 'από την προθέρμανση', style: 'ύφος προθέρμανσης' },
+  ]);
+  const warmup = createWarmup({ hot, store, client, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => nowMs });
+  seedPortrait(store, 'a', { messageCount: 420 });
+  assert.equal((await warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] })).characterQueued, true);
+
+  // The voice request for that item, held in flight.
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const voiceCalls = [];
+  const voiceLlm = {
+    complete: async (messages, opts) => {
+      voiceCalls.push({ messages, opts });
+      await gate;
+      const worded = Object.fromEntries(itemsOf({ messages }).map((item) => [item.id, 'παλιό συγχωνευμένο']));
+      return { text: JSON.stringify({ items: worded }), usage: {}, estimated: 0, finishReason: 'stop' };
+    },
+  };
+  const updater = createMemoryUpdater({ hot, store, llm: voiceLlm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => nowMs });
+  nowMs += 3_600_000;
+  const personReadAt = nowMs;
+
+  const { result: voiceDone } = await withCapturedLogs(async () => {
+    const voice = updater.runVoice('g1');
+    await waitFor(() => voiceCalls.length === 1);
+    assert.equal((await warmup.runPerson('g1', 'a')).ok, true);
+    assert.deepEqual(store.getVoiceQueue('g1'), [], 'the person run settled the queued item');
+    release();
+    return voice;
+  });
+
+  assert.deepEqual([voiceDone.sent, voiceDone.applied], [1, 0], 'sent, but no longer queued when the answer came');
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.character, 'από την προθέρμανση');
+  assert.equal(profile.portraitRefreshedAt, iso(personReadAt), 'the person run\'s stamp stands');
+});
+
+test('refreshPortrait (two-stage): a forced refresh of a member with no profile whose answer brings no style queues nothing (no-profile); with a style the profile starts and the item is queued', async () => {
+  const llm = textLlm([
+    { text: JSON.stringify(portraitAnswer('', { add: ['γράφει τη νύχτα'] })) },
+    { text: JSON.stringify(portraitAnswer('μακριές προτάσεις', { add: ['γράφει τη νύχτα'] })) },
+  ]);
+  const { warmup, store } = portraitWarmup({ hot: twoStageHot(), llm });
+  const windows = [win('c1', lines('c1', 'a', 5, T0))];
+
+  const { result: bare, logs } = await withCapturedLogs(() => warmup.refreshPortrait('g1', 'a', '', { windows, force: true }));
+  assert.deepEqual([bare.ok, bare.reason], [false, 'no-profile']);
+  assert.equal(store.getUser('g1', 'a'), null, 'no profile created');
+  assert.deepEqual(store.getVoiceQueue('g1'), [], 'no item the voice run would drop as gone');
+  assert.ok(logs.some((entry) => entry.reason === 'no-profile' && entry.sent === true));
+
+  const styled = await warmup.refreshPortrait('g1', 'a', '', { windows, force: true });
+  assert.deepEqual([styled.ok, styled.characterQueued], [true, true]);
+  assert.equal(store.getUser('g1', 'a').style, 'μακριές προτάσεις');
+  assert.equal(store.getVoiceQueue('g1').length, 1);
+});
+
+/** Hold `channel`'s history fetch until `open()`: the crawl a refresh awaits. */
+function holdFetch(channel) {
+  const original = channel.messages.fetch.bind(channel.messages);
+  let open;
+  const gate = new Promise((resolve) => {
+    open = resolve;
+  });
+  const held = { started: false, open: () => open() };
+  channel.messages.fetch = async (opts) => {
+    held.started = true;
+    await gate;
+    return original(opts);
+  };
+  return held;
+}
+
+test('refreshPortrait: the mode, its prompt and the request\'s route are read after the history crawl, so a switch flipped or a prompt removed during it is honoured whole', async () => {
+  for (const change of ['on', 'off', 'no-prompt']) {
+    const history = Array.from({ length: 3 }, (_, i) => rawMessage(T0 + i * 60_000, { authorId: 'a' }));
+    const channel = fakeChannel('c1', history);
+    const held = holdFetch(channel);
+    const hot = twoStageHot();
+    if (change === 'on') hot.config.features.memoryTwoStage = false;
+    const llm = stagedLlm({
+      decision: (messages) => (messages[0].content.startsWith('PORTRAIT') ? portraitAnswer('νέο ύφος', { add: ['γράφει τη νύχτα'] }) : { character: 'νέος', style: 'νέο' }),
+    });
+    const { warmup, store } = portraitWarmup({ hot, llm, client: fakeClient(fakeGuild('g1', [channel])) });
+    seedPortrait(store, 'a', { at: T0 });
+
+    const pending = withCapturedLogs(() => warmup.refreshPortrait('g1', 'a', ''));
+    await waitFor(() => held.started, 500);
+    if (change === 'on') hot.config.features.memoryTwoStage = true;
+    if (change === 'off') hot.config.features.memoryTwoStage = false;
+    if (change === 'no-prompt') {
+      delete hot.prompts.portrait;
+      delete hot.prompts.profile;
+    }
+    held.open();
+    const { result } = await pending;
+
+    if (change === 'no-prompt') {
+      assert.deepEqual([result.ok, result.reason], [false, 'no-prompt'], change);
+      assert.equal(llm.calls.length, 0, 'nothing sent');
+      assert.equal(store.state.data.portraitCount, 0, 'the slot went back');
+      assert.equal(store.getUser('g1', 'a').portraitAttemptAt, undefined, 'no back-off');
+      continue;
+    }
+    assert.equal(llm.calls.length, 1, change);
+    const [call] = llm.calls;
+    if (change === 'on') {
+      assert.deepEqual([call.messages[0].content.split(' ')[0], call.opts.model, call.opts.role], ['PORTRAIT', 'gpt/decider', 'analyzer'], 'stage A whole');
+      assert.deepEqual([result.stage, result.characterQueued], ['two', true]);
+      assert.equal(store.getVoiceQueue('g1').length, 1);
+    } else {
+      assert.deepEqual([call.messages[0].content.split(' ')[0], call.opts.model, call.opts.role], ['SYSTEM', 'gpt/decider', 'analyzer'], 'the single request whole');
+      assert.equal(result.stage, undefined);
+      assert.deepEqual(store.getVoiceQueue('g1'), [], 'nothing queued with the switch off');
+      assert.equal(store.getUser('g1', 'a').character, 'νέος');
+    }
+  }
 });
