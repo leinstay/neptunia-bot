@@ -15,7 +15,7 @@ import { canAttach, canReact, canSend, channelAllowed, fetchHistory, fetchNeighb
 import { captionPulled, checkPull, fetchPull } from '../discord/pull-fetch.js';
 import { buildDrawPrompt, buildRequest, fillPromptTemplate } from './prompt.js';
 import { channelPullOn, pullSettings, pullTargets } from './pull.js';
-import { markSeen, messageLink, resolveDestination } from './elsewhere.js';
+import { markSeen, messageLink, resolveDestination, stampPings } from './elsewhere.js';
 import { classifierTextModel } from './mention.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError, RETRY_STATUS, sleep } from '../llm/openrouter.js';
@@ -588,8 +588,9 @@ export function createTurnRunner({
 
   /**
    * The limit notice for a refused drawing (src/behavior/limits.js#postLimitNotice,
-   * labels and dry-run read now), quoting the trigger unless the turn posts
-   * plain (a follow-up: never a Discord reply). Never throws.
+   * labels and dry-run read now), posted in `channel`, quoting the trigger
+   * unless `plain` (a follow-up: never a Discord reply; a routed call: it lives
+   * in another channel). Never throws.
    */
   async function notifyLimit(channel, limit, trigger, plain) {
     const posted = await postLimitNotice({
@@ -609,17 +610,21 @@ export function createTurnRunner({
    * read now) with the request clamped to `image.maxPromptChars`, the avatar as
    * reference for a picture the persona is in (`image.reference: 'avatar'`),
    * then one generation and one upload. No typing indicator while it works.
-   * Resolves `{}` when posted, `{ drawFailed: reason }` otherwise (a
-   * generation failure keeps its reason, `empty` counts as `error`; anything
-   * else, the upload included, is `error`). A refusal by an image cap
-   * (`ImageCapError`) resolves `{}`: the senses line already told the
+   * Resolves `{ posted: true, pulledId }` when posted (`pulledId`: the pulled
+   * line it answers, or null), `{ drawFailed: reason }`
+   * otherwise (a generation failure keeps its reason, `empty` counts as
+   * `error`; anything else, the upload included, is `error`). A refusal by an
+   * image cap (`ImageCapError`) resolves `{}`: the senses line already told the
    * persona; on a turn someone asked for the limit notice tells the
    * requester, an unasked one (spontaneous, overheard: askedFor) stays silent
    * and only logs it. An unasked picture is charged to no member. A picture
    * answering a pulled line (`pulledIds`) posts plain (replyTarget); the link
-   * `linkFor` gives it, asked once the picture is ready, is its content.
+   * `linkFor` gives it, asked once the picture is ready, is its content. On a
+   * turn about another channel (`sourceId`) the trigger, if any, is a call
+   * written there: the limit notice is posted here as a plain message, never as
+   * a Discord reply across channels.
    */
-  async function draw({ channel, parsed, idByIndex, pulledIds, linkFor, trigger, triggerKind, selfName }) {
+  async function draw({ channel, parsed, idByIndex, pulledIds, linkFor, trigger, triggerKind, selfName, sourceId = null }) {
     const config = hot.config;
     const self = parsed.draw.self === true;
     const prompt = drawPromptFor(selfName, parsed.draw);
@@ -650,7 +655,7 @@ export function createTurnRunner({
         bytes: picture.buffer?.length ?? 0,
         ...(link ? { link: true } : {}),
       });
-      return {};
+      return { posted: true, pulledId };
     } catch (err) {
       if (err instanceof ImageCapError) {
         const limit = limitOf(err);
@@ -664,7 +669,7 @@ export function createTurnRunner({
           asked,
         });
         if (!asked) return {};
-        await notifyLimit(channel, limit, trigger, plain);
+        await notifyLimit(channel, limit, trigger, plain || Boolean(sourceId));
         return {};
       }
       if (err instanceof ImageGenError) {
@@ -742,10 +747,11 @@ export function createTurnRunner({
    * Post the persona's GIF (after its messages): a link GIF as its stored
    * URL (Discord embeds tenor/giphy links), an attached one as a fresh URL of
    * its attachment, the stored one when that fails. Counted against
-   * `gifs.maxPerDay` once sent. Never throws. `replyId`: the chat line it
-   * quotes as a Discord reply (replyTarget), or null; `link`: the jump link
-   * it carries after its URL (withLink, so the URL comes first and still
-   * embeds), or null.
+   * `gifs.maxPerDay` once sent. Never throws; resolves whether it was sent.
+   * `replyId`: the chat line it quotes as a Discord reply (replyTarget), or
+   * null; `link`: the jump link it carries after its URL (withLink, so the
+   * URL comes first and still embeds), or null.
+   * @returns {Promise<boolean>}
    */
   async function postGif(channel, gif, replyId, link) {
     const { entry } = gif;
@@ -759,8 +765,10 @@ export function createTurnRunner({
       countGif();
       lastPostAt.set(channel.id, clock());
       log.info('turn: gif sent', { channel: channel.id, gif: entry.id, kind: entry.kind, fresh: Boolean(fresh), ...(link ? { link: true } : {}) });
+      return true;
     } catch (err) {
       log.warn('turn: gif failed', { channel: channel.id, gif: entry.id, error: err });
+      return false;
     }
   }
 
@@ -787,8 +795,13 @@ export function createTurnRunner({
   }
 
   /**
-   * Post the turn for real. Resolves `{ drawFailed }` from draw() when the
-   * persona's picture could not be posted, `{}` otherwise. Once the text
+   * Post the turn for real. Resolves `{ delivered, answered }` -- whether
+   * anything reached the chat (a reaction put, a message, the GIF or the
+   * picture posted; a limit notice is not the persona's answer), and the ids
+   * of the pulled lines what reached it answered (a reaction put on one, a
+   * message, the GIF or the picture posted answering one: stampShownCalls) --
+   * plus `drawFailed` from draw() when the persona's picture could not be
+   * posted. Once the text
    * messages are out (before the GIF and the picture), the variety pass for
    * the next turn starts ahead (startAhead) on this chat's history.
    *
@@ -806,7 +819,8 @@ export function createTurnRunner({
    *   sourceId: string|null }} args
    *   `lines`: the lines shown of the pulled channels, then `history` (a chat author wins a
    *   display name both share); `sourceId`: the channel the turn is about (its `source`),
-   *   logged on every message sent.
+   *   logged on every message sent; with it a refused drawing's limit notice quotes nothing
+   *   (the trigger of a routed turn lives in that channel).
    */
   async function act({ channel, guildId, privateChat, parsed, idByIndex, history, startedAt, triggerKind, trigger, selfName, pulledIds, lines, linkFor, sourceId }) {
     const cfg = hot.config.typing;
@@ -814,6 +828,10 @@ export function createTurnRunner({
     // A follow-up or an overheard turn (postsPlain) never posts as a Discord
     // reply -- the model's reply="#n" (if any) quotes nothing, plain messages only.
     const plain = postsPlain(triggerKind);
+    // Whether anything reached the chat (the caller of a routed turn marks its call by it), and
+    // the pulled lines it answered (the ring of calls marks them by it).
+    let delivered = false;
+    const answered = new Set();
 
     for (const reaction of parsed.reactions) {
       const targetId = idByIndex.get(reaction.to);
@@ -827,6 +845,8 @@ export function createTurnRunner({
       try {
         const target = await route.target.messages.fetch(targetId);
         await target.react(reaction.emoji);
+        delivered = true;
+        if (route.source) answered.add(targetId);
       } catch (err) {
         log.warn('turn: reaction failed', { channel: channel.id, ...(route.source ? { source: route.source } : {}), emoji: reaction.emoji, error: err });
       }
@@ -858,6 +878,8 @@ export function createTurnRunner({
         reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
         allowedMentions: { parse: [], users: userIds, repliedUser: true },
       });
+      delivered = true;
+      if (pulledId) answered.add(pulledId);
       lastPostAt.set(channel.id, clock());
       ownPosted.push({
         id: posted?.id ?? null,
@@ -897,12 +919,17 @@ export function createTurnRunner({
     if (parsed.gif) {
       if (parsed.messages.length > 0 && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
       const { replyId, pulledId } = replyTarget(parsed.gif.replyTo, { plain, idByIndex, pulledIds });
-      await postGif(channel, parsed.gif, replyId, linkFor(pulledId));
+      if (await postGif(channel, parsed.gif, replyId, linkFor(pulledId))) {
+        delivered = true;
+        if (pulledId) answered.add(pulledId);
+      }
     }
 
     // The picture comes last, once every message is out.
-    if (parsed.draw) return draw({ channel, parsed, idByIndex, pulledIds, linkFor, trigger, triggerKind, selfName });
-    return {};
+    if (!parsed.draw) return { delivered, answered };
+    const drawn = await draw({ channel, parsed, idByIndex, pulledIds, linkFor, trigger, triggerKind, selfName, sourceId });
+    if (drawn.posted === true && drawn.pulledId) answered.add(drawn.pulledId);
+    return { delivered: delivered || drawn.posted === true, answered, ...(drawn.drawFailed ? { drawFailed: drawn.drawFailed } : {}) };
   }
 
   /**
@@ -1309,10 +1336,47 @@ export function createTurnRunner({
    */
   function noteSpokeSaw(channel, history, shown, pulled) {
     spokeSaw.set(channel.id, new Set(history.map((m) => m.id)));
-    const readOnly = new Set(pulled.filter((entry) => entry.readOnly === true).map((entry) => entry.channelId));
+    const readOnly = readOnlyIdsOf(pulled);
     for (const { channelId, ids } of shown) {
       if (readOnly.has(channelId)) spokeSaw.set(channelId, new Set(ids));
     }
+  }
+
+  /** The ids of the pulled channels (PulledChannel records) the bot cannot write in. */
+  function readOnlyIdsOf(pulled) {
+    return new Set(pulled.filter((entry) => entry.readOnly === true).map((entry) => entry.channelId));
+  }
+
+  /**
+   * The ring of calls (`state.json` `elsewherePings`, read by every later
+   * pull) after a turn that reached a decision -- it chose silence, or it
+   * spoke for real (a dry run that spoke reached nobody and stamps nothing):
+   * every call of the ring among the lines it showed of a channel the bot
+   * cannot write in (buildRequest's `pulledKept`) is stamped answered when
+   * what reached the chat answered it (`answered`, from act), else skipped --
+   * it was in view, so no later pull presents it as waiting for an answer
+   * (src/behavior/elsewhere.js#stampPings: an answer wins over a skip, a stamp
+   * never moves). A pulled channel the bot can write in is left alone (a call
+   * there is answered there), and so is `exceptId`: a routed turn's own call,
+   * which its caller (src/discord/events.js) stamps by the turn's outcome.
+   * Nothing changes while paused (the owner may be editing data/). Each call
+   * whose state changed logs `elsewhere: marked`; the state is marked dirty
+   * once.
+   * @param {{ shown: { channelId: string, ids: string[] }[], pulled: object[], answered: Set<string>,
+   *   exceptId: string|null }} args
+   */
+  function stampShownCalls({ shown, pulled, answered, exceptId }) {
+    const readOnly = readOnlyIdsOf(pulled);
+    const stamps = shown
+      .filter(({ channelId }) => readOnly.has(channelId))
+      .flatMap(({ ids }) => ids.filter((id) => id !== exceptId).map((id) => ({ messageId: id, status: answered.has(id) ? 'answered' : 'skipped' })));
+    const data = store.state.data;
+    if (stamps.length === 0 || data.paused || !Array.isArray(data.elsewherePings)) return;
+    const { ring, marked } = stampPings(data.elsewherePings, stamps, clock());
+    if (marked.length === 0) return;
+    data.elsewherePings = ring;
+    store.state.markDirty();
+    for (const { messageId, channelId, status } of marked) log.info('elsewhere: marked', { source: channelId, message: messageId, status });
   }
 
   /**
@@ -1341,9 +1405,13 @@ export function createTurnRunner({
    *   initiate`) -- passed straight through to buildRequest, which appends prompts.forced (when
    *   present) to the task text so the model knows `<skip/>` is not the expected outcome this time.
    * @returns {Promise<{ outcome: TurnOutcome, mode?: string, dryRun?: boolean, drawFailed?: string,
-   *   limit?: { key: string, used: number, cap: number }|null }>}
-   *   `drawFailed` (the reason) when the persona's picture could not be posted; `limit` on
-   *   `outcome: 'refused'` (a request or token cap), for the caller's limit notice.
+   *   delivered?: boolean, limit?: { key: string, used: number, cap: number }|null }>}
+   *   `drawFailed` (the reason) when the persona's picture could not be posted; `delivered` on a
+   *   `spoke` turn posted for real: whether anything reached the chat (a reaction put, a message,
+   *   the GIF or the picture posted -- by the drawFailed turn too); `limit` on `outcome:
+   *   'refused'` (a request or token cap), for the caller's limit notice. A `skip`, or a `spoke`
+   *   turn posted for real, stamps the calls of the ring it showed (stampShownCalls) -- every
+   *   one but a routed turn's own call, which the caller stamps by this outcome.
    */
   async function runTurn(params) {
     const first = await runTurnOnce(params);
@@ -1357,7 +1425,8 @@ export function createTurnRunner({
     // it. Nobody asked on a spontaneous or an overheard turn (askedFor, the
     // same predicate as runTurnOnce's hand-off): the failure is only logged.
     // A turn about another channel keeps its source: a routed call is still
-    // answered here, with the call shown and linked.
+    // answered here, with the call shown and linked -- what that turn posts
+    // reached the chat for the call too (`delivered`).
     if (askedFor(trigger, triggerKind)) {
       try {
         const second = await runTurnOnce({
@@ -1371,6 +1440,7 @@ export function createTurnRunner({
           holdIdle: true,
         });
         log.info('turn: draw failure answered', { channel: channel.id, reason: first.drawFailed, outcome: second.outcome });
+        if (second.outcome === 'spoke' && second.delivered === true) return { ...first, delivered: true };
       } finally {
         notifyIdle();
       }
@@ -1794,8 +1864,14 @@ export function createTurnRunner({
       markPulledSeen(shownPulled);
       store.state.data.calibration = calibrator.ratio;
       store.state.markDirty();
+      // The calls of the ring this turn showed follow its decision (stampShownCalls), except a
+      // routed turn's own call: its caller stamps that one.
+      const ownCallId = source?.reason === 'routed' ? (trigger?.id ?? null) : null;
 
-      if (parsed.skip || nothingToDo) return { outcome: 'skip', mode: finalMode };
+      if (parsed.skip || nothingToDo) {
+        stampShownCalls({ shown: shownPulled, pulled, answered: new Set(), exceptId: ownCallId });
+        return { outcome: 'skip', mode: finalMode };
+      }
 
       const idByIndex = request.idByIndex;
       // The output side of the pulled channels: which line lives where, whose @name resolves,
@@ -1838,10 +1914,12 @@ export function createTurnRunner({
         sourceId: isPrivate ? null : (source?.channelId ?? null),
       });
       noteSpokeSaw(channel, history, shownPulled, pulled);
-      if (!acted.drawFailed) return { outcome: 'spoke', mode: finalMode };
+      stampShownCalls({ shown: shownPulled, pulled, answered: acted.answered ?? new Set(), exceptId: ownCallId });
+      const spoke = { outcome: 'spoke', mode: finalMode, delivered: acted.delivered === true };
+      if (!acted.drawFailed) return spoke;
       // The same predicate as runTurn's hand-off: an unasked turn notifies right here.
       handOff = asked;
-      return { outcome: 'spoke', mode: finalMode, drawFailed: acted.drawFailed };
+      return { ...spoke, drawFailed: acted.drawFailed };
     } catch (err) {
       if (err instanceof DailyCapError || err instanceof TokenLimitError) {
         log.warn('turn: refused by a safety rail', { channel: channel.id, error: err });

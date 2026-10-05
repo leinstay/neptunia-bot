@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { createMessageHandler } from '../src/discord/events.js';
 import { createTagHistory } from '../src/behavior/mention.js';
+import { pingStatus } from '../src/behavior/elsewhere.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -4957,10 +4958,17 @@ test('events: a call another turn already showed and answered is not answered ag
   const turns = recordingTurns();
   turns.spokeAfterSeeing = (channelId, messageId) => spokeSaw.get(channelId)?.has(messageId) ?? false;
   const scene = routeScene({ turns });
+  // Earlier calls in the ring: m0 in the source, x1 in another read-only channel.
+  scene.store.state.data.elsewherePings = [
+    { messageId: 'm0', channelId: 's1', ts: routeAt(-600), answeredAt: null, skippedAt: null },
+    { messageId: 'x1', channelId: 's2', ts: routeAt(-500), answeredAt: null, skippedAt: null },
+  ];
   await routeSend(scene, scene.source, 0, { id: 'm1' });
   await routeSend(scene, scene.source, 5, { id: 'm2', authorId: 'u2', authorName: 'Ίων' });
-  // During the wait a turn in the main channel pulled s1, showed both calls and spoke.
-  spokeSaw.set('s1', new Set(['m1', 'm2']));
+  // During the wait a turn in the main channel pulled s1, showed both calls of this settle
+  // (m2 took m1's place) and spoke -- m0 was not in its view; s2 was shown by another turn.
+  spokeSaw.set('s1', new Set(['n0', 'm1', 'm2']));
+  spokeSaw.set('s2', new Set(['x1']));
   const { logs } = await withCapturedLogs(() => routeFire(scene, 95));
 
   assert.equal(turns.calls.length, 0);
@@ -4968,6 +4976,15 @@ test('events: a call another turn already showed and answered is not answered ag
   assert.equal(answered.channel, 's1');
   assert.equal(answered.kind, 'mention');
   assert.equal(byMsg(logs, 'mention: decided').length, 0, 'never counted or rolled again');
+  // The call it had in hand and the one it replaced are no longer presented as waiting by a
+  // later pull; a call that turn never showed, or one of another channel, is left as it was.
+  assert.deepEqual(ringStates(scene), { m0: 'unanswered', x1: 'unanswered', m1: 'skipped', m2: 'skipped' });
+  const m1 = scene.store.state.data.elsewherePings.find((entry) => entry.messageId === 'm1');
+  assert.deepEqual([m1.answeredAt, m1.skippedAt], [null, routeAt(95)]);
+  assert.deepEqual(
+    byMsg(logs, 'elsewhere: marked').map(({ source, message, status }) => [source, message, status]),
+    [['s1', 'm2', 'skipped'], ['s1', 'm1', 'skipped']],
+  );
 
   // A call that turn did not have in view is still answered.
   await routeSend(scene, scene.source, 100, { id: 'm3', authorId: 'u3', authorName: 'Χλόη' });
@@ -4998,6 +5015,62 @@ test('events: stop clears every settle wait, and a timer that fires late starts 
   scene.clock.set(routeAt(90));
   for (const timer of scene.timers.all) await scene.timers.fireOne(timer);
   assert.equal(scene.turns.calls.length, 0);
+});
+
+test('events: a pause clears armed settle timers; nothing fires afterwards', async () => {
+  const scene = routeScene();
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  await routeSend(scene, scene.source2, 10, { id: 'm2', authorId: 'u2', authorName: 'Ίων' });
+  assert.equal(scene.timers.live().length, 2);
+
+  const { logs } = await withCapturedLogs(() => scene.handler.clearPending());
+  assert.equal(scene.timers.live().length, 0, 'every settle timer cleared');
+  assert.deepEqual(
+    byMsg(logs, 'elsewhere: dropped').map(({ source, kind, message, reason }) => [source, kind, message, reason]),
+    [
+      ['s1', 'ping', 'm1', 'paused'],
+      ['s2', 'ping', 'm2', 'paused'],
+    ],
+  );
+
+  // A timer that fires anyway starts nothing.
+  const late = await withCapturedLogs(async () => {
+    scene.clock.set(routeAt(120));
+    for (const timer of scene.timers.all) await scene.timers.fireOne(timer);
+    await scene.handler.drainPending();
+  });
+  assert.equal(scene.turns.calls.length, 0);
+  assert.equal(byMsg(late.logs, 'elsewhere: settled').length, 0);
+  assert.deepEqual(scene.store.state.data.elsewherePings.map((entry) => entry.answeredAt), [null, null], 'both stay unanswered in the ring');
+
+  // A later message in the source arms nothing old; a new call there arms a wait of its own.
+  const armed = scene.timers.all.length;
+  await routeSend(scene, scene.source, 130, { id: 'm3', mention: false, authorId: 'u3', authorName: 'Χλόη', content: 'σημείωση' });
+  assert.equal(scene.timers.all.length, armed, 'nothing to move or re-arm');
+  const fresh = await withCapturedLogs(async () => {
+    await routeSend(scene, scene.source, 140, { id: 'm4', authorId: 'u3', authorName: 'Χλόη' });
+    await routeFire(scene, 230);
+  });
+  assert.deepEqual(byMsg(fresh.logs, 'elsewhere: settling').map(({ source, message }) => [source, message]), [['s1', 'm4']]);
+  assert.deepEqual(scene.turns.calls.map((args) => args.trigger.id), ['m4'], 'only the new call is answered');
+});
+
+test('events: clearPending drops a queued routed ping with the rest of the queue', async () => {
+  let busy = true;
+  const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
+  const scene = routeScene({ turns });
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  const queued = await withCapturedLogs(() => routeFire(scene, 90));
+  assert.deepEqual(
+    byMsg(queued.logs, 'mention: deferred').map(({ channel, destination }) => [channel, destination]),
+    [['s1', 'd1']],
+    'the routed call waits in the queue, not dropped',
+  );
+  scene.handler.clearPending();
+  busy = false;
+  await scene.handler.drainPending();
+
+  assert.equal(turns.calls.length, 0);
 });
 
 test('events: the settle wait marks no turn busy: a call in the main channel meanwhile is answered at once', async () => {
@@ -5151,7 +5224,7 @@ test('events: a routed call whose switch or channel was turned off during the se
 });
 
 test('events: the busy rules of a routed call are keyed by the main channel', async () => {
-  // oneAtATime off: only a turn in the channel the routed turn posts in blocks it.
+  // oneAtATime off: only a turn in the channel the routed turn posts in holds it back.
   for (const [busyId, expectTurn] of [['s1', true], ['d1', false]]) {
     const turns = recordingTurns({ outcome: 'spoke' }, { isBusy: (id) => id === busyId, isAnyBusy: () => true });
     const scene = routeScene({ turns, config: { mention: { oneAtATime: false } } });
@@ -5159,22 +5232,66 @@ test('events: the busy rules of a routed call are keyed by the main channel', as
     const { logs } = await withCapturedLogs(() => routeFire(scene, 90));
 
     assert.equal(turns.calls.length, expectTurn ? 1 : 0, `busy ${busyId}`);
-    const busyDrops = byMsg(logs, 'mention: dropped').filter((entry) => entry.reason === 'busy');
-    assert.equal(busyDrops.length, expectTurn ? 0 : 1, `busy ${busyId}`);
-    if (!expectTurn) assert.equal(busyDrops[0].destination, 'd1');
-    assert.equal(byMsg(logs, 'mention: deferred').length, 0, 'a routed call is never queued');
+    assert.equal(byMsg(logs, 'mention: dropped').length, 0, `busy ${busyId}: nothing dropped`);
+    const deferred = byMsg(logs, 'mention: deferred');
+    assert.equal(deferred.length, expectTurn ? 0 : 1, `busy ${busyId}`);
+    if (!expectTurn) {
+      assert.deepEqual(
+        [deferred[0].channel, deferred[0].destination, deferred[0].sameChannel],
+        ['s1', 'd1', true],
+        'queued under its source; the busy check names the main channel',
+      );
+    }
   }
 });
 
-test('events: a routed mention that meets a busy attention is dropped, never queued where the drain cannot answer it', async () => {
+/** Lets the bot keep viewing `channel` but no longer send there. */
+function revokeSend(scene, channel) {
+  const original = channel.permissionsFor;
+  channel.permissionsFor = (target) => (target === scene.guild.members.me ? { has: (flag) => flag !== SEND } : original(target));
+}
+
+test('events: a routed ping during a turn is queued under its source and drained into the destination', async () => {
   let busy = false;
   const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
   const scene = routeScene({ turns });
-  const writable = ['c1', 'c2', 'c3'].map((id) => routeChannel(scene.guild, id));
   await routeSend(scene, scene.source, 0, { id: 'm1' });
   busy = true;
-  // Three calls in writable channels wait for the running turn (mention.maxPending is 3).
-  for (const [index, channel] of writable.entries()) {
+  const { logs } = await withCapturedLogs(async () => {
+    await routeFire(scene, 90);
+    assert.equal(turns.calls.length, 0, 'held while the attention is taken');
+    busy = false;
+    scene.clock.set(routeAt(120));
+    await scene.handler.drainPending();
+  });
+
+  const [deferred] = byMsg(logs, 'mention: deferred');
+  assert.deepEqual(
+    [deferred.channel, deferred.kind, deferred.destination, deferred.sameChannel, deferred.pending],
+    ['s1', 'mention', 'd1', false, 1],
+  );
+  const [picked] = byMsg(logs, 'mention: picked up');
+  assert.deepEqual([picked.channel, picked.destination], ['s1', 'd1']);
+  const [decided] = byMsg(logs, 'mention: decided');
+  assert.deepEqual([decided.channel, decided.destination, decided.deferred], ['s1', 'd1', true], 'counted and rolled at the drain');
+  assert.equal(turns.calls.length, 1);
+  const args = turns.calls[0];
+  assert.equal(args.channel, scene.main, 'the drained turn posts in the main channel');
+  assert.deepEqual(args.source, { channelId: 's1', reason: 'routed' });
+  assert.deepEqual([args.mode, args.triggerKind, args.trigger.id], ['reply', 'mention', 'm1']);
+  assert.equal(byMsg(logs, 'mention: dropped').length, 0);
+  assert.equal(scene.store.state.data.elsewherePings[0].answeredAt, routeAt(120), 'answered once its drained turn spoke');
+});
+
+test("events: a routed ping at mention.maxPending evicts the oldest waiting call, the main channel's too, logged with counts", async () => {
+  let busy = false;
+  const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
+  const scene = routeScene({ turns });
+  const [c2, c3] = ['c2', 'c3'].map((id) => routeChannel(scene.guild, id));
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  busy = true;
+  // Three calls in writable channels, the main channel's first, wait for the running turn (mention.maxPending is 3).
+  for (const [index, channel] of [scene.main, c2, c3].entries()) {
     await routeSend(scene, channel, 10 + index, { id: `w${index + 1}`, authorId: `u${index + 2}`, authorName: 'Ίων' });
   }
   const { logs } = await withCapturedLogs(async () => {
@@ -5183,15 +5300,439 @@ test('events: a routed mention that meets a busy attention is dropped, never que
     await scene.handler.drainPending();
   });
 
+  const dropped = byMsg(logs, 'mention: dropped');
+  assert.equal(dropped.length, 1);
+  assert.deepEqual(
+    [dropped[0].channel, dropped[0].kind, dropped[0].reason, dropped[0].pending, dropped[0].maxPending],
+    ['d1', 'mention', 'full', 3, 3],
+    "the main channel's own call, the oldest, made room -- logged with the counts",
+  );
+  assert.equal('destination' in dropped[0], false, 'the evicted call was written in the main channel itself');
+  assert.equal(byMsg(logs, 'mention: deferred').at(-1).pending, 3);
+  assert.deepEqual(
+    turns.calls.map((args) => [args.channel.id, args.trigger.id, args.source?.channelId ?? null]),
+    [['c2', 'w2', null], ['c3', 'w3', null], ['d1', 'm1', 's1']],
+    'oldest first, the routed call into the main channel',
+  );
+});
+
+test('events: an evicted routed ping is logged with its destination', async () => {
+  let busy = true;
+  const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
+  const scene = routeScene({ turns, config: { mention: { maxPending: 1 } } });
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  const { logs } = await withCapturedLogs(async () => {
+    await routeFire(scene, 90);
+    await routeSend(scene, scene.main, 100, { id: 'w1', authorId: 'u2', authorName: 'Ίων' });
+    busy = false;
+    await scene.handler.drainPending();
+  });
+
   const [dropped] = byMsg(logs, 'mention: dropped');
-  assert.equal(dropped.channel, 's1');
-  assert.equal(dropped.kind, 'mention');
-  assert.equal(dropped.reason, 'busy');
-  assert.equal(dropped.destination, 'd1');
-  assert.equal(byMsg(logs, 'mention: dropped').length, 1, 'no waiting call was evicted to make room');
-  assert.equal(byMsg(logs, 'mention: deferred').length, 0);
-  assert.deepEqual(turns.calls.map((args) => args.channel.id), ['c1', 'c2', 'c3'], 'the drain answers only the writable calls');
-  assert.equal(scene.store.state.data.elsewherePings[0].answeredAt, null, 'the routed call stays unanswered in the ring');
+  assert.deepEqual(
+    [dropped.channel, dropped.reason, dropped.destination, dropped.pending, dropped.maxPending],
+    ['s1', 'full', 'd1', 1, 1],
+  );
+  assert.deepEqual(turns.calls.map((args) => [args.channel.id, args.trigger.id]), [['d1', 'w1']]);
+  assert.equal(scene.store.state.data.elsewherePings[0].answeredAt, null, 'the evicted call stays unanswered in the ring');
+});
+
+test("events: a queued routed ping never replaces the main channel's own pending ping", async () => {
+  let busy = true;
+  const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
+  const scene = routeScene({ turns });
+  await routeSend(scene, scene.main, 0, { id: 'w1', authorId: 'u2', authorName: 'Ίων' });
+  await routeSend(scene, scene.source, 5, { id: 'm1' });
+  const { logs } = await withCapturedLogs(async () => {
+    await routeFire(scene, 95);
+    busy = false;
+    await scene.handler.drainPending();
+  });
+
+  assert.equal(byMsg(logs, 'mention: dropped').length, 0);
+  assert.deepEqual(
+    turns.calls.map((args) => [args.channel.id, args.trigger.id, args.source?.channelId ?? null]),
+    [['d1', 'w1', null], ['d1', 'm1', 's1']],
+  );
+});
+
+test('events: a drained routed ping whose turn finds the attention taken is queued again with its destination', async () => {
+  // oneAtATime off: only a turn in the main channel holds the routed call back -- never one in its source.
+  const busyIds = new Set(['d1']);
+  const results = [{ outcome: 'busy' }, { outcome: 'spoke' }];
+  const calls = [];
+  const turns = fakeTurns({
+    isBusy: (id) => busyIds.has(id),
+    isAnyBusy: () => busyIds.size > 0,
+    runTurn: async (args) => {
+      calls.push(args);
+      // A turn starts in the main channel during the switch pause of the first attempt.
+      if (calls.length === 1) busyIds.add('d1');
+      return results.shift();
+    },
+  });
+  const scene = routeScene({ turns, config: { mention: { oneAtATime: false } } });
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  await routeFire(scene, 90);
+  busyIds.clear();
+
+  const first = await withCapturedLogs(() => scene.handler.drainPending());
+  assert.equal(calls.length, 1, 'the pass stops while the main channel is busy');
+  const [again] = byMsg(first.logs, 'mention: deferred again');
+  assert.deepEqual([again.channel, again.destination, again.reason], ['s1', 'd1', 'busy']);
+
+  busyIds.clear();
+  const second = await withCapturedLogs(() => scene.handler.drainPending());
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].channel, scene.main);
+  assert.deepEqual(calls[1].source, { channelId: 's1', reason: 'routed' });
+  assert.equal(byMsg([...first.logs, ...second.logs], 'mention: decided').length, 1, 'decided once');
+  assert.equal(scene.store.state.data.elsewherePings[0].answeredAt, routeAt(90));
+});
+
+test('events: the drain drops a routed ping when the destination can no longer send', async () => {
+  let busy = true;
+  const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
+  const scene = routeScene({ turns });
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  await routeFire(scene, 90);
+  revokeSend(scene, scene.main);
+  busy = false;
+  const { logs } = await withCapturedLogs(() => scene.handler.drainPending());
+
+  assert.equal(turns.calls.length, 0);
+  const [dropped] = byMsg(logs, 'mention: dropped');
+  assert.deepEqual(
+    [dropped.channel, dropped.kind, dropped.reason, dropped.route, dropped.destination],
+    ['s1', 'mention', 'cannot-send', 'no-destination', 'd1'],
+    'no other main channel to take it: dropped by its route, with the code',
+  );
+  assert.equal(byMsg(logs, 'mention: decided').length, 0, 'never counted or rolled');
+  assert.equal(scene.store.state.data.elsewherePings[0].answeredAt, null);
+});
+
+test('events: a drained routed ping posts in the main channel resolved now, not the one it waited with', async () => {
+  for (const [label, mainBefore, change] of [
+    ['the first main channel lost Send', ['d1', 'd2'], (scene) => revokeSend(scene, scene.main)],
+    ['the main channel list changed', ['d1'], (scene) => (scene.config.memory.mainChannelIds = ['d2'])],
+    [
+      'the list changed after the old main channel lost Send',
+      ['d1'],
+      (scene) => {
+        revokeSend(scene, scene.main);
+        scene.config.memory.mainChannelIds = ['d2'];
+      },
+    ],
+  ]) {
+    let busy = true;
+    const turns = recordingTurns({ outcome: 'spoke', mode: 'reply', delivered: true }, { isAnyBusy: () => busy });
+    const scene = routeScene({ turns, config: { memory: { mainChannelIds: mainBefore } } });
+    const second = routeChannel(scene.guild, 'd2');
+    await routeSend(scene, scene.source, 0, { id: 'm1' });
+    const { logs } = await withCapturedLogs(async () => {
+      await routeFire(scene, 90);
+      change(scene);
+      busy = false;
+      scene.clock.set(routeAt(120));
+      await scene.handler.drainPending();
+    });
+
+    assert.equal(byMsg(logs, 'mention: deferred')[0].destination, 'd1', `${label}: it waited with d1`);
+    assert.equal(byMsg(logs, 'mention: dropped').length, 0, label);
+    assert.equal(turns.calls.length, 1, label);
+    assert.equal(turns.calls[0].channel, second, `${label}: the turn posts in d2`);
+    assert.deepEqual(turns.calls[0].source, { channelId: 's1', reason: 'routed' }, label);
+    const [decided] = byMsg(logs, 'mention: decided');
+    assert.deepEqual([decided.channel, decided.destination], ['s1', 'd2'], label);
+    assert.equal(scene.store.state.data.elsewherePings[0].answeredAt, routeAt(120), label);
+  }
+});
+
+for (const [reason, change] of [
+  ['off', (scene) => (scene.config.features.elsewhere = false)],
+  ['no-destination', (scene) => (scene.config.memory.mainChannelIds = [])],
+  // @everyone loses the source; the main channel stays visible to everyone.
+  ['audience', (scene) => scene.sourceViewers.splice(scene.sourceViewers.indexOf('g1'), 1)],
+]) {
+  test(`events: the drain checks the route of a queued routed ping again (${reason})`, async () => {
+    let busy = true;
+    const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
+    const scene = routeScene({ turns });
+    await routeSend(scene, scene.source, 0, { id: 'm1' });
+    await routeFire(scene, 90);
+    change(scene);
+    busy = false;
+    const { logs } = await withCapturedLogs(() => scene.handler.drainPending());
+
+    assert.equal(turns.calls.length, 0);
+    const [dropped] = byMsg(logs, 'mention: dropped');
+    assert.deepEqual([dropped.channel, dropped.reason, dropped.route, dropped.destination], ['s1', 'cannot-send', reason, 'd1']);
+    assert.equal(byMsg(logs, 'mention: decided').length, 0);
+  });
+}
+
+test('events: a queued routed ping a turn already showed and answered is not answered again', async () => {
+  let busy = true;
+  let shown = false;
+  const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
+  turns.spokeAfterSeeing = (channelId, messageId) => shown && channelId === 's1' && messageId === 'm1';
+  const scene = routeScene({ turns });
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  await routeFire(scene, 90);
+  // The running turn pulled s1, showed the queued call and spoke.
+  shown = true;
+  busy = false;
+  scene.clock.set(routeAt(100));
+  const { logs } = await withCapturedLogs(() => scene.handler.drainPending());
+
+  assert.equal(turns.calls.length, 0);
+  assert.deepEqual(
+    byMsg(logs, 'mention: already answered').map((entry) => [entry.channel, entry.destination]),
+    [['s1', 'd1']],
+    'traceable to the main channel like every drain line of a routed call',
+  );
+  assert.equal(byMsg(logs, 'mention: decided').length, 0);
+  // No later pull presents the call as waiting.
+  const [entry] = scene.store.state.data.elsewherePings;
+  assert.deepEqual([entry.answeredAt, entry.skippedAt], [null, routeAt(100)]);
+  assert.deepEqual(byMsg(logs, 'elsewhere: marked').map(({ message, status }) => [message, status]), [['m1', 'skipped']]);
+});
+
+test('events: a queued routed ping dropped as already answered takes the call it replaced in the queue with it', async () => {
+  let busy = true;
+  const seen = new Set();
+  const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
+  turns.spokeAfterSeeing = (channelId, messageId) => channelId === 's1' && seen.has(messageId);
+  const scene = routeScene({ turns });
+  // m1 waits in the queue; m2, a later call of the same source, takes its slot.
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  await routeFire(scene, 90);
+  await routeSend(scene, scene.source, 100, { id: 'm2', authorId: 'u2', authorName: 'Ίων' });
+  await routeFire(scene, 190);
+  // The running turn pulled s1, showed both calls and spoke.
+  for (const id of ['m1', 'm2']) seen.add(id);
+  busy = false;
+  scene.clock.set(routeAt(200));
+  const { logs } = await withCapturedLogs(() => scene.handler.drainPending());
+
+  assert.equal(turns.calls.length, 0);
+  assert.deepEqual(byMsg(logs, 'mention: already answered').map((line) => line.channel), ['s1']);
+  assert.deepEqual(ringStates(scene), { m1: 'skipped', m2: 'skipped' });
+});
+
+test('events: a routed ping enters the ring and is marked answered when the turn spoke', async () => {
+  const scene = routeScene();
+  await routeSend(scene, scene.source, 0, { id: 'm1', ts: routeAt(-5) });
+  assert.deepEqual(scene.store.state.data.elsewherePings, [
+    { messageId: 'm1', channelId: 's1', ts: routeAt(-5), answeredAt: null, skippedAt: null },
+  ]);
+  const dirty = scene.store.dirtyCount;
+  const { logs } = await withCapturedLogs(() => routeFire(scene, 90));
+
+  assert.deepEqual(scene.store.state.data.elsewherePings, [
+    { messageId: 'm1', channelId: 's1', ts: routeAt(-5), answeredAt: routeAt(90), skippedAt: null },
+  ]);
+  assert.ok(scene.store.dirtyCount > dirty, 'the ring is marked dirty');
+  assert.deepEqual(
+    byMsg(logs, 'elsewhere: marked').map(({ source, message, status }) => ({ source, message, status })),
+    [{ source: 's1', message: 'm1', status: 'answered' }],
+  );
+});
+
+test('events: a routed call the persona let pass is marked skipped, one whose turn did not reach a decision stays unanswered', async () => {
+  for (const [result, status] of [
+    [{ outcome: 'skip', mode: 'reply' }, 'skipped'],
+    // It chose to answer, but nothing reached the chat (its only reaction was dropped or refused).
+    [{ outcome: 'spoke', mode: 'reply', delivered: false }, 'skipped'],
+    [{ outcome: 'error' }, 'unanswered'],
+    [{ outcome: 'refused', limit: null }, 'unanswered'],
+    [{ outcome: 'paused' }, 'unanswered'],
+  ]) {
+    const scene = routeScene({ turns: recordingTurns(result) });
+    await routeSend(scene, scene.source, 0, { id: 'm1' });
+    const { logs } = await withCapturedLogs(() => routeFire(scene, 90));
+
+    const [entry] = scene.store.state.data.elsewherePings;
+    assert.equal(scene.turns.calls.length, 1, result.outcome);
+    assert.deepEqual(
+      [entry.answeredAt, entry.skippedAt],
+      status === 'skipped' ? [null, routeAt(90)] : [null, null],
+      result.outcome,
+    );
+    assert.deepEqual(byMsg(logs, 'elsewhere: marked').map((line) => line.status), status === 'skipped' ? ['skipped'] : [], result.outcome);
+  }
+});
+
+test('events: dry run never marks a ring entry answered', async () => {
+  const scene = routeScene({ turns: recordingTurns({ outcome: 'spoke', mode: 'reply', dryRun: true }), config: { features: { dryRun: true } } });
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  const dirty = scene.store.dirtyCount;
+  const { logs } = await withCapturedLogs(() => routeFire(scene, 90));
+
+  assert.equal(scene.turns.calls.length, 1);
+  const [entry] = scene.store.state.data.elsewherePings;
+  assert.deepEqual([entry.answeredAt, entry.skippedAt], [null, null], 'nothing reached the chat');
+  assert.equal(scene.store.dirtyCount, dirty);
+  assert.equal(byMsg(logs, 'elsewhere: marked').length, 0);
+
+  // A dry-run skip is the persona's silence like any skip (a skip claims no answer): stamped skipped.
+  const quiet = routeScene({ turns: recordingTurns({ outcome: 'skip', mode: 'reply' }), config: { features: { dryRun: true } } });
+  await routeSend(quiet, quiet.source, 0, { id: 'm1' });
+  const skipped = await withCapturedLogs(() => routeFire(quiet, 90));
+  const [silent] = quiet.store.state.data.elsewherePings;
+  assert.deepEqual([silent.answeredAt, silent.skippedAt], [null, routeAt(90)]);
+  assert.deepEqual(byMsg(skipped.logs, 'elsewhere: marked').map((line) => line.status), ['skipped']);
+});
+
+/** The state of each ring entry by message id: `answered`, `skipped` or `unanswered`. */
+function ringStates(scene) {
+  return Object.fromEntries(scene.store.state.data.elsewherePings.map((entry) => [entry.messageId, pingStatus(entry)]));
+}
+
+test("events: a routed turn's outcome stamps its own call only; the other calls it showed are the turn's to stamp", async () => {
+  // m1 and m2 in one settle: the newer m2 takes the wait. A real turn that showed m1 stamps it
+  // itself -- answered when its output answered m1, skipped otherwise (src/behavior/turn.js,
+  // tests/turn.test.js); the fake turn here stamps nothing, so m1 shows what the caller does.
+  for (const [label, result, states, marked] of [
+    ['spoke', { outcome: 'spoke', mode: 'reply', delivered: true }, { m1: 'unanswered', m2: 'answered' }, [['m2', 'answered']]],
+    ['skip', { outcome: 'skip', mode: 'reply' }, { m1: 'unanswered', m2: 'skipped' }, [['m2', 'skipped']]],
+    ['dry run', { outcome: 'spoke', mode: 'reply', dryRun: true }, { m1: 'unanswered', m2: 'unanswered' }, []],
+    ['error', { outcome: 'error' }, { m1: 'unanswered', m2: 'unanswered' }, []],
+  ]) {
+    const scene = routeScene({ turns: recordingTurns(result) });
+    await routeSend(scene, scene.source, 0, { id: 'm1' });
+    await routeSend(scene, scene.source, 20, { id: 'm2', authorId: 'u2', authorName: 'Ίων' });
+    const { logs } = await withCapturedLogs(() => routeFire(scene, 110));
+
+    assert.deepEqual(scene.turns.calls.map((args) => args.trigger.id), ['m2'], label);
+    assert.deepEqual(ringStates(scene), states, label);
+    assert.deepEqual(byMsg(logs, 'elsewhere: marked').map(({ message, status }) => [message, status]), marked, label);
+  }
+
+  // Earlier stamps are kept and only what changed is logged; a call skipped during its wait (a
+  // turn that showed it chose silence) is answered when its own routed turn reaches the chat.
+  const scene = routeScene({ turns: recordingTurns({ outcome: 'spoke', mode: 'reply', delivered: true }) });
+  scene.store.state.data.elsewherePings = [
+    { messageId: 'm0', channelId: 's1', ts: routeAt(-60), answeredAt: routeAt(-30), skippedAt: null },
+    { messageId: 'm1', channelId: 's1', ts: routeAt(-20), answeredAt: null, skippedAt: routeAt(-10) },
+  ];
+  await routeSend(scene, scene.source, 0, { id: 'm2' });
+  scene.store.state.data.elsewherePings.find((entry) => entry.messageId === 'm2').skippedAt = routeAt(30);
+  const { logs } = await withCapturedLogs(() => routeFire(scene, 90));
+  assert.deepEqual(ringStates(scene), { m0: 'answered', m1: 'skipped', m2: 'answered' });
+  assert.deepEqual(byMsg(logs, 'elsewhere: marked').map(({ message, status }) => [message, status]), [['m2', 'answered']], 'only what changed is logged');
+});
+
+test('events: a routed call the ignore roll lets pass is stamped skipped and runs no turn', async () => {
+  // The live path once the settle is over, and the drain of a call queued meanwhile.
+  for (const queued of [false, true]) {
+    let busy = queued;
+    const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
+    const scene = routeScene({ turns, config: { mention: { ignoreChance: 1 } } });
+    await routeSend(scene, scene.source, 0, { id: 'm1' });
+    const { logs } = await withCapturedLogs(async () => {
+      await routeFire(scene, 90);
+      busy = false;
+      if (queued) {
+        scene.clock.set(routeAt(100));
+        await scene.handler.drainPending();
+      }
+    });
+
+    assert.equal(turns.calls.length, 0, `queued ${queued}`);
+    const [decided] = byMsg(logs, 'mention: decided');
+    assert.deepEqual([decided.reason, decided.destination], ['ignored:random', 'd1'], `queued ${queued}`);
+    const [entry] = scene.store.state.data.elsewherePings;
+    assert.deepEqual([entry.answeredAt, entry.skippedAt], [null, routeAt(queued ? 100 : 90)], `queued ${queued}`);
+    assert.deepEqual(byMsg(logs, 'elsewhere: marked').map(({ source, message, status }) => [source, message, status]), [['s1', 'm1', 'skipped']]);
+  }
+});
+
+test('events: a routed call the ignore roll lets pass takes the calls it replaced with it', async () => {
+  // The settle groups a burst into one decision: a call a newer one replaced (in the settle wait
+  // or the pending slot), or a weaker one the waiting call outranked, shares its decline.
+  const mention = (id, authorId = 'u1') => ({ id, authorId, authorName: 'Ίων' });
+  const name = (id) => ({ id, mention: false, authorId: 'u3', authorName: 'Χλόη', content: 'η νεπτούνια είναι αστεία' });
+  // [label, calls as [seconds, spec], the settle fire after each call (none: one fire after both,
+  // nothing held), the author of the call that was decided]
+  const cases = [
+    ['replaced in the settle', [[0, mention('m1')], [20, mention('m2', 'u2')]], [], 'u2'],
+    ['outranked in the settle', [[0, mention('m1')], [20, name('m2')]], [], 'u1'],
+    ['replaced in the pending slot', [[0, mention('m1')], [100, mention('m2', 'u2')]], [90, 190], 'u2'],
+  ];
+  for (const [label, calls, fires, decidedAuthor] of cases) {
+    let busy = fires.length > 0;
+    const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
+    const scene = routeScene({ turns, config: { mention: { ignoreChance: 1 } } });
+    // m0, an older call no turn ever showed (lost in a restart), is not part of this burst.
+    scene.store.state.data.elsewherePings = [{ messageId: 'm0', channelId: 's1', ts: routeAt(-600), answeredAt: null, skippedAt: null }];
+    const { logs } = await withCapturedLogs(async () => {
+      for (const [index, [seconds, spec]] of calls.entries()) {
+        await routeSend(scene, scene.source, seconds, spec);
+        if (fires[index] !== undefined) await routeFire(scene, fires[index]);
+      }
+      if (fires.length === 0) await routeFire(scene, 110);
+      busy = false;
+      scene.clock.set(routeAt(200));
+      await scene.handler.drainPending();
+    });
+
+    assert.equal(turns.calls.length, 0, label);
+    const decided = byMsg(logs, 'mention: decided');
+    assert.deepEqual(
+      decided.map((line) => [line.reason, line.author, line.channel, line.destination]),
+      [['ignored:random', decidedAuthor, 's1', 'd1']],
+      `${label}: one decision for the burst`,
+    );
+    assert.deepEqual(ringStates(scene), { m0: 'unanswered', m1: 'skipped', m2: 'skipped' }, label);
+    assert.deepEqual(
+      byMsg(logs, 'elsewhere: marked').map(({ source, message, status }) => [source, message, status]).sort((a, b) => a[1].localeCompare(b[1])),
+      [['s1', 'm1', 'skipped'], ['s1', 'm2', 'skipped']],
+      label,
+    );
+  }
+});
+
+test('events: a routed call that takes the pending slot of an older one from its source logs the drop', async () => {
+  let busy = false;
+  const turns = recordingTurns({ outcome: 'spoke', mode: 'reply', delivered: true }, { isAnyBusy: () => busy });
+  const scene = routeScene({ turns });
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  busy = true;
+  const { logs } = await withCapturedLogs(async () => {
+    await routeFire(scene, 90);
+    await routeSend(scene, scene.source, 100, { id: 'm2', authorId: 'u2', authorName: 'Ίων' });
+    await routeFire(scene, 190);
+    busy = false;
+    await scene.handler.drainPending();
+  });
+
+  assert.deepEqual(byMsg(logs, 'mention: deferred').map(({ channel, destination }) => [channel, destination]), [['s1', 'd1'], ['s1', 'd1']]);
+  const dropped = byMsg(logs, 'mention: dropped');
+  assert.deepEqual(
+    dropped.map(({ channel, kind, reason, destination }) => [channel, kind, reason, destination]),
+    [['s1', 'mention', 'newer', 'd1']],
+    'the older call leaves the queue with a trace',
+  );
+  assert.deepEqual(turns.calls.map((args) => args.trigger.id), ['m2']);
+  // Its turn spoke: the caller stamps that call; the older one is stamped by the turn that
+  // showed it (src/behavior/turn.js), which this fake is not.
+  assert.deepEqual(ringStates(scene), { m1: 'unanswered', m2: 'answered' });
+});
+
+test('events: a routed turn that ends while paused leaves the ring untouched', async () => {
+  const scene = routeScene({ turns: fakeTurns() });
+  scene.turns.runTurn = async () => {
+    // The owner pauses while the turn runs: nothing may mark the store dirty afterwards.
+    scene.store.state.data.paused = true;
+    return { outcome: 'spoke' };
+  };
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  const dirty = scene.store.dirtyCount;
+  await routeFire(scene, 90);
+
+  assert.equal(scene.store.state.data.elsewherePings[0].answeredAt, null);
+  assert.equal(scene.store.dirtyCount, dirty);
 });
 
 test('events: a routed name call while busy is dropped, never queued', async () => {
@@ -5209,18 +5750,56 @@ test('events: a routed name call while busy is dropped, never queued', async () 
   assert.equal(byMsg(logs, 'mention: deferred').length, 0);
 });
 
-test('events: a refused routed turn posts no limit notice in either channel', async () => {
-  for (const dryRun of [false, true]) {
-    const turns = recordingTurns({ outcome: 'refused', limit: { key: 'llm.maxRequestsPerDay', used: 800, cap: 800 } });
-    const scene = routeScene({ turns, prompts: { labels }, config: { features: { dryRun } } });
+test('events: a refused routed turn posts the notice in the destination, not as a reply', async () => {
+  const limit = { key: 'llm.maxRequestsPerDay', used: 800, cap: 800 };
+  // The live path and the drain of a queued call alike.
+  for (const queued of [false, true]) {
+    let busy = queued;
+    const turns = recordingTurns({ outcome: 'refused', limit }, { isAnyBusy: () => busy });
+    const scene = routeScene({ turns, prompts: { labels } });
     await routeSend(scene, scene.source, 0, { id: 'm1' });
-    const { logs } = await withCapturedLogs(() => routeFire(scene, 90));
+    const { logs } = await withCapturedLogs(async () => {
+      await routeFire(scene, 90);
+      busy = false;
+      if (queued) await scene.handler.drainPending();
+    });
 
-    assert.equal(turns.calls.length, 1, `dryRun ${dryRun}`);
-    assert.equal(scene.source.sent.length, 0, 'never a reply in the channel it cannot write in');
-    assert.equal(scene.main.sent.length, 0);
-    assert.deepEqual(logs.filter((entry) => /^(limits|dry-run):/.test(entry.msg)), [], `dryRun ${dryRun}`);
+    assert.equal(turns.calls.length, 1, `queued ${queued}`);
+    assert.deepEqual(
+      scene.main.sent,
+      [{ content: 'limit reached (llm.maxRequestsPerDay, 800/800)', reply: undefined, allowedMentions: { parse: [] } }],
+      `queued ${queued}: one plain line in the main channel, quoting nothing`,
+    );
+    assert.equal(scene.source.sent.length, 0, 'never in the channel it cannot write in');
+    assert.deepEqual(byMsg(logs, 'limits: notice sent').map((entry) => entry.channel), ['d1']);
+    assert.equal(scene.store.state.data.elsewherePings[0].answeredAt, null, 'a refusal answers nothing');
   }
+
+  // Dry-run: logged and mirrored under the main channel, sent nowhere.
+  const mirrored = [];
+  const turns = recordingTurns({ outcome: 'refused', limit });
+  const scene = routeScene({ turns, prompts: { labels }, config: { features: { dryRun: true }, bot: { dryRunChannelId: 'mirror1' } } });
+  scene.handler = createMessageHandler({
+    hot: { config: scene.config, prompts: { labels } },
+    store: scene.store,
+    client: { ...fakeClient(), channels: { fetch: async () => ({ send: async (payload) => mirrored.push(payload) }) } },
+    turns,
+    spontaneous: fakeSpontaneous(),
+    memory: fakeMemory(),
+    tagHistory: createTagHistory(),
+    getGuildId: () => 'g1',
+    rng: () => 0.5,
+    now: scene.clock,
+    sleep: async () => {},
+    timers: scene.timers,
+  });
+  await routeSend(scene, scene.source, 0, { id: 'm1' });
+  const { logs } = await withCapturedLogs(() => routeFire(scene, 90));
+
+  assert.deepEqual([scene.main.sent, scene.source.sent], [[], []]);
+  assert.deepEqual(byMsg(logs, 'dry-run: would notify limit').map((entry) => entry.channel), ['d1']);
+  assert.equal(mirrored.length, 1);
+  assert.ok(mirrored[0].content.startsWith('[dry-run] #d1 · limit'), mirrored[0].content);
 });
 
 test('events: a routed turn that finds the attention taken is logged as a busy drop with its destination', async () => {
@@ -5265,6 +5844,8 @@ test('events: a name written in a read-only channel is routed and rolls the ordi
       assert.equal(scene.turns.calls[0].triggerKind, 'name');
       assert.deepEqual(scene.turns.calls[0].source, { channelId: 's1', reason: 'routed' });
     }
+    // She may skip a name there like anywhere: a later pull never presents it as waiting.
+    assert.deepEqual(ringStates(scene), { m1: answered ? 'answered' : 'skipped' }, `roll ${roll}`);
   }
 });
 
