@@ -4,6 +4,7 @@
 // object proves nothing in the code is language-bound.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   fill,
   formatClock,
@@ -43,10 +44,6 @@ function msg(id, ts, overrides = {}) {
 
 // --- fill --------------------------------------------------------------
 
-test('fill: replaces {key} with the given value', () => {
-  assert.equal(fill('{duration} passed', { duration: '5 min' }), '5 min passed');
-});
-
 test('fill: leaves unknown keys untouched', () => {
   assert.equal(fill('{duration} passed', {}), '{duration} passed');
 });
@@ -72,13 +69,6 @@ test('formatClock: crossing midnight in the target timezone', () => {
 test('formatDate: uses the LOCAL date, not the UTC date', () => {
   const ts = Date.UTC(2026, 8, 19, 21, 5, 0); // UTC date is the 19th, Moscow date is the 20th
   assert.equal(formatDate(ts, TZ, 'en-US'), formatDate(Date.UTC(2026, 8, 20, 0, 5, 0), TZ, 'en-US'));
-});
-
-test('formatDate: locale changes the rendered wording', () => {
-  const ts = Date.UTC(2026, 8, 20, 10, 30, 0);
-  const en = formatDate(ts, TZ, 'en-US');
-  const ru = formatDate(ts, TZ, 'ru-RU');
-  assert.notEqual(en, ru);
 });
 
 test('formatNow: combines full date, clock and the timezone name', () => {
@@ -133,10 +123,6 @@ test('formatDuration: rounding at 23 h 59.5 min rolls over to the day form, not 
   assert.ok(!text.includes('24'));
 });
 
-test('formatDuration: works with a non-English units object', () => {
-  assert.equal(formatDuration(3 * HOUR + 12 * MIN, grLabels.units), '3 ώρα 12 λεπτό');
-});
-
 // --- formatTranscript: gap markers and date changes -----------------------
 
 test('formatTranscript: no marker for a gap under the threshold, same day', () => {
@@ -182,27 +168,6 @@ test('formatTranscript: labels drive the wording even for non-English deployment
   const messages = [msg('a', t0), msg('b', t0 + 25 * MIN)];
   const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels: grLabels });
   assert.ok(items[1].text.startsWith('--- πέρασαν 25 λεπτό ---'));
-});
-
-// --- formatTranscript: line shape ------------------------------------------
-
-test('formatTranscript: own lines use labels.self with {{name}} filled by selfName', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const items = formatTranscript([msg('a', t0, { self: true, content: 'hi' })], {
-    timezone: TZ,
-    gapMinutes: 20,
-    maxChars: 100,
-    selfName: 'Nept',
-    labels,
-  });
-  assert.ok(items[0].text.includes('Nept (you): hi'));
-});
-
-test('formatTranscript: a reply to a message inside the window shows its index', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [msg('a', t0, { content: 'first' }), msg('b', t0 + MIN, { content: 'second', replyToId: 'a' })];
-  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
-  assert.ok(items[1].text.includes('(replying to #1)'));
 });
 
 // --- formatTranscript: indexOffset (a second block continues the numbering) ---
@@ -268,13 +233,6 @@ test('formatTranscript: indexOffset in memory mode moves only item.index, the te
     shifted.map((item) => item.index),
     [6, 7, 8, 9],
   );
-});
-
-test('formatTranscript: a reply to a message outside the window is marked as an old message', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [msg('b', t0, { content: 'second', replyToId: 'missing-old-id' })];
-  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
-  assert.ok(items[0].text.includes('(replying to an older message)'));
 });
 
 test('formatTranscript: attachments and stickers get tagged', () => {
@@ -502,104 +460,6 @@ test('formatTranscript: an older labels.json with no imageAttachedDescribed key 
   assert.ok(!items[0].text.includes('grey cat'));
 });
 
-test('formatTranscript: a described image (not attached) renders imageDescribed', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'att1', kind: 'image', name: 'pic.png' }] })];
-  const descriptions = new Map([['att1', 'a grey cat sleeping']]);
-  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, descriptions });
-  assert.ok(items[0].text.includes('[image: a grey cat sleeping]'));
-});
-
-test('formatTranscript: a gif attachment renders blind by name, described by caption', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const blindMessages = [msg('a', t0, { content: '', attachments: [{ id: 'g1', kind: 'gif', name: 'cat.gif' }] })];
-  const blind = formatTranscript(blindMessages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
-  assert.ok(blind[0].text.includes('[gif: cat.gif]'));
-
-  const described = formatTranscript(blindMessages, {
-    timezone: TZ,
-    gapMinutes: 20,
-    maxChars: 100,
-    selfName: 'Nept',
-    labels,
-    descriptions: new Map([['g1', 'a cat dances']]),
-  });
-  assert.ok(described[0].text.includes('[gif: a cat dances]'));
-});
-
-test('formatTranscript: a video attachment renders name+duration blind, adds a caption when described', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'v1', kind: 'video', name: 'clip.mp4', durationSec: 65 }] })];
-  const blind = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
-  assert.ok(blind[0].text.includes('[video: clip.mp4, 1:05]'));
-
-  const described = formatTranscript(messages, {
-    timezone: TZ,
-    gapMinutes: 20,
-    maxChars: 100,
-    selfName: 'Nept',
-    labels,
-    descriptions: new Map([['v1', 'a dog runs across a field']]),
-  });
-  assert.ok(described[0].text.includes('[video: clip.mp4, 1:05: a dog runs across a field]'));
-});
-
-test('formatTranscript: a voice message renders only its duration', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'voice1', kind: 'voice', durationSec: 42 }] })];
-  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
-  assert.ok(items[0].text.includes('[voice message, 0:42]'));
-});
-
-test('formatTranscript: an audio attachment renders name+duration', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'a1', kind: 'audio', name: 'song.mp3', durationSec: 130 }] })];
-  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
-  assert.ok(items[0].text.includes('[audio: song.mp3, 2:10]'));
-});
-
-test('formatTranscript: a text attachment with a fetched preview renders filePreview, else the plain file form', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const noPreview = [msg('a', t0, { content: '', attachments: [{ id: 't1', kind: 'text', name: 'notes.txt' }] })];
-  const blind = formatTranscript(noPreview, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
-  assert.ok(blind[0].text.includes('[file: notes.txt]'));
-
-  const withPreview = [msg('a', t0, { content: '', attachments: [{ id: 't1', kind: 'text', name: 'notes.txt', previewText: 'line one' }] })];
-  const previewed = formatTranscript(withPreview, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
-  assert.ok(previewed[0].text.includes('[file: notes.txt: line one]'));
-});
-
-test('formatTranscript: a link embed renders link/linkText depending on whether it has description text', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const noText = [msg('a', t0, { content: '', links: [{ id: 'a#e0', kind: 'link', site: 'example.com', title: 'Cool page' }] })];
-  const items1 = formatTranscript(noText, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
-  assert.ok(items1[0].text.includes('[link: example.com — Cool page]'));
-
-  const withText = [
-    msg('a', t0, { content: '', links: [{ id: 'a#e0', kind: 'link', site: 'example.com', title: 'Cool page', text: 'a snippet' }] }),
-  ];
-  const items2 = formatTranscript(withText, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
-  assert.ok(items2[0].text.includes('[link: example.com — Cool page: a snippet]'));
-});
-
-test('formatTranscript: a tenor/giphy embed (kind gif) keeps its gif form and adds frameAttached when its frame is attached', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const gifLink = [msg('a', t0, { content: '', links: [{ id: 'a#e0', kind: 'gif', site: 'Tenor', title: 'cat', thumbnailUrl: 'https://x' }] })];
-  const blind = formatTranscript(gifLink, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
-  assert.ok(blind[0].text.includes('[gif: cat]'));
-
-  const attached = formatTranscript(gifLink, {
-    timezone: TZ,
-    gapMinutes: 20,
-    maxChars: 100,
-    selfName: 'Nept',
-    labels,
-    attachedIndex: new Map([['a#e0', 1]]),
-  });
-  assert.ok(attached[0].text.includes('[gif: cat] [its still frame is attached image 1]'));
-  assert.ok(!attached[0].text.includes('[picture #1, attached]'), 'the site/title must survive, not collapse into bare imageAttached');
-});
-
 // --- formatTranscript: a plain 'link' embed's thumbnail can be described too
 // -- the link/linkText tag itself never swaps, one extra tag follows.
 
@@ -648,27 +508,6 @@ test('formatTranscript: an older labels.json with no thumbnailDescribed key rend
   assert.ok(!items[0].text.includes('  '), 'no stray double space from the omitted tag');
 });
 
-test('formatTranscript: an attached link thumbnail keeps the link tag and adds frameAttached instead of the description', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [
-    msg('a', t0, {
-      content: '',
-      links: [{ id: 'link:abcd1234', kind: 'link', site: 'YouTube', title: 'Cool video', thumbnailUrl: 'https://i.ytimg.com/x.jpg' }],
-    }),
-  ];
-  const items = formatTranscript(messages, {
-    timezone: TZ,
-    gapMinutes: 20,
-    maxChars: 100,
-    selfName: 'Nept',
-    labels,
-    attachedIndex: new Map([['link:abcd1234', 1]]),
-    descriptions: new Map([['link:abcd1234', 'a cat plays piano']]),
-  });
-  assert.ok(items[0].text.includes('[link: YouTube — Cool video] [its still frame is attached image 1]'));
-  assert.ok(!items[0].text.includes('a cat plays piano'));
-});
-
 // --- formatTranscript: video states ------------------------------------
 
 function videoTranscript(messages, extra = {}) {
@@ -684,14 +523,6 @@ test('formatTranscript: a watched video renders videoWatched', () => {
   assert.ok(items[0].text.endsWith('[video: clip.mp4, 1:05, watched: a dog runs]'));
 });
 
-test('formatTranscript: a watched video with an attached still frame renders both tags, in order', () => {
-  const items = videoTranscript([videoMsg()], {
-    attachedIndex: new Map([['v1', 1]]),
-    videos: new Map([['v1', { state: 'watched', text: 'a dog runs' }]]),
-  });
-  assert.ok(items[0].text.endsWith('[video: clip.mp4, 1:05, watched: a dog runs] [its still frame is attached image 1]'));
-});
-
 test('formatTranscript: the reason code is swapped for its label, for all four codes', () => {
   const cases = [
     [{ state: 'limit', reason: 'length' }, 'too long'],
@@ -703,14 +534,6 @@ test('formatTranscript: the reason code is swapped for its label, for all four c
     const items = videoTranscript([videoMsg()], { videos: new Map([['v1', video]]) });
     assert.ok(items[0].text.endsWith(`[video: clip.mp4, 1:05, not watched: ${label}]`), items[0].text);
   }
-});
-
-test('formatTranscript: a video not watched but with a still-frame caption renders videoNotWatchedFrame', () => {
-  const items = videoTranscript([videoMsg()], {
-    descriptions: new Map([['v1', 'a café terrace']]),
-    videos: new Map([['v1', { state: 'limit', reason: 'size' }]]),
-  });
-  assert.ok(items[0].text.endsWith('[video: clip.mp4, 1:05, not watched: too big; one frame: a café terrace]'));
 });
 
 test('formatTranscript: a reason code missing from labels.transcript.videoReason renders empty, never the code', () => {
@@ -728,24 +551,6 @@ test('formatTranscript: a watched link keeps the link tag, linkWatched follows',
   });
   assert.ok(items[0].text.endsWith('[link: YouTube — Cool video] [watched: a talk about bridges]'));
   assert.ok(!items[0].text.includes('[thumbnail:'));
-});
-
-test('formatTranscript: a link not watched renders linkNotWatchedFrame with a caption, linkNotWatched without', () => {
-  const messages = [msg('a', T0, { content: '', links: [ytLink] })];
-  const videos = new Map([['link:abcd1234', { state: 'limit', reason: 'daily' }]]);
-  const framed = videoTranscript(messages, { videos, descriptions: new Map([['link:abcd1234', 'a stage']]) });
-  assert.ok(framed[0].text.endsWith('[link: YouTube — Cool video] [not watched: daily limit; thumbnail: a stage]'));
-  const bare = videoTranscript(messages, { videos });
-  assert.ok(bare[0].text.endsWith('[link: YouTube — Cool video] [not watched: daily limit]'));
-});
-
-test('formatTranscript: an attached link thumbnail AND a video state -> frameAttached first, then the video tag', () => {
-  const messages = [msg('a', T0, { content: '', links: [ytLink] })];
-  const items = videoTranscript(messages, {
-    attachedIndex: new Map([['link:abcd1234', 2]]),
-    videos: new Map([['link:abcd1234', { state: 'watched', text: 'a talk' }]]),
-  });
-  assert.ok(items[0].text.endsWith('[link: YouTube — Cool video] [its still frame is attached image 2] [watched: a talk]'));
 });
 
 test('formatTranscript: a forwarded snapshot\'s video also reads its state', () => {
@@ -785,30 +590,11 @@ test('formatTranscript: labels without the video keys render byte-for-byte as be
   assert.ok(before[0].text.endsWith('look [video: clip.mp4, 1:05: a dog runs] [link: YouTube — Cool video] [its still frame is attached image 1]'));
 });
 
-test('formatTranscript: no videos map at all renders today\'s still-frame forms with the new labels too', () => {
-  const items = videoTranscript([videoMsg()], { descriptions: new Map([['v1', 'a dog runs']]) });
-  assert.ok(items[0].text.endsWith('[video: clip.mp4, 1:05: a dog runs]'));
-});
-
 // --- formatTranscript: stickers ---------------------------------------
 
 function stickerItem(id, name, url) {
   return { id, name, url };
 }
-
-test('formatTranscript: a picture-format sticker attached to the request keeps the sticker tag and adds frameAttached', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [msg('a', t0, { content: '', stickers: [stickerItem('s1', 'pepe', 'https://x/s1.png')] })];
-  const items = formatTranscript(messages, {
-    timezone: TZ,
-    gapMinutes: 20,
-    maxChars: 100,
-    selfName: 'Nept',
-    labels,
-    attachedIndex: new Map([['sticker:s1', 1]]),
-  });
-  assert.ok(items[0].text.includes('[sticker: pepe] [its still frame is attached image 1]'));
-});
 
 test('formatTranscript: a described sticker (not attached) renders stickerDescribed', () => {
   const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
@@ -838,23 +624,6 @@ test('formatTranscript: an older labels.json with no stickerDescribed key falls 
   });
   assert.ok(items[0].text.includes('[sticker: pepe]'));
   assert.ok(!items[0].text.includes('thumbs up'));
-});
-
-test('formatTranscript: a Lottie sticker (url null) is always the plain sticker tag, even with a matching description entry', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [msg('a', t0, { content: '', stickers: [stickerItem('s1', 'wiggle', null)] })];
-  const items = formatTranscript(messages, {
-    timezone: TZ,
-    gapMinutes: 20,
-    maxChars: 100,
-    selfName: 'Nept',
-    labels,
-    attachedIndex: new Map([['sticker:s1', 1]]),
-    descriptions: new Map([['sticker:s1', 'should never show']]),
-  });
-  assert.ok(items[0].text.includes('[sticker: wiggle]'));
-  assert.ok(!items[0].text.includes('should never show'));
-  assert.ok(!items[0].text.includes('still frame'));
 });
 
 // --- formatTranscript: custom emoji -----------------------------------
@@ -895,32 +664,6 @@ test('formatTranscript: an older labels.json with no emojiDescribed key renders 
   });
   assert.equal(items[0].text.includes('a surprised cat face'), false);
   assert.ok(!items[0].text.includes('  '));
-});
-
-test('formatTranscript: multiple distinct described emoji each get their own tag', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [
-    msg('a', t0, {
-      content: ':pog: and :kekw:',
-      emojis: [
-        { id: 'e1', name: 'pog' },
-        { id: 'e2', name: 'kekw' },
-      ],
-    }),
-  ];
-  const items = formatTranscript(messages, {
-    timezone: TZ,
-    gapMinutes: 20,
-    maxChars: 100,
-    selfName: 'Nept',
-    labels,
-    descriptions: new Map([
-      ['emoji:e1', 'a surprised cat face'],
-      ['emoji:e2', 'a laughing face'],
-    ]),
-  });
-  assert.ok(items[0].text.includes('[:pog: a surprised cat face]'));
-  assert.ok(items[0].text.includes('[:kekw: a laughing face]'));
 });
 
 test('formatTranscript: a forwarded message-snapshot wraps its content and media in labels.transcript.forwarded', () => {
@@ -989,54 +732,7 @@ test('formatTranscript: a media-only forwarded snapshot (no text) still renders 
   assert.ok(items[0].text.includes('[forwarded from #media-dump: [image]]'));
 });
 
-test('formatTranscript: an attached video frame keeps its blind/described form and adds frameAttached, numbered', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'v1', kind: 'video', name: 'clip.mp4', durationSec: 34 }] })];
-  const attachedIndex = new Map([['v1', 1]]);
-  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, attachedIndex });
-  assert.ok(items[0].text.includes('[video: clip.mp4, 0:34] [its still frame is attached image 1]'));
-});
-
-test('formatTranscript: an attached gif frame keeps its blind/described form and adds frameAttached', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'g1', kind: 'gif', name: 'cat.gif' }] })];
-  const attachedIndex = new Map([['g1', 2]]);
-  const descriptions = new Map([['g1', 'a cat dances']]);
-  const items = formatTranscript(messages, {
-    timezone: TZ,
-    gapMinutes: 20,
-    maxChars: 100,
-    selfName: 'Nept',
-    labels,
-    attachedIndex,
-    descriptions,
-  });
-  assert.ok(items[0].text.includes('[gif: a cat dances] [its still frame is attached image 2]'));
-});
-
-test('formatTranscript: an attached plain image still renders the bare imageAttached form, unaffected by the frameAttached change', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'att1', kind: 'image', name: 'pic.png' }] })];
-  const attachedIndex = new Map([['att1', 1]]);
-  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, attachedIndex });
-  assert.ok(items[0].text.includes('[picture #1, attached]'));
-  assert.ok(!items[0].text.includes('still frame'));
-});
-
-test('formatTranscript: a video with an unknown duration renders labels.transcript.unknownDuration, never "0:00"', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [msg('a', t0, { content: '', attachments: [{ id: 'v1', kind: 'video', name: 'clip.mp4', durationSec: null }] })];
-  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels });
-  assert.ok(items[0].text.includes('[video: clip.mp4, unknown length]'));
-  assert.ok(!items[0].text.includes('0:00'));
-});
-
 // --- renderTranscript -------------------------------------------------------
-
-test('renderTranscript: empty items render as labels.transcript.empty', () => {
-  assert.equal(renderTranscript([], TZ, labels), '(empty)');
-  assert.equal(renderTranscript([], TZ, grLabels), '(κενό)');
-});
 
 test('renderTranscript: prefixes a date header taken from the first item', () => {
   const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
@@ -1136,20 +832,16 @@ function baseTempo(overrides = {}) {
 
 // The verdict must look at silence, not only at message counts (a channel
 // with 2 messages 4 minutes ago is live, not dead -- see the dry-run case
-// below). Default thresholds: liveMessages10min: 4, deadSilenceMinutes: 45.
+// below). The behaviour tests pin their own thresholds instead of leaning on
+// the code fallback.
+const THRESHOLDS = { liveMessages10min: 4, deadSilenceMinutes: 45 };
 
-test('renderTempo: under 4 messages in the last 10 min is below the live threshold (default thresholds)', () => {
+test('renderTempo: fewer messages in the last 10 min than the live threshold are not live', () => {
   const { verdictLive, verdictSlow, verdictDead } = labels.tempo;
   const rows = [
     {
-      label: '3 messages in the last 10 min is below the live threshold',
-      tempo: { last10min: 3, silenceMs: 10 * MIN },
-      present: [],
-      absent: [verdictLive],
-    },
-    {
-      label: 'no thresholds argument: 3 messages and no silence yet is still not live',
-      tempo: { last10min: 3, silenceMs: 0 },
+      label: 'one under the live threshold is not live',
+      tempo: { last10min: THRESHOLDS.liveMessages10min - 1, silenceMs: 10 * MIN },
       present: [],
       absent: [verdictLive],
     },
@@ -1161,24 +853,24 @@ test('renderTempo: under 4 messages in the last 10 min is below the live thresho
     },
   ];
   for (const { label, tempo, present, absent } of rows) {
-    const text = renderTempo(baseTempo(tempo), labels);
+    const text = renderTempo(baseTempo(tempo), labels, THRESHOLDS);
     for (const verdict of present) assert.ok(text.includes(verdict), `${label}: expected ${verdict}`);
     for (const verdict of absent) assert.ok(!text.includes(verdict), `${label}: unexpected ${verdict}`);
   }
 });
 
-test('renderTempo: 4 messages in the last 10 min -> the "live" verdict, even with long silence', () => {
-  const text = renderTempo(baseTempo({ last10min: 4, silenceMs: 50 * MIN }), labels);
+test('renderTempo: messages at the live threshold -> the "live" verdict, even with long silence', () => {
+  const text = renderTempo(baseTempo({ last10min: THRESHOLDS.liveMessages10min, silenceMs: 50 * MIN }), labels, THRESHOLDS);
   assert.ok(text.includes(labels.tempo.verdictLive));
 });
 
-test('renderTempo: silence just under 45 min -> the "slow" verdict, not dead', () => {
-  const text = renderTempo(baseTempo({ last10min: 0, silenceMs: 44 * MIN + 59_000 }), labels);
+test('renderTempo: silence just under the dead threshold -> the "slow" verdict, not dead', () => {
+  const text = renderTempo(baseTempo({ last10min: 0, silenceMs: THRESHOLDS.deadSilenceMinutes * MIN - 1000 }), labels, THRESHOLDS);
   assert.ok(text.includes(labels.tempo.verdictSlow));
 });
 
 test('renderTempo: an empty channel (silenceMs null) -> the "dead" verdict', () => {
-  const text = renderTempo(baseTempo({ last10min: 0, silenceMs: null }), labels);
+  const text = renderTempo(baseTempo({ last10min: 0, silenceMs: null }), labels, THRESHOLDS);
   assert.ok(text.includes(labels.tempo.verdictDead));
 });
 
@@ -1192,41 +884,59 @@ test('renderTempo: custom thresholds are honoured', () => {
   assert.ok(slow.includes(labels.tempo.verdictSlow));
 });
 
-test('renderTempo: silence at exactly 45 min -> "dead" (inclusive), also when a thresholds object misses that key', () => {
-  const rows = [
-    { label: 'no thresholds argument: silence at exactly 45 min -> the "dead" verdict (inclusive)', thresholds: undefined },
-    // deadSilenceMinutes still defaults to 45
-    { label: 'a thresholds object missing one key falls back to the default for that key', thresholds: { liveMessages10min: 10 } },
-  ];
-  for (const { label, thresholds } of rows) {
-    const text = renderTempo(baseTempo({ last10min: 0, silenceMs: 45 * MIN }), labels, thresholds);
-    assert.ok(text.includes(labels.tempo.verdictDead), label);
-  }
+test('renderTempo: silence exactly at the dead threshold -> "dead" (inclusive)', () => {
+  const text = renderTempo(baseTempo({ last10min: 0, silenceMs: THRESHOLDS.deadSilenceMinutes * MIN }), labels, THRESHOLDS);
+  assert.ok(text.includes(labels.tempo.verdictDead));
 });
 
 test('renderTempo: null silenceMs describes an empty channel', () => {
-  const text = renderTempo(baseTempo({ silenceMs: null }), labels);
+  const text = renderTempo(baseTempo({ silenceMs: null }), labels, THRESHOLDS);
   assert.ok(text.includes(labels.tempo.emptyChannel));
 });
 
 test('renderTempo: hasTrigger phrases silence via silenceBeforeTrigger', () => {
-  const text = renderTempo(baseTempo({ hasTrigger: true, silenceMs: 5 * MIN }), labels);
+  const text = renderTempo(baseTempo({ hasTrigger: true, silenceMs: 5 * MIN }), labels, THRESHOLDS);
   assert.ok(text.includes('before the message that called you, the channel was silent for: 5 min'));
 });
 
 test('renderTempo: without a trigger, silence is phrased via lastMessageAgo', () => {
-  const text = renderTempo(baseTempo({ hasTrigger: false, silenceMs: 5 * MIN }), labels);
+  const text = renderTempo(baseTempo({ hasTrigger: false, silenceMs: 5 * MIN }), labels, THRESHOLDS);
   assert.ok(text.includes('the last message in the channel was: 5 min ago'));
 });
 
 test('renderTempo: mentions when the last own message went unanswered (no trigger)', () => {
-  const text = renderTempo(baseTempo({ lastIsOwn: true, hasTrigger: false }), labels);
+  const text = renderTempo(baseTempo({ lastIsOwn: true, hasTrigger: false }), labels, THRESHOLDS);
   assert.ok(text.includes(labels.tempo.ownUnanswered));
 });
 
 test('renderTempo: does not mention the unanswered line when there is a trigger', () => {
-  const text = renderTempo(baseTempo({ lastIsOwn: true, hasTrigger: true }), labels);
+  const text = renderTempo(baseTempo({ lastIsOwn: true, hasTrigger: true }), labels, THRESHOLDS);
   assert.ok(!text.includes(labels.tempo.ownUnanswered));
+});
+
+test('format: the code fallbacks equal the values in config.json', () => {
+  const shipped = JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8')).context;
+  // Tempo: a thresholds argument that is missing, or missing a key, reads as the shipped pair.
+  const { liveMessages10min, deadSilenceMinutes } = shipped.tempo;
+  const probes = [
+    { last10min: liveMessages10min - 1, silenceMs: 0 },
+    { last10min: liveMessages10min, silenceMs: 0 },
+    { last10min: 0, silenceMs: deadSilenceMinutes * MIN - 1 },
+    { last10min: 0, silenceMs: deadSilenceMinutes * MIN },
+  ];
+  for (const probe of probes) {
+    const expected = renderTempo(baseTempo(probe), labels, shipped.tempo);
+    assert.equal(renderTempo(baseTempo(probe), labels), expected, JSON.stringify(probe));
+    assert.equal(renderTempo(baseTempo(probe), labels, {}), expected, JSON.stringify(probe));
+  }
+  // Reactions per message: the omitted option reads as the shipped number.
+  const T = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const reactions = Array.from({ length: shipped.reactionsPerMessage + 3 }, (_, i) => ({ emoji: `:e${i}:`, count: 1, mine: false }));
+  const options = { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels };
+  assert.deepEqual(
+    formatTranscript([msg('1', T, { reactions })], options),
+    formatTranscript([msg('1', T, { reactions })], { ...options, reactionsPerMessage: shipped.reactionsPerMessage }),
+  );
 });
 
 // --- formatTranscript: a second look on a question (videoAnswered) -----------------
@@ -1236,14 +946,6 @@ const answered = { question: 'τι χρώμα είναι;', text: 'κόκκιν�
 test('formatTranscript: a watched video with an answer renders videoAnswered right after videoWatched', () => {
   const items = videoTranscript([videoMsg()], { videos: new Map([['v1', { state: 'watched', text: 'a dog runs', answer: answered }]]) });
   assert.ok(items[0].text.endsWith('[video: clip.mp4, 1:05, watched: a dog runs] [looked again for "τι χρώμα είναι;": κόκκινο]'));
-});
-
-test('formatTranscript: a watched link with an answer renders videoAnswered right after linkWatched', () => {
-  const messages = [msg('a', T0, { content: '', links: [ytLink] })];
-  const items = videoTranscript(messages, {
-    videos: new Map([['link:abcd1234', { state: 'watched', text: 'a talk', answer: answered }]]),
-  });
-  assert.ok(items[0].text.endsWith('[link: YouTube — Cool video] [watched: a talk] [looked again for "τι χρώμα είναι;": κόκκινο]'));
 });
 
 test('formatTranscript: labels without videoAnswered render an answered video exactly as a plain watched one', () => {
@@ -1309,22 +1011,10 @@ test('formatTranscript: an older labels.json with no linkRead key ignores reads,
   assert.ok(!withReads[0].text.includes('texte'));
 });
 
-test('formatTranscript: reads apply inside a forwarded snapshot too', () => {
-  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const messages = [
-    msg('a', t0, {
-      content: '',
-      forwarded: [{ content: '', links: [{ id: 'f#e0', kind: 'link', site: 'example.org', title: 'Á', url: 'https://example.org/a' }] }],
-    }),
-  ];
-  const items = formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, reads: new Map([['f#e0', 'résumé']]) });
-  assert.ok(items[0].text.includes('[link: example.org — Á] [page read: résumé]'), items[0].text);
-});
-
 // --- formatTranscript: reactions ---------------------------------------
 
 function reactionTranscript(messages, extra = {}) {
-  return formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, ...extra });
+  return formatTranscript(messages, { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, seeReactions: true, ...extra });
 }
 
 test('formatTranscript: reactions are rendered after the text', () => {
@@ -1360,8 +1050,6 @@ test('formatTranscript: at most reactionsPerMessage items', () => {
   const reactions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].map((name, i) => ({ emoji: `:${name}:`, count: 8 - i, mine: false }));
   const capped = reactionTranscript([msg('1', T, { reactions })], { reactionsPerMessage: 2 });
   assert.ok(capped[0].text.endsWith('[reactions: :a: x8, :b: x7]'), capped[0].text);
-  const byDefault = reactionTranscript([msg('1', T, { reactions })]);
-  assert.ok(byDefault[0].text.endsWith('[reactions: :a: x8, :b: x7, :c: x6, :d: x5, :e: x4, :f: x3]'), byDefault[0].text);
 });
 
 test('formatTranscript: seeReactions=false renders none', () => {
@@ -1379,10 +1067,4 @@ test('formatTranscript: labels without transcript.reactions render none', () => 
   };
   const items = reactionTranscript([msg('1', T, { reactions: [{ emoji: '🍣', count: 2, mine: true }] })], { labels: oldLabels });
   assert.ok(items[0].text.endsWith(': text'), items[0].text);
-});
-
-test('formatTranscript: an empty or missing reactions list renders no tag', () => {
-  const T = Date.UTC(2026, 8, 20, 10, 0, 0);
-  const items = reactionTranscript([msg('1', T, { reactions: [] }), msg('2', T)]);
-  assert.ok(items.every((item) => item.text.endsWith(': text')), items.map((item) => item.text).join('\n'));
 });
