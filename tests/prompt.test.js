@@ -2751,6 +2751,22 @@ test('buildRequest: the author\'s queued calls follow a part\'s others, numbered
   assert.equal(bodyOf(userText(buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', prompts: older, tasks: { part: null, queued: ['τρία'], added: [] } }))), 'task'), plain);
 });
 
+test('buildRequest: other members\' waiting calls append labels.task.queuedOthers, on a part too; an older labels file adds nothing', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const task = (tasks, prompts = fakePrompts()) => bodyOf(userText(buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', tasks, prompts }))), 'task');
+  const plain = task(null);
+  const others = [{ author: 'Léa', text: 'δύο' }, { author: 'Bjørn', text: 'τρία' }];
+  const othersText = fill(labels.task.queuedOthers, { others: '1. Léa: δύο; 2. Bjørn: τρία' });
+  assert.equal(
+    task({ part: null, queued: ['ένα'], queuedOthers: others, added: ['λοιπόν;'] }),
+    [plain, fill(labels.task.queued, { others: '1. ένα' }), othersText, fill(labels.task.added, { added: 'λοιπόν;' })].join('\n\n'),
+  );
+  const part = { index: 1, total: 2, parts: ['α', 'β'] };
+  assert.equal(task({ part, queued: [], queuedOthers: others, added: [] }), [plain, fill(labels.task.part, { index: 1, total: 2, part: 'α', others: '2. β' }), othersText].join('\n\n'));
+  const { queuedOthers: _others, ...older } = labels.task;
+  assert.equal(task({ part: null, queued: [], queuedOthers: others, added: [] }, fakePrompts({ labels: { ...labels, task: older } })), plain);
+});
+
 test('buildRequest: messages folded into the call append labels.task.added after the other task labels', () => {
   const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
   const task = (tasks, prompts = fakePrompts()) => bodyOf(userText(buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', tasks, prompts }))), 'task');

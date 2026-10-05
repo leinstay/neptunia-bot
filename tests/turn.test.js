@@ -6251,3 +6251,32 @@ test('runTurn: queued calls named in the request are not counted as seen; withou
   assert.equal(older.task.includes('δεύτερο'), false);
   assert.equal(older.turns.spokeAfterSeeing('c1', 'm3'), true, 'the old rule: seen is answered');
 });
+
+test('runTurn: another member\'s waiting call is named under labels.task.queuedOthers and not counted as seen; without the label it is', async () => {
+  const history = [
+    rawMessage({ id: 'm1', ts: NOW - 3000, content: 'πρώτο' }),
+    rawMessage({ id: 'm2', ts: NOW - 2500, authorId: 'u2', authorName: 'Léa', content: 'άλλο' }),
+    rawMessage({ id: 'm3', ts: NOW - 2000, content: 'δεύτερο' }),
+  ];
+  const run = async (hot) => {
+    const llm = splitLlm({ talk: '<msg>ok</msg>' });
+    const channel = fakeTurnChannel({ historyMessages: history });
+    const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW, schedule: manualSchedule() });
+    const queued = () => [
+      { id: 'm2', text: 'άλλο', author: 'Léa' },
+      { id: 'm3', text: 'δεύτερο' },
+    ];
+    await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(history[0]), triggerKind: 'mention', queued });
+    return { turns, task: taskOf(llm.calls.talk[0]) };
+  };
+  const named = await run(splitHot());
+  assert.ok(named.task.endsWith([fill(labels.task.queued, { others: '1. δεύτερο' }), fill(labels.task.queuedOthers, { others: '1. Léa: άλλο' })].join('\n\n')));
+  assert.equal(named.turns.spokeAfterSeeing('c1', 'm2'), false, 'left to its own turn');
+  assert.equal(named.turns.spokeAfterSeeing('c1', 'm3'), false);
+
+  const { queuedOthers: _others, ...older } = labels.task;
+  const old = await run(splitHot({ labels: { ...labels, task: older } }));
+  assert.equal(old.task.includes('άλλο'), false);
+  assert.equal(old.turns.spokeAfterSeeing('c1', 'm2'), true, 'the old rule for another member\'s call');
+  assert.equal(old.turns.spokeAfterSeeing('c1', 'm3'), false, 'the author\'s own call is still named under task.queued');
+});

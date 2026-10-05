@@ -246,6 +246,7 @@ export const labels = {
   task: {
     part: 'the message has {total} parts; now answer part {index} only: {part}\nthe other parts get their own turns:\n{others}',
     queued: 'the same person has more calls waiting, each gets its own turn later:\n{others}',
+    queuedOthers: 'other people have calls waiting here too, each gets its own turn later: {others}',
     added: 'they asked about this again meanwhile:\n{added}',
   },
   recent: {

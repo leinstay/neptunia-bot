@@ -254,6 +254,7 @@
   "task": {
     "part": "This message has {total} parts; you are answering part {index}: {part}. The rest ({others}) get their own turns, so do not answer them or say you will get to them. Answer this part, or let it pass.",
     "queued": "This person has other messages waiting ({others}); each gets its own turn, so do not answer them here or say you will get to them.",
+    "queuedOthers": "Other people have messages waiting for you too ({others}); each gets its own turn, so do not answer them here or say you will get to them.",
     "added": "While this was waiting, the person came back to it ({added}); answer once with that in view."
   }
 }

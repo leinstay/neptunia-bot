@@ -591,13 +591,18 @@ export function routeFor(source, config) {
 /**
  * The `tasks` input of a turn's request (src/behavior/prompt.js#buildRequest)
  * and the calls it names as left to their own turns. `part`: the part of a
- * split message this turn answers; `queued()`: the trigger author's other
- * calls still waiting (read now; a throw counts as none, logged
- * `turn: queued failed`); `added`: messages folded into this call. The queued
- * calls count as named (`deferred`, their ids) when the request can render
- * them: in `labels.task.part`'s others on a part, else under
- * `labels.task.queued`. `input` is null when there is nothing to say.
- * @returns {{ input: { part: object|null, queued: string[], added: string[] }|null, deferred: Set<string> }}
+ * split message this turn answers; `queued()`: the calls still waiting in
+ * this channel (read now; a throw counts as none, logged `turn: queued
+ * failed`) -- the trigger author's own as `{ id, text }`, another member's as
+ * `{ id, text, author }` (their display name); `added`: messages folded into
+ * this call. The author's own calls count as named (`deferred`, their ids)
+ * when the request can render them: in `labels.task.part`'s others on a part,
+ * else under `labels.task.queued`; another member's under
+ * `labels.task.queuedOthers`. A call the labels cannot name is not deferred:
+ * the seen-in-history rule holds for it, as before. `input` is null when
+ * there is nothing to say.
+ * @returns {{ input: { part: object|null, queued: string[], queuedOthers: { author: string, text: string }[],
+ *   added: string[] }|null, deferred: Set<string> }}
  */
 function taskInput({ part, queued, added, labels, channelId }) {
   let waiting = [];
@@ -609,11 +614,22 @@ function taskInput({ part, queued, added, labels, channelId }) {
       log.warn('turn: queued failed', { channel: channelId, error: err });
     }
   }
+  const own = waiting.filter((call) => typeof call.author !== 'string');
+  const others = waiting.filter((call) => typeof call.author === 'string');
   const addedTexts = Array.isArray(added) ? added.map((message) => message?.text).filter((text) => typeof text === 'string' && text) : [];
-  const named = waiting.length > 0 && Boolean(part ? labels?.task?.part : labels?.task?.queued);
-  const deferred = new Set(named ? waiting.map((call) => call.id).filter(Boolean) : []);
+  const ownNamed = own.length > 0 && Boolean(part ? labels?.task?.part : labels?.task?.queued);
+  const othersNamed = others.length > 0 && Boolean(labels?.task?.queuedOthers);
+  const deferred = new Set([...(ownNamed ? own : []), ...(othersNamed ? others : [])].map((call) => call.id).filter(Boolean));
   if (!part && waiting.length === 0 && addedTexts.length === 0) return { input: null, deferred };
-  return { input: { part: part ?? null, queued: waiting.map((call) => call.text), added: addedTexts }, deferred };
+  return {
+    input: {
+      part: part ?? null,
+      queued: own.map((call) => call.text),
+      queuedOthers: others.map((call) => ({ author: call.author, text: call.text })),
+      added: addedTexts,
+    },
+    deferred,
+  };
 }
 
 /**
@@ -1931,11 +1947,13 @@ export function createTurnRunner({
    * @param {boolean} [params.forced]  True for an owner-forced turn (`/nep interject`, `/nep
    *   initiate`) -- passed straight through to buildRequest, which appends prompts.forced (when
    *   present) to the task text so the model knows `<skip/>` is not the expected outcome this time.
-   * @param {(() => { id: string, text: string }[])|null} [params.queued]  The trigger author's other
-   *   calls still waiting in the queue (src/discord/events.js), read when the request is built:
-   *   named under `labels.task.queued` (on a part, in `labels.task.part`'s `{others}`) so the
-   *   persona leaves them to their own turns; a call so named is not counted as answered by this
-   *   turn (spokeAfterSeeing). Without the label they are not named and the old rule holds.
+   * @param {(() => { id: string, text: string, author?: string }[])|null} [params.queued]  The calls
+   *   still waiting in the queue in this channel (src/discord/events.js), read when the request is
+   *   built: the trigger author's own (no `author`) named under `labels.task.queued` (on a part, in
+   *   `labels.task.part`'s `{others}`), another member's (`author`: their display name) under
+   *   `labels.task.queuedOthers`, so the persona leaves them to their own turns; a call so named is
+   *   not counted as answered by this turn (spokeAfterSeeing). Without its label a call is not
+   *   named and the old rule holds for it.
    * @param {{ id: string, text: string, ts: number }[]|null} [params.added]  Later messages of the
    *   author folded into this call (src/discord/events.js): `labels.task.added` names them.
    * @returns {Promise<{ outcome: TurnOutcome, mode?: string, dryRun?: boolean, drawFailed?: string,

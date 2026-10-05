@@ -1135,16 +1135,22 @@ export function createMessageHandler({
 
   /**
    * The `queued` input of a turn answering `trigger` (src/behavior/turn.js): a
-   * function giving, when the turn builds its request, the other calls its
-   * author has waiting in `channelId` (`{ id, text }`, arrival order). Null for
-   * a routed call: its turn is about another channel.
+   * function giving, when the turn builds its request, the other calls waiting
+   * in `channelId` (never a routed one), arrival order: the trigger author's
+   * own as `{ id, text }`, another member's as `{ id, text, author }` (their
+   * display name). Null for a routed call: its turn is about another channel.
    */
   function queuedFor(channelId, trigger, routed = false) {
     if (routed || !trigger?.authorId) return null;
     return () =>
-      authorCalls(pendingList, channelId, trigger.authorId)
-        .filter((p) => p.trigger.id !== trigger.id)
-        .map((p) => ({ id: p.trigger.id, text: itemText(p.trigger.content) }));
+      pendingList
+        .filter((p) => !p.destination && p.channelId === channelId && p.trigger?.id !== trigger.id)
+        .sort((a, b) => a.arrivedAt - b.arrivedAt)
+        .map((p) => ({
+          id: p.trigger.id,
+          text: itemText(p.trigger.content),
+          ...(p.trigger.authorId === trigger.authorId ? {} : { author: oneLine(p.trigger.authorName ?? '') }),
+        }));
   }
 
   /**
@@ -1434,10 +1440,11 @@ export function createMessageHandler({
    * now (`fetch-failed`: messageStillExists), a channel that lost send
    * permission, or a ping the last turn that spoke in its channel already
    * had in its history (turns.spokeAfterSeeing -- unless that turn named it as
-   * a call of its author still waiting for its own turn, labels.task.queued),
+   * a call still waiting for its own turn: its author's under
+   * labels.task.queued, another member's under labels.task.queuedOthers),
    * is dropped with a log line; the messages folded into a dropped call
-   * (`added`) go with it. Each call's turn gets its author's other waiting
-   * calls (`queued`) and the messages folded into it (`added`).
+   * (`added`) go with it. Each call's turn gets the other calls waiting in its
+   * channel (`queued`, queuedFor) and the messages folded into it (`added`).
    * A ping queued in a channel whose own turn was running is picked up the
    * same way once that turn frees the channel. Guarded against re-entrancy:
    * the turn this function itself starts also frees the channel through the very same `onIdle`,

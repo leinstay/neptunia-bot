@@ -6624,7 +6624,7 @@ test('events: with an older labels file, a call the speaking turn had in view is
   assert.equal(scene.calls.talk.length, 2, 'm1, then m2 whose turn saw m3 and m4');
 });
 
-test('events: another author\'s queued call the speaking turn had in view is still dropped as seen', async () => {
+test('events: calls of two authors waiting in one channel each get their own turn, in arrival order, each request naming the other\'s', async () => {
   const { talk, open } = heldFirst();
   const scene = liveScene({ talk });
   const { logs } = await withLiveLogs(async (logs) => {
@@ -6632,11 +6632,40 @@ test('events: another author\'s queued call the speaking turn had in view is sti
     await tickUntil(() => scene.calls.talk.length === 1);
     await scene.call('m2', 'u2', 'δύο');
     await scene.call('m3', 'u1', 'τρία');
-    await tickUntil(() => logs.filter((line) => line.msg === 'mention: deferred').length === 2);
+    await scene.call('m4', 'u2', 'τέσσερα');
+    await tickUntil(() => logs.filter((line) => line.msg === 'mention: deferred').length === 3);
     open();
-    await tickUntil(() => logs.some((line) => line.msg === 'mention: already answered'));
+    await tickUntil(() => scene.calls.talk.length === 4);
   });
-  assert.deepEqual(answeredAuthors(scene.calls), ['Alice', 'Léa'], 'Léa\'s turn had m3 in view and did not name it');
+  assert.deepEqual(answeredAuthors(scene.calls), ['Alice', 'Léa', 'Alice', 'Léa']);
+  assert.equal(logs.filter((line) => line.msg === 'mention: already answered').length, 0, 'none dropped as seen');
+  // m2 (Léa): her own m4 under task.queued, Alice's m3 under task.queuedOthers.
+  assert.ok(
+    liveTask(scene.calls.talk[1]).endsWith(
+      [fill(labels.task.queued, { others: '1. τέσσερα' }), fill(labels.task.queuedOthers, { others: '1. Alice: τρία' })].join('\n\n'),
+    ),
+  );
+  // m3 (Alice): Léa's m4 under task.queuedOthers.
+  assert.ok(liveTask(scene.calls.talk[2]).endsWith(fill(labels.task.queuedOthers, { others: '1. Léa: τέσσερα' })));
+  assert.ok(liveTask(scene.calls.talk[3]).endsWith('Reply to Léa.'), 'nothing left to name');
+});
+
+test('events: without labels.task.queuedOthers, another author\'s queued call the speaking turn had in view is dropped as seen', async () => {
+  const { talk, open } = heldFirst();
+  const { queuedOthers: _others, ...older } = labels.task;
+  const scene = liveScene({ talk, labels: { ...labels, task: older } });
+  const { logs } = await withLiveLogs(async (logs) => {
+    await scene.call('m1', 'u1', 'ένα');
+    await tickUntil(() => scene.calls.talk.length === 1);
+    await scene.call('m2', 'u2', 'δύο');
+    await scene.call('m3', 'u1', 'τρία');
+    await scene.call('m4', 'u2', 'τέσσερα');
+    await tickUntil(() => logs.filter((line) => line.msg === 'mention: deferred').length === 3);
+    open();
+    await tickUntil(() => logs.some((line) => line.msg === 'mention: already answered') && scene.calls.talk.length === 3);
+  });
+  assert.deepEqual(answeredAuthors(scene.calls), ['Alice', 'Léa', 'Léa'], 'm3 was in view of Léa\'s turn and not named; her own m4 was named');
+  assert.equal(liveTask(scene.calls.talk[1]).includes('τρία'), false);
 });
 
 test('events: a call the merge classifier folds into a waiting call gets no turn; that call\'s turn names it', async () => {

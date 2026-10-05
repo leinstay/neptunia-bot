@@ -758,9 +758,10 @@ function numberedItems(texts, first) {
 /**
  * The task labels for buildRequest's `input.tasks` (see there), joined by a
  * blank line: `labels.task.part` (or, without a usable part,
- * `labels.task.queued`), then `labels.task.added`. '' when nothing applies.
+ * `labels.task.queued`), then `labels.task.queuedOthers`, then
+ * `labels.task.added`. '' when nothing applies.
  * @param {{ part?: { index: number, total?: number, parts: string[] }|null, queued?: string[],
- *   added?: string[] }|null|undefined} tasks
+ *   queuedOthers?: { author: string, text: string }[], added?: string[] }|null|undefined} tasks
  * @param {object} labels
  * @returns {string}
  */
@@ -778,6 +779,11 @@ function renderTasks(tasks, labels) {
     texts.push(fill(labels.task.part, { index: part.index, total: part.total ?? parts.length, part: parts[part.index - 1], others }));
   } else if (!usablePart && queued.length > 0 && labels.task?.queued) {
     texts.push(fill(labels.task.queued, { others: numberedItems(queued, 1).join(TASK_ITEM_JOIN) }));
+  }
+  const others = Array.isArray(tasks.queuedOthers) ? tasks.queuedOthers.filter((call) => call && call.text) : [];
+  if (others.length > 0 && labels.task?.queuedOthers) {
+    const items = numberedItems(others.map((call) => `${call.author ?? ''}: ${call.text}`), 1);
+    texts.push(fill(labels.task.queuedOthers, { others: items.join(TASK_ITEM_JOIN) }));
   }
   if (added.length > 0 && labels.task?.added) texts.push(fill(labels.task.added, { added: added.join(TASK_ITEM_JOIN) }));
   return texts.join('\n\n');
@@ -1499,13 +1505,15 @@ function pulledAuthors(pulledFits) {
  *   question): `labels.room.focus` (`{author}` `{target}`) follows the task text when it is in
  *   the chat.
  * @param {{ part: { index: number, total: number, parts: string[] }|null, queued: string[],
- *   added: string[] }|null} [input.tasks]  What else the trigger's author is waiting for, after
+ *   queuedOthers?: { author: string, text: string }[], added: string[] }|null} [input.tasks]  What else the trigger's author is waiting for, after
  *   the task text (src/behavior/turn.js). `part`: this turn answers one part of a message that
  *   holds several requests (src/behavior/split.js) -- `labels.task.part` with `{index}` (1-based),
  *   `{total}`, `{part}` (the part answered now) and `{others}` (every other part, then each of
  *   `queued`, as `<n>. <text>` items numbered on, joined by `; `). `queued`: the author's other
  *   calls still waiting for their own turns -- without a part, `labels.task.queued` with
- *   `{others}` (them, `<n>. <text>` items from 1, joined by `; `). `added`: later messages of the
+ *   `{others}` (them, `<n>. <text>` items from 1, joined by `; `). `queuedOthers`: other members'
+ *   calls waiting in this channel -- `labels.task.queuedOthers` with `{others}` (`<n>. <author>:
+ *   <text>` items from 1, joined by `; `), on a part too. `added`: later messages of the
  *   author about this same call -- `labels.task.added` with `{added}` (their texts joined by `; `).
  *   A label missing (an older labels file) or a part outside its parts adds nothing for it.
  * @param {{ name: string }|null} [input.elsewhereDestination]  Where a call from a read-only
