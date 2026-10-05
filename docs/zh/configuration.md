@@ -17,7 +17,9 @@
 | `episodes` | `true` | 每人的长期回忆（时刻、引言、恩怨） |
 | `lore` | `true` | 服务器级世界书 |
 | `reactions` | `true` | 表情反应（角色放置反应） |
-| `seeReactions` | `true` | 在对话记录中显示消息上的反应。缺失的键视为开启。与 `reactions`（控制角色是否放置反应）不同，此项控制角色是否看到反应 |
+| `seeReactions` | `true` | 在对话记录中显示消息上的反应。缺失的键视为开启。与 `reactions`（控制角色是否放置反应）不同，此项控制角色是否看到它们 |
+| `customEmoji` | `true` | 列出服务器自定义表情（按使用率排名），使角色可以通过 `:name:` 使用它们。缺失的键视为开启 |
+| `gifs` | `true` | 从成员分享的内容构建 GIF 库，让角色通过 handle 发送。缺失的键视为开启 |
 | `multiMessage` | `true` | 允许连续发 2–3 条消息 |
 | `vision` | `true` | 处理附加图片 |
 | `mediaDescriptions` | `true` | 为图片、GIF、视频帧和链接缩略图生成单行描述 |
@@ -32,6 +34,10 @@
 | `memoryTwoStage` | `false` | 将记忆分析器拆分为两个阶段：中性 GPT 模型判定变更（阶段 A），然后语音模型撰写角色文本（阶段 B）。必须严格为 `true` 才能启用；缺失键 = 关。参见 `memory.voiceModel` 和 `memory.voice.*` |
 | `mentor` | `false` | 手动测试子进程，使用独立模型。必须严格为 `true` 才能启用；缺失的键视为关闭。参见 [Mentor](#mentor) |
 | `promptCache` | `false` | 为系统消息添加提供商的提示缓存标记。缓存读取仅为正常输入成本的一小部分；某些提供商不将缓存读取计入 token 配额。必须严格为 `true` 才能启用；缺失的键视为关闭。参见 `llm.cache.*` |
+| `recall` | `true` | 当问题需要时，在网络搜索之外同时搜索服务器自身的消息历史。缺失的键视为开启。参见[媒体：搜索](media.md#搜索)和 `recall.*` |
+| `recent` | `true` | 在请求中显示一个 `<recent>` 块，呈现服务器最近几天发生的事情。缺失的键视为开启。参见 `memory.recentHours` 和 `context.caps.recent` |
+| `channelRoute` | `true` | 分类器在回合前选出对话中提及的频道，以便将其拉入请求。缺失的键视为开启。参见 `route.*` |
+| `pauseNotice` | `true` | 角色在暂停时被呼叫会发布一条简短通知。缺失的键视为开启。参见 `mention.pauseNoticeMinutes` 和 `labels.limits.paused` |
 | `variety` | `true` | 模型过程识别角色在近期消息中过度使用的表达手法。结果作为 `<worn>` 块包含在回合请求中。缺失的键视为开启 |
 | `varietyPrecompute` | `true` | 角色发布文本后立即启动多样性过程，使下一回合可以直接使用结果。关闭时过程仅在回合时运行，但迟到的结果仍会保存。缺失的键视为开启 |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
@@ -63,6 +69,7 @@
 | `maxRequestTokens` | `50000` | 每请求硬性 token 上限 |
 | `safetyMargin` | `0.9` | `maxRequestTokens` 的预算比例 |
 | `timeoutMs` | `300000` | 请求超时（毫秒） |
+| `helperTimeoutMs` | `30000` | 与回合并行运行的辅助任务（路由分类器、搜索分类器和 recall 摘要）的超时。超时的辅助任务被放弃，回合在没有其结果的情况下继续 |
 | `pingTimeoutMs` | `30000` | `/nep ping` 请求超时（毫秒） |
 | `retries` | `2` | 临时 HTTP 错误（408/429/5xx）和网络故障的重试次数。提供商账户的日配额 429 不重试：一次尝试后直接抛出 |
 | `maxRequestsPerDay` | `300` | 每日请求上限 |
@@ -72,6 +79,10 @@
 | `cache.roles` | `["talk"]` | 系统消息会获得缓存标记的请求角色 |
 | `cache.models` | `["anthropic/"]` | 提供商接受 `cache_control` 标记的模型 id 前缀（区分大小写）。列表外的模型发送时不带标记 |
 | `cache.promptIncludesCached` | `true` | 提供商报告的 `prompt_tokens` 是否已包含缓存读取和缓存写入的 token。通过一次实际探测设定。token 校准和每请求上限始终使用完整计数 |
+| `hedge.roles` | `["classifier.text"]` | 对冲的请求角色（两个并发尝试，先完成的获胜） |
+| `hedge.afterMs` | `2500` | 第二次尝试在第一次之后多少毫秒启动。`0` 或以下对所有角色关闭对冲 |
+| `hedge.timeoutMs` | `8000` | 从第一次尝试开始，两者均未返回时中止的毫秒数 |
+| `hedge.longTimeoutMs` | `20000` | 当调用方标记请求为 `long: true` 时使用的超时（路由分类器在频道列表较大时使用此值） |
 
 `llm.provider` 为聊天请求设置默认的 OpenRouter provider 路由字段，例如 `{ "ignore": ["some-provider"] }` 或 `{ "order": ["anthropic"], "allow_fallbacks": true }`。`llm.providerByModel` 按模型添加覆盖：每个键是模型 id 前缀（匹配任意角色）或 `<prefix>@<role>`（仅匹配一个角色），值为原样传递的 OpenRouter 路由对象。
 
@@ -83,13 +94,17 @@
 
 启用 `features.promptCache` 后，当请求的角色在 `llm.cache.roles` 中且模型以 `llm.cache.models` 中的前缀开头时，系统消息会被标记为提供商的提示缓存。标记在 token 估算之后添加，因此每请求 50k 上限和校准不受影响。`llm.cache.promptIncludesCached` 告诉引擎提供商如何报告缓存 token；通过一次实际探测设定。`llm: usage` 日志行新增 `cache` 字段: `write`、`read`、`none` 或 `off`。
 
+`llm: usage` 日志行还包含 `ms`（请求的耗时）、`purpose`（一个短字符串说明请求用途，例如 `route-channel`、`recall-summary`、`address`）、`origin`（例如 mentor 发起或引起的请求为 `mentor`）、`hedged`（请求被对冲时为 true）和 `attempt`（对冲请求为 1 或 2，否则不存在）。
+
+配置了 `llm.hedge` 后，其列出的角色的请求会被对冲：第二次尝试在第一次之后 `llm.hedge.afterMs` 启动，先完成的获胜。两者在 `llm.hedge.timeoutMs`（`long: true` 请求使用 `longTimeoutMs`）时中止。这为每个在第二次启动前未完成的对冲调用增加一次额外请求；两者都计入 `llm.maxRequestsPerDay`。
+
 ## `classifier`
 
 三个辅助模型角色，统一归入一个键下。每个独立设置，因此辅助工具可以使用低成本模型，而语音使用高端模型。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `text` | `"anthropic/claude-sonnet-4.6"` | 文本分类器：地址分类器（`features.followUp`）、重看分类器（`features.videoRewatch`）和搜索分类器（`features.webLookup`）。同时负责浓缩链接阅读和搜索结果 |
+| `text` | `"anthropic/claude-sonnet-4.6"` | 文本分类器：地址分类器（`features.followUp`）、搜索分类器、链接阅读器、搜索浓缩器和 recall 摘要（`features.webLookup`、`features.recall`）、重看分类器（`features.videoRewatch`）、房间分类器（`spontaneous.roomQuestionChance`）、频道路由分类器（`features.channelRoute`）和多样性过程（`features.variety`） |
 | `media` | `"anthropic/claude-haiku-4.5"` | 图片描述器（`features.mediaDescriptions`）：为图片、GIF 帧、视频封面、贴纸、自定义表情和链接缩略图生成单行描述 |
 | `video` | `"google/gemini-3.8-flash"` | 视频描述器（`features.videoDescriptions`）：观看短片段，基于问题重看，按请求重试。必须同时接受视频和音频输入 |
 
@@ -109,6 +124,7 @@
 | `reactionsPerMessage` | `6` | 对话记录中每条消息列出的最大反应数，按频率降序 |
 | `otherProfiles` | `6` | 显示的其他档案最大数量 |
 | `askedAboutProfiles` | `3` | 在近期消息中被提及的成员以完整档案显示，排在其他参与者之前 |
+| `askedAboutEpisodes` | `3` | 被问及的成员显示的回忆数。`0` 隐藏被问及成员的回忆。私聊中始终隐藏 |
 | `tempo.liveMessages10min` | `4` | 10 分钟内的消息数 = “活跃” |
 | `tempo.deadSilenceMinutes` | `45` | 沉默分钟数 = “沉寂” |
 | `caps.interlocutor` | `6000` | Token 上限：呼叫者的档案与回忆 |
@@ -117,6 +133,8 @@
 | `caps.people` | `9000` | Token 上限：其他档案 |
 | `caps.neighbors` | `3000` | Token 上限：相邻频道 |
 | `caps.server` | `4000` | Token 上限：频道地图 |
+| `caps.emoji` | `800` | Token 上限：自定义表情 |
+| `caps.gifs` | `900` | Token 上限：GIF 库 |
 | `caps.pulled` | `4000` | Token 上限：拉取的频道块（`<channel_view>`） |
 | `channelActivity.liveMessagesPerDay` | `20` | 每日消息数 = “活跃”频道 |
 | `channelActivity.deadAfterDays` | `7` | 无消息天数 = “沉寂”频道 |
@@ -128,12 +146,81 @@
 | `vision.maxBytes` | `1500000` | 图片文件大小上限（字节）；更大的图片会被跳过 |
 | `vision.fetchTimeoutMs` | `10000` | 每张图片下载超时（毫秒） |
 
-## `gifs`
+## `context.pull`
 
-GIF 库（`features.gifs`）的设置。使用次数在每条消息到达时统计（仅成员，排除机器人和角色）。
+将另一个频道拉入回合请求的设置（`features.channelPull`）。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
+| `scanMessages` | `20` | 扫描频道提及的当前频道近期消息数 |
+| `maxChannels` | `1` | 每回合可拉取的频道数 |
+| `maxAgeDays` | `0` | 当频道最新消息超过此天数时拒绝拉取。`0` = 无限制 |
+| `sameAudience` | `true` | 检查目标频道的所有可查看角色是否也能查看来源频道。同时控制 `<other_channels>` 中显示哪些相邻频道，以及 recall 运行保留哪些服务器搜索窗口。关闭时，受限频道的内容可能到达更广泛的受众 |
+
+## `elsewhere`
+
+响应机器人可读但不可写的频道中的呼叫的设置（`features.elsewhere`）。呼叫在对话稳定后在 `memory.mainChannelIds` 中的第一个可用频道中回复，附带跳转链接。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `settleSeconds` | `10` | 呼叫后等待频道对话稳定的秒数 |
+| `settleMaxSeconds` | `60` | 等待稳定的最长秒数 |
+| `rememberPings` | `20` | 每个频道的呼叫记录环中记忆的呼叫数 |
+| `pingMaxAgeDays` | `7` | 记忆的呼叫在环中保留的天数 |
+
+## `pace`
+
+回合各阶段的时间限制。全部热重载。未在截止时间内完成的辅助任务被丢弃，回合在没有其结果的情况下继续。在 `dropAfterMs` 前未拿到回答的回合会被完全丢弃（记录为 `turn: dropped`）。每个请求在 `turn: timings` 中记录各阶段的耗时。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `prepareMs` | `6000` | 回合开始到发出对话请求前的毫秒数。LLM 调用前运行的所有任务（历史、说明、多样性过程、路由和搜索分类器）必须在此窗口内完成。`0` 或非数字移除此限制 |
+| `prepareSearchMs` | `12000` | 搜索分类器发起网络或服务器搜索后的延长截止时间。不会短于 `prepareMs`。`0` 或非数字移除此限制 |
+| `dropAfterMs` | `60000` | 从回合开始计的毫秒数。如果到此时完成的回答仍未到手，回合被丢弃不发布（`turn: dropped`）。`0` 或非数字移除此限制 |
+| `typingWhilePreparing` | `false` | 从回答直接呼叫（提及、回复、名字、跟进、私信）的回合开始就显示输入指示器，而非仅在打字阶段显示。必须严格为 `true` 才能启用 |
+
+## `route`
+
+频道路由分类器（`features.channelRoute`）的设置。当对话提到或引用了另一个频道时，分类器（`prompts/route-channel.md`，使用 `classifier.text` 角色）从列表中选出频道号。选中的频道作为 `<channel_view>` 块拉入请求，与显式频道提及并列。记录为 `route: classified`、`route: skipped` 或 `route: failed`。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `contextMessages` | `20` | 为分类器渲染的近期频道消息数 |
+| `maxChannels` | `40` | 列给分类器选择的频道数 |
+| `purposeChars` | `80` | 列表中每个频道已存储用途显示的字符数 |
+| `maxOutputTokens` | `120` | 分类器的最大输出 token 数 |
+
+## `recall`
+
+服务器消息历史搜索（`features.recall`）的设置。当查询分类器（`prompts/lookup.md`）回答 `server:` 词形、`who:` 名称词形或 `when:` 日期范围时，引擎通过 Discord 搜索 API 搜索服务器消息历史，将命中项分组为聚类，获取每个聚类周围的消息窗口，并让摘要辅助（`prompts/recall-summary.md`，使用 `classifier.text` 角色）回答历史中的答案。摘要可能指出一段最佳回答问题的原文；如果是，角色将在 `<lookup>` 块中看到该段原文和浓缩笔记。记录为 `recall: searched`、`recall: summary`、`recall: skipped` 或 `recall: failed`。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `maxForms` | `5` | 分类器在每个 `server:` 行中列出的搜索词形（词的变体）数 |
+| `maxPeople` | `2` | `who:` 行可列出的人数 |
+| `dateSamples` | `4` | 仅给出 `when:` 范围而无内容词形时跨范围采样的仅日期查询数 |
+| `clusterGapMinutes` | `30` | 将命中项分入不同聚类的时间间隔 |
+| `maxClusters` | `5` | 保留的聚类数（多余的从最新开始丢弃） |
+| `windowMessages` | `16` | 每个聚类中心周围获取的消息数 |
+| `answerChars` | `1200` | 摘要笔记的最大字符数；填充 `recall-summary.md` 中的 `{{answerChars}}` |
+| `stretchChars` | `1500` | 向角色展示的原文段的最大字符数 |
+| `maxPerDay` | `100` | 每日 recall 运行次数（在 `state.json` 中存储为 `recallDay` / `recallCount`） |
+| `timeoutMs` | `10000` | recall 运行的总时间（搜索、窗口、摘要）。一半时间过后不再发新搜索；只有剩余 `minSummaryMs` 时才询问摘要 |
+| `minSummaryMs` | `2500` | 询问摘要辅助的最低剩余时间。不足时返回排名最高窗口的原文段，不附笔记 |
+| `memoryItems` | `6` | 将分类器的词形和名称词形与已存储记忆（回忆、世界书、所学、近期行，不含私有层）匹配的条目数，作为 `<memory>` 块发送给摘要。`0` 关闭匹配 |
+| `maxOutputTokens` | `500` | 摘要辅助的最大输出 token 数 |
+
+## `gifs`
+
+GIF 库（`features.gifs`）的设置。使用次数在每条消息到达时统计（仅成员，排除机器人和角色）。启动时通过频道历史一次性回填来初始化排名。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `max` | `40` | `<gifs>` 块中显示的 GIF 数，按近期加权使用排名 |
+| `listChars` | `70` | `<gifs>` 列表中每条说明保留的字符数，在词边界处截断。`0` 显示完整说明 |
+| `storeMax` | `300` | 库中保留的 GIF 数；显示排名前 `max` 个 |
+| `halfLifeDays` | `30` | 使用排名的近期半衰期（天）；与自定义表情使用相同公式 |
+| `maxPerDay` | `40` | 角色每天可发送的 GIF 数 |
 | `recachePerRun` | `50` | 每次 `/nep gifs recache` 运行时重新描述的库 GIF 数量。库外的单帧说明立即删除；然后在后台从最旧的开始观看最多此数量的库条目 |
 
 ## `media`
@@ -232,7 +319,9 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `followUpContext` | `15` | 发送给分类器的对话记录行数 |
 | `followUpMaxOutputTokens` | `8` | 分类器的最大输出 token 数 |
 | `followUpOverheard` | `true` | 开启时，地址分类器的 `overheard` 回答启动使用 `prompts/overheard.md` 的独立回合。关闭时 `overheard` 回答视为普通 `yes`（跟进回合）。缺失的键视为开启 |
+| `followUpAliases` | `5` | 与角色名称一起发送给地址分类器的角色已存储别名数，以便分类器将其识别为呼叫。`0` 不发送 |
 | `followUpNoStreak` | `3` | 连续 `no` 判定次数达到此值关闭窗口 |
+| `pauseNoticeMinutes` | `10` | 同一频道两次暂停通知之间的最短间隔（分钟）。`0` 对每次呼叫都发通知 |
 
 后续窗口保存在 `data/state.json` 的 `followUpWindows` 中，启动时恢复；过期的窗口会被丢弃。
 
@@ -261,6 +350,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `liveMinMessages` | `4` | “活跃”所需最少消息数 |
 | `deadAfterMinutes` | `90` | 沉默达此时长视为“沉寂”（分钟） |
 | `initiateChance` | `0.35` | 发起话题（而非插话）的概率 |
+| `roomQuestionChance` | `0.04` | 面向全体（而非面向特定人）的消息被角色接听的概率。分类器（`prompts/room.md`）预先过滤。`0` 关闭此功能 |
 | `eavesdropChance` | `0.02` | 逐消息插入概率 |
 | `eavesdropDelayMs` | `[5000, 40000]` | 窃听延迟范围（毫秒） |
 | `minGapMinutes` | `12` | 动作之间的最短间隔（分钟） |
@@ -277,7 +367,19 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `portraitRefreshPerDay` | `3` | 每服务器每天最大画像刷新次数（代码触发、分析器提示和 `/nep memory refresh` 共享此限额）。日计数器存储在 `state.json` 中（`portraitDay` / `portraitCount`），`/nep warmup reset` 不会清除它 |
 | `portraitRetryHours` | `24` | 失败的刷新尝试后等待多少小时再重试同一成员 |
 | `portraitCheckMinutes` | `60` | 画像调度器检查需要刷新的成员的频率（分钟） |
+| `analyzerEpisodes` | `8` | 分析器 `<existing_profiles>` 中每个作者显示的回忆数。只发送按权重和近期排名的前几个；存储列表保留全部。`0` 不发送 |
 | `keepNewestEpisodes` | `5` | 最新添加的情节（按添加时间）免于淘汰。`0` = 旧规则：先淘汰最轻的，再淘汰最老的 |
+| `recentHours` | `72` | 保留并在 `<recent>` 块中显示的近期记事的小时数。降低此值会立即缩小视野，下次写入时删除更旧的行 |
+| `maxRecentStored` | `150` | 磁盘上保留的行数。写入超过此上限时，先淘汰最轻的，再淘汰最老的 |
+| `maxNewRecent` | `3` | 分析器每批次可添加的行数 |
+| `recentChars` | `160` | 每条近期记事的最大字符数 |
+| `recentShown` | `12` | 在 `<existing_recent>` 中向分析器展示的实时近期行数，避免重复 |
+| `notesStaleDays` | `7` | 频道或服务器笔记多少天未变化后被标记为待分析器重新检查。`0` 关闭标记 |
+| `notesMinLines` | `20` | 频道在本批次中需要多少行消息才会发送过时标记 |
+| `privateMaxAgeMinutes` | `360` | 安静的私聊缓冲区在未达到 `minBatchMessages` 时多少分钟后仍进行分析 |
+| `channelWritersStored` | `20` | 每个频道保留的最活跃作者数，按衰减计数排名 |
+| `channelWritersHalfLifeDays` | `30` | 每频道作者计数的半衰期（天）；停止发言的作者排名会低于活跃的 |
+| `reasoning` | `null` | 在分析器的阶段 A 请求和预热的中性路径上发送的 OpenRouter `reasoning` 对象。`null` 省略该字段。示例：`{ "effort": "low" }` |
 | `voiceModel` | `null` | 两阶段分析器阶段 B 使用的模型，负责撰写角色文本。`null` 使用对话模型（`llm.model`）。通过 `/nep model set voice` 设置 |
 | `batchMessages` | `60` | 理想批次大小 |
 | `minBatchMessages` | `15` | 更新前的最少消息数 |
@@ -311,6 +413,20 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `timeoutMs` | `900000` | 分析器超时（毫秒），独立于 `llm.timeoutMs` |
 
 分析器提示通过占位符读取这些限制，因此调高某个值会在下一批次生效。更大的档案会消耗更多上下文 token（`context.caps.people`、`context.caps.interlocutor`）和分析器输出（`memory.maxOutputTokens`）。
+
+### `memory.voice`
+
+两阶段分析器（`features.memoryTwoStage`）阶段 B 的设置。阶段 A 把要用角色声音撰写的条目排入队列；阶段 B 在下一次成功的阶段 A 批次后和每个找到待处理条目的 tick 运行。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `maxPerDay` | `100` | 每 UTC 天的语音请求数（存储在 `state.json` 中的 `voiceDay` / `voiceCount`） |
+| `maxItems` | `24` | 每次语音请求携带的最大条目数 |
+| `maxOutputTokens` | `6000` | 每次语音请求的最大输出 token 数 |
+| `maxAttempts` | `4` | 条目被回答遗漏多少次后走降级路径。失败的请求（错误 JSON、超时）不计入 |
+| `queueMax` | `100` | 队列中保留的条目数；最旧的非角色条目溢出到降级路径 |
+| `queueHours` | `24` | 排队条目在走降级路径前的过期小时数。角色条目永不过期 |
+| `timeoutMs` | `120000` | 语音请求的请求超时（毫秒） |
 
 ## `relationships`
 
@@ -375,6 +491,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `results` | `5` | 请求的 Brave Search 结果数 |
 | `summaryChars` | `900` | 浓缩答案的最大字符数；填充 `search-summary.md` 中的 `{{maxChars}}` |
 | `maxOutputTokens` | `400` | 浓缩器的最大输出 token 数 |
+| `classifierMaxOutputTokens` | `200` | 搜索分类器的最大输出 token 数。提高以适应多行回答格式（`web:`、`server:`、`who:`、`when:`）。推理型模型需要更大的上限 |
 | `cacheHours` | `24` | 缓存的搜索结果在重新搜索前服务的小时数 |
 | `contextMessages` | `50` | 为搜索分类器渲染为 `<transcript>` 的近期频道消息数 |
 | `timeoutMs` | `10000` | Brave Search 请求超时（毫秒） |
@@ -417,7 +534,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 ## `variety`
 
-多样性过程的设置（`features.variety`）。角色近期的消息会发送给 `classifier.text` 模型，由其识别重复的表达手法。当 `features.varietyPrecompute` 开启时，过程在角色发布文本后立即启动，使下一回合可以直接使用结果；回合时使用缓存的结果，或加入正在进行的过程并最多等待 `variety.timeoutMs`。结果以 `<worn>` 块的形式出现在本轮请求中。超时或过程失败不会延迟或中断本轮，本轮会在没有该块的情况下继续。全部热重载。
+多样性过程的设置（`features.variety`）。角色近期的消息会发送给 `classifier.text` 模型，由其识别重复的表达手法。当 `features.varietyPrecompute` 开启时，过程在角色发布文本后立即启动，使下一回合可以直接使用结果；回合时使用缓存的结果，或加入正在进行的过程并最多等待 `variety.timeoutMs`。结果以 `<worn>` 块的形式出现在本轮请求中。超时或过程失败不会延迟或中断本轮，本轮会在没有该块的情况下继续。第二个更长时间窗口的过程（`variety.longLines`）至多每 `variety.longEveryHours` 小时运行一次，读取角色在所有频道中的消息环，使用 `prompts/variety-long.md` 在 `variety.longModel` 模型上运行（null = `classifier.text` 模型）。其手法列表存储为服务器记忆中的 `wornLong`，在下次长过程前一直有效；回合的 `<worn>` 块先放长过程的手法，然后是短过程的，去重后最多 `variety.maxPatterns` + `variety.longMaxPatterns` 个。全部热重载。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
@@ -431,6 +548,11 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `timeoutMs` | `8000` | 回合等待过程结果的时间（毫秒）。超过此等待的过程继续运行至 `requestTimeoutMs`；迟到的结果会保存并在下一回合使用。Mentor 沙盒将此值用作请求超时 |
 | `requestTimeoutMs` | `30000` | 多样性模型调用的请求超时（毫秒）。过程在此时间截止；`variety.timeoutMs` 仅为回合的等待时间 |
 | `history` | `20` | `/nep variety` 显示的历史过程环的容量 |
+| `longLines` | `300` | 长过程从环中读取的角色消息数，跨所有频道无时间限制。`0` 关闭长过程 |
+| `longEveryHours` | `6` | 两次长过程之间的小时数；失败也计入，避免每次发帖后重试 |
+| `longMinLines` | `60` | 环中消息少于此数时跳过长过程 |
+| `longMaxPatterns` | `3` | 长过程最多可识别的手法数 |
+| `longModel` | `null` | 长过程使用的模型。`null` 使用 `classifier.text` 模型 |
 
 ## `private`
 
@@ -474,6 +596,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `anchor.contextMessages` | `30` | 解析 moment 时从频道获取的上下文消息数，截止到触发消息 |
 | `anchor.samples` | `5` | 运行和 `/nep mentor check` 中每个真实 moment 的角色回答数 |
 | `anchor.hideLaterMemory` | `true` | 重放真实 moment 时，隐藏在触发消息时间点或之后写入的记忆（事件、态度变化、详情、兴趣、别名、学到的内容、知识库条目）。设为 `false` 则使用当前全部记忆重放 |
+| `anchor.ledgerSize` | `300` | 发布账本（`state.json` `postLedger`）保留的条目数。账本将每条已发布的消息映射到其回合，以便 mentor 在解析真实 moment 时找到触发消息。仅在 `features.mentor` 开启时写入。`0` 不保留 |
 | `feedbackExamples` | `10` | 在每次评分请求中包含的最新所有者修正（`/nep mentor wrong`）数 |
 
 `llm.maxRequestTokens`（每次请求 50k）适用于 mentor 发出或引起的每个请求，包括沙盒回答。每次 mentor 请求前，预算检查计入提示加上回答可能的最大成本（`mentor.maxOutputTokens` 乘以 `mentor.outputTokenWeight`），因此当可能的输出不适合剩余预算时请求被拒绝。预算耗尽时运行停止并报告已有结果。运行期间 `features.mentor` 或 `mentor.model` 被关闭时运行也会停止，参考窗口内参考频道中没有人的消息时同样停止。
@@ -514,7 +637,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 ### 文本分类器（`classifier.text`）
 
-能可靠回答 "yes" 或 "no" 的最便宜的文本模型。运行地址分类器、重看分类器、搜索分类器，并浓缩链接阅读和搜索结果。默认：`anthropic/claude-sonnet-4.6`。
+能可靠回答 "yes" 或 "no" 的最便宜的文本模型。运行地址分类器（`features.followUp`）、搜索分类器、链接阅读器、搜索浓缩器和 recall 摘要（`features.webLookup`、`features.recall`）、重看分类器（`features.videoRewatch`）、房间分类器（`spontaneous.roomQuestionChance`）、频道路由分类器（`features.channelRoute`）和多样性过程（`features.variety`）。默认：`anthropic/claude-sonnet-4.6`。
 
 ### 图片（`classifier.media`）
 

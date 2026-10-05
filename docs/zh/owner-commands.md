@@ -6,7 +6,7 @@
 
 | 命令 | 说明 |
 |---|---|
-| `/nep status` | 模型、校准、配额（包括图片计数和图像模型）、每服务器记忆状态、多样性过程（开关、手法数和时间）、私聊开关和私有文件数 |
+| `/nep status` | 模型、校准、配额（今日午夜后的 LLM 请求数、图片计数和图像模型、GIF 观看数、已刷新画像数）、每服务器记忆状态（档案、缓冲区、下次自发）、语音队列大小和今日语音请求数（两阶段开启时）、多样性过程（开关、手法数和时间）、私聊开关和私有文件数 |
 | `/nep reload` | 立即重新加载配置和提示 |
 | `/nep ping [role]` | 向一个或所有模型角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）发送最小请求，遵循每个角色的 `llm.providerByModel` 路由，并报告模型、延迟、provider、token 或错误；`classifier.video` 之后报告 `youtube: API key — {status}`（如 `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）；`classifier.text` 之后报告 `web: API key — {status}`（`ok`、`missing` 或 `off`）。`role:image` 检查 `image.model` 是否在 provider 的公开模型列表中且支持图片输出（一次免费 GET，不进行生成）；检查通过不代表生成一定成功。不指定 role 时 image 检查排在最后。不计入 `llm.maxRequestsPerDay`，在暂停或预热期间均可使用 |
 | `/nep pause` | 停止所有活动，将记忆刷入磁盘并卸载；进行中的 mentor 运行会被停止，其报告在刷盘前发布。暂停期间可安全编辑 `data/` |
@@ -27,10 +27,11 @@
 | `/nep memory show <user> [section] [limit] [order]` | 不指定 section：紧凑摘要。可选 section：`character`、`style`、`relationship`、`affinity`、`aliases`、`interests`、`details`、`episodes`、`raw`（存储的 JSON）。列表 section 接受 `limit` 1..100（默认 25）和 `order`：`rank`（默认，在可见性截止处有分隔线）或 `recent`。存储的成员引用解析为当前名称，`raw` 除外 |
 | `/nep memory channel [channel]` | 指定频道：完整的存储笔记（用途、话题、氛围、消息数、活跃度、最活跃作者）。不指定：角色已知的所有频道表格，按最后消息排序 |
 | `/nep memory server` | 服务器级笔记：人们如何交流、对话如何开始、内部梗、自述事实，以及档案、频道和世界书条目的计数 |
-| `/nep memory refresh <user>` | 强制刷新成员画像 |
+| `/nep memory recent` | 显示服务器的实时近期记事行：当前 `memory.recentHours` 窗口内的记事，从新到旧，附带 id、时间、频道和权重 |
+| `/nep memory refresh <user>` | 强制刷新成员画像。token 限制下调整采样量。计入 `memory.portraitRefreshPerDay`。当该成员有排队的角色文本语音条目（`voice-pending`）时，回复会说明并拒绝，除非强制刷新 |
 | `/nep memory forget <user>` | 删除存储的档案、私有记忆和排队的语音条目（包括该成员教授的课程）。等待正在运行的分析器批次完成后再执行 |
 | `/nep memory affinity <user> [score] [reason]` | 查看或设置态度（-100..100） |
-| `/nep memory wipe <confirm>` | 清除该服务器的所有分析器记忆；输入准确的服务器名称以确认。删除项：成员档案及其私有记忆、服务器习惯（模式、开场白、内部梗）、所学条目、语音队列、表情排名、多样性历史、频道地图、分析器世界书、预热进度。保留项：所有者世界书条目、媒体描述缓存、GIF 库、token 校准、每日计数器、自发时间表。等待正在运行的分析器批次完成后再执行 |
+| `/nep memory wipe <confirm>` | 清除该服务器的所有分析器记忆；输入准确的服务器名称以确认。删除项：成员档案及其私有记忆、服务器习惯（模式、开场白、内部梗）、所学条目、语音队列、近期记事、表情排名、多样性历史、频道地图、分析器世界书、预热进度。保留项：所有者世界书条目、媒体描述缓存、GIF 库、token 校准、每日计数器、自发时间表。等待正在运行的分析器批次完成后再执行 |
 | `/nep private show <user>` | 显示成员的私有记忆：关系、兴趣、细节、回忆、私有和有效好感度、今日回复数。无私有层则为普通回答。仅限所有者；不可授权 |
 | `/nep private forget <user>` | 仅删除成员的私有记忆；公共档案保留。等待正在运行的分析器批次完成后再执行。仅限所有者；不可授权 |
 | `/nep private purge <user>` | 删除机器人在与成员的私信对话中发送的消息（扫描最多 `private.purgeMaxMessages` 条），然后删除该成员的私有记忆。成员自己的消息保留。暂停时拒绝。仅限所有者；不可授权 |
@@ -64,7 +65,7 @@
 | `/nep mentor show <id>` | 上次运行的报告：场景、回答、分数、评论、以及诊断（如有） |
 | `/nep mentor wrong <id> <reason>` | 告知 mentor 对该案例判断有误以及原因；作为反例保存供未来评分 |
 | `/nep mentor status` | 模型、是否启用、今日 token 使用量/上限、各状态的案例数、进行中的运行（停止待处理时显示 `, stopping`），以及最近完成的运行（`last:`）：案例、结果、overall 中位数、已评分回答数、token 数和完成时间 |
-| `/nep variety` | 多样性过程：最新列表含示例，然后是从新到旧的历史过程。只读，可通过权限授予 |
+| `/nep variety` | 多样性过程：最新短列表含示例，长过程的列表含其行数，然后是从新到旧的历史过程。只读，可通过权限授予 |
 | `/nep access grant <command> [role] [user]` | 将命令、命令组或 `*` 开放给所有人（默认）、某个身份组或某个用户。`private.*`、`mentor.*` 和 `access.*` 被排除；见上文 |
 | `/nep access revoke <command> [role] [user]` | 从所有人（默认）、某个身份组或某个用户撤销授权 |
 | `/nep access list` | 列出所有当前访问授权 |

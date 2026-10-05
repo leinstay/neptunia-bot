@@ -27,7 +27,7 @@
 | `forced.md` | 否 | 强制回合（`/nep interject`、`/nep initiate`）时追加在模式提示之后。覆盖默认的 `<skip/>` 选项 | `{{name}}` |
 | `memory.md` | 是 | 角色外提示，用于流分析器（单阶段模式和私有批次）：从实时批次中对记忆进行针对性编辑 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
 | `memory-decide.md` | 否 | 两阶段分析器的阶段 A（`features.memoryTwoStage`）：对变更的中性判定。与 `memory.md` 相同的输入块。返回 JSON。文件缺失时回退到单阶段模式 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
-| `memory-voice.md` | 否 | 两阶段分析器的阶段 B：角色用自己的声音撰写排队的条目。返回 JSON | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
+| `memory-voice.md` | 否 | 两阶段分析器的阶段 B：角色用自己的声音撰写排队的条目。返回 JSON。`features.memoryTwoStage` 开启时必需 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
 | `portrait.md` | 否 | 两阶段画像刷新的阶段 A。详情见后续文档迭代 | `{{name}}` `{{fieldChars}}` |
 | `profile.md` | 是 | 预热 / 画像刷新：从消息样本生成一个成员的档案 | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
 | `channel.md` | 是 | 预热：从消息样本生成频道笔记 | `{{fieldChars}}` |
@@ -39,9 +39,13 @@
 | `rewatch-answer.md` | 是 | 角色外提示，用于重看回答：视频模型再次观看片段并回答一个问题。语言和限制规则与 `describe-video.md` 相同。不接收角色卡 | `{{question}}` `{{maxChars}}` |
 | `address.md` | 是 | 分类器：未标记的消息是否在对角色说话、在谈论角色还是两者都不是。输出为一个词：`yes`、`overheard` 或 `no` | `{{name}}` |
 | `overheard.md` | 否 | 任务：消息在谈论角色，而不是在对角色说话。触发类型为 `overheard` 且文件存在且非空时，代替模式提示使用；文件缺失或为空时回退到模式提示（降级） | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
-| `lookup.md` | 否 | 分类器：角色是否需要搜索网络来回答这条消息（`features.webLookup`）。接收一段短对话记录和一个 `<candidate>` 块。输出为一行：一个搜索查询（纯文字，最多 12 个词）或 `none` | `{{name}}` |
-| `read-link.md` | 否 | 角色外提示，用于链接阅读器（`features.webLookup`，`web.links.enabled`）：将获取的页面浓缩为一个段落。接收页面标题和正文。不接收角色卡 | `{{maxChars}}` |
-| `search-summary.md` | 否 | 角色外提示，用于搜索浓缩器（`features.webLookup`，`web.search.enabled`）：将编号的搜索结果浓缩为带内联来源的笔记。不接收角色卡 | `{{query}}` `{{maxChars}}` |
+| `lookup.md` | 否 | 分类器：角色是否需要查询某些内容（`features.webLookup`、`features.recall`）。接收一段短对话记录和一个 `<candidate>` 块。输出为 `none`，或最多四行标注行：`web:` 网络查询，`server:` 在服务器消息中搜索的词形，`who:` 找人的名称词形，`when:` 日期范围。单行无标注仍被读取为网络查询 | `{{name}}` `{{today}}` |
+| `recall-summary.md` | 否 | 角色外提示，用于 recall 摘要（`features.recall`）：读取服务器搜索找到的旧聊天片段并回答问题，可选择指出一段供角色逐字看到的原文。不接收角色卡 | `{{name}}` `{{answerChars}}` |
+| `room.md` | 否 | 分类器：这条消息是面向所有人还是面向特定人（`spontaneous.roomQuestionChance`）。接收一段短对话记录、作者的别名和一个 `<candidate>` 块。输出为一个词：`yes` 或 `no` | `{{name}}` |
+| `route-channel.md` | 否 | 分类器：回答这条消息是否需要角色看另一个频道（`features.channelRoute`）。接收一段短对话记录、一个 `<channels>` 列表和一个 `<candidate>` 块。输出为一行：列表中的一个编号或 `none` | `{{name}}` |
+| `elsewhere.md` | 否 | 任务：角色读了一个无法发言的频道，可以在主频道评论（`features.elsewhere`）。用作 noticed 回合的任务文本。`<skip/>` 是正常结果 | `{{name}}` `{{channel}}` `{{destination}}` |
+| `read-link.md` | 否 | 角色外提示，用于链接阅读器（`features.webLookup`，`web.links.enabled`）：将获取的页面浓缩为一个段落。接收页面标题和正文。不接收角色卡 | `{{today}}` `{{maxChars}}` |
+| `search-summary.md` | 否 | 角色外提示，用于搜索浓缩器（`features.webLookup`，`web.search.enabled`）：将编号的搜索结果浓缩为带内联来源的笔记。不接收角色卡 | `{{today}}` `{{query}}` `{{maxChars}}` |
 | `private.md` | 否 | 追加在模式提示（`reply.md`）之后、`forced.md` 之前，仅在 DM 中使用（`features.privateMessages`）。这是一段私聊：此处所说的一切留在此处；角色保留其公共知识。文件不存在则不追加任何内容 | `{{name}}` `{{author}}` |
 | `draw.md` | 是 | 绘画子进程的角色外提示（`features.imageGeneration`）：根据场景描述生成一张图片。仅接收外貌和请求，不接收角色卡 | `{{name}}` `{{appearance}}` `{{request}}` |
 | `appearance.md` | 否 | 角色的视觉外貌，在 `self="yes"` 时插入 `draw.md`。一段话，无性格，无背景故事 | `{{name}}` |
@@ -50,16 +54,18 @@
 | `mentor-signs.md` | 否 | Mentor：已知的模型文本习惯，作为 `<signs>` 块在每次 mentor 请求中发送（`features.mentor`）。文件缺失或为空时省略 | `{{name}}` |
 | `mentor-diagnose.md` | 否 | Mentor：评分后解释弱回答，指出角色上下文中的具体文本（`features.mentor`）。结果为未验证的假设，存储为运行中的 `diagnosis`。`mentor.diagnose` 为 false 或文件缺失时省略 | `{{name}}` |
 | `variety.md` | 否 | `classifier.text` 请求：识别角色近期消息中重复的表达手法（`features.variety`）。不接收角色卡 | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
+| `variety-long.md` | 否 | 长多样性过程：在全部消息环中识别手法（`features.variety`、`variety.longLines`）。与 `variety.md` 相同的占位符、`<lines>` 块和回答格式。使用 `variety.longModel`（null = `classifier.text`）。不接收角色卡。文件不存在则无长过程 | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
 
 `{{name}}` 机器人的显示名称 · `{{author}}` 呼叫者的显示名称 · `{{trigger}}` `labels.triggers.*` 之一 ·
 `{{target}}` 呼叫消息的索引（`#87`）。
+`{{today}}` 在 `lookup.md` 中为 `bot.timezone` 中的日期；在描述器（`describe.md`、`describe-video.md`、`describe-gif.md`）和 `search-summary.md` 中为 UTC 日期。
 系统消息 = `system-prompt` + `character-card` + `rules` + `format`。分析器则单独使用 `memory.md`。
 在强制回合（`/nep interject`、`/nep initiate`）中，如果 `forced.md` 存在，则追加在模式提示之后。
 在 `overheard` 回合中，`overheard.md` 替代模式提示（它是任务文本本身，而非追加）。当 `overheard.md` 缺失或为空时，使用模式提示代替（降级：模式提示将消息描述为对角色说话，与实际不符）。
 在私聊中，`private.md` 追加在模式提示之后（`forced.md` 之前），使用相同的 `{{name}}` 和 `{{author}}` 占位符。
 分析器和预热的 `profile.md`、`server.md` 在用户消息中以 `<character>` 块接收角色卡和 `rules.md`。
-`channel.md`、`describe.md`、`describe-video.md`、`describe-gif.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md` 和 `variety.md` 不接收角色卡。
+`channel.md`、`describe.md`、`describe-video.md`、`describe-gif.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md`、`recall-summary.md`、`room.md`、`route-channel.md`、`elsewhere.md`、`variety.md` 和 `variety-long.md` 不接收角色卡。
 
 `{{guildFieldChars}}` 等于 `fieldChars * 2`，是代码对服务器级规律和开场白进行截断的上限。
 `{{maxEpisodes}}` 是每人保留的回忆总数上限。两者均从配置填充，但默认提示未使用；自定义的 `memory.md`
@@ -73,21 +79,26 @@
 |---|---|
 | `<now>` | 日期、星期、`config.bot.timezone` 中的时间，使用 `labels.locale` 格式化 |
 | `<senses>` | 角色此刻能感知和不能感知的内容，根据实时配置生成：哪些图片由角色自己看到，哪些通过辅助描述获得，对什么视而不见、听而不闻。使角色不会假装看过视频，并能用自己的语气开玩笑 |
+| `<emoji>` | 角色可以使用的自定义表情（`features.customEmoji`）：最多 `context.customEmoji.max` 条，按成员使用率排名。每条包含 `:name:` 和辅助已缓存的说明 |
+| `<gifs>` | 角色可以发送的 GIF（`features.gifs`）：最多 `gifs.max`（默认 40）条，按近期加权使用排名。每条包含 handle（`g1`、`g2`、…）和辅助已缓存的说明，在词边界截断至 `gifs.listChars`（默认 70；`0` = 完整），以便更多条目适合预算 |
 | `<about_chat>` | 人们在这里如何交谈，如何发起和插入对话，内部梗，人们教给角色的东西 |
 | `<server>` | 当前频道的完整信息（Discord 分类和话题、用途、人们写什么、氛围、活跃度、最后一条消息、最活跃作者；以 `labels.server.currentMark` 标记），加上仅限本轮向 `<other_channels>` 提供了消息的相邻频道；不包含其他频道 |
 | `<lore>` | 关键词出现在近期消息中的服务器世界书条目（加上标记为 always 的条目）：事件、常驻角色、长期故事。如同世界书：可存在数百个，仅显示相关的少数 |
 | `<self_facts>` | 角色声称过的关于自身的事实 |
+| `<recent>` | 服务器最近 `memory.recentHours`（默认 72）小时内发生的事情：分析器写入的近期记事（短事件）和成员的窗口内回忆（按引用显示）。记事仅来自本轮自身的频道或此处所有人都能阅读的频道；私聊中仅来自所有服务器成员都能阅读的频道，不含回忆。本轮提及的人的条目排在前面；已在 `<people>` 中渲染的回忆不再出现，每人最多 2 条。从最旧到最新。标题无条目则不渲染。开关 `features.recent`（缺失 = 开）；上限 `context.caps.recent`（默认 1200） |
 | `<people>` | 成员档案；呼叫者排首位，以 `labels.profile.interlocutorMark` 标记（`overheard` 回合中省略：作者在谈论角色而非对角色说话）；每个档案包含角色的态度，呼叫者还包含**回忆**：角色记住的关于两人之间的时刻，附带日期和简短引用 |
 | `<other_channels>` | 每个相邻频道最多 `context.neighborMessages` 条消息，不超过 `context.neighborMaxAgeMinutes` 的时效 |
-| `<worn>` | 角色在近期消息中过度使用的手法（`features.variety`）：`labels.variety.intro`，然后每个手法一行 `- <shape> ("<example>", ...)`。过程未执行、未发现或开关关闭时省略 |
-| `<lookup>` | 角色本轮在线查询的内容（`features.webLookup`）：查询词、浓缩的答案和来源站点，或"未找到"行。仅在搜索分类器触发且搜索完成后出现 |
+| `<worn>` | 角色在近期消息中过度使用的手法（`features.variety`）：`labels.variety.intro`，然后每个手法一行 `- <shape> ("<example>", ...)`。长过程的手法（`wornLong`，来自 `variety-long.md`）在前，然后是短过程的，去重后最多 `variety.maxPatterns` + `variety.longMaxPatterns` 个。两者都无结果或开关关闭时省略 |
+| `<lookup>` | 角色本轮查询的内容。网络搜索（`features.webLookup`）携带 `labels.lookup.webHeader`、浓缩的答案、`labels.lookup.sources`，未找到时为 `labels.lookup.none`。服务器搜索（`features.recall`）携带 `labels.lookup.serverHeader`、摘要笔记，摘要指出一段时还有逐字原文。两者都运行时 `labels.lookup.bothNote` 位于两部分之间。`labels.lookup.stretch` 行引入一段逐字原文（`{date}` `{channel}`）。仅在搜索分类器触发且至少一项搜索完成后出现 |
 | `<chat>` | 当前频道最新的 `context.channelMessages` 条消息 |
 | `<tempo>` | 10 分钟 / 1 小时 / 1 天的消息计数，不同人数，沉默时长，一个判定（活跃 / 缓慢 / 沉寂） |
-| `<task>` | `reply` / `interject` / `initiate` / `overheard`（当 `overheard.md` 存在时），占位符已填充 |
+| `<task>` | `reply` / `interject` / `initiate` / `overheard`（当 `overheard.md` 存在时）/ `elsewhere`（当 `elsewhere.md` 存在时，用于 noticed 评论），占位符已填充 |
 
 预算优先级（区块从此列表的底部开始裁剪）：系统提示 + 任务 + 时钟 + 节奏 + 感知
-（永不裁剪）→ 呼叫者的档案含回忆 → 查询结果（整体保留或丢弃）→ 聊天习惯 → 自述事实 → 世界书 → 服务器 → 对话记录（最新优先）→
-其他档案 → worn（整体保留或丢弃）→ 相邻频道 → 表情符号（从底部删除条目，然后删除整个块；`context.caps.emoji`）→ GIF（同样的裁剪；`context.caps.gifs`）。
+（永不裁剪）-> 呼叫者的档案含回忆 -> 查询结果（整体保留或丢弃；可包含网络部分、服务器部分或两者）-> 聊天习惯 -> 自述事实 -> 世界书 -> 服务器 -> 对话记录（最新优先）->
+拉取的频道（`<channel_view>`，上限 `context.caps.pulled`；回答只读频道呼叫的回合中拉取块在对话记录之前而非之后）->
+近期记事（上限 `context.caps.recent`）->
+其他档案 -> worn（整体保留或丢弃）-> 相邻频道 -> 表情符号（从底部删除条目，然后删除整个块；`context.caps.emoji`）-> GIF（同样的裁剪；`context.caps.gifs`）。
 
 对话记录行中的媒体，使用可用的最具信息量的形式：附加在当前请求上的图片 →
 `transcript.imageAttached`（按图片在文本后的顺序编号）；已描述的 →
@@ -182,14 +193,20 @@ senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
-senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona it can draw
+senses.customEmoji                       shown when features.customEmoji is on and the server has at least one custom emoji; tells the persona they can use server custom emoji by writing :name:
+senses.gifs                              shown when features.gifs is on and the library is not empty; tells the persona they can post one GIF per turn by handle from the list
+senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona they can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
 senses.privateChat                       shown in a DM turn: this is a one-on-one conversation, what is said here stays between the two of them
-senses.privateAware                      shown on a server turn when features.privateMessages is on: the persona knows it has private chats and never repeats or hints at anything from them
-lookup.header                            {query}: heading of the `<lookup>` block
+senses.privateAware                      shown on a server turn when features.privateMessages is on: the persona knows they have private chats and never repeats or hints at anything from them
+lookup.header                            {query}: heading of the `<lookup>` block (web search)
 lookup.sources                           {list}: site names, comma-separated by code
 lookup.none                              shown in `<lookup>` when the search found nothing useful
+lookup.webHeader                         heading of the web part inside `<lookup>` when both web and server searches ran
+lookup.serverHeader                      heading of the server part inside `<lookup>` when both web and server searches ran
+lookup.bothNote                          shown between the web and server parts when both ran
+lookup.stretch                           {date} {channel}: introduces a verbatim stretch of old chat inside the server part
 tempo.counts                             {last10min} {lastHour} {lastDay}
 tempo.authors                            {authors}: a head count
 tempo.silenceBeforeTrigger | lastMessageAgo | sinceOwn          {duration}
@@ -223,19 +240,26 @@ server.category | topic | purpose | topics | tone               {text}
 server.activity                          {activity} = server.activityLive | activitySlow | activityDead
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
-triggers.mention | reply | name | followUp | overheard   followUp = an untagged message the address classifier judged to be for the persona; overheard = talk about the persona, not to it. Both post plain, never as a Discord reply. overheard falls back to followUp, then reply
+triggers.mention | reply | name | followUp | overheard   followUp = an untagged message the address classifier judged to be for the persona; overheard = talk about the persona, not to them. Both post plain, never as a Discord reply. overheard falls back to followUp, then reply
 triggers.private                         the trigger for a private (DM) message
 triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
 draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons; daily and userDaily are reserved but no longer reached by triggers.drawFailed — an image cap now posts limits.notice instead of a follow-up turn
 memory.privateNote                       the <private> block content in a private analyzer batch: marks the batch as a private conversation, constrains output to users for the partner's id only
 memory.privateChannel                    heading used in place of a channel name for the <new_messages> section in a private batch
 limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
+limits.paused                            posted as a plain reply when the persona is called while paused (`features.pauseNotice`). No placeholders. At most once per channel per `mention.pauseNoticeMinutes`
 warmup.ownMark                           prefixed to a member's own lines in the profile.md transcript
 warmup.contextMark                       prefixed to context lines in the profile.md transcript
 mentor.intended                          array of short strings: engine behaviours that must not cost points in the mentor's scoring
 mentor.examples                          first line inside the `<examples>` block in a situations request: introduces the real moments
 mentor.original                          first line inside the `<original>` block in a score request: introduces the persona's rejected answer
+room.focus                               {target} {author}: appended to the reply task when a room question triggers the turn
+address.author                           {name} {aliases}: the candidate author's display name and known aliases, shown to the address classifier when the member has aliases
 variety.intro                            first line of the `<worn>` block: tells the persona these devices are spent
+recent.header                            REQUIRED {hours}: the block's first line. A missing header or a missing `recent.line` means no `<recent>` block
+recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
+recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
+recent.episode                           OPTIONAL {date} {name} {what}: a moment the persona remembers with {name} on {date}; no quote, no feeling. Without it the block shows notes only
 ```
 
 ## 输出
@@ -244,13 +268,14 @@ variety.intro                            first line of the `<worn>` block: tells
 
 - `<think>…</think>` 可选，位于最前，1–4 行隐藏的思考过程；未闭合表示保持沉默。
 - `<msg>text</msg>` 一条聊天消息，连续最多 3 条；`reply="#87"` 使其成为对对话记录中某行的 Discord 回复。
-- `<react to="#87">💀</react>` 一个 unicode 表情；可单独使用，也可与 `<msg>` 一起使用。
+- `<react to="#87">💀</react>` 一个 unicode 表情或一个服务器自定义表情的 `:name:`；可单独使用，也可与 `<msg>` 一起使用。
+- `<gif reply="#87">g12</gif>` 从库中通过 handle 发布一个 GIF（内容 = `<gifs>` 列表或对话记录中的 handle，不是 URL）。每回合一个；`reply` 可选。可与 `<msg>`、`<react>`、`<draw>` 同时出现。未知 handle = 不发布。
 - `<draw self="yes" reply="#87">scene</draw>` 提交给绘画子进程的图片。每回合一个，首个非空优先，截断至 800 字符。`self="yes"` 添加角色外貌；`reply="#87"` 与 `<msg>` 用法相同。可与 `<msg>` 和 `<react>` 同时出现。
 - `<skip/>` 保持沉默。
 - `@nick` 与对话记录中完全一致时转换为真实的提及。
 
 `features.reactions: false` 移除 `<react>`，`features.multiMessage: false` 仅保留第一个 `<msg>`；
-`features.imageGeneration: false` 或无图像客户端时移除 `<draw>`；`drawFailed` 回合中 `<draw>` 也被移除。提示无需知道这些。
+`features.gifs: false` 或空库移除 `<gif>`；`features.imageGeneration: false` 或无图像客户端时移除 `<draw>`；`drawFailed` 回合中 `<draw>` 也被移除。提示无需知道这些。
 
 ## 分析器
 
@@ -259,11 +284,12 @@ variety.intro                            first line of the `<worn>` block: tells
 
 提示中的数值限制是占位符，在运行时从 `config.memory.*` 和 `relationships.maxDeltaPerUpdate` 填充。
 
-输入：`<character>` · `<existing_profiles>`（按用户 id 的 JSON，包含当前 `affinity`（分数、区间和原因），
-适用时含 `relationshipStale`，以及已存储的 `episodes`）· `<existing_lore>` ·
+输入：`<character>` · `<existing_profiles>`（按用户 id 的 JSON；每个档案为完整或简要形式。完整形式包含文本字段、态度和兴趣、细节、别名、回忆的排名前列：兴趣上限 `memory.maxInterests`，细节上限 `memory.maxDetails`，别名上限 `memory.maxAliases`，回忆上限 `memory.analyzerEpisodes`（默认 8）。简要形式仅包含 `names`、`affinity` 和 `"compact": true`。当批次过大时，消息最多的作者保留完整形式，其余为简要形式。日志字段 `profilesWhole`、`profilesCompact`、`profilesTokens`，记录在 `memory: update applied` 上）· `<existing_lore>` ·
 `<existing_guild>`（JSON：规律、开场白、内部梗、学到的条目）· `<existing_channels>`（按频道 id 的 JSON：`name`、Discord `category`、`topic`、已存储的
 `purpose`、`topics`、`tone`）· `<known_members>`（仅服务器批次，私聊批次不含；可能部分或完全缺失：本批次中未写入的已存储成员，各带其显示名和别名，使分析器能为其中一人记录别名；最多 `memory.aliasRosterSize` 条，按最近可见排列，`0` = 关闭；在预算中排在对话记录之前，非必需因此不会导致请求失败）· `<new_messages>` 按 `## #channel-name (id:123)` 分组，行格式为
 `[14:32] nick (id:123): text`，对角色说话的行以 `→ ` 开头，角色自身的行使用 `labels.self`。
+
+用户消息中的区块顺序（预算从底部开始裁剪）：每个作者的简要档案、名册（`<known_members>`）、对话记录（`<new_messages>`）、完整档案（仅为有显示行的作者提供，行最多的优先）、近期记事（`<recent_notes>`）。服务器、频道和世界书块在简要档案之前。无法容纳完整形式的档案以简要形式发送；请求永远不会因为档案而失败。
 
 输出：一个裸 JSON 对象。档案以增量方式更新：分析器返回变更内容，而非对已存储内容的重新概括，因此事实
 不会因为逐批重写而退化：
@@ -420,7 +446,7 @@ variety.intro                            first line of the `<worn>` block: tells
   被跳过。
 
 当前频道尚无存储笔记（分析器尚未处理过）时，会从对话记录中消息的 Discord 事实合成一个回退条目，使角色
-仍然知道自己在哪里。
+仍然知道自己在哪。
 
 ## 预热
 
@@ -503,12 +529,9 @@ variety.intro                            first line of the `<worn>` block: tells
 `media.video.maxPerDay`；`media.video.rewatch.maxPerDay`（默认 20）单独限制重看次数。回答按问题缓存一小时（参见
 上方视频缓存部分）。开关 `features.videoRewatch`（缺失 = 开启，需要 `videoDescriptions`）。
 
-## 搜索分类器
+## 搜索与 recall 分类器
 
-当角色被直接呼叫（回复回合，非 `overheard` 或自发回合）且以下条件全部满足时（`features.webLookup` 开启、`web.search.enabled` 不为 false、
-`lookup.md` 提示文件存在、`web.search.maxPerTurn` 至少为 1、且已配置 `BRAVE_SEARCH_API_KEY`），分类器判断触发消息
-是否需要网络搜索。它使用 `classifier.text` 模型角色。代码将 `lookup.md` 作为系统提示，用户消息包含一个短的
-`<transcript>`（与重看分类器相同，角色自身的行以 `labels.self` 标记）和一个 `<candidate>` 块：
+当角色被直接呼叫（回复回合，非 `overheard` 或自发回合）且 `lookup.md` 提示文件存在时，分类器判断触发消息是否需要网络搜索、服务器历史搜索或两者兼有。代码将 `lookup.md` 作为系统提示，使用 `classifier.text` 模型角色，用户消息包含一个短的 `<transcript>`（与重看分类器相同，角色自身的行以 `labels.self` 标记）和一个 `<candidate>` 块：
 
 ```
 <transcript>
@@ -519,23 +542,32 @@ variety.intro                            first line of the `<worn>` block: tells
 </candidate>
 ```
 
-对话记录在可用时携带描述、视频摘要和链接阅读内容。触发文本在 `context.maxMessageChars` 处截断。输出为一行：
+对话记录在可用时携带描述、视频摘要和链接阅读内容。触发文本在 `context.maxMessageChars` 处截断。输出为 `none`，或以任意顺序最多四行标注行：
 
-- 一个搜索查询（纯文字，无引号，无操作符，最多 12 个词）：当消息需要聊天之外的事实时。
-- `none`：其他所有情况。
+- `web: <搜索查询>`（纯文字，无引号，无操作符，最多 12 个词）：消息需要聊天之外的事实，或明确要求搜索网络。仅在 `features.webLookup` 开启、`web.search.enabled` 不为 false、`web.search.maxPerTurn` 至少为 1、且配置了 `BRAVE_SEARCH_API_KEY` 时触发。
+- `server: <词形>, <词形>, ...`：消息问到了这个服务器上说过或做过的不在对话记录中的事。每个词形是一个词或短语的变体形式。仅在 `features.recall` 开启时触发。
+- `who: <名称词形>, <名称词形>, ...`：问题涉及对话记录中不明显的某个人。词形帮助通过昵称、用户名或标签找到此人。
+- `when: <from> .. <to>`：问题指向一个时间（`YYYY-MM-DD` 或 `YYYY-MM-DD HH:MM`，`..` 两侧各一个；单个日期表示全天）。
 
-查询命中时，Brave Search 运行查询（`web.search.results` 个结果，默认 5），编号的结果通过 `classifier.text` 经
-`search-summary.md`（`{{query}}`、`{{maxChars}}` = `web.search.summaryChars`，默认 900）浓缩，答案渲染为
-`<chat>` 之前的 `<lookup>` 块：`labels.lookup.header` 附带查询词，浓缩文本，以及 `labels.lookup.sources` 附带
-不同的站点名称。当搜索无结果或浓缩器未找到有用内容时，显示 `labels.lookup.none`。
+单行无标注（旧格式）仍被读取为网络查询。空白或空的回答为失败调用（`reason: empty`），不是安静的 `none`。
 
-限制：每回合最多一次搜索；分类器和浓缩器各自计入 `llm.maxRequestsPerDay`；搜索本身计入 `web.maxPerDay`
-（与链接阅读共享）。结果按规范化查询缓存 `web.search.cacheHours`（默认 24）小时。开关 `features.webLookup`
-（缺失 = 关闭）。
+`web:` 命中时，Brave Search 运行查询（`web.search.results` 个结果，默认 5），编号的结果通过 `classifier.text` 经 `search-summary.md`（`{{today}}`、`{{query}}`、`{{maxChars}}` = `web.search.summaryChars`，默认 900）浓缩，网络部分渲染在 `<lookup>` 块中：`labels.lookup.header` 附带查询词，浓缩文本，以及 `labels.lookup.sources` 附带不同的站点名称。搜索无结果或浓缩器未找到有用内容时，显示 `labels.lookup.none`。
+
+`server:` 命中（可附带 `who:` 和 `when:` 行）时，引擎通过 Discord 搜索 API 搜索服务器消息历史。词形成为有序的搜索查询列表（内容词形轮转，然后作者名），仅有 `when:` 时为日期范围采样。命中项经过过滤（排除其他机器人和受众规则拒绝的频道），按频道和时间分组为聚类（`recall.clusterGapMinutes`），每个聚类获取 `recall.windowMessages` 条消息的窗口。分类器的词形和名称词形还会与已存储记忆匹配（不含私有层）：成员的回忆、世界书条目、所学内容和近期行。每个匹配的条目成为 `<memory>` 块中的一行：`kind | date | name | text`，kind 为 `episode`、`lore`、`learned`、`recent`。`when:` 日期范围排除无日期的种类（lore、learned）。最多 `recall.memoryItems`（默认 6）条，按匹配的词形数和权重排名。`<memory>` 块在 `<people>` 之后、`<found>` 之前；其条目不能被指定为 `stretch`。有记忆匹配但无聊天命中的运行仍会询问摘要。日志记录在 `recall: searched` 行的 `stats.memory` 上。
+
+摘要辅助（`recall-summary.md`，使用 `classifier.text`，块 `<people>`、`<memory>`、`<found>`、`<question>`）读取窗口、已存储记忆和问题并写出笔记。摘要可以指出最佳回答问题的一段原文（`stretch: <n>`）；如果是，该段的逐字内容（上限 `recall.stretchChars`）与笔记一起出现。摘要说 `nothing` 时，`<lookup>` 块无服务器部分。摘要失败或超时时回退到排名最高窗口的逐字原文段，不附笔记。
+
+两者都运行时，`<lookup>` 块在网络部分上方携带 `labels.lookup.webHeader`，服务器部分上方携带 `labels.lookup.serverHeader`，两者之间携带 `labels.lookup.bothNote`。
+
+`<lookup>` 块遵循与 `<other_channels>` 相同的受众规则（`context.pull.sameAudience`）：当服务器搜索窗口来自的频道并非目标所有可读者都能阅读时，该窗口被拒绝。
+
+限制：每回合最多一次网络搜索和一次服务器搜索。分类器、网络浓缩器和 recall 摘要各自计入 `llm.maxRequestsPerDay`；网络搜索计入 `web.maxPerDay`（与链接阅读共享）；recall 运行计入 `recall.maxPerDay`（存储在 `state.json` 中的 `recallDay` / `recallCount`）。网络结果按规范化查询缓存 `web.search.cacheHours`（默认 24）小时。分类器在 `features.webLookup` 或 `features.recall` 任一开启时触发。开关：`features.webLookup`（缺失 = 关闭）、`features.recall`（缺失 = 开启）。
 
 ## 多样性过程
 
 `classifier.text` 过程读取角色近期的自身消息，识别角色正在陷入的重复手法（惯用表达、结构性套路、重复的玩笑模式）。结果成为本轮请求中的 `<worn>` 块。开关 `features.variety`（缺失 = 开启）。
+
+第二个更长视野的过程至多每 `variety.longEveryHours`（默认 6）小时在角色在服务器频道发帖后运行一次，读取跨所有频道的环中最新的 `variety.longLines`（默认 300；`0` = 关闭）条消息，无时间限制。当环中有至少 `variety.longMinLines`（默认 60）条消息且 `prompts/variety-long.md` 存在时，在 `variety.longModel`（null = `classifier.text` 模型）上运行，用途标记 `variety-long`，与短过程相同的 `<lines>` 块和回答格式，最多 `variety.longMaxPatterns`（默认 3）个手法。列表存储为服务器记忆中的 `wornLong`，在下次长过程前一直有效；失败保留上一次的列表。回合的 `<worn>` 块先放长过程的手法，然后是短过程的，去重（shape 不区分大小写、合并空白后比较），最多 `variety.maxPatterns` + `variety.longMaxPatterns`。长过程不在回复前运行，不阻塞回合，不为私聊运行。日志：成功为 `variety: long`，失败为 `variety: pass failed`（`cause: 'long'`）。
 
 当 `features.varietyPrecompute` 开启（默认）时，过程在角色发布文本后立即启动，基于下次 `fetchHistory` 将返回的消息。回合查找自身消息集：缓存中有匹配结果则直接使用无需模型请求；同一消息的过程正在进行中则加入并最多等待 `variety.timeoutMs`；否则启动自己的请求。请求运行至 `variety.requestTimeoutMs`（默认 30000）：如果回合的等待 `variety.timeoutMs` 先到期，请求继续运行，迟到的结果保存给下一回合。加入的过程失败的回合不获得块，也不启动自己的请求。暂停期间或 `features.variety` 关闭时不保存任何内容。
 
@@ -672,7 +704,11 @@ Mentor 沙盒为每个场景执行一次多样性过程，计入 mentor 的 toke
 
 Mentor 模型读取渲染后的沙盒请求，因此可以读取角色记忆中关于真实用户的内容。私信和私有记忆层永远不会出现在沙盒请求中。
 
-沙盒包含与实时回合相同的自定义表情和 GIF 块，因此角色在沙盒回答中可以使用表情反应、发布 GIF 或绘画。GIF 或绘画与 `<msg>` 一样计为一个动作。
+沙盒包含与实时回合相同的自定义表情和 GIF 块，因此角色在沙盒回答中可以使用表情反应、发布 GIF 或绘画。GIF 或绘画与 `<msg>` 一样计为一个动作。沙盒还携带 elsewhere 目标和搜索感知的 `<senses>` 行，以便测试角色对这些功能的认知。
+
+### 发布账本
+
+`state.json` `postLedger` 记录角色在服务器频道发布的每条消息：消息 id、频道、模式、触发类型、触发 id、最新历史行 id 和来源频道 id。仅在 `features.mentor` 开启时（或 mentor 的 anchor 相关路径被使用时）写入。账本上限为 `mentor.anchor.ledgerSize`（默认 300）条；mentor 用它在解析真实 moment 时找到某条已发布消息属于哪个回合。mentor 自身发起的请求在使用日志中携带 `origin: mentor`。
 
 ### 运行如何结束
 
@@ -829,7 +865,7 @@ Mentor 使用四个提示文件：场景/评分一对，加上特征文件和诊
 
 结果存储在运行中的 `diagnosis` 字段，并在报告中输出。这些是供所有者审阅的假设，mentor 本身不进行任何修改。
 
-原因可以指向的层：`rules`（规则块中的一条规则）、`prompt`（引擎系统提示、格式或任务）、`card`（角色卡）、`self`（角色关于自己的笔记）、`learned`（他人教会角色的内容）、`guild`（服务器习惯或梗）、`profile`（角色对某人的记忆）、`missing`（应当存在但缺失的指令）。
+原因可以指向的层：`rules`（规则块中的一条规则）、`prompt`（引擎系统提示、格式或任务）、`card`（角色卡）、`self`（角色关于自己的笔记）、`learned`（他人教会角色的内容）、`guild`（服务器习惯或梗）、`profile`（角色对某人的记忆）、`labels`（`labels.json` 中的字符串）、`variety`（`<worn>` 块中的内容）、`lore`（世界书条目）、`channel`（频道笔记）、`recent`（`<recent>` 块中的行）、`missing`（应当存在但缺失的指令）。
 
 #### 诊断 schema
 

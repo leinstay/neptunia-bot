@@ -6,25 +6,47 @@
 
 消息经过服务器、频道和自身消息过滤。如果角色被呼叫（@提及、回复或名字触发），忽略启发式会根据基础概率进行判定，该概率会因空提及、重复标记、垃圾消息和呼叫者的关系分数而调整。判定失败时消息会被忽略；被忽略的消息仍会出现在下次回复构建的对话记录中。
 
-角色回复某人后，该频道内接下来 `mention.followUpMinutes` 分钟的未标记消息会被发送到 `classifier.text` 角色上的分类器，回答 `yes`、`overheard` 或 `no`。`yes` 延续对话；`overheard`（谈论角色而非对角色说话）在 `mention.followUpOverheard` 开启（默认）时启动使用 `prompts/overheard.md` 的独立回合，否则视为普通跟进。连续三个 `no` 判定（`mention.followUpNoStreak`）关闭窗口；`overheard` 在连续判定中视为 `yes`。后续窗口在重启后保留。`features.followUp` 可关闭此功能。
+角色回复某人后，该频道内接下来 `mention.followUpMinutes` 分钟的未标记消息会被发送到 `classifier.text` 角色上的分类器，回答 `yes`、`overheard` 或 `no`。`yes` 延续对话；`overheard`（谈论角色而非对它说话）在 `mention.followUpOverheard` 开启（默认）时启动使用 `prompts/overheard.md` 的独立回合，否则视为普通跟进。连续三个 `no` 判定（`mention.followUpNoStreak`）关闭窗口；`overheard` 在连续判定中视为 `yes`。后续窗口在重启后保留。`features.followUp` 可关闭此功能。
 
-自发回合由混沌定时器或逐消息窃听概率（`spontaneous.eavesdropChance`）触发。`spontaneous.deadAfterMinutes` 的沉默后，即使角色自己的消息是频道中的最后一条，角色也可以发起话题；但它永远不会在自己的最后一条消息上插话。角色不会在沉默超过 `spontaneous.maxChannelSilenceHours` 小时的频道中主动发言；但该频道中的直接提及仍会回复。
+自发回合由混沌定时器或逐消息窃听概率（`spontaneous.eavesdropChance`）触发。面向全体（而非面向特定人）的消息有概率（`spontaneous.roomQuestionChance`，默认 0.04）被角色接听，经分类器（`prompts/room.md`）确认后回合聚焦于该消息。`spontaneous.deadAfterMinutes` 的沉默后，即使角色自己的消息是频道中的最后一条，角色也可以发起话题；角色永远不会在自己的最后一条消息上插话。角色不会在沉默超过 `spontaneous.maxChannelSilenceHours` 小时的频道中主动发言；但该频道中的直接提及仍会回复。
 
 ### 一次一条回复
 
-角色在整个服务器范围内同一时间只写一条回复（`mention.oneAtATime`）。当 `mention.pendingSameChannel` 开启（默认 `true`，缺失键 = 开启）时，同一频道中在回合执行期间到达的直接提及（@提及或对角色消息的回复）会被挂起：每个频道保留一条，回合结束后以 `mention.switchDelayMs` 的暂停回复，忽略概率在那时判定。如果正在执行的回合已经在历史记录中处理了该提及，则不会重复回复。关闭该开关时，提及会被错过，仅出现在下次回复的对话记录中。来自其他频道的直接提及以相同方式挂起，每个频道保留一条，最多在 `mention.maxPending` 个频道中保留 `mention.pendingMinutes` 分钟；同一待处理频道中较新的提及会替换较旧的。当前回复完成后，角色在短暂停顿（`mention.switchDelayMs`）后切换频道，基于当前对话状态进行回复；通常的忽略概率仍然适用。挂起的提及在机器人暂停时不会被回复。繁忙期间到达的名字触发和窃听命中会被跳过。设置 `mention.oneAtATime: false` 后，每个频道独立处理。角色不会在缺少发送消息权限的频道中发言或做出反应，且在消耗 LLM 请求之前检查权限；此类频道仍会被读取和记忆。
+角色在整个服务器范围内同一时间只写一条回复（`mention.oneAtATime`）。当 `mention.pendingSameChannel` 开启（默认 `true`，缺失键 = 开启）时，同一频道中在回合执行期间到达的直接提及（@提及或对角色消息的回复）会被挂起：每个频道保留一条，回合结束后以 `mention.switchDelayMs` 的暂停回复，忽略概率在那时判定。如果正在执行的回合已经在历史记录中处理了该提及，则不会重复回复。关闭该开关时，提及会被错过，仅出现在下次回复的对话记录中。来自其他频道的直接提及以相同方式挂起，每个频道保留一条，最多在 `mention.maxPending` 个频道中保留 `mention.pendingMinutes` 分钟；同一待处理频道中较新的提及会替换较旧的。当前回复完成后，角色在短暂停顿（`mention.switchDelayMs`）后切换频道，基于当前对话状态进行回复；通常的忽略概率仍然适用。挂起的提及在机器人暂停时不会被回复。繁忙期间到达的名字触发和窃听命中会被跳过。设置 `mention.oneAtATime: false` 后，每个频道独立处理。角色不会在缺少发送消息权限的频道中发言；此类频道仍会被读取和记忆。当 `features.elsewhere` 开启且角色在只读频道中被呼叫（@提及、回复、名字）时，呼叫等待对话稳定（`elsewhere.settleSeconds`，上限 `elsewhere.settleMaxSeconds`），然后角色在 `memory.mainChannelIds` 中第一个可用的频道回复，附带跳转链接。等候中的较新呼叫替换旧的。等候期间消息被删除的（`gone`）或无法获取的（`fetch-failed`）呼叫会被丢弃。重启会丢失等候中的呼叫（它在环中保持未回复状态）。呼叫记录保留在每频道的环中（`elsewhere.rememberPings`，默认 20），保留 `elsewhere.pingMaxAgeDays`（默认 7）天。角色也可以主动评论自己在只读频道中读到的内容（记录为 `spontaneous: noticed`），评论发布在主频道，使用 `prompts/elsewhere.md` 作为任务。
+
+当 `features.pauseNotice` 开启时（默认如此），角色在暂停时被呼叫会收到一条简短回复（`labels.limits.paused`）。每个频道每 `mention.pauseNoticeMinutes`（默认 10）分钟最多一条。
+
+### 时机
+
+对话请求之前运行的所有任务（历史、说明、多样性过程、路由和搜索分类器）有一个截止时间：`pace.prepareMs`（默认 6 秒），搜索发起后延长到 `pace.prepareSearchMs`（默认 12 秒）。超时的辅助任务被丢弃，回合在没有其结果的情况下继续（记录为 `turn: stage late` 或 `turn: stage failed`）。完成的回答本身必须在回合开始后 `pace.dropAfterMs`（默认 60 秒）内到达；超时后回合被丢弃不发布（记录为 `turn: dropped`）。每个回合在 `turn: timings` 中记录各阶段的耗时。
+
+`llm.hedge.roles`（默认 `classifier.text`）中列出的角色的请求会被对冲：第二次尝试在第一次之后 `llm.hedge.afterMs`（默认 2.5 秒）启动，先完成的获胜。两者在 `llm.hedge.timeoutMs`（默认 8 秒）后中止。`llm.helperTimeoutMs`（默认 30 秒）分别限制路由分类器、搜索分类器和 recall 摘要。
+
+当 `pace.typingWhilePreparing` 开启（默认关闭）时，输入指示器从回答直接呼叫的回合开始显示，而非仅在完成的回答打字阶段显示。
 
 ### 请求
 
-回合收集频道对话记录和相邻频道，然后在 token 预算内构建一个 LLM 请求。各区块按优先级填充：系统提示和任务永不裁剪；然后是呼叫者的档案、网络查询结果、服务器习惯和自述事实、频道地图、世界书条目、对话记录（最新优先）、其他档案和相邻频道。
+回合收集频道对话记录和相邻频道，然后在 token 预算内构建一个 LLM 请求。各区块按优先级填充：系统提示和任务永不裁剪；然后是呼叫者的档案、查询结果（网络、服务器或两者兼有）、服务器习惯和自述事实、频道地图、世界书条目、对话记录（最新优先）、其他档案和相邻频道。
 
-模型可以看到服务器的频道地图（用途、话题、氛围、活跃度），当前频道会被标记。每个频道条目还包含代码维护的数据：消息数量、首条和末条消息、近 30 天的活跃度和最活跃的作者。预热从频道历史中填充这些数据，实时流量保持其更新。
+当 `features.channelRoute` 开启时（默认如此），分类器（`prompts/route-channel.md`）从最多 `route.maxChannels`（默认 40）个候选频道中选出对话中提及的频道，以便将其作为 `<channel_view>` 块拉入请求。这与显式频道提及（`features.channelPull`）并行：路由分类器解析间接引用（"那个频道"、"某某的频道"），而真实的 `<#id>` 提及始终直接拉取。
 
-模型使用 `<think>`（隐藏的思考过程）、`<msg>`（1–3 条聊天消息；`reply="#87"` 回复对话记录中的某一行）、`<react>`（一个 emoji 反应）或 `<skip/>`（保持沉默）来回应。解析后，按人类速度模拟输入，输出中的 `@nick` 会转换为真实的提及。
+模型可以看到服务器的频道地图（用途、话题、氛围、活跃度），当前频道会被标记。每个频道条目还包含代码维护的数据：消息数量、首条和末条消息、近 30 天的活跃度和最活跃的作者（`memory.channelWritersStored`，按 `memory.channelWritersHalfLifeDays` 衰减）。预热从频道历史中填充这些数据，实时流量保持其更新。当频道笔记在 `memory.notesStaleDays`（默认 7）天内未变更且批次中有至少 `memory.notesMinLines`（默认 20）行来自该频道时，分析器会被要求重新检查。
+
+模型使用 `<think>`（隐藏的思考过程）、`<msg>`（1 到 3 条聊天消息；`reply="#87"` 回复对话记录中的某一行）、`<react>`（一个 emoji 反应）或 `<skip/>`（保持沉默）来回应。解析后，按人类速度模拟输入，输出中的 `@nick` 会转换为真实的提及。每条消息截断至 Discord 的 2000 字符限制。发送失败的消息会被记录（`turn: send failed`）并终止该回合的发布。
+
+## 近期记事
+
+当 `features.recent` 开启时（默认如此），`<recent>` 块显示服务器最近 `memory.recentHours`（默认 72）小时内发生的事情：分析器写入的带日期短行，以及本轮提及的成员的近期回忆。一行仅来自本轮自身的频道或此处所有人都能阅读的频道；私聊中仅来自所有服务器成员都能阅读的频道，不含回忆。本轮提及的人的条目排在前面。块上限为 `context.caps.recent`（默认 1200）token。
+
+分析器每批次最多写入 `memory.maxNewRecent`（默认 3）行，每行最多 `memory.recentChars`（默认 160）字符。行存储在 `data/guilds/<id>/recent.json`（最多 `memory.maxRecentStored`，默认 150），`memory.recentHours` 后过期。`/nep memory recent` 显示实时行。
 
 ## 分析器
 
 记忆分析器在累积了足够消息时（`memory.batchMessages`、`memory.minBatchMessages`、`memory.maxBatchAgeMinutes`）作为单独的 LLM 调用运行。它接收角色卡，以角色的视角评判每个人，返回态度变化、档案更改、频道观察和服务器级笔记。
+
+当批次对 token 上限来说过大时，分析最早的可容纳行，剩余的推迟到下一批次（日志报告 `consumed`、`shown` 和 `deferred`）。安静的私聊缓冲区（`memory.privateMaxAgeMinutes`，默认 360 分钟内无新消息）即使未达到 `minBatchMessages` 也会被分析。内部梗和自述事实列表在满员时通过淘汰最过时的已有条目来为新条目腾出空间。世界书在达到 `lore.maxEntries` 时淘汰最过时的条目。
+
+失败的批次（输出截断、JSON 无法解析、超 token 上限）将批次大小减半用于下次尝试。当批次已经处于下限（20 条消息）仍然失败时，等待 15 分钟后再重试而非立即重试（日志记录 `memory: update failed ... backing off`，附带 `atFloor: true` 和 `backoffMs`）。缓冲区始终保留。
 
 ### 档案
 
@@ -51,9 +73,9 @@
 
 世界书存储跨对话的服务器级知识：事件、常驻角色、长期故事、恩怨、传统。每个条目有一个标题、一组关键词和一段简短文本（`lore.textChars`）。代码扫描最近 `lore.scanMessages` 条消息以匹配关键词，在 `<lore>` 块中最多包含 `lore.maxMatches` 个条目；标记为 `always` 的条目每次都会出现。可以存在数百个条目而几乎不增加开销，因为只有匹配的少数才会被展示。
 
-分析器会自行添加和更新世界书条目，但不会触碰所有者通过 `/nep lore` 命令添加的条目。世界书数据存储在 `data/guilds/<id>/lore.json`。
+分析器添加和更新世界书条目，但不会触碰所有者通过 `/nep lore` 命令添加的条目。世界书数据存储在 `data/guilds/<id>/lore.json`。
 
-分析器还会记录人们直接教给角色的东西 — 词语和表达、关于服务器的事实、关于行为方式的请求 — 作为服务器级的所学条目，始终出现在提示中。
+分析器还会记录人们直接教给角色的东西（词语和表达、关于服务器的事实、关于角色行为方式的请求），作为服务器级的所学条目，始终出现在提示中。
 
 ## 私有层
 
@@ -73,6 +95,7 @@
 
 | 命令 | 功能 |
 |---|---|
+| `/nep memory recent` | 显示实时近期记事行 |
 | `/nep memory show <user>` | 已存储档案的简要摘要或特定部分 |
 | `/nep memory channel` | 已存储的频道笔记和代码维护的数据 |
 | `/nep memory server` | 服务器级的习惯、内部梗、自述事实 |
