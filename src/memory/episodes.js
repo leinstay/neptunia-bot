@@ -6,6 +6,9 @@
 // docs/prompt-contract.md ("episodes" in "The analyzer") and
 // src/memory/update.js#applyMemoryUpdate, which routes the model's
 // `users.<id>.episodes` through this module via src/memory/store.js#addEpisodes.
+// Plus the display order (`sortEpisodesForDisplay`, also behind the owner's
+// view in src/admin.js) and the top-N choice for a member asked about
+// (`topEpisodes`), both used by src/behavior/prompt.js.
 
 import { clampText } from './clamp.js';
 import { utcDay } from '../time.js';
@@ -171,4 +174,21 @@ export function sortEpisodesForDisplay(episodes) {
       (a.date < b.date ? 1 : a.date > b.date ? -1 : 0) ||
       String(b.addedAt ?? '').localeCompare(String(a.addedAt ?? '')),
   );
+}
+
+/**
+ * The at most `max` episodes a member is shown by when the persona is asked
+ * about them (`context.askedAboutEpisodes`): heaviest weight first, then
+ * newest, as `sortEpisodesForDisplay` orders them. An upper bound, not what a
+ * request shows: under a tight `<people>` budget src/behavior/prompt.js keeps
+ * only a prefix of this list (the lightest dropped first), possibly none, so
+ * a block that must not repeat the shown ones has to take them from what was
+ * rendered, not from this list. Pure, does not mutate `episodes`.
+ * @param {object[]|undefined} episodes
+ * @param {number} max  Not a positive integer (0 = off) -> none.
+ * @returns {object[]}
+ */
+export function topEpisodes(episodes, max) {
+  if (!Array.isArray(episodes) || !Number.isInteger(max) || max < 1) return [];
+  return sortEpisodesForDisplay(episodes).slice(0, max);
 }

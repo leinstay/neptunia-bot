@@ -1,8 +1,9 @@
 // Tests for src/memory/episodes.js: mergeEpisodes (validation, deduplication,
-// eviction) and sortEpisodesForDisplay (rendering order). Pure, no I/O.
+// eviction), sortEpisodesForDisplay (rendering order) and topEpisodes (the top N
+// shown for a member asked about). Pure, no I/O.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeEpisodes, sortEpisodesForDisplay } from '../src/memory/episodes.js';
+import { mergeEpisodes, sortEpisodesForDisplay, topEpisodes } from '../src/memory/episodes.js';
 
 const NOW = Date.UTC(2026, 8, 21, 12, 0, 0); // 2026-09-21
 
@@ -345,5 +346,36 @@ test('sortEpisodesForDisplay: does not mutate its input', () => {
   ]);
   const copy = episodes.map((e) => ({ ...e }));
   sortEpisodesForDisplay(episodes);
+  assert.deepEqual(episodes, copy);
+});
+
+// ---- topEpisodes ----------------------------------------------------------------
+
+test('episodes: topEpisodes keeps the heaviest then newest', () => {
+  const episodes = stored([
+    ['2026-01-01', 'ελαφρύ παλιό', 1, 'a'],
+    ['2026-02-01', 'βαρύ παλιό', 4, 'b'],
+    ['2026-03-01', 'βαρύ νέο', 4, 'c'],
+    ['2026-03-02', 'μεσαίο', 2, 'd'],
+    ['2026-03-03', 'ελαφρύ νέο', 1, 'e'],
+  ]);
+  assert.deepEqual(topEpisodes(episodes, 3).map((e) => e.what), ['βαρύ νέο', 'βαρύ παλιό', 'μεσαίο']);
+  assert.deepEqual(topEpisodes(episodes, 10).map((e) => e.what), sortEpisodesForDisplay(episodes).map((e) => e.what), 'fewer than max -> all of them');
+});
+
+test('episodes: topEpisodes gives none for a max that is not a positive integer, or no list', () => {
+  const episodes = stored([['2026-01-01', 'στιγμή', 3, 'a']]);
+  for (const max of [0, -1, 1.5, '3', undefined, null, Infinity]) assert.deepEqual(topEpisodes(episodes, max), [], String(max));
+  assert.deepEqual(topEpisodes(undefined, 3), []);
+  assert.deepEqual(topEpisodes('not a list', 3), []);
+});
+
+test('episodes: topEpisodes does not mutate its input', () => {
+  const episodes = stored([
+    ['2026-01-01', 'a', 1, 'x'],
+    ['2026-01-02', 'b', 5, 'y'],
+  ]);
+  const copy = episodes.map((e) => ({ ...e }));
+  topEpisodes(episodes, 1);
   assert.deepEqual(episodes, copy);
 });

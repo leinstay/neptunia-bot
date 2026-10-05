@@ -800,10 +800,57 @@ test('renderProfile: mark false keeps the full interlocutor rendering, episodes 
   assert.equal(renderProfile(profile, labels, { ...options, mark: true }).split('\n')[0], marked[0], 'true is the default');
 });
 
-test('renderProfile: episodes are never rendered for a non-interlocutor profile', () => {
+test('renderProfile: episodes are never rendered for a non-interlocutor profile without episodes.max', () => {
   const profile = { id: 'p1', names: ['Carl'], character: 'calm', episodes: [episodeFixture()] };
   const text = renderProfile(profile, labels, { relationships: true, interlocutor: false, episodes: { enabled: true } });
   assert.ok(!text.includes(labels.profile.episodes));
+});
+
+test('renderProfile: episodes.max renders the top episodes of a non-interlocutor right after the attitude line', () => {
+  const profile = {
+    id: 'p1',
+    names: ['Carl'],
+    character: 'calm',
+    affinity: { score: 10, reason: 'nice', history: [] },
+    episodes: [
+      episodeFixture({ what: 'léger', weight: 1, quote: '' }),
+      episodeFixture({ what: 'lourd', weight: 5, quote: '' }),
+      episodeFixture({ what: 'moyen', weight: 3, quote: '' }),
+    ],
+  };
+  const lines = renderProfile(profile, labels, { relationships: true, episodes: { enabled: true, max: 2 } }).split('\n');
+  assert.deepEqual(lines, [
+    '## Carl',
+    'attitude: 10 (warm) — nice',
+    labels.profile.episodes,
+    fill(labels.profile.episodeNoQuote, { date: '2026-01-01', what: 'lourd', feeling: 'touched' }),
+    fill(labels.profile.episodeNoQuote, { date: '2026-01-01', what: 'moyen', feeling: 'touched' }),
+    'character: calm',
+  ]);
+  for (const max of [0, -2, 1.5, undefined]) {
+    const text = renderProfile(profile, labels, { relationships: true, episodes: { enabled: true, max } });
+    assert.ok(!text.includes(labels.profile.episodes), String(max));
+  }
+  assert.ok(!renderProfile(profile, labels, { relationships: true, episodes: { enabled: false, max: 2 } }).includes('lourd'));
+  assert.ok(!renderProfile(profile, labels, { compact: true, relationships: true, episodes: { enabled: true, max: 2 } }).includes('lourd'));
+});
+
+test('renderProfile: a non-interlocutor capped below one episode shows no episodes heading', () => {
+  const cost = (text) => estimateTokens(text) + 2;
+  const profile = { id: 'p1', names: ['Carl'], character: 'calm', episodes: [episodeFixture({ what: 'lourd', weight: 5 }), episodeFixture({ what: 'léger', weight: 1 })] };
+  const bare = renderProfile(profile, labels, {});
+  const headingOnly = cost(bare) + cost(labels.profile.episodes);
+  assert.equal(renderProfile(profile, labels, { episodes: { enabled: true, max: 2, cap: headingOnly, cost } }), bare);
+  const one = renderProfile(profile, labels, { episodes: { enabled: true, max: 2, cap: headingOnly + 1000, cost } });
+  assert.ok(one.includes(labels.profile.episodes) && one.includes('lourd'));
+  // Nothing else learned and not one episode fits: no profile at all.
+  assert.equal(renderProfile({ ...profile, character: undefined }, labels, { episodes: { enabled: true, max: 2, cap: headingOnly, cost } }), '');
+});
+
+test('renderProfile: episodes.max never caps the interlocutor', () => {
+  const profile = { id: 'p1', names: ['Carl'], episodes: [episodeFixture({ what: 'un' }), episodeFixture({ what: 'deux' }), episodeFixture({ what: 'trois' })] };
+  const text = renderProfile(profile, labels, { interlocutor: true, episodes: { enabled: true, max: 1 } });
+  for (const what of ['un', 'deux', 'trois']) assert.ok(text.includes(`: ${what} —`), what);
 });
 
 test('renderProfile: episodes are never rendered when episodes.enabled is false/absent', () => {
@@ -1739,6 +1786,288 @@ test('buildRequest: under a tight caps.people, the member asked about survives w
   const user = request.messages[1].content;
   assert.ok(user.includes('## Wanda'), 'the member asked about must survive the tight cap');
   assert.ok(request.stats.people.dropped > 0, 'at least one active participant is trimmed under the tight cap');
+});
+
+// --- <people>: episodes of the members asked about (context.askedAboutEpisodes) -----
+
+/** Five moments of one member: heaviest-then-newest order is ε5, ε4, ε3, ε2, ε1. */
+function askedEpisodes() {
+  return [
+    episodeFixture({ what: 'ε1 στιγμή', weight: 1, date: '2026-09-01', quote: '' }),
+    episodeFixture({ what: 'ε4 στιγμή', weight: 4, date: '2026-08-01', quote: '' }),
+    episodeFixture({ what: 'ε5 στιγμή', weight: 4, date: '2026-09-10', quote: 'ποτέ ξανά' }),
+    episodeFixture({ what: 'ε2 στιγμή', weight: 2, date: '2026-09-15', quote: '' }),
+    episodeFixture({ what: 'ε3 στιγμή', weight: 3, date: '2026-07-01', quote: '' }),
+  ];
+}
+
+/** A turn whose trigger asks about Zoé, a silent member with five episodes; `people` is the `<people>` body. */
+function askedAboutScene({ context = {}, zoe = {}, ...overrides } = {}) {
+  const trigger = makeMessage(1, NOW - MIN, { authorId: 'u1', authorName: 'Ana', content: 'τι έκανε η Zoé χθες;' });
+  const input = baseInput({
+    config: fakeConfig({ context }),
+    history: [trigger],
+    trigger,
+    triggerKind: 'mention',
+    candidateProfiles: [{ id: 'z1', names: ['Zoé'], character: 'rêveuse', episodes: askedEpisodes(), ...zoe }],
+    ...overrides,
+  });
+  const request = buildRequest(input);
+  return { request, people: bodyOf(userText(request), 'people') ?? '' };
+}
+
+test('people: an asked-about member renders up to askedAboutEpisodes episodes, heaviest first', () => {
+  const { people } = askedAboutScene();
+  const lines = people.split('\n');
+  assert.equal(lines[0], '## Zoé');
+  assert.equal(lines[1], labels.profile.episodes, 'right after the heading, where the interlocutor has them');
+  assert.equal(lines[2], fill(labels.profile.episode, { date: '2026-09-10', what: 'ε5 στιγμή', quote: 'ποτέ ξανά', feeling: 'touched' }));
+  assert.equal(lines[3], fill(labels.profile.episodeNoQuote, { date: '2026-08-01', what: 'ε4 στιγμή', feeling: 'touched' }));
+  assert.equal(lines[4], fill(labels.profile.episodeNoQuote, { date: '2026-07-01', what: 'ε3 στιγμή', feeling: 'touched' }));
+  assert.equal(lines[5], 'character: rêveuse');
+  assert.ok(!people.includes('ε2') && !people.includes('ε1'), 'the code default is 3, as in config.json');
+
+  const two = askedAboutScene({ context: { askedAboutEpisodes: 2 } }).people;
+  assert.ok(two.includes('ε5') && two.includes('ε4') && !two.includes('ε3'));
+});
+
+test('people: askedAboutEpisodes 0 renders none', () => {
+  for (const askedAboutEpisodes of [0, -1, 1.5, '3']) {
+    const { people } = askedAboutScene({ context: { askedAboutEpisodes } });
+    assert.ok(people.includes('## Zoé') && people.includes('character: rêveuse'), 'the profile itself stays');
+    assert.ok(!people.includes(labels.profile.episodes) && !people.includes('στιγμή'), String(askedAboutEpisodes));
+  }
+  const off = askedAboutScene({ config: fakeConfig({ features: { episodes: false } }) }).people;
+  assert.ok(off.includes('## Zoé') && !off.includes('στιγμή'), 'features.episodes false renders none either');
+});
+
+test('people: a compact participant still renders no episodes', () => {
+  const carl = { id: 'p2', names: ['Carl'], character: 'calm', episodes: askedEpisodes() };
+  const history = [makeMessage(2, NOW - 2 * MIN, { authorId: 'p2', authorName: 'Carl', content: 'καλημέρα' })];
+  const { people } = askedAboutScene({ history: [...history, makeMessage(1, NOW - MIN, { authorId: 'u1', content: 'τι νέα;' })], trigger: null, otherProfiles: [carl] });
+  assert.ok(people.startsWith('## Carl'), people);
+  assert.ok(!people.includes(labels.profile.episodes) && !people.includes('στιγμή'));
+});
+
+test('people: the interlocutor still renders every episode within caps.interlocutor', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorId: 'u1', authorName: 'Ana', content: 'γεια' });
+  const interlocutor = { id: 'u1', names: ['Ana'], character: 'vive', episodes: askedEpisodes() };
+  const own = (context) =>
+    bodyOf(userText(buildRequest(baseInput({ config: fakeConfig({ context }), history: [trigger], trigger, triggerKind: 'mention', interlocutor }))), 'people');
+  const shown = own({ askedAboutEpisodes: 1 });
+  for (const what of ['ε1', 'ε2', 'ε3', 'ε4', 'ε5']) assert.ok(shown.includes(what), `${what}: askedAboutEpisodes never caps the interlocutor`);
+  assert.equal(own({ askedAboutEpisodes: 0 }), shown);
+  assert.equal(own({}), shown);
+
+  // A tight caps.interlocutor still drops the interlocutor's lightest episodes first, as before.
+  const cost = (text) => estimateTokens(text) + 2;
+  const rest = renderProfile({ ...interlocutor, episodes: [] }, labels, { interlocutor: true, relationships: true, episodes: { enabled: true } });
+  const heavy = [
+    fill(labels.profile.episode, { date: '2026-09-10', what: 'ε5 στιγμή', quote: 'ποτέ ξανά', feeling: 'touched' }),
+    fill(labels.profile.episodeNoQuote, { date: '2026-08-01', what: 'ε4 στιγμή', feeling: 'touched' }),
+  ];
+  const cap = cost(rest) + cost(labels.profile.episodes) + heavy.reduce((sum, line) => sum + cost(line), 0);
+  const tight = own({ askedAboutEpisodes: 3, caps: { interlocutor: cap, aboutChat: 2500, people: 4000, neighbors: 3000, server: 2500, lore: 1500 } });
+  assert.ok(tight.includes('ε5') && tight.includes('ε4'));
+  assert.ok(!tight.includes('ε3') && !tight.includes('ε2') && !tight.includes('ε1'));
+});
+
+test('people: a request whose asked-about members have no episodes is the same whatever askedAboutEpisodes says', () => {
+  // The interlocutor and a compact participant have episodes, the member asked about has none.
+  const carl = { id: 'p2', names: ['Carl'], character: 'calm', episodes: askedEpisodes() };
+  const interlocutor = { id: 'u1', names: ['Ana'], character: 'vive', episodes: askedEpisodes() };
+  const scene = (askedAboutEpisodes) =>
+    askedAboutScene({
+      context: askedAboutEpisodes === undefined ? {} : { askedAboutEpisodes },
+      zoe: { episodes: [] },
+      history: [makeMessage(2, NOW - 2 * MIN, { authorId: 'p2', authorName: 'Carl' }), makeMessage(1, NOW - MIN, { authorId: 'u1', authorName: 'Ana', content: 'τι έκανε η Zoé χθες;' })],
+      otherProfiles: [carl],
+      interlocutor,
+    }).request;
+  const before = scene(0);
+  assert.ok(bodyOf(userText(before), 'people').includes('## Zoé'));
+  for (const value of [undefined, 3, 10]) {
+    const after = scene(value);
+    assert.deepEqual(after.messages, before.messages, String(value));
+    assert.deepEqual(after.stats, before.stats, String(value));
+  }
+});
+
+test('people: an asked-about member known only by episodes still shows them', () => {
+  const { people } = askedAboutScene({ zoe: { character: undefined } });
+  const lines = people.split('\n');
+  assert.equal(lines[0], '## Zoé');
+  assert.equal(lines[1], labels.profile.episodes);
+  assert.equal(lines.length, 5, 'the heading, the episodes heading and three episodes, nothing claiming she is unknown');
+  assert.ok(!people.includes(labels.profile.unknown));
+  const none = askedAboutScene({ zoe: { character: undefined }, context: { askedAboutEpisodes: 0 } }).people;
+  assert.equal(none, '', 'no episodes shown and nothing else known: no profile, as before');
+});
+
+test('people: under a tight caps.people the lightest episodes of an asked-about member go first and the member stays', () => {
+  const cost = (text) => estimateTokens(text) + 2;
+  const rest = renderProfile({ id: 'z1', names: ['Zoé'], character: 'rêveuse' }, labels, { relationships: true });
+  const heaviest = fill(labels.profile.episode, { date: '2026-09-10', what: 'ε5 στιγμή', quote: 'ποτέ ξανά', feeling: 'touched' });
+  const people = cost(rest) + cost(labels.profile.episodes) + cost(heaviest);
+  const caps = { interlocutor: 2500, aboutChat: 2500, people, neighbors: 3000, server: 2500, lore: 1500 };
+  const { request, people: body } = askedAboutScene({ context: { caps } });
+  assert.ok(body.includes('## Zoé') && body.includes('character: rêveuse'), 'the member asked about is never lost to her episodes');
+  assert.ok(body.includes('ε5') && !body.includes('ε4') && !body.includes('ε3'));
+  assert.ok(request.stats.people.used <= people, 'the block stays inside caps.people');
+
+  // Too small even for the profile: the block is trimmed, the request never fails.
+  const tiny = askedAboutScene({ context: { caps: { ...caps, people: 5 } } });
+  assert.equal(tiny.people, '');
+  assert.equal(tiny.request.stats.people.dropped, 1);
+});
+
+test('people: near the request limit an asked-about member keeps her place and loses her lightest episodes first', () => {
+  const cost = (text) => estimateTokens(text) + 2;
+  // Carl, a compact participant, would fit where Zoé with all her episodes does not.
+  const carl = { id: 'p2', names: ['Carl'], character: 'calm' };
+  const history = [
+    makeMessage(2, NOW - 2 * MIN, { authorId: 'p2', authorName: 'Carl', content: 'καλημέρα' }),
+    makeMessage(1, NOW - MIN, { authorId: 'u1', authorName: 'Ana', content: 'τι έκανε η Zoé χθες;' }),
+  ];
+  const scene = (llm, askedAboutEpisodes) =>
+    askedAboutScene({ config: fakeConfig({ context: { askedAboutEpisodes }, llm }), history, trigger: history[1], otherProfiles: [carl] });
+  // What the sections ahead of <people> take: nothing after it is offered in this scene.
+  const loose = scene({}, 0).request.stats;
+  const ahead = loose.used - loose.people.used;
+  // A limit leaving <people> exactly `room` tokens (safetyMargin 1, no picture, 60 for the tags).
+  const tight = (room, askedAboutEpisodes) => scene({ maxRequestTokens: ahead + room + 60, safetyMargin: 1 }, askedAboutEpisodes);
+
+  const rest = renderProfile({ id: 'z1', names: ['Zoé'], character: 'rêveuse' }, labels, { relationships: true });
+  const heaviest = fill(labels.profile.episode, { date: '2026-09-10', what: 'ε5 στιγμή', quote: 'ποτέ ξανά', feeling: 'touched' });
+  const room = cost(rest) + cost(labels.profile.episodes) + cost(heaviest);
+  assert.ok(room < fakeConfig().context.caps.people, 'the request limit binds, not caps.people');
+  assert.ok(tight(room, 0).people.startsWith(rest), 'without episodes she is shown');
+
+  const { request, people } = tight(room, 3);
+  assert.ok(people.startsWith('## Zoé\n'), `the member asked about is never lost to her episodes: ${people}`);
+  assert.ok(people.includes('ε5') && !people.includes('ε4') && !people.includes('ε3'), 'the lightest go first');
+  assert.ok(request.stats.used <= request.stats.limit);
+
+  // Room for her profile and the episodes heading, none for an episode: no heading without an episode under it.
+  const headingOnly = tight(cost(rest) + cost(labels.profile.episodes), 3).people;
+  assert.equal(headingOnly.split('\n\n')[0], rest);
+  assert.ok(!headingOnly.includes(labels.profile.episodes));
+});
+
+test('people: room for the episodes heading but not for one episode shows no heading, and an episodes-only member not at all', () => {
+  const cost = (text) => estimateTokens(text) + 2;
+  const capsWith = (people) => ({ interlocutor: 2500, aboutChat: 2500, people, neighbors: 3000, server: 2500, lore: 1500 });
+  const rest = renderProfile({ id: 'z1', names: ['Zoé'], character: 'rêveuse' }, labels, { relationships: true });
+  const { people } = askedAboutScene({ context: { caps: capsWith(cost(rest) + cost(labels.profile.episodes) + 1) } });
+  assert.equal(people, rest, 'the profile without an empty episodes heading');
+
+  const bare = askedAboutScene({ zoe: { character: undefined }, context: { caps: capsWith(cost('## Zoé') + cost(labels.profile.episodes) + 1) } });
+  assert.equal(bare.people, '', 'nothing learned and no episode shown: no profile');
+  assert.equal(bare.request.stats.people.kept, 0);
+
+  // The interlocutor's rendering is unchanged by this rule.
+  const interlocutor = { id: 'u1', names: ['Ana'], episodes: askedEpisodes() };
+  const own = renderProfile(interlocutor, labels, { interlocutor: true, episodes: { enabled: true, cap: 1000, cost } });
+  assert.ok(own.includes(labels.profile.episodes) && own.includes('ε5'));
+});
+
+test('people: under a tight caps.people a second asked-about member loses episodes before being lost', () => {
+  const cost = (text) => estimateTokens(text) + 2;
+  const zoe = { id: 'z1', names: ['Zoé'], character: 'rêveuse', episodes: askedEpisodes() };
+  const maxime = { id: 'm1', names: ['Maxime'], character: 'têtu', episodes: askedEpisodes() };
+  const full = renderProfile(zoe, labels, { relationships: true, episodes: { enabled: true, max: 3 } });
+  const bare = renderProfile({ ...maxime, episodes: [] }, labels, { relationships: true });
+  const caps = { interlocutor: 2500, aboutChat: 2500, people: cost(full) + cost(bare) + 1, neighbors: 3000, server: 2500, lore: 1500 };
+  const trigger = makeMessage(1, NOW - MIN, { authorId: 'u1', authorName: 'Ana', content: 'τι έκαναν η Zoé και ο Maxime χθες;' });
+  const request = buildRequest(
+    baseInput({ config: fakeConfig({ context: { caps } }), history: [trigger], trigger, triggerKind: 'mention', candidateProfiles: [zoe, maxime] }),
+  );
+  const people = bodyOf(userText(request), 'people');
+  assert.equal(people, `${full}\n\n${bare}`, 'the first shows her three, the second keeps his place without his');
+  assert.deepEqual([request.stats.people.kept, request.stats.people.dropped], [2, 0]);
+});
+
+test("people: the first asked-about member's episodes never cost a later member asked about their place", () => {
+  const cost = (text) => estimateTokens(text) + 2;
+  const zoe = { id: 'z1', names: ['Zoé'], character: 'rêveuse', episodes: askedEpisodes() };
+  const maxime = { id: 'm1', names: ['Maxime'], character: 'têtu' };
+  const zoeWith = (max) => renderProfile(zoe, labels, { relationships: true, episodes: { enabled: true, max } });
+  const bareMaxime = renderProfile(maxime, labels, { relationships: true });
+  // One token short of Zoé with her three episodes and Maxime: her lightest one has to go.
+  const people = cost(zoeWith(3)) + cost(bareMaxime) - 1;
+  const caps = { interlocutor: 2500, aboutChat: 2500, people, neighbors: 3000, server: 2500, lore: 1500 };
+  const trigger = makeMessage(1, NOW - MIN, { authorId: 'u1', authorName: 'Ana', content: 'τι έκαναν η Zoé και ο Maxime χθες;' });
+  const scene = (askedAboutEpisodes) =>
+    buildRequest(
+      baseInput({
+        config: fakeConfig({ context: { caps, askedAboutEpisodes } }),
+        history: [trigger],
+        trigger,
+        triggerKind: 'mention',
+        candidateProfiles: [zoe, maxime],
+      }),
+    );
+  const before = scene(0);
+  assert.deepEqual([before.stats.people.kept, before.stats.people.dropped], [2, 0], 'without episodes both are shown');
+
+  const request = scene(3);
+  const body = bodyOf(userText(request), 'people');
+  assert.equal(body, `${zoeWith(2)}\n\n${bareMaxime}`, 'Zoé loses her lightest episode, Maxime keeps his place');
+  assert.deepEqual([request.stats.people.kept, request.stats.people.dropped], [2, 0]);
+  assert.ok(request.stats.people.used <= people, 'the block stays inside caps.people');
+});
+
+test('people: next to a pulled block near the request limit an asked-about member keeps her place with fewer episodes', () => {
+  const cost = (text) => estimateTokens(text) + 2;
+  const zoe = { id: 'z1', names: ['Zoé'], character: 'rêveuse', episodes: askedEpisodes() };
+  const zoeWith = (max) => renderProfile(zoe, labels, { relationships: true, episodes: { enabled: true, max } });
+  const trigger = makeMessage(1, NOW - MIN, { authorId: 'u1', authorName: 'Ana', content: 'τι έκανε η Zoé χθες;' });
+  // Lines by someone with no profile: the block only takes room ahead of <people>.
+  const messages = [1, 2, 3, 4, 5, 6].map((i) =>
+    makeMessage(`q${i}`, NOW - (30 - i) * MIN, { channelId: 'src', channelName: 'journal', authorId: 'x9', authorName: 'Léa', content: `σελίδα ${i}: une longue page du journal, écrite avec soin` }),
+  );
+  const scene = (llm, askedAboutEpisodes) =>
+    buildRequest(
+      baseInput({
+        config: fakeConfig({ context: { askedAboutEpisodes }, llm }),
+        history: [trigger],
+        trigger,
+        triggerKind: 'mention',
+        pulled: [{ channelId: 'src', channelName: 'journal', messages }],
+        candidateProfiles: [zoe],
+      }),
+    );
+  // What the sections ahead of <people> take, the pulled block included: nothing after it is offered.
+  const loose = scene({}, 0);
+  assert.equal(loose.stats.pulled.kept, 1);
+  const ahead = loose.stats.used - loose.stats.people.used;
+  assert.ok(loose.stats.pulled.used > cost(zoeWith(3)) - cost(zoeWith(1)), 'the block is larger than the two episodes left out');
+
+  // A limit leaving <people> exactly her profile with her heaviest episode (safetyMargin 1, no picture, 60 for the tags).
+  const request = scene({ maxRequestTokens: ahead + cost(zoeWith(1)) + 60, safetyMargin: 1 }, 3);
+  assert.deepEqual([request.stats.pulled.kept, request.stats.pulled.linesCut], [1, 0], 'the pulled block is shown whole');
+  assert.equal(bodyOf(userText(request), 'people'), zoeWith(1), 'she stays, with her heaviest episode only');
+  assert.deepEqual([request.stats.people.kept, request.stats.people.dropped], [1, 0]);
+  assert.ok(request.stats.used <= request.stats.limit);
+});
+
+test('people: a private chat renders no episodes for an asked-about member', () => {
+  const zoe = { id: 'z1', names: ['Zoé'], character: 'rêveuse', episodes: askedEpisodes() };
+  const history = [makeMessage(1, NOW - MIN, { authorId: 'u1', authorName: 'Alice', content: 'τι έκανε η Zoé χθες;' })];
+  const user = userText(buildRequest(privateScene({ history, trigger: history[0], candidateProfiles: [zoe] })));
+  const people = bodyOf(user, 'people');
+  assert.ok(people.includes('## Zoé') && people.includes('character: rêveuse'));
+  assert.ok(!people.includes('στιγμή'), "another member's episodes never reach a private chat");
+  const server = bodyOf(userText(buildRequest(privateScene({ history, trigger: history[0], candidateProfiles: [zoe], privateChat: null }))), 'people');
+  assert.ok(server.includes('ε5'), 'the same member on the server shows them');
+});
+
+test('people: an author of a pulled line asked about through the pulled block shows episodes too', () => {
+  const messages = [makeMessage('q1', NOW - 20 * MIN, { channelId: 'src', channelName: 'journal', authorId: 'z1', authorName: 'Zoé', content: 'σελίδα' })];
+  const pulled = [{ channelId: 'src', channelName: 'journal', messages }];
+  const zoe = { id: 'z1', names: ['Zoé'], character: 'rêveuse', episodes: askedEpisodes() };
+  const people = bodyOf(userText(buildRequest(baseInput({ pulled, candidateProfiles: [zoe] }))), 'people');
+  assert.ok(people.includes('## Zoé') && people.includes('ε5') && !people.includes('ε2'));
 });
 
 // --- <senses>: the second look on a question (videoRewatch) --------------------------
