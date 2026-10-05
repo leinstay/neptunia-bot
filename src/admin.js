@@ -61,7 +61,9 @@ import { anchorMax, checkCaseText } from './mentor/cases.js';
 import { renderCard, renderFile, renderLastRun } from './mentor/report.js';
 import { log } from './log.js';
 import { clampChars } from './memory/clamp.js';
-import { utcDay } from './time.js';
+import { countToday, utcDay } from './time.js';
+import { VOICE_DAILY } from './memory/update.js';
+import { PORTRAIT_SLOTS, portraitSettings } from './memory/portrait.js';
 
 /** `/nep access grant/revoke`'s command keys that ONLY read — everything else (including every
  * group and `*`) is treated as opening a write command, and gets the "changes memory or config"
@@ -1295,6 +1297,10 @@ export function createAdmin({
     const gifWatches = gifWatchesToday(data, cfg, todayUtc());
     lines.push(`gif watches today: ${gifWatches.used}/${gifWatches.cap}`);
 
+    // Portraits share one daily cap (memory.portraitRefreshPerDay) between the analyzer and the owner.
+    const portraitsToday = countToday(data, PORTRAIT_SLOTS, todayUtc());
+    lines.push(`portraits refreshed today: ${portraitsToday}/${portraitSettings(cfg).perDay}`);
+
     if (warmup && typeof warmup.summary === 'function') {
       const summary = warmup.summary();
       lines.push(
@@ -1313,6 +1319,14 @@ export function createAdmin({
       lines.push(`guild: ${label} profiles=${profiles} buffer=${buffer.length} nextSpontaneous=${next ?? '-'}`);
       // The variety pass: the switch, how many patterns its latest list holds and how old it is.
       lines.push(varietyStatusLine(typeof store.getGuild === 'function' ? store.getGuild(guildId)?.worn : null, cfg, Date.now()));
+      // The voice lines exist only while the two-stage analyzer is on (features.memoryTwoStage).
+      if (cfg?.features?.memoryTwoStage === true) {
+        const voiceCap = cfg?.memory?.voice?.maxPerDay;
+        lines.push(
+          `voice queue: ${store.getVoiceQueue(guildId).length}`,
+          `voice requests today: ${countToday(data, VOICE_DAILY, todayUtc())}/${Number.isFinite(voiceCap) ? voiceCap : 100}`,
+        );
+      }
     } else {
       lines.push('guild: not resolved yet');
     }

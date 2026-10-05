@@ -5063,6 +5063,56 @@ test('run: status counts yesterday\'s GIF watches as zero; a missing cap shows t
   assert.ok(lines.includes('gif watches today: 0/200'), lines.join('\n'));
 });
 
+test('run: status shows today\'s portrait refreshes against memory.portraitRefreshPerDay', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, hot } = makeAdmin(rootDir);
+  hot.config.memory = { portraitRefreshPerDay: 5 };
+  const today = new Date().toISOString().slice(0, 10);
+  Object.assign(store.state.data, { portraitDay: today, portraitCount: 2 });
+
+  const lines = (await admin.run('status', {}, {})).split('\n');
+  assert.ok(lines.includes('portraits refreshed today: 2/5'), lines.join('\n'));
+});
+
+test('run: status counts yesterday\'s portrait refreshes as zero', async () => {
+  const rootDir = makeRoot();
+  const { admin, store } = makeAdmin(rootDir);
+  Object.assign(store.state.data, { portraitDay: '2000-01-01', portraitCount: 2 });
+
+  const lines = (await admin.run('status', {}, {})).split('\n');
+  assert.ok(lines.includes('portraits refreshed today: 0/3'), lines.join('\n'));
+});
+
+test('run: status shows the voice queue size and today\'s voice requests while the two-stage analyzer is on', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, hot } = makeAdmin(rootDir);
+  hot.config.features = { ...hot.config.features, memoryTwoStage: true };
+  hot.config.memory = { voice: { maxPerDay: 80 } };
+  store.getVoiceQueue = () => [{}, {}, {}];
+  const today = new Date().toISOString().slice(0, 10);
+  Object.assign(store.state.data, { voiceDay: today, voiceCount: 7 });
+
+  const lines = (await admin.run('status', {}, {})).split('\n');
+  assert.ok(lines.includes('voice queue: 3'), lines.join('\n'));
+  assert.ok(lines.includes('voice requests today: 7/80'), lines.join('\n'));
+});
+
+test('run: status counts yesterday\'s voice requests as zero and omits the voice lines when two-stage is off', async () => {
+  const rootDir = makeRoot();
+  const { admin, store, hot } = makeAdmin(rootDir);
+  store.getVoiceQueue = () => [];
+  Object.assign(store.state.data, { voiceDay: '2000-01-01', voiceCount: 7 });
+
+  let body = await admin.run('status', {}, {});
+  assert.ok(!body.includes('voice queue'));
+  assert.ok(!body.includes('voice requests today'));
+
+  hot.config.features = { ...hot.config.features, memoryTwoStage: true };
+  body = await admin.run('status', {}, {});
+  assert.ok(body.split('\n').includes('voice queue: 0'), body);
+  assert.ok(body.split('\n').includes('voice requests today: 0/100'), body);
+});
+
 test('run: status has no image lines without an image client', async () => {
   const rootDir = makeRoot();
   const { admin } = makeAdmin(rootDir, { hot: hotForDraw(rootDir) });

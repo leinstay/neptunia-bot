@@ -195,7 +195,7 @@ function voiceRequestOptions(config) {
 }
 
 // The per-day count of voice requests in state.json, capped by `memory.voice.maxPerDay`.
-const VOICE_DAILY = { dayKey: 'voiceDay', countKey: 'voiceCount' };
+export const VOICE_DAILY = { dayKey: 'voiceDay', countKey: 'voiceCount' };
 
 /** The `running` key of one guild's voice run (a guild id and a `private:` key never collide with it). */
 const voiceKey = (guildId) => `voice:${guildId}`;
