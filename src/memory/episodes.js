@@ -1,6 +1,8 @@
 // Pure merge logic for a member's remembered episodes -- moments the persona
 // recalls about the two of them, appended by the analyzer (never rewritten)
-// and evicted by weight then age once the per-person cap is exceeded. See
+// and evicted by weight then age once the per-person cap is exceeded, the
+// newest few (`memory.keepNewestEpisodes`) spared so a light moment of a busy
+// member is not thrown out the moment it arrives. See
 // docs/prompt-contract.md ("episodes" in "The analyzer") and
 // src/memory/update.js#applyMemoryUpdate, which routes the model's
 // `users.<id>.episodes` through this module via src/memory/store.js#addEpisodes.
@@ -63,18 +65,68 @@ function evictionOrder(a, b) {
 }
 
 /**
+ * How many of the newest entries eviction spares: `keepNewest` rounded down and clamped to
+ * `[0, cap - 1]`, so one entry is always left to evict. Anything that is not a number counts as 0.
+ */
+function keptNewestCount(keepNewest, cap) {
+  const count = typeof keepNewest === 'number' && !Number.isNaN(keepNewest) ? Math.floor(keepNewest) : 0;
+  return Math.max(0, Math.min(count, cap - 1));
+}
+
+/**
+ * Indices of the `count` most recently added entries of `list`, whose entries from `storedLength`
+ * on are the ones this merge accepted: those first whatever their stamp (a caller's clock may be
+ * behind the stored stamps), then the latest `addedAt` (an entry with none counts as the oldest),
+ * a later position first among equals (one merge stamps all its entries alike, in the model's
+ * order).
+ */
+function newestIndices(list, count, storedLength) {
+  if (count <= 0) return new Set();
+  const byRecency = list
+    .map((ep, index) => ({ addedAt: String(ep?.addedAt ?? ''), index, arrived: Number(index >= storedLength) }))
+    .sort((a, b) => b.arrived - a.arrived || b.addedAt.localeCompare(a.addedAt) || b.index - a.index);
+  return new Set(byRecency.slice(0, count).map((o) => o.index));
+}
+
+/**
  * Merge freshly-extracted episodes into a member's stored list. Pure:
  * `existing` is never mutated, surviving entries keep their original fields
  * and relative order (eviction only ever removes entries, never reorders or
  * rewrites the ones that remain). Tolerates a profile written before this
  * feature existed (`existing` undefined/not an array).
  *
+ * Over `maxEpisodes`, the `K` most recently added entries are exempt from
+ * eviction, `K` = `keepNewest` clamped to `maxEpisodes - 1`: this call's own
+ * entries first, then by `addedAt`, then position; the rest go lowest weight
+ * first, then oldest. `keepNewest` 0 (the default) = eviction by weight then age
+ * alone. With `K` above 0 a moment is never evicted on arrival (unless one call
+ * brings more than `K`: then only its last `K` are spared), whatever the
+ * caller's `now`. It then stays safe while fewer than `K` entries rank newer
+ * (a later call's own, or a later `addedAt`); from then on it ranks by weight
+ * then age with the rest. Its `addedAt` is the caller's `now`: the warmup's
+ * person run stamps with the member's last sampled message, so its moments can
+ * rank below stream moments stored after that message and live shorter than the
+ * survival below once they have arrived. Expected survival: a light
+ * moment of a member at the cap whose stored moments are all heavier lives for
+ * exactly `K` later moments and goes in the merge that stores the `K`-th -- at
+ * `memory.keepNewestEpisodes` 5 and `memory.maxNewEpisodes` 3, at least two
+ * more batches that add moments for that member. The light end of the list
+ * turns over at the same rate as before; what changes is that every moment is
+ * stored and can be seen before it goes.
+ *
  * @param {object[]|undefined} existing  Stored episodes, oldest-appended order.
  * @param {unknown} incoming             Untrusted, model-extracted episodes.
- * @param {{ maxEpisodes: number, maxNew: number, now?: number, clampTolerance?: number }} opts
- * @returns {{ episodes: object[], added: number }}
+ * @param {{ maxEpisodes: number, maxNew: number, now?: number, clampTolerance?: number, keepNewest?: number }} opts
+ *   `keepNewest`: `memory.keepNewestEpisodes` (see src/memory/update.js#episodeOptions);
+ *   omitted, negative or not a number = 0.
+ * @returns {{ episodes: object[], added: number }}  `added` counts every accepted entry, one
+ *   evicted again by the same merge included.
  */
-export function mergeEpisodes(existing, incoming, { maxEpisodes, maxNew = Infinity, now: nowMs = Date.now(), clampTolerance } = {}) {
+export function mergeEpisodes(
+  existing,
+  incoming,
+  { maxEpisodes, maxNew = Infinity, now: nowMs = Date.now(), clampTolerance, keepNewest = 0 } = {},
+) {
   const stored = Array.isArray(existing) ? existing : [];
   if (!Array.isArray(incoming) || incoming.length === 0) return { episodes: stored, added: 0 };
 
@@ -94,7 +146,11 @@ export function mergeEpisodes(existing, incoming, { maxEpisodes, maxNew = Infini
   const cap = Number.isInteger(maxEpisodes) ? maxEpisodes : Infinity;
   if (merged.length > cap) {
     const dropCount = merged.length - cap;
-    const order = merged.map((ep, index) => ({ ep, index })).sort(evictionOrder);
+    const exempt = newestIndices(merged, keptNewestCount(keepNewest, cap), stored.length);
+    const order = merged
+      .map((ep, index) => ({ ep, index }))
+      .filter((o) => !exempt.has(o.index))
+      .sort(evictionOrder);
     const dropIndices = new Set(order.slice(0, dropCount).map((o) => o.index));
     merged = merged.filter((_, index) => !dropIndices.has(index));
   }
