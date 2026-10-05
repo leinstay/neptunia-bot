@@ -13,6 +13,8 @@
 //   data/guilds/<guildId>/lore.json           the guild's lorebook
 //   data/guilds/<guildId>/media.json          the media description cache
 //   data/guilds/<guildId>/gifs.json           the GIF library the persona posts from (src/memory/gifs.js)
+//   data/guilds/<guildId>/voice.json          the voice queue: briefs the two-stage analyzer's stage A left for
+//                                            the voice model to word (src/memory/voice.js); survives restarts
 //
 // Everything is cached in memory, marked dirty on change and flushed on a
 // timer and on shutdown. Writes are atomic (temp file + rename) so a crash
@@ -22,7 +24,14 @@
 // `forgetUser`, `forgetPrivate`, `removeLore` and `wipeGuild` are the only
 // functions in the whole project allowed to delete stored memory (see
 // src/admin.js, the owner-only `/nep memory forget`, `/nep private forget`,
-// `/nep lore remove` and `/nep memory wipe` commands).
+// `/nep lore remove` and `/nep memory wipe` commands). A forget also takes the
+// member's items out of the voice queue, at once on disk; a wipe deletes the
+// queue. Nothing else clears it: the voice run takes out only the items it
+// applied, found gone or switched off, or sent down the degraded path (an
+// expired or overflowing item), and a stage A batch folds a new brief into the
+// queued item of the same target, a newer character item replacing the queued
+// one (src/memory/voice.js). An item the queue file holds but that cannot be
+// read is left out on load, and logged as a count.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -32,12 +41,13 @@ import { utcDay } from '../time.js';
 import { emptyAffinity, applyDelta, decayAffinity } from './affinity.js';
 import { mergeEpisodes } from './episodes.js';
 import { upsertLore } from './lore.js';
-import { applyInterestOps, normalizeInterests } from './interests.js';
+import { applyInterestOps, normalizeInterests, normalizeTopic } from './interests.js';
 import { applyDetailOps, normalizeDetails } from './details.js';
 import { applyAliasOps } from './aliases.js';
 import { clampText } from './clamp.js';
 import { mergeEmojiUsage, normalizeEmojiUsage } from './emoji-usage.js';
 import { emptyGifs, findGif, mergeGifs, normalizeBackfillStamp, normalizeGifs, resetGifCounts } from './gifs.js';
+import { FEELING_CHARS, REASON_CHARS, SELF_CHARS, forgetMember, normalizeQueue } from './voice.js';
 import { appendOwnLine, appendWornHistory, normalizeOwnLines, normalizeWorn, normalizeWornHistory } from '../behavior/variety.js';
 
 function readJson(file, fallback) {
@@ -404,16 +414,19 @@ export function createStore({ dataDir }) {
     return [...ids];
   }
 
-  function flushAll() {
-    for (const [file, item] of entries) {
-      if (!item.dirty) continue;
-      try {
-        writeJsonAtomic(file, item.value);
-        item.dirty = false;
-      } catch (err) {
-        log.error('store: flush failed', { file, error: err });
-      }
+  /** Write one dirty cache entry to disk; a failed write is logged and stays dirty for the next flush. */
+  function flushEntry(file, item) {
+    if (!item.dirty) return;
+    try {
+      writeJsonAtomic(file, item.value);
+      item.dirty = false;
+    } catch (err) {
+      log.error('store: flush failed', { file, error: err });
     }
+  }
+
+  function flushAll() {
+    for (const [file, item] of entries) flushEntry(file, item);
   }
 
   const guildDir = (guildId) => path.join(dataDir, 'guilds', String(guildId));
@@ -428,6 +441,7 @@ export function createStore({ dataDir }) {
   const gifsFile = (guildId) => path.join(guildDir(guildId), 'gifs.json');
   const privateDir = (guildId) => path.join(guildDir(guildId), 'private');
   const privateFile = (guildId, userId) => path.join(privateDir(guildId), `${userId}.json`);
+  const voiceFile = (guildId) => path.join(guildDir(guildId), 'voice.json');
   const stateFile = path.join(dataDir, 'state.json');
 
   const stateEntry = entry(stateFile, () => ({}));
@@ -458,6 +472,63 @@ export function createStore({ dataDir }) {
   function hasPrivate(guildId, userId) {
     const file = privateFile(guildId, userId);
     return entries.has(file) || fs.existsSync(file);
+  }
+
+  /** The cache entry a voice text about one member lands in: their public profile (`layer`
+   * omitted, undefined or null) or their private layer (exactly `'private'`), normalised; null
+   * when that file does not exist (nothing is created) or the layer is any other value (`'public'`,
+   * `'Private'`, `'dm'`...): a text meant for one layer never falls back to the public profile. */
+  function memberEntry(guildId, userId, layer) {
+    if (layer === 'private') return hasPrivate(guildId, userId) ? privateEntry(guildId, userId) : null;
+    if (layer !== undefined && layer !== null) return null;
+    return store.getUser(guildId, userId) ? entries.get(userFile(guildId, userId)) : null;
+  }
+
+  /** The cache entry of a guild's voice queue, `[]` when nothing is queued, normalised in place of
+   * the cached value (src/memory/voice.js#normalizeQueue); never marked dirty by reading. A file
+   * that cannot be parsed reads as `[]` with a warning (`readJson`), like every other file. On the
+   * read that loads the file, items normalising leaves out (a hand edit, a file from another
+   * version) are logged as a count, `store: voice items dropped`, and a value that is not a list
+   * as `store: voice queue replaced`: the next queue write makes the loss permanent. */
+  function voiceEntry(guildId) {
+    const file = voiceFile(guildId);
+    const loading = !entries.has(file);
+    const item = entry(file, () => []);
+    const raw = item.value;
+    item.value = normalizeQueue(raw);
+    if (loading && !Array.isArray(raw)) {
+      log.warn('store: voice queue replaced', { guildId, reason: 'malformed' });
+    } else if (loading && raw.length > item.value.length) {
+      log.warn('store: voice items dropped', { guildId, dropped: raw.length - item.value.length });
+    }
+    return item;
+  }
+
+  /** Store `next`, normalised, as the guild's queue: the value cached is parsed from the JSON the
+   * flush will write, so it shares nothing with what the caller holds and equals what a restart
+   * reads back. Dirty only when something changed.
+   * @throws {TypeError} `next` cannot be written as JSON (a cycle, a BigInt): nothing changes. */
+  function writeQueue(item, next) {
+    const queue = normalizeQueue(JSON.parse(JSON.stringify(next)));
+    if (JSON.stringify(queue) === JSON.stringify(item.value)) return;
+    item.value = queue;
+    item.dirty = true;
+  }
+
+  /** Take what a guild's voice queue holds about one member out of it
+   * (src/memory/voice.js#forgetMember; `{ layer: 'private' }` = their private items only) and
+   * write the file at once, like the files a forget deletes. No queue -> nothing, no file
+   * created. Returns how many items were removed. */
+  function forgetQueued(guildId, userId, opts) {
+    const file = voiceFile(guildId);
+    if (!entries.has(file) && !fs.existsSync(file)) return 0;
+    const item = voiceEntry(guildId);
+    const { queue, removed } = forgetMember(item.value, userId, opts);
+    if (removed === 0) return 0;
+    item.value = queue;
+    item.dirty = true;
+    flushEntry(file, item);
+    return removed;
   }
 
   const store = {
@@ -668,14 +739,82 @@ export function createStore({ dataDir }) {
 
     /**
      * Delete one member's profile AND their private layer (`forgetPrivate`),
-     * cache and disk alike: removing a person removes all of them. See also
-     * `wipeGuild` below.
+     * cache and disk alike: removing a person removes all of them -- the
+     * guild's voice queue included: every item about them, public and private,
+     * and every lesson they taught (src/memory/voice.js#forgetMember), the
+     * queue file rewritten at once. See also `wipeGuild` below.
      */
     forgetUser(guildId, userId) {
       const file = userFile(guildId, userId);
       entries.delete(file);
       fs.rmSync(file, { force: true });
+      forgetQueued(guildId, userId);
       store.forgetPrivate(guildId, userId);
+    },
+
+    /**
+     * Fill in the reason of one attitude move after the fact (the two-stage analyzer: stage A
+     * moved the score with an empty reason, the voice run words it later): the
+     * history entry stamped `at` (its `ts`) gets `reason`, and `affinity.reason` too while that
+     * entry is the newest. The score is never touched. `reason` is clamped as
+     * src/memory/affinity.js#applyDelta clamps it (src/memory/voice.js#REASON_CHARS, the limit the
+     * voice run words it to). Writing the same text again changes nothing, so a write applied
+     * twice (a restart before the queue was saved) does no harm.
+     * @param {string} guildId
+     * @param {string} userId
+     * @param {string} at  The ISO stamp of the history entry.
+     * @param {string} reason
+     * @param {{ layer?: 'private', clampTolerance?: number }} [opts]  `layer: 'private'` = the
+     *   member's private layer; omitted (or null) = the public profile; any other value refuses.
+     * @returns {boolean} Whether such an entry exists and now holds the text. No profile (or
+     *   private layer), an unknown layer, no entry stamped `at`, or an empty text -> false,
+     *   nothing written or created.
+     */
+    fillAffinityReason(guildId, userId, at, reason, opts = {}) {
+      const item = memberEntry(guildId, userId, opts.layer);
+      const text = typeof reason === 'string' ? clampText(reason, REASON_CHARS, { tolerance: opts.clampTolerance }) : '';
+      const affinity = item?.value.affinity;
+      if (!text || typeof at !== 'string' || !at || !isPlainObject(affinity) || !Array.isArray(affinity.history)) return false;
+      const index = affinity.history.findLastIndex((move) => move?.ts === at);
+      if (index === -1) return false;
+      const newest = index === affinity.history.length - 1;
+      if (affinity.history[index].reason === text && (!newest || affinity.reason === text)) return true;
+      const history = affinity.history.map((move, i) => (i === index ? { ...move, reason: text } : move));
+      item.value.affinity = { ...affinity, history, ...(newest ? { reason: text } : {}) };
+      item.dirty = true;
+      return true;
+    },
+
+    /**
+     * Fill in the feeling of one stored episode after the fact (the two-stage analyzer: stage A
+     * stored it with an empty feeling; the voice run words it later, or the degraded path keeps
+     * stage A's tone as the feeling): the
+     * episode added at `episode.at` (its `addedAt`) whose `date` and `what` EQUAL the given ones.
+     * `feeling` is clamped as src/memory/episodes.js#sanitizeEpisode clamps it
+     * (src/memory/voice.js#FEELING_CHARS, the limit the voice run words it to). Writing the
+     * same text again changes nothing.
+     * @param {string} guildId
+     * @param {string} userId
+     * @param {{ at: string, date: string, what: string }} episode  The episode's address.
+     * @param {string} feeling
+     * @param {{ layer?: 'private', clampTolerance?: number }} [opts]  As for `fillAffinityReason`
+     *   (an unknown layer refuses).
+     * @returns {boolean} Whether such an episode exists and now holds the text; otherwise
+     *   nothing is written or created.
+     */
+    fillEpisodeFeeling(guildId, userId, episode, feeling, opts = {}) {
+      const item = memberEntry(guildId, userId, opts.layer);
+      const text = typeof feeling === 'string' ? clampText(feeling, FEELING_CHARS, { tolerance: opts.clampTolerance }) : '';
+      const episodes = item?.value.episodes;
+      if (!text || !isPlainObject(episode) || !Array.isArray(episodes)) return false;
+      const { at, date, what } = episode;
+      if (typeof at !== 'string' || !at || typeof date !== 'string' || typeof what !== 'string') return false;
+      const index = episodes.findLastIndex((ep) => isPlainObject(ep) && ep.addedAt === at && ep.date === date && ep.what === what);
+      if (index === -1) return false;
+      if (episodes[index].feeling === text) return true;
+      item.value.episodes = episodes.map((ep, i) => (i === index ? { ...ep, feeling: text } : ep));
+      item.dirty = true;
+      return true;
     },
 
     // ---- the private layer: what one member said to the persona in direct messages ----
@@ -888,8 +1027,10 @@ export function createStore({ dataDir }) {
     },
 
     /**
-     * Delete one member's private layer, cache and disk alike; the public
-     * profile stays. Safe when there is none.
+     * Delete one member's private layer, cache and disk alike, and their
+     * private items in the guild's voice queue (the queue file rewritten at
+     * once); the public profile and their public items stay. Safe when there
+     * is none.
      * @param {string} guildId
      * @param {string} userId
      */
@@ -897,6 +1038,7 @@ export function createStore({ dataDir }) {
       const file = privateFile(guildId, userId);
       entries.delete(file);
       fs.rmSync(file, { force: true });
+      forgetQueued(guildId, userId, { layer: 'private' });
     },
 
     /** How many member profiles a guild has, cached or on disk (a profile not flushed yet included). */
@@ -1106,6 +1248,72 @@ export function createStore({ dataDir }) {
         item.dirty = true;
       }
       return guild.learned;
+    },
+
+    /**
+     * Apply one batch of self-fact ops to the guild's `self` list (what the persona said about
+     * itself), the two-stage analyzer's incremental shape (src/memory/voice.js): `remove` first,
+     * every stored fact equal to one listed (compared by src/memory/interests.js#normalizeTopic:
+     * trimmed, whitespace collapsed, lower-cased -- the rule src/memory/voice.js tells a queued
+     * self fact by); then `add`, each new claim clamped like the single-stage self list
+     * (src/memory/voice.js#SELF_CHARS, `opts.clampTolerance`) and appended unless it is already
+     * stored; past `opts.maxSelfFacts` the oldest leave to make room (a cap of 0 adds nothing; a
+     * call that adds nothing never cuts the list, even one stored above a lowered cap). The
+     * single-stage analyzer still replaces the whole list through `updateGuild`. Like
+     * `updateGuild`, the guild is marked dirty and `updatedAt` stamped (`opts.now`, else the wall
+     * clock) only when the list changed. Garbage `ops` and entries that are not strings change
+     * nothing and never throw. Tokenizing `<@id>` is the caller's.
+     * @param {string} guildId
+     * @param {{ add?: string[], remove?: string[] }} ops
+     * @param {{ maxSelfFacts: number, clampTolerance?: number, now?: number }} opts
+     *   `maxSelfFacts` is required: the caller's resolved `memory.maxSelfFacts` (its fallback is
+     *   src/memory/update.js#MEMORY_LIMIT_DEFAULTS'; the store keeps no copy). A fraction is
+     *   floored.
+     * @returns {{ added: number, removed: number, evicted: number }}  `evicted`: facts that left
+     *   to stay under the cap (a claim added in this call included).
+     * @throws {TypeError} `opts.maxSelfFacts` is not a finite number of at least 0; nothing changes.
+     */
+    applySelfOps(guildId, ops, opts = {}) {
+      const limit = opts?.maxSelfFacts;
+      if (typeof limit !== 'number' || !Number.isFinite(limit) || limit < 0) {
+        throw new TypeError('applySelfOps: opts.maxSelfFacts must be a number of at least 0');
+      }
+      const cap = Math.floor(limit);
+      const counts = { added: 0, removed: 0, evicted: 0 };
+      if (!isPlainObject(ops)) return counts;
+      const item = entry(guildFile(guildId), emptyGuild);
+      const guild = item.value;
+      normalizeGuild(guild);
+
+      const stored = Array.isArray(guild.self) ? guild.self.filter((fact) => typeof fact === 'string' && fact.trim()) : [];
+      const removing = new Set((Array.isArray(ops.remove) ? ops.remove : []).filter((fact) => typeof fact === 'string').map(normalizeTopic));
+      removing.delete('');
+      let next = stored.filter((fact) => !removing.has(normalizeTopic(fact)));
+      counts.removed = stored.length - next.length;
+
+      if (cap > 0) {
+        const held = new Set(next.map(normalizeTopic));
+        for (const claim of Array.isArray(ops.add) ? ops.add : []) {
+          if (typeof claim !== 'string') continue;
+          const fact = clampText(claim, SELF_CHARS, { tolerance: opts.clampTolerance });
+          const key = normalizeTopic(fact);
+          if (!key || held.has(key)) continue;
+          held.add(key);
+          next.push(fact);
+          counts.added += 1;
+        }
+        if (counts.added > 0 && next.length > cap) {
+          counts.evicted = next.length - cap;
+          next = next.slice(-cap);
+        }
+      }
+
+      if (counts.added + counts.removed > 0) {
+        guild.self = next;
+        guild.updatedAt = new Date(Number.isFinite(opts.now) ? opts.now : Date.now()).toISOString();
+        item.dirty = true;
+      }
+      return counts;
     },
 
     /** One channel's stored entry (the server map), or null when never seen. */
@@ -1360,6 +1568,54 @@ export function createStore({ dataDir }) {
       item.dirty = true;
     },
 
+    // ---- the voice queue: briefs waiting for the voice model (src/memory/voice.js) ----
+    //
+    // Every write is a synchronous read-modify-write of the cached queue (DECISIONS-R4): a voice
+    // run that awaits its request reads the queue again afterwards and removes only the ids it
+    // applied, so an item a stage A batch or a portrait refresh queued meanwhile stays.
+    // `updateVoiceQueue` is the only write (besides a forget or a wipe); there is no setter that
+    // takes a whole queue, so a copy kept across an await has no door to be written back through.
+
+    /**
+     * A copy of the guild's voice queue (data/guilds/<id>/voice.json), `[]` when nothing is
+     * queued; normalised on read (src/memory/voice.js#normalizeQueue), persisted the next time
+     * anything writes it, never emptied implicitly. Changing the copy changes nothing stored.
+     * For reading only: a change goes through `updateVoiceQueue`.
+     * @param {string} guildId
+     * @returns {import('./voice.js').VoiceItem[]}
+     */
+    getVoiceQueue(guildId) {
+      return structuredClone(voiceEntry(guildId).value);
+    },
+
+    /**
+     * Change the guild's voice queue in one synchronous step, the only way to write it: `change`
+     * gets a copy of the current queue and returns the new one, either as an array
+     * (src/memory/voice.js#removeItems, #retryLater) or as an object holding it under `queue`
+     * (#mergeIntoQueue, #expireItems, #forgetMember); the result is normalised and stored as a
+     * copy of its own (changing what `change` returned afterwards changes nothing stored), dirty
+     * only when something changed. An explicit `[]` empties the queue; nothing else does.
+     * @template T
+     * @param {string} guildId
+     * @param {(queue: import('./voice.js').VoiceItem[]) => T} change  Synchronous.
+     * @returns {T} What `change` returned.
+     * @throws {TypeError} `change` returned a promise (a rejecting one is never left unhandled),
+     *   no queue, or a queue that cannot be written as JSON; the queue is left as it was (also
+     *   when `change` throws).
+     */
+    updateVoiceQueue(guildId, change) {
+      const item = voiceEntry(guildId);
+      const outcome = change(structuredClone(item.value));
+      if (typeof outcome?.then === 'function') {
+        Promise.resolve(outcome).catch(() => {}); // refused below; its own failure must not go unhandled
+        throw new TypeError('updateVoiceQueue: the change must be synchronous');
+      }
+      const next = Array.isArray(outcome) ? outcome : outcome?.queue;
+      if (!Array.isArray(next)) throw new TypeError('updateVoiceQueue: the change must return a queue');
+      writeQueue(item, next);
+      return outcome;
+    },
+
     /**
      * A deliberate, owner-only clean start for one guild's memory (see
      * src/admin.js `/nep memory wipe`). Together with `forgetUser`,
@@ -1369,7 +1625,8 @@ export function createStore({ dataDir }) {
      * member's private layer), `guild.json` -- and with it everything it holds:
      * patterns, starters, in-jokes, self facts, `learned`, `emojiUsage`, the
      * `emojiBackfill` stamp, `ownLines` and the variety pass's `worn` /
-     * `wornHistory` -- every channel entry, the live observation buffer, and
+     * `wornHistory` -- every channel entry, the live observation buffer, the
+     * voice queue (`voice.json`), and
      * lorebook entries whose `source` is `'analyzer'` (every entry, owner
      * included, when `keepOwnerLore` is false). Keeps, by default, owner lore
      * (`source: 'owner'`) and the media description cache, and always the GIF
@@ -1418,6 +1675,12 @@ export function createStore({ dataDir }) {
       const bufferMessages = entry(bufferFileName, () => []).value.length;
       entries.delete(bufferFileName);
       fs.rmSync(bufferFileName, { force: true });
+
+      {
+        const file = voiceFile(guildId);
+        entries.delete(file);
+        fs.rmSync(file, { force: true });
+      }
 
       const loreItem = entry(loreFile(guildId), () => []);
       const storedLore = loreItem.value;
