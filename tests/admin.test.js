@@ -823,10 +823,9 @@ test('run: ping pings the seven roles in parallel and reports latency, provider 
   const lines = body.split('\n');
 
   assert.equal(llm.calls.length, 4, 'talk, analyzer, media and video are four distinct models here; voice shares the talk model; classifier.text falls back to classifier.media; mentor is unset');
-  assert.equal(lines.length, 8);
-  assert.ok(lines.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=provider-for-anthropic/claude-opus-4.6') && l.includes('tokens 5/1')));
+  assert.equal(lines.length, 7, 'talk and voice share one model and route: one line for the pair');
+  assert.ok(lines.some((l) => l.startsWith('voice: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=provider-for-anthropic/claude-opus-4.6') && l.includes('tokens 5/1')), 'memory.voiceModel unset: the talk model');
   assert.ok(lines.some((l) => l.startsWith('analyzer: openrouter/analyzer-model — ok,')));
-  assert.ok(lines.some((l) => l.startsWith('voice: anthropic/claude-opus-4.6 — ok,')), 'memory.voiceModel unset: the talk model');
   assert.ok(lines.some((l) => l.startsWith('classifier.media: anthropic/claude-haiku-4.5 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('classifier.text: anthropic/claude-haiku-4.5 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('classifier.video: openrouter/video-model — ok,')));
@@ -915,8 +914,8 @@ test('run: ping de-duplicates identical models: one call, reported for every rol
   const lines = body.split('\n');
 
   assert.equal(llm.calls.length, 2, 'talk+analyzer+voice share one model, classifier.media (and classifier.text, which falls back to it) share another: two calls');
-  assert.equal(lines.length, 8, 'still one line per requested role');
-  assert.ok(lines.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,')));
+  assert.equal(lines.length, 7, 'one line per requested role, talk and voice shown as one');
+  assert.ok(lines.some((l) => l.startsWith('voice: anthropic/claude-opus-4.6 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,')));
   assert.ok(lines.some((l) => l.startsWith('classifier.text: anthropic/claude-haiku-4.5 — ok,')));
   assert.ok(lines.includes('classifier.video: (no model configured)'), 'no classifier.video -> skipped, like any role without a model');
@@ -950,6 +949,70 @@ test('ping: role voice pings memory.voiceModel as role voice, the talk model whi
   assert.deepEqual(llm.calls.map((c) => c.options.role).filter((role) => role === 'talk' || role === 'voice'), ['talk', 'voice']);
 });
 
+test('ping: one voice line stands for talk and voice while they share a model and a route, both lines once they differ', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  const llm = fakeLlm((options) => ({ text: 'pong', usage: {}, estimated: 1, provider: `served-${options.role}` }));
+  const { admin } = makeAdmin(rootDir, { hot, llm });
+
+  const merged = (await admin.run('ping', {}, {})).split('\n');
+  assert.equal(merged.filter((l) => l.startsWith('voice:')).length, 1);
+  assert.equal(merged.filter((l) => l.startsWith('talk:')).length, 0);
+  assert.ok(merged.some((l) => l.startsWith('voice: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-talk')), 'the result of the one request');
+  assert.equal(llm.calls.filter((c) => c.options.model === 'anthropic/claude-opus-4.6').length, 1, 'one request for the pair');
+
+  // memory.voiceModel set to another model: both lines, each with its own request.
+  hot.config.memory.voiceModel = 'openrouter/voice-model';
+  llm.calls.length = 0;
+  const split = (await admin.run('ping', {}, {})).split('\n');
+  assert.ok(split.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,')));
+  assert.ok(split.some((l) => l.startsWith('voice: openrouter/voice-model — ok,')));
+  assert.ok(split.indexOf(split.find((l) => l.startsWith('talk:'))) < split.indexOf(split.find((l) => l.startsWith('voice:'))), 'talk before voice');
+
+  // The same model routed elsewhere for the voice role only: both lines too.
+  hot.config.memory.voiceModel = null;
+  hot.config.llm.providerByModel = { 'anthropic/@voice': { only: ['amazon-bedrock'] } };
+  const routed = (await admin.run('ping', {}, {})).split('\n');
+  assert.ok(routed.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-talk')));
+  assert.ok(routed.some((l) => l.startsWith('voice: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-voice')));
+});
+
+test('ping: every model line comes before the youtube and web lines, the image line among the models', async () => {
+  const rootDir = makeRoot();
+  const hot = hotForPing(rootDir);
+  hot.config.memory.voiceModel = 'openrouter/voice-model';
+  hot.config.memory.model = 'openrouter/analyzer-model';
+  hot.config.classifier.video = 'openrouter/video-model';
+  hot.config.mentor = { model: 'openrouter/mentor-model' };
+  hot.config.image = { model: 'openai/gpt-image-2.5-flare' };
+  hot.config.features = { ...hot.config.features, webLookup: true };
+  const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+  const describer = fakeYoutubeDescriber({ status: 'api', detail: '', keySet: true });
+  const { admin } = makeAdmin(rootDir, { hot, llm, describer, lookup: fakeWebLookup(true) });
+
+  const lines = (await admin.run('ping', {}, {})).split('\n');
+
+  assert.deepEqual(
+    lines.map((l) => l.split(':')[0]),
+    ['talk', 'voice', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor', 'image', 'youtube', 'web'],
+  );
+});
+
+test('ping: a single talk or voice target prints that one line under its own name', async () => {
+  for (const role of ['talk', 'voice']) {
+    const rootDir = makeRoot();
+    const hot = hotForPing(rootDir);
+    const llm = fakeLlm(() => ({ text: 'pong', usage: {}, estimated: 1 }));
+    const { admin } = makeAdmin(rootDir, { hot, llm });
+
+    const body = await admin.run('ping', { role }, {});
+
+    assert.equal(body.split('\n').length, 1, role);
+    assert.ok(body.startsWith(`${role}: anthropic/claude-opus-4.6 — ok,`), role);
+    assert.equal(llm.calls.length, 1, role);
+  }
+});
+
 // A real "wrong provider keys" 404 body captured from OpenRouter, verbatim -- see the
 // module header's WHY. `error.metadata.routing_funnel` is the real location; `step` is the
 // real step-name key; `endpoint_count` (snake_case) is the real count key.
@@ -981,7 +1044,7 @@ test('run: ping reports a role that returns an HTTP error with its status, a tri
   const body = await admin.run('ping', {}, {});
   const lines = body.split('\n');
 
-  const talkLine = lines.find((l) => l.startsWith('talk:'));
+  const talkLine = lines.find((l) => l.startsWith('voice:'));
   assert.ok(talkLine.includes('FAIL'));
   assert.ok(talkLine.includes('404'));
   // The last step is also the first one that hit 0 here, so only one is shown.
@@ -1027,9 +1090,9 @@ test('run: ping reports every role skipped when labels.ping.prompt is missing, w
 
   assert.equal(llm.calls.length, 0);
   const lines = body.split('\n');
-  assert.equal(lines.length, 8);
-  assert.ok(lines.slice(0, 7).every((l) => l.includes('skipped: label missing')));
-  assert.equal(lines[7], 'image: (no model configured)', 'the image check needs no label');
+  assert.equal(lines.length, 7, 'talk and voice are one line here too');
+  assert.ok(lines.slice(0, 6).every((l) => l.includes('skipped: label missing')));
+  assert.equal(lines[6], 'image: (no model configured)', 'the image check needs no label');
 });
 
 test('run: ping works while paused', async () => {
@@ -3785,7 +3848,7 @@ test('run: ping sends each role as its own role and pings a shared model once pe
   llm.calls.length = 0;
   const routed = (await admin.run('ping', {}, {})).split('\n');
   assert.deepEqual(llm.calls.map((c) => c.options.role), ['talk', 'analyzer', 'classifier.text'], 'the analyzer route differs from talk: its own call');
-  assert.ok(routed.some((l) => l.startsWith('talk: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-talk')));
+  assert.ok(routed.some((l) => l.startsWith('voice: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-talk')), 'talk and voice still share their one request');
   assert.ok(routed.some((l) => l.startsWith('analyzer: anthropic/claude-opus-4.6 — ok,') && l.includes('provider=served-analyzer')));
 });
 

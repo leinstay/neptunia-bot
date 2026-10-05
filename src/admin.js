@@ -577,6 +577,10 @@ const ROUTE_ROLES = [...MODEL_ROLES, IMAGE_ROLE];
 /** A provider slug as OpenRouter writes it: lowercase letters, digits and `-`. */
 const PROVIDER_SLUG_RE = /^[a-z0-9-]+$/;
 
+/** The order the model lines of `/nep ping` are printed in (a display rule only: the speaking
+ * pair first, then the subprocessors); the image line follows them, the API checks come last. */
+const PING_DISPLAY_ORDER = ['talk', 'voice', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor'];
+
 /** The roles one `/nep ping` argument stands for: one role, a group, the image check, or (anything else)
  * all of them, the image check last. */
 function pingRolesFor(role) {
@@ -686,14 +690,13 @@ function formatYoutubeLine(result) {
   return `youtube: API key — ${state}`;
 }
 
-/** `lines` with the YouTube line inserted right after the classifier.video line. */
-function withYoutubeLine(lines, requested, youtubeLine) {
+/** `lines` with the YouTube line appended: an API check, so it follows every model line. */
+function withYoutubeLine(lines, youtubeLine) {
   if (youtubeLine == null) return lines;
-  const at = requested.indexOf('classifier.video');
-  return [...lines.slice(0, at + 1), youtubeLine, ...lines.slice(at + 1)];
+  return [...lines, youtubeLine];
 }
 
-/** `lines` with the image line appended last, after every model line and the lines that follow them. */
+/** `lines` with the image line appended, after the other model lines and before the API checks. */
 function withImageLine(lines, imageLine) {
   if (imageLine == null) return lines;
   return [...lines, imageLine];
@@ -2289,18 +2292,15 @@ export function createAdmin({
     if (!llm) return 'ping is not available (no llm client configured)';
 
     const requested = pingRolesFor(args?.role);
-    const modelRoles = requested.filter((role) => role !== IMAGE_ROLE);
+    const modelRoles = PING_DISPLAY_ORDER.filter((role) => requested.includes(role));
     const cfg = hot.config;
     const roleModel = new Map(modelRoles.map((role) => [role, modelForRole(role, cfg)]));
 
     const youtube = startPingYoutube(modelRoles);
     const image = startPingImage(requested, cfg);
 
-    const promptText = hot.prompts?.labels?.ping?.prompt;
-    if (!promptText) {
-      const skipped = modelRoles.map((role) => `${role}: ${roleModel.get(role) ?? '(no model configured)'} — skipped: label missing`);
-      return withImageLine(withWebLine(withYoutubeLine(skipped, modelRoles, await youtube), modelRoles), await image).join('\n');
-    }
+    // The model lines come first (the image line among them), the API checks after.
+    const assemble = async (lines) => withWebLine(withYoutubeLine(withImageLine(lines, await image), await youtube), modelRoles);
 
     // One request per distinct (model, route): roles sharing a model share a ping unless a
     // role-specific `llm.providerByModel` key routes one of them elsewhere. Each request is
@@ -2310,6 +2310,17 @@ export function createAdmin({
       const route = resolveProvider(model, { byModel: cfg?.llm?.providerByModel, fallback: cfg?.llm?.provider, role });
       return `${model}\n${JSON.stringify(route ?? null)}`;
     };
+    // Display only: when voice has the very same model and route as talk (the usual case: no
+    // memory.voiceModel), one line labelled `voice` stands for the pair.
+    const mergedIntoVoice = modelRoles.includes('talk') && modelRoles.includes('voice') && targetOf('talk') === targetOf('voice');
+    const shownRoles = modelRoles.filter((role) => !(mergedIntoVoice && role === 'talk'));
+
+    const promptText = hot.prompts?.labels?.ping?.prompt;
+    if (!promptText) {
+      const skipped = shownRoles.map((role) => `${role}: ${roleModel.get(role) ?? '(no model configured)'} — skipped: label missing`);
+      return (await assemble(skipped)).join('\n');
+    }
+
     const targets = new Map();
     for (const role of modelRoles) {
       const model = roleModel.get(role);
@@ -2336,7 +2347,7 @@ export function createAdmin({
       }),
     );
 
-    const lines = modelRoles.map((role) => {
+    const lines = shownRoles.map((role) => {
       const model = roleModel.get(role);
       if (!model) return `${role}: (no model configured)`;
       const outcome = results.get(targetOf(role));
@@ -2344,7 +2355,7 @@ export function createAdmin({
         ? formatPingSuccess(role, model, outcome.result, outcome.ms)
         : formatPingFailure(role, model, outcome.err, outcome.ms);
     });
-    return withImageLine(withWebLine(withYoutubeLine(lines, modelRoles, await youtube), modelRoles), await image).join('\n');
+    return (await assemble(lines)).join('\n');
   }
 
   // ---------------------------------------------------------------------
