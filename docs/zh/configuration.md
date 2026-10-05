@@ -23,6 +23,7 @@
 | `multiMessage` | `true` | 允许连续发 2–3 条消息 |
 | `vision` | `true` | 处理附加图片 |
 | `mediaDescriptions` | `true` | 为图片、GIF、视频帧和链接缩略图生成单行描述 |
+| `attachedDescriptions` | `true` | 描述器同时为附加到请求的图片运行。角色仍然直接看到图片；辅助的注释帮助发现一眼容易错过的内容。需要同时开启 `vision` 和 `mediaDescriptions` |
 | `videoDescriptions` | `false` | 通过支持视频的模型观看短视频片段；需同时开启 `mediaDescriptions`。在 `config.local.json` 中开启；还需要支持视频的模型，以及站点链接需要 `yt-dlp`/`ffmpeg` |
 | `videoRewatch` | `true` | 被呼叫时重看视频以回答相关问题；需要 `videoDescriptions` |
 | `webLookup` | `false` | 阅读聊天中发布的链接并在被问到事实性问题时搜索网络。与其他功能不同，缺失的键视为关闭。搜索需要 `.env` 中的 `BRAVE_SEARCH_API_KEY`；没有密钥时只有链接阅读可用。参见[媒体：链接与搜索](media.md#链接) |
@@ -40,6 +41,7 @@
 | `pauseNotice` | `true` | 角色在暂停时被呼叫会发布一条简短通知。缺失的键视为开启。参见 `mention.pauseNoticeMinutes` 和 `labels.limits.paused` |
 | `variety` | `true` | 模型过程识别角色在近期消息中过度使用的表达手法。结果作为 `<worn>` 块包含在回合请求中。缺失的键视为开启 |
 | `varietyPrecompute` | `true` | 角色发布文本后立即启动多样性过程，使下一回合可以直接使用结果。关闭时过程仅在回合时运行，但迟到的结果仍会保存。缺失的键视为开启 |
+| `splitTasks` | `true` | 将长且有结构的直接呼叫拆分为多个部分，每个部分在自己的回合中回答。缺失的键视为开启。需要 `prompts/split.md` 和 `labels.task.part` |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
 | `adminCommands` | `true` | 所有者斜杠命令；设为 `false` 时注销命令 |
@@ -146,12 +148,29 @@
 | `vision.maxBytes` | `1500000` | 图片文件大小上限（字节）；更大的图片会被跳过 |
 | `vision.fetchTimeoutMs` | `10000` | 每张图片下载超时（毫秒） |
 
-## `context.pull`
+### `context.customEmoji`
 
-将另一个频道拉入回合请求的设置（`features.channelPull`）。
+自定义表情块（`features.customEmoji`）的设置。记忆分析器追踪成员使用了哪些自定义表情以及频率。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
+| `max` | `30` | `<emoji>` 块中显示的自定义表情数，按成员使用率排名；排名不足 `max` 时从服务器表情按顺序补齐 |
+| `storeMax` | `200` | 使用排名中保留的自定义表情数；显示排名前 `max` 个 |
+| `halfLifeDays` | `30` | 使用排名的近期半衰期（天）；rank = log2(count + 0.5) + last / halfLife；最近不用的表情排名低于常用的 |
+| `backfillMessages` | `500` | 启动时从每个频道历史中读取的消息数以初始化排名。在 `features.customEmoji` 开启且该服务器尚未运行过回填时运行一次；结果标记在 `guild.json` 中。`0` 禁用回填 |
+
+## `context.pull`
+
+将另一个频道拉入回合请求的设置（`features.channelPull`）。当近期消息或触发器包含真实的 Discord 频道提及（`<#id>`）时，被提及频道的最新消息会渲染为 `<channel_view>` 块。窗口止于该频道的最新消息。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `windowMinutes` | `60` | 拉取的消息窗口（分钟），止于该频道最新消息 |
+| `minMessages` | `5` | 窗口内的最少消息数；不足时窗口向前扩展 |
+| `maxMessages` | `60` | 每个频道拉取的最大消息数 |
+| `maxPictures` | `10` | 包含说明的图片数；已缓存的说明免费，新的仅在回合确定运行时请求 |
+| `maxNewDescriptions` | `8` | 每回合为拉取频道中的图片发起的新描述请求数 |
+| `describeTimeoutMs` | `15000` | 新说明请求的超时（毫秒） |
 | `scanMessages` | `20` | 扫描频道提及的当前频道近期消息数 |
 | `maxChannels` | `1` | 每回合可拉取的频道数 |
 | `maxAgeDays` | `0` | 当频道最新消息超过此天数时拒绝拉取。`0` = 无限制 |
@@ -190,6 +209,17 @@
 | `purposeChars` | `80` | 列表中每个频道已存储用途显示的字符数 |
 | `maxOutputTokens` | `120` | 分类器的最大输出 token 数 |
 
+## `split`
+
+任务分拆器（`features.splitTasks`）的设置。当直接呼叫（提及、回复、名字、跟进、私信）足够长且有结构（`split.minChars`，至少两个分隔符）时，分类器（`prompts/split.md`，使用 `classifier.text` 角色）判断其中是否包含多个独立请求。每个部分在自己的回合中回答；第一个回复消息，其余发布为普通消息。分拆器与回合的准备过程并行运行，不会延迟单个请求。记录为 `split: verdict`、`split: skipped` 或 `split: failed`；每个部分记录 `turn: part`。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `minChars` | `80` | 询问分拆器前需要的最少字符数（链接和 Discord token 排除在外） |
+| `maxTasks` | `4` | 分拆器可返回的最大部分数。小于 2 时分拆器关闭 |
+| `contextMessages` | `6` | 与候选一起渲染给分类器的近期频道消息数 |
+| `maxOutputTokens` | `300` | 分类器的最大输出 token 数 |
+
 ## `recall`
 
 服务器消息历史搜索（`features.recall`）的设置。当查询分类器（`prompts/lookup.md`）回答 `server:` 词形、`who:` 名称词形或 `when:` 日期范围时，引擎通过 Discord 搜索 API 搜索服务器消息历史，将命中项分组为聚类，获取每个聚类周围的消息窗口，并让摘要辅助（`prompts/recall-summary.md`，使用 `classifier.text` 角色）回答历史中的答案。摘要可能指出一段最佳回答问题的原文；如果是，角色将在 `<lookup>` 块中看到该段原文和浓缩笔记。记录为 `recall: searched`、`recall: summary`、`recall: skipped` 或 `recall: failed`。
@@ -221,6 +251,8 @@ GIF 库（`features.gifs`）的设置。使用次数在每条消息到达时统�
 | `storeMax` | `300` | 库中保留的 GIF 数；显示排名前 `max` 个 |
 | `halfLifeDays` | `30` | 使用排名的近期半衰期（天）；与自定义表情使用相同公式 |
 | `maxPerDay` | `40` | 角色每天可发送的 GIF 数 |
+| `backfillMessages` | `500` | 启动时从每个频道历史中读取的消息数以初始化库 |
+| `backfillDescribe` | `20` | 回填后立即获取说明的排名最高 GIF 数 |
 | `recachePerRun` | `50` | 每次 `/nep gifs recache` 运行时重新描述的库 GIF 数量。库外的单帧说明立即删除；然后在后台从最旧的开始观看最多此数量的库条目 |
 
 ## `media`
@@ -229,9 +261,11 @@ GIF 库（`features.gifs`）的设置。使用次数在每条消息到达时统�
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `maxOutputTokens` | `120` | 每次描述的最大输出 token 数 |
+| `maxOutputTokens` | `120` | 每次描述的最大输出 token 数；推理模型的思考计入此上限时需调高 |
+| `descriptionChars` | `200` | 图片描述的最大字符数；保留第一行并在词边界截断。当 `describe.md` 中存在 `{{maxChars}}` 占位符时填充其值 |
 | `imageSize` | `512` | 缩放目标像素 |
 | `maxPerTurn` | `6` | 每回合生成的最大描述数 |
+| `prefillPerMessage` | `2` | 一条观察到的消息中立即发送给描述器的图片、贴纸和自定义表情数；`0` 关闭图片预填 |
 | `cacheEntries` | `5000` | 描述缓存大小，以附件为键 |
 | `filePreviewChars` | `500` | 文本文件开头显示的字符数 |
 | `embedTextChars` | `200` | 链接嵌入文本显示的字符数 |
@@ -275,6 +309,7 @@ GIF 库（`features.gifs`）的设置。使用次数在每条消息到达时统�
 | `urlProcessing` | `"agentic"` | 公开 URL 视频部分发送的 OpenRouter 处理模式；缺少时某些提供商只能看到单帧。`null` 省略该字段 |
 | `reasoning` | `{ "effort": "low" }` | 每个视频请求的 OpenRouter `reasoning` 设置；防止推理占用输出预算。非对象值省略该字段 |
 | `prefill` | `true` | 视频到达时立即观看，以便下次回合时已有缓存 |
+| `prefillPerMessage` | `1` | 一条观察到的消息中立即观看的视频数（`prefill` 开启时）；`0` 关闭视频预填 |
 
 `yt-dlp` 和 `ffmpeg` 均为可选的系统二进制文件。没有它们时，在限制内的附件仍然可用（直接发送）。更长的附件和所有站点链接会回退到静帧或预览图，角色会被告知原因。每个视频请求都计入 `llm.maxRequestsPerDay` 和视频 token 上限（`maxRequestTokens`）。
 
@@ -287,7 +322,8 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `maxPerDay` | `20` | 每日重看上限（独立于 `media.video.maxPerDay`） |
-| `maxOutputTokens` | `600` | 重看回答的最大输出 token 数 |
+| `maxOutputTokens` | `600` | 重看回答的最大输出 token 数（视频模型的再看响应，非分类器的选择） |
+| `classifierMaxOutputTokens` | `120` | 重看分类器的最大输出 token 数（选择/重试/none 决定）。推理型模型需要更大的上限 |
 | `answerChars` | `1200` | 回答的最大字符数；填充 `rewatch-answer.md` 中的 `{{maxChars}}` |
 | `recentMessages` | `60` | 扫描已观看或错误状态视频的近期消息数 |
 | `maxCandidates` | `6` | 从近期窗口中提供给分类器的最大视频数，按最新排序 |
@@ -311,7 +347,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `affinityLikeBonus` | `0.08` | 态度 +100 时减少的最大忽略概率 |
 | `oneAtATime` | `true` | 全服务器同一时间只处理一条回复 |
 | `pendingSameChannel` | `true` | 当同一频道中正在执行回合时挂起该频道的直接提及；回合结束后以通常的忽略概率回复。缺失键 = 开启 |
-| `maxPending` | `3` | 繁忙时可挂起直接提及的频道数 |
+| `maxPending` | `6` | 跨所有频道和作者挂起的呼叫总数。满员时淘汰最早的一个（`mention: dropped`，原因 `full`） |
 | `pendingMinutes` | `10` | 挂起的提及过期时间（分钟） |
 | `switchDelayMs` | `[2000, 9000]` | 在下一个频道回复前的暂停时间（毫秒） |
 | `followUpMinutes` | `15` | 角色最后一条回复后的后续窗口（分钟） |
@@ -360,6 +396,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `model` | `null` | 分析器模型（`null` = `llm.model`） |
+| `temperature` | `0.3` | 所有 analyzer 角色请求的采样温度：流分析器批次（服务器和私有）、预热的频道/档案/服务器请求和画像刷新 |
 | `mainChannelIds` | `[]` | 人们相互交流的频道；成员性格和风格的画像取自这些频道；为空表示所有频道均计入。也是只读频道呼叫响应的目标频道（`features.elsewhere`）：使用列表中第一个可用的频道 |
 | `portraitRefreshHours` | `24` | 每成员画像刷新最短间隔（小时） |
 | `portraitRefreshMessages` | `300` | 自上次画像以来的成员自身消息数达到此值时触发代码刷新。也是采样大小 |
@@ -420,9 +457,10 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `maxPerDay` | `100` | 每 UTC 天的语音请求数（存储在 `state.json` 中的 `voiceDay` / `voiceCount`） |
-| `maxItems` | `24` | 每次语音请求携带的最大条目数 |
-| `maxOutputTokens` | `6000` | 每次语音请求的最大输出 token 数 |
+| `maxItems` | `24` | 每次语音请求携带的条目数，控制在 50k token 限制内 |
+| `maxPerDay` | `100` | 每 UTC 天的语音请求数。`0` 阻止发送（可用于仅阶段 A 的模拟运行） |
+| `maxOutputTokens` | `3000` | 每次语音请求的最大输出 token 数 |
+| `retryMinutes` | `15` | 语音回答遗漏条目后的退避时间；每次遗漏后延迟翻倍 |
 | `maxAttempts` | `4` | 条目被回答遗漏多少次后走降级路径。失败的请求（错误 JSON、超时）不计入 |
 | `queueMax` | `100` | 队列中保留的条目数；最旧的非角色条目溢出到降级路径 |
 | `queueHours` | `24` | 排队条目在走降级路径前的过期小时数。角色条目永不过期 |

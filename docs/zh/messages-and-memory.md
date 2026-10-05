@@ -12,7 +12,21 @@
 
 ### 一次一条回复
 
-角色在整个服务器范围内同一时间只写一条回复（`mention.oneAtATime`）。当 `mention.pendingSameChannel` 开启（默认 `true`，缺失键 = 开启）时，同一频道中在回合执行期间到达的直接提及（@提及或对角色消息的回复）会被挂起：每个频道保留一条，回合结束后以 `mention.switchDelayMs` 的暂停回复，忽略概率在那时判定。如果正在执行的回合已经在历史记录中处理了该提及，则不会重复回复。关闭该开关时，提及会被错过，仅出现在下次回复的对话记录中。来自其他频道的直接提及以相同方式挂起，每个频道保留一条，最多在 `mention.maxPending` 个频道中保留 `mention.pendingMinutes` 分钟；同一待处理频道中较新的提及会替换较旧的。当前回复完成后，角色在短暂停顿（`mention.switchDelayMs`）后切换频道，基于当前对话状态进行回复；通常的忽略概率仍然适用。挂起的提及在机器人暂停时不会被回复。繁忙期间到达的名字触发和窃听命中会被跳过。设置 `mention.oneAtATime: false` 后，每个频道独立处理。角色不会在缺少发送消息权限的频道中发言；此类频道仍会被读取和记忆。当 `features.elsewhere` 开启且角色在只读频道中被呼叫（@提及、回复、名字）时，呼叫等待对话稳定（`elsewhere.settleSeconds`，上限 `elsewhere.settleMaxSeconds`），然后角色在 `memory.mainChannelIds` 中第一个可用的频道回复，附带跳转链接。等候中的较新呼叫替换旧的。等候期间消息被删除的（`gone`）或无法获取的（`fetch-failed`）呼叫会被丢弃。重启会丢失等候中的呼叫（它在环中保持未回复状态）。呼叫记录保留在每频道的环中（`elsewhere.rememberPings`，默认 20），保留 `elsewhere.pingMaxAgeDays`（默认 7）天。角色也可以主动评论自己在只读频道中读到的内容（记录为 `spontaneous: noticed`），评论发布在主频道，使用 `prompts/elsewhere.md` 作为任务。
+角色在整个服务器范围内同一时间只写一条回复（`mention.oneAtATime`）。当 `mention.pendingSameChannel` 开启（默认 `true`，缺失键 = 开启）时，同一频道中在回合执行期间到达的直接提及（@提及或对角色消息的回复）会被挂起，回合结束后以 `mention.switchDelayMs` 的暂停回复，忽略概率在那时判定。如果正在执行的回合已经在历史记录中处理了该提及，则不会重复回复。关闭该开关时，提及会被错过，仅出现在下次回复的对话记录中。来自其他频道的直接提及以相同方式挂起。每个呼叫按到达顺序等候，不会相互替换。跨所有频道和作者最多挂起 `mention.maxPending`（默认 6）个呼叫；超出时淘汰最早的一个（`mention: dropped`，原因 `full`）。呼叫在 `mention.pendingMinutes` 分钟后过期。当前回复完成后，角色在短暂停顿（`mention.switchDelayMs`）后切换频道，基于当前对话状态回复最早的挂起呼叫；通常的忽略概率仍然适用。挂起的呼叫在机器人暂停时不会被回复。繁忙期间到达的名字触发和窃听命中会被跳过。设置 `mention.oneAtATime: false` 后，每个频道独立处理。角色不会在缺少发送消息权限的频道中发言；此类频道仍会被读取和记忆。
+
+当有呼叫来自在该频道已有等候条目的作者时（分拆消息中尚未处理的部分，或之前排队的呼叫），合并分类器（`prompts/merge.md`，使用 `classifier.text`，用途标记 `merge`）判断新消息是否属于其中某个条目。如果是，新消息被折叠进该条目而非作为独立呼叫排队；该条目的回合通过 `labels.task.added` 看到它。没有提示文件时，每个呼叫都单独排队。记录为 `merge: verdict` 或 `merge: failed`。
+
+回答呼叫的回合会通过 `labels.task.queued` 列出同一作者的其他等候呼叫（在分拆回合中作为 `labels.task.part` 的 `{others}` 的一部分），通过 `labels.task.queuedOthers` 列出频道中其他成员的等候呼叫。以这种方式列出的呼叫不会因为已出现在回合的历史记录中而被丢弃。没有这些标签时使用旧规则，等候呼叫不被列出。
+
+当 `features.elsewhere` 开启且角色在只读频道中被呼叫（@提及、回复、名字）时，呼叫等待对话稳定（`elsewhere.settleSeconds`，上限 `elsewhere.settleMaxSeconds`），然后角色在 `memory.mainChannelIds` 中第一个可用的频道回复，附带跳转链接。等候中的较新呼叫替换旧的（除非新呼叫更弱：名字触发替换不了标签呼叫）。等候期间消息被删除的（`gone`）或无法获取的（`fetch-failed`）呼叫会被丢弃。重启会丢失等候中的呼叫（它在环中保持未回复状态）。呼叫记录保留在每频道的环中（`elsewhere.rememberPings`，默认 20），保留 `elsewhere.pingMaxAgeDays`（默认 7）天。角色也可以主动评论自己在只读频道中读到的内容（记录为 `spontaneous: noticed`），评论发布在主频道，使用 `prompts/elsewhere.md` 作为任务。
+
+### 分拆消息
+
+当 `features.splitTasks` 开启（默认如此）且一个直接呼叫（提及、回复、名字、跟进、私信）足够长且有结构（`split.minChars`，至少两个分隔符），分类器（`prompts/split.md`，使用 `classifier.text`，用途标记 `split`）判断其中是否包含多个独立的请求。分类器与回合的准备过程并行运行，不会延迟单个请求。回答为 `one`（一个请求）或 2 到 `split.maxTasks` 行，每行以 `- ` 开头，用作者自己的话表述一个部分。
+
+各部分成为同一消息上的普通回合链。每个部分是其自身回合的查询、频道路由和 recall 辅助的候选，角色的请求会指出正在回答的部分和其余部分（`labels.task.part`）。第一个部分回复消息，其余的发布为普通消息。每个部分有自己的截止时间和丢弃限制。角色以沉默、失败或拒绝回答的部分不会阻止下一个。暂停或预热会提前结束链（`turn: chain stopped`）。忽略概率、私聊每日上限和环标记在每条消息上只计一次。链运行期间，挂起呼叫继续排队；注意力在链结束时才释放。
+
+设置：`features.splitTasks`、`split` 组（`minChars`、`maxTasks`、`contextMessages`、`maxOutputTokens`）。没有 `prompts/split.md` 或没有 `labels.task.part` 时分拆器关闭。日志：`split: verdict`、`split: skipped`、`split: failed`、`turn: part`、`turn: chain stopped`。
 
 当 `features.pauseNotice` 开启时（默认如此），角色在暂停时被呼叫会收到一条简短回复（`labels.limits.paused`）。每个频道每 `mention.pauseNoticeMinutes`（默认 10）分钟最多一条。
 

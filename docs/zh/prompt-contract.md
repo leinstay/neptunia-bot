@@ -55,6 +55,8 @@
 | `mentor-diagnose.md` | 否 | Mentor：评分后解释弱回答，指出角色上下文中的具体文本（`features.mentor`）。结果为未验证的假设，存储为运行中的 `diagnosis`。`mentor.diagnose` 为 false 或文件缺失时省略 | `{{name}}` |
 | `variety.md` | 否 | `classifier.text` 请求：识别角色近期消息中重复的表达手法（`features.variety`）。不接收角色卡 | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `variety-long.md` | 否 | 长多样性过程：在全部消息环中识别手法（`features.variety`、`variety.longLines`）。与 `variety.md` 相同的占位符、`<lines>` 块和回答格式。使用 `variety.longModel`（null = `classifier.text`）。不接收角色卡。文件不存在则无长过程 | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
+| `split.md` | 否 | 分类器：直接呼叫是否包含多个独立请求（`features.splitTasks`）。接收一段短 `<transcript>` 和新消息作为 `<candidate>`。输出为 `one`，或 2 到 `{{maxTasks}}` 行，每行以 `- ` 开头，用作者自己的话表述一个部分。不接收角色卡。没有此文件时分拆器关闭 | `{{name}}` `{{maxTasks}}` |
+| `merge.md` | 否 | 分类器：已有等候条目的作者的新消息是否属于其中一个。接收编号的 `<waiting>` 列表和新消息作为 `<candidate>`。输出为一行：列表中的一个编号或 `new`。不接收角色卡。没有此文件时新呼叫始终作为独立条目排队 | `{{name}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
 
 `{{name}}` 机器人的显示名称 · `{{author}}` 呼叫者的显示名称 · `{{trigger}}` `labels.triggers.*` 之一 ·
@@ -87,12 +89,13 @@
 | `<self_facts>` | 角色声称过的关于自身的事实 |
 | `<recent>` | 服务器最近 `memory.recentHours`（默认 72）小时内发生的事情：分析器写入的近期记事（短事件）和成员的窗口内回忆（按引用显示）。记事仅来自本轮自身的频道或此处所有人都能阅读的频道；私聊中仅来自所有服务器成员都能阅读的频道，不含回忆。本轮提及的人的条目排在前面；已在 `<people>` 中渲染的回忆不再出现，每人最多 2 条。从最旧到最新。标题无条目则不渲染。开关 `features.recent`（缺失 = 开）；上限 `context.caps.recent`（默认 1200） |
 | `<people>` | 成员档案；呼叫者排首位，以 `labels.profile.interlocutorMark` 标记（`overheard` 回合中省略：作者在谈论角色而非对角色说话）；每个档案包含角色的态度，呼叫者还包含**回忆**：角色记住的关于两人之间的时刻，附带日期和简短引用 |
-| `<other_channels>` | 每个相邻频道最多 `context.neighborMessages` 条消息，不超过 `context.neighborMaxAgeMinutes` 的时效 |
+| `<other_channels>` | 每个相邻频道最多 `context.neighborMessages` 条消息，不超过 `context.neighborMaxAgeMinutes` 的时效。`features.mediaDescriptions` 开启时，相邻频道行中的图片在描述器缓存已有说明时携带说明；不为相邻频道发起新的描述请求。`<channel_view>` 中已显示其块的频道不再出现在 `<other_channels>` 中；如果预算丢弃了拉取的块，该频道重新作为普通相邻频道出现 |
+| `<channel_view>` | 拉入本轮的另一个频道（`features.channelPull`）。每个拉取的频道一个条目：标题行（`labels.pull.header`）、适用时的只读标记（`labels.server.readOnly`）、窗口被截断时的"更早的未显示"行、"图片未查看"计数、角色的早期呼叫（带已回复/未回复/已跳过标记），然后是窗口行。行使用与 `<chat>` 相同的对话记录格式，但编号在对话后继续（对话为 `#1`..`#N`，拉取块从 `#N+1` 开始），因此每个 `#n` 在块间唯一。图片仅以说明或盲标签形式出现，不作为附加图片。没有 `labels.pull.header` 时块为空 |
 | `<worn>` | 角色在近期消息中过度使用的手法（`features.variety`）：`labels.variety.intro`，然后每个手法一行 `- <shape> ("<example>", ...)`。长过程的手法（`wornLong`，来自 `variety-long.md`）在前，然后是短过程的，去重后最多 `variety.maxPatterns` + `variety.longMaxPatterns` 个。两者都无结果或开关关闭时省略 |
 | `<lookup>` | 角色本轮查询的内容。网络搜索（`features.webLookup`）携带 `labels.lookup.webHeader`、浓缩的答案、`labels.lookup.sources`，未找到时为 `labels.lookup.none`。服务器搜索（`features.recall`）携带 `labels.lookup.serverHeader`、摘要笔记，摘要指出一段时还有逐字原文。两者都运行时 `labels.lookup.bothNote` 位于两部分之间。`labels.lookup.stretch` 行引入一段逐字原文（`{date}` `{channel}`）。仅在搜索分类器触发且至少一项搜索完成后出现 |
 | `<chat>` | 当前频道最新的 `context.channelMessages` 条消息 |
 | `<tempo>` | 10 分钟 / 1 小时 / 1 天的消息计数，不同人数，沉默时长，一个判定（活跃 / 缓慢 / 沉寂） |
-| `<task>` | `reply` / `interject` / `initiate` / `overheard`（当 `overheard.md` 存在时）/ `elsewhere`（当 `elsewhere.md` 存在时，用于 noticed 评论），占位符已填充 |
+| `<task>` | `reply` / `interject` / `initiate` / `overheard`（当 `overheard.md` 存在时）/ `elsewhere`（当 `elsewhere.md` 存在时，用于 noticed 评论），占位符已填充。模式提示之后，当条件满足时最多追加三个 `task.*` 标签（各以空行分隔）：回合回答分拆消息的一个部分时为 `task.part`，或触发作者有其他呼叫等候时为 `task.queued`；频道中其他成员有呼叫等候时为 `task.queuedOthers`；稍后的消息被折叠进此呼叫时为 `task.added`。参见下方 `labels.task.*` |
 
 预算优先级（区块从此列表的底部开始裁剪）：系统提示 + 任务 + 时钟 + 节奏 + 感知
 （永不裁剪）-> 呼叫者的档案含回忆 -> 查询结果（整体保留或丢弃；可包含网络部分、服务器部分或两者）-> 聊天习惯 -> 自述事实 -> 世界书 -> 服务器 -> 对话记录（最新优先）->
@@ -260,6 +263,10 @@ recent.header                            REQUIRED {hours}: the block's first lin
 recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
 recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
 recent.episode                           OPTIONAL {date} {name} {what}: a moment the persona remembers with {name} on {date}; no quote, no feeling. Without it the block shows notes only
+task.part                                {index} {total} {part} {others}: this turn answers one part of a split message. {index} is 1-based, {part} is the text of this part, {others} lists the remaining parts and any queued calls as numbered items joined by `; `. Without this key the splitter is off even when the prompt file exists
+task.queued                              {others}: the trigger author has other calls waiting, listed as numbered items joined by `; `. Shown only when there is no `task.part` for this turn. Without this key the waiting calls are not named and the seen-in-history drop rule applies to them
+task.queuedOthers                        {others}: other members have calls waiting in this channel, listed as `<n>. <author>: <text>` items joined by `; `. Without this key those calls are not named
+task.added                               {added}: later messages from the author were folded into this call while it waited, joined by `; `. Without this key the folded messages are not named
 ```
 
 ## 输出
@@ -602,6 +609,18 @@ recent.episode                           OPTIONAL {date} {name} {what}: a moment
 ### Mentor
 
 Mentor 沙盒为每个场景执行一次多样性过程，计入 mentor 的 token 预算（不计入 `llm.maxRequestsPerDay`）。沙盒使用 `variety.timeoutMs` 作为请求超时（它没有后续回合来使用迟到的结果）。识别的手法保存为场景记录上的 `worn`。评分者不会看到 `<worn>` 块。
+
+## 任务分拆器
+
+足够长且有结构的直接呼叫（提及、回复、名字、跟进、私信）（`split.minChars` 字符，排除链接和 Discord token，至少两段分隔符）会在回合准备过程中一并交给分类器（`prompts/split.md`，使用 `classifier.text`，用途标记 `split`）。分类器读取最近 `split.contextMessages` 条消息的短 `<transcript>`（角色自身的行以 `labels.self` 标记），然后是新消息作为 `<candidate>`（`<作者名>: <文本>`）。回答为 `one`，或 2 到 `split.maxTasks`（默认 4）行，每行以 `- ` 开头，用作者自己的话表述一个部分。空白、无法解析或迟到的回答（回合准备先完成）视为单个请求，记录 `split: failed`。开关 `features.splitTasks`（缺失 = 开启）。
+
+各部分成为同一消息上的普通回合链（`turn: part`）。每个部分的辅助（搜索分类器、recall、路由、重看）以该部分的文本为判断对象，请求中指出正在回答的部分和其余部分（`labels.task.part`，含 `{index}`、`{total}`、`{part}`、`{others}`）。第一个部分复用整条消息的回合已获取的历史记录并回复消息；后续部分重新获取历史记录并发布为普通消息。每个部分有自己的截止时间和丢弃限制；失败或被拒绝的部分不会阻止下一个。忽略概率、私聊每日上限和环标记在每条消息上只计一次。暂停或预热在下一个部分前结束链（`turn: chain stopped`）。链运行期间，未开始的部分是作者的等候条目（回合执行器上的 `waitingParts`）；作者稍后的消息折叠进其中一个（`addToPart`）会通过 `tasks.added` 到达该部分的请求。注意力从第一个回合到结束一直保持；空闲通知在结束时只触发一次。
+
+没有 `prompts/split.md` 时分拆器关闭（`split: skipped`，`no-prompt`）。没有 `labels.task.part` 时分拆器也关闭：解析出的回答被丢弃。设置：`split.minChars`（默认 80）、`split.maxTasks`（默认 4）、`split.contextMessages`（默认 6）、`split.maxOutputTokens`（默认 300）。
+
+## 合并分类器
+
+当有呼叫来自在该频道已有等候条目的作者时（分拆消息中尚未处理的部分，或待处理列表中排队的呼叫），分类器（`prompts/merge.md`，使用 `classifier.text`，用途标记 `merge`）判断新消息是否属于其中一个。分类器读取编号条目的 `<waiting>` 块（`1. <文本>`，每个等候条目一行）和新消息作为 `<candidate>`（`<作者名>: <文本>`）。回答为一行：等候列表中的一个编号或 `new`。被折叠的消息不会获得自己的回合；它通过 `labels.task.added`（`{added}`）出现在其条目的回合中。被路由的呼叫不会被折叠。没有提示文件时，每个呼叫都作为独立条目排队（`merge: failed`，`no-prompt`）。记录为 `merge: verdict` 或 `merge: failed`。无自己的配置设置；输出上限为 `mention.followUpMaxOutputTokens`。
 
 ## 绘画
 

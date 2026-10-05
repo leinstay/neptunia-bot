@@ -124,7 +124,7 @@ Discord 斜杠命令只有一个：`/nep`（名称来自 `bot.commandName`）。
 
 ## 消息与记忆
 
-角色响应提及、回复和名字触发，有时选择无视。随机插入对话，在安静的频道发起话题，也可能对面向全体的问题作出回应。回复某人后，通过分类器追踪该频道的后续消息。整个服务器同一时间只写一条回复；其他频道的提及挂起后依次处理。当有人提到另一个频道时，分类器会选出该频道，使角色能够阅读它。
+角色响应提及、回复和名字触发，有时选择无视。随机插入对话，在安静的频道发起话题，也可能对面向全体的问题作出回应。回复某人后，通过分类器追踪该频道的后续消息。整个服务器同一时间只写一条回复；其他频道的提及挂起后依次处理，每个频道和作者可挂起任意数量，最多 `mention.maxPending`（默认 6）个。当一条消息包含多个独立的请求时，每个请求在自己的回合中回答。当有人又发了一条关于仍在等候的内容的消息时，它会被折叠进那个条目而非单独排队。当有人提到另一个频道时，分类器会选出该频道，使角色能够阅读它。
 
 独立的记忆分析器在消息累积到一定量时运行。它为每个成员建立档案，包含兴趣、细节、别名、回忆和态度，以及服务器级的习惯、内部梗、事件故事的世界书，还有人们直接教给角色的东西（词语、事实、请求）。档案增量更新；已存储的事实不会被重新概括。角色还会学习人们怎么互称，通过名字或别名认出成员。所学内容存储在服务器级别（`memory.maxLearned` 个显示，`memory.maxLearnedStored` 个保留在磁盘上，`memory.learnedChars` 字符/条目），始终出现在提示中。
 
@@ -146,7 +146,7 @@ Mentor 的模型、预算和命令独立于角色。配置键参见 [`configurat
 
 ## 成本
 
-每个回合消耗一次 LLM 请求；记忆更新再加一次。成本取决于模型和端点；`llm.model` 和 `llm.baseUrl` 接受任何兼容值。每日上限（`llm.maxRequestsPerDay`）防止超支。视频描述每个片段向更便宜的独立模型发一次请求（`media.video.maxPerDay` 限制每日数量）；`yt-dlp` 和 `ffmpeg` 在本地运行，只消耗带宽。链接阅读和网络搜索（`features.webLookup`，默认关闭）向文本分类器发请求，受 `web.maxPerDay` 限制；网络搜索还需要 Brave Search API 密钥（免费层：每月 2,000 次查询）。服务器消息历史搜索（`features.recall`，默认开启）使用 Discord 内置的搜索 API，只增加分类器和摘要请求。图像生成（`features.imageGeneration`，默认关闭）通过 `image.model` 按输出 token 计费；`image.maxPerDay` 独立于聊天请求限制每日数量。私聊（`features.privateMessages`，默认关闭）使用同样的 LLM 和上限；每条 DM 回复是一次请求，每个私有分析器批次是另一次。启用 `features.webLookup` 后，机器人会发出 HTTP 请求获取页面和访问 Brave Search API；私有地址拒绝访问。
+每个回合消耗一次 LLM 请求；记忆更新再加一次。分拆消息分类器和合并分类器在条件满足时各可增加一次 `classifier.text` 模型请求。成本取决于模型和端点；`llm.model` 和 `llm.baseUrl` 接受任何兼容值。每日上限（`llm.maxRequestsPerDay`）防止超支。视频描述每个片段向更便宜的独立模型发一次请求（`media.video.maxPerDay` 限制每日数量）；`yt-dlp` 和 `ffmpeg` 在本地运行，只消耗带宽。链接阅读和网络搜索（`features.webLookup`，默认关闭）向文本分类器发请求，受 `web.maxPerDay` 限制；网络搜索还需要 Brave Search API 密钥（免费层：每月 2,000 次查询）。服务器消息历史搜索（`features.recall`，默认开启）使用 Discord 内置的搜索 API，只增加分类器和摘要请求。图像生成（`features.imageGeneration`，默认关闭）通过 `image.model` 按输出 token 计费；`image.maxPerDay` 独立于聊天请求限制每日数量。私聊（`features.privateMessages`，默认关闭）使用同样的 LLM 和上限；每条 DM 回复是一次请求，每个私有分析器批次是另一次。启用 `features.webLookup` 后，机器人会发出 HTTP 请求获取页面和访问 Brave Search API；私有地址拒绝访问。
 
 `data/` 存储成员档案、关系分数、频道观察、服务器规律、媒体描述和网页摘要的缓存。全部保留在你的机器上，已加入 gitignore，仅作为上下文发送给 LLM。分析器被指示不存储敏感信息。`/nep memory forget` 可完全删除某人的档案。
 
@@ -218,6 +218,8 @@ prompts/
   mentor-score.md          mentor：评分角色的回答
   mentor-signs.md          mentor：已知的模型文本习惯
   mentor-diagnose.md       mentor：评分后解释弱回答
+  split.md                 分类器：直接呼叫是否包含多个独立请求
+  merge.md                 分类器：新消息是否属于已在等候的条目
   variety.md               分类器：识别角色过度使用的手法
   variety-long.md          分类器：在更大范围内识别过度使用的手法
   profile.md               预热：从消息样本生成一个成员的档案
@@ -291,7 +293,8 @@ src/
     prompt.js              带 token 预算的请求构建器
     turn.js                一个回合：收集、构建、调用、执行
     spontaneous.js         混沌定时器，窃听，面向全体的问题
-    pending.js             角色繁忙时挂起的直接提及
+    split.js               纯函数：任务分拆预过滤和回答解析
+    pending.js             挂起的呼叫，合并回答解析，折叠
     private.js             纯函数：DM 门控，合并档案，有效好感度
     limits.js              纯函数：限制和暂停通知
     recall.js              纯函数：服务器历史搜索决策
