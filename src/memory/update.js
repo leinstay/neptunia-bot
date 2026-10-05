@@ -19,13 +19,17 @@
 // That is the voice run (`runVoice`, stage B): one request per run on
 // `memory.voiceModel`, right after a stage A batch and from the tick while
 // queued items are due, its texts written by id into what stage A stored.
+// A guild batch also sees the live lines of the recent store (src/memory/recent.js,
+// `<recent_notes>`) only so it does not write one moment twice, and its `recent`
+// field adds or removes such lines (`features.recent`); a line is never copied
+// into a long-term store, and a private batch neither sees nor writes one.
 // Memory is persistent: nothing here ever wipes it — a failed update just
 // leaves the buffer alone and backs off for a while.
 
 import { isPlainObject } from '../config.js';
 import { fitSections, SectionsTooLargeError } from '../llm/budget.js';
 import { estimateTokens } from '../llm/tokens.js';
-import { formatTranscript, renderTranscript } from '../discord/format.js';
+import { formatClock, formatDate, formatTranscript, renderTranscript } from '../discord/format.js';
 import { parseJsonObject } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError, dailyCapOf } from '../llm/openrouter.js';
 import { isDescribable, mediaParts, stickerUrl } from '../discord/media.js';
@@ -42,6 +46,7 @@ import { gifOpts } from './gifs.js';
 import { topByRank } from './ranking.js';
 import { ID_DIGITS, toTokens, fromTokens } from './mentions.js';
 import { clampText } from './clamp.js';
+import { RECENT_DEFAULTS, foldText, liveRecent, recentSettings } from './recent.js';
 import { videoStateFromCache } from './describe.js';
 import { isVideoVisionOn } from './youtube-check.js';
 import { block, fillPromptTemplate, renderProfile } from '../behavior/prompt.js';
@@ -294,8 +299,11 @@ export function isDue(buffer, nowMs, cfg, relationshipsCfg) {
  * The `{{fieldChars}}`/`{{maxDetails}}`/... placeholders `prompts.memory` may use, filled from
  * the live config so a prompt states the same limits the code actually clamps to. Missing config
  * keys fall back to MEMORY_LIMIT_DEFAULTS (config.json's own defaults), `{{relationshipChars}}`
- * to src/memory/voice.js#voiceLimits' (the limit stage B states for the same text); an unknown
- * placeholder in the prompt is left untouched by fillPromptTemplate regardless.
+ * to src/memory/voice.js#voiceLimits' (the limit stage B states for the same text), the recent
+ * layer's `{{recentHours}}` / `{{maxNewRecent}}` / `{{recentChars}}` to src/memory/recent.js'
+ * RECENT_DEFAULTS. With `features.recent` off the answer's `recent` field is ignored, so
+ * `{{maxNewRecent}}` is 0 (the number of notes the code takes) and the other two are filled as
+ * usual; an unknown placeholder in the prompt is left untouched by fillPromptTemplate regardless.
  * @param {object} config  Live config (`config.memory`, `config.relationships`, `config.lore`).
  * @param {string} selfName
  */
@@ -319,6 +327,9 @@ function memoryTemplateValues(config, selfName) {
     maxLearned: memoryCfg.maxLearned ?? MEMORY_LIMIT_DEFAULTS.maxLearned,
     learnedChars: memoryCfg.learnedChars ?? MEMORY_LIMIT_DEFAULTS.learnedChars,
     relationshipChars: voiceLimits(config).relationship,
+    recentHours: memoryCfg.recentHours ?? RECENT_DEFAULTS.hours,
+    maxNewRecent: recentSettings(config)?.maxNew ?? 0,
+    recentChars: memoryCfg.recentChars ?? RECENT_DEFAULTS.chars,
   };
 }
 
@@ -571,6 +582,36 @@ export function characterText(prompts, selfName) {
 }
 
 /**
+ * The `<recent_notes>` candidates of a guild batch: the lines of the recent store still inside
+ * `memory.recentHours` of `now` (src/memory/recent.js#liveRecent), the newest
+ * `memory.recentShown` of them by moment, oldest first. Each is one JSON item `{ id, when, text }`:
+ * `when` the moment in the transcript's own date and clock (`formatDate` + `formatClock`), `text`
+ * with every `<@id>` token as `name (id:...)` like every other analyzer view. None with
+ * `features.recent` false, `memory.recentShown` 0, no clock or no live line.
+ * @param {unknown} lines  The store's lines (src/memory/store.js#getRecent).
+ * @param {{ config: object, now: number, timezone: string, locale?: string,
+ *   nameOf: (id: string) => (string|null) }} opts
+ * @returns {{ id: number, text: string }[]}
+ */
+function recentNoteItems(lines, { config, now, timezone, locale, nameOf }) {
+  const settings = recentSettings(config);
+  if (!settings || !Number.isFinite(now)) return [];
+  const shown = Number.isInteger(settings.shown) && settings.shown >= 0 ? settings.shown : RECENT_DEFAULTS.shown;
+  if (shown === 0) return [];
+  const live = liveRecent(lines, { now, hours: settings.hours })
+    .filter((line) => Number.isInteger(line.id) && typeof line.text === 'string' && line.text.trim() !== '')
+    .sort((a, b) => a.at - b.at || a.id - b.id);
+  return live.slice(-shown).map((line) => ({
+    id: line.id,
+    text: JSON.stringify({
+      id: line.id,
+      when: `${formatDate(line.at, timezone, locale)} ${formatClock(line.at, timezone, locale)}`,
+      text: resolveText(line.text, nameOf),
+    }),
+  }));
+}
+
+/**
  * Build one memory-update LLM request. Pure: no I/O, no clock reads besides
  * what is already baked into `messages`.
  *
@@ -615,10 +656,19 @@ export function characterText(prompts, selfName) {
  * @param {'single'|'decide'} [input.stage]  `decide` = stage A of the two-stage analyzer:
  *   the system message is `prompts['memory-decide']` (the same placeholders filled), and a guild
  *   profile's view leaves `style` out (stage A writes no portrait; `character` stays as
- *   context). Everything else -- blocks, roster, markers, the fit and the return value -- is the
- *   single-stage request's. Omitted or `single` -> `prompts.memory`.
+ *   context). Everything else -- blocks, roster, recent notes, markers, the fit and the return
+ *   value -- is the single-stage request's. Omitted or `single` -> `prompts.memory`.
+ * @param {object[]} [input.recentLines]  The guild's recent lines (store.getRecent(guildId).lines):
+ *   the live ones go into `<recent_notes>` (see `recentNoteItems`), so the analyzer does not write
+ *   a moment twice and can take back a wrong line by id. Their own section, ranked AFTER the
+ *   transcript and never required: on a heavy batch the notes are cut first (the oldest first) and
+ *   can never fail the request or cost a transcript line. Rendered after `<known_members>`, right
+ *   before `<new_messages>`. Omitted, a private batch or `features.recent` false -> no block.
+ * @param {number} [input.now]  The clock (epoch ms) the recent window is measured from; omitted ->
+ *   the batch's newest message.
  * @returns {{ messages: object[], consumed: number, shown: number, trimmed: number, rosterIds: string[],
- *   rosterCandidates: number, rosterTokens: number, staleRelationships: number }}
+ *   rosterCandidates: number, rosterTokens: number, staleRelationships: number, recentShown: number,
+ *   recentIds: number[] }}
  *   `consumed` is always the whole batch; `shown` of it made it into `<new_messages>` (the newest
  *   lines), the other `trimmed` did not fit the token cap (`shown + trimmed === consumed`).
  *   `rosterIds`: the members the request's `<known_members>` actually carries, in the order
@@ -628,8 +678,10 @@ export function characterText(prompts, selfName) {
  *   `staleRelationships`: the profiles sent with a `relationshipStale` marker
  *   (src/memory/affinity.js#relationshipStaleOf, settings `relationships.rewriteOnBandChange`,
  *   `bandHysteresis`, `rewriteOnDrift`, `rewriteAfterMoves`); 0 with relationships off.
+ *   `recentShown`: the recent lines `<recent_notes>` actually carries; `recentIds`: their ids, in
+ *   the order sent -- the only lines an answer may remove (applyMemoryUpdate's `recent.shownIds`).
  */
-export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, videos, reads, nameOf, privateChat, rosterProfiles, stage = 'single' }) {
+export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, videos, reads, nameOf, privateChat, rosterProfiles, recentLines, now, stage = 'single' }) {
   const { timezone } = config.bot;
   const labels = requireLabels(prompts);
   if (privateChat && (!labels.memory?.privateNote || !labels.memory?.privateChannel)) {
@@ -763,6 +815,11 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     ? []
     : aliasRoster(rosterProfiles, new Set([...batchAuthorIds(messages), ...Object.keys(profiles ?? {})]), aliasRosterSize(config), config.memory ?? {});
 
+  // The live recent lines, guild batches only: what the store already holds, so the analyzer
+  // does not write the same moment again.
+  const clock = Number.isFinite(now) ? now : Math.max(...messages.map((m) => (Number.isFinite(m?.ts) ? m.ts : -Infinity)));
+  const recentItems = privateChat ? [] : recentNoteItems(recentLines, { config, now: clock, timezone, locale: labels.locale, nameOf: resolveName });
+
   const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
   const limit = Math.floor(config.llm.maxRequestTokens * config.llm.safetyMargin);
 
@@ -778,6 +835,10 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
       // older one is still tried, so what is sent may have gaps.
       { name: 'roster', keep: 'first', items: rosterEntries.map((entry) => entry.text) },
       { name: 'transcript', keep: 'newest', items: transcriptTexts },
+      // Ranked after the transcript: it takes only what the transcript left, so it is cut first
+      // and never costs a transcript line; not required, so it never fails the request. The
+      // newest notes survive a cut.
+      { name: 'recent', keep: 'newest', items: recentItems.map((item) => item.text) },
     ],
     limit,
     cost,
@@ -787,10 +848,13 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const keptRoster = rosterEntries.filter((entry) => keptRosterTexts.has(entry.text));
   const rosterBlock = keptRoster.length > 0 ? block('known_members', `{${keptRoster.map((entry) => entry.text).join(',')}}`) : '';
 
+  const keptRecent = recentItems.slice(recentItems.length - kept.recent.length);
+  const recentBlock = keptRecent.length > 0 ? block('recent_notes', `[${keptRecent.map((item) => item.text).join(',')}]`) : '';
+
   const keptTranscriptItems = transcriptItems.slice(transcriptItems.length - kept.transcript.length);
   const newMessagesBlock = block('new_messages', renderTranscript(keptTranscriptItems, timezone, labels));
 
-  const user = [...fixedBlocks, rosterBlock, newMessagesBlock].filter(Boolean).join('\n\n');
+  const user = [...fixedBlocks, rosterBlock, recentBlock, newMessagesBlock].filter(Boolean).join('\n\n');
 
   return {
     messages: [
@@ -811,6 +875,8 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     rosterCandidates: rosterEntries.length,
     rosterTokens: stats.roster?.used ?? 0,
     staleRelationships,
+    recentShown: keptRecent.length,
+    recentIds: keptRecent.map((item) => item.id),
   };
 }
 
@@ -913,6 +979,94 @@ export function batchAuthorNamesMap(messages) {
     names.set(String(m.authorId), m.authorName);
   }
   return names;
+}
+
+/** `value` (an answer's `HH:MM`, or a `formatClock` reading) as four digits for comparison, a
+ * missing leading zero tolerated (`9:05` = `09:05`); '' when it is no clock. */
+function clockKey(value) {
+  if (typeof value !== 'string') return '';
+  const digits = value.replace(/\D/g, '');
+  if (digits.length === 3) return `0${digits}`;
+  return digits.length === 4 ? digits : '';
+}
+
+// A channel reference that carries its id: a `<#id>` mention, or the transcript heading's
+// `#name (id:...)` form (src/discord/format.js), whose id decides.
+const CHANNEL_MENTION_RE = /^<#([^>]+)>$/;
+const HEADING_ID_RE = /\(id:([^)]+)\)$/;
+
+/**
+ * The batch channel an answer's `channel` names, read as a reference: a known id as it stands, a
+ * `<#id>` mention or the heading's `#name (id:...)` form by its id alone, else a channel name with
+ * or without its leading `#`, compared case-insensitively with the names `dated` carries.
+ * `undefined` when no channel is given (missing, null or blank); null when one is given but names
+ * no single batch channel (an unknown id or name, a name two batch channels share, a value that
+ * is no reference).
+ * @param {unknown} channel
+ * @param {Set<string>} known  The batch's channel ids.
+ * @param {object[]} dated  The batch's messages in `known` channels (`channelId`, `channelName` read).
+ * @returns {string|null|undefined}
+ */
+function channelOfRef(channel, known, dated) {
+  if (channel === undefined || channel === null) return undefined;
+  if (typeof channel !== 'string' && typeof channel !== 'number') return null;
+  const ref = String(channel).trim();
+  if (ref === '') return undefined;
+  if (known.has(ref)) return ref;
+  const withId = CHANNEL_MENTION_RE.exec(ref) ?? HEADING_ID_RE.exec(ref);
+  if (withId) {
+    const id = withId[1].trim();
+    return known.has(id) ? id : null;
+  }
+  const bare = ref.replace(/^#/, '');
+  if (known.has(bare)) return bare;
+  const name = bare.toLowerCase();
+  const matches = new Set(dated.filter((m) => typeof m.channelName === 'string' && m.channelName.toLowerCase() === name).map((m) => String(m.channelId)));
+  return matches.size === 1 ? [...matches][0] : null;
+}
+
+/**
+ * Where and when a recent line the analyzer wrote happened, from the batch it was written from
+ * (its moment and source channel: the channel decides who may later be shown the line). The
+ * messages considered are those of `channelIds` (the batch's channels) with a finite `ts`.
+ * - The source channel is the one `channel` names (`channelOfRef`: an id, `<#id>`, `#name`, a
+ *   name). A `channel` that names no single batch channel gives no channel: the time never
+ *   stands in for it. With none given, only a batch of one channel says where the line comes
+ *   from; in a batch of several there is no channel. No channel is `channelId: null`, at the
+ *   batch's newest message (or `now`): the store takes no line without one.
+ * - The moment is the source channel's first message whose clock (`formatClock` in `timezone` /
+ *   `locale`, as the transcript wrote it) equals `time`, else its newest message, else `now`.
+ *   When `time` matches none of that channel's messages but matches a message of another batch
+ *   channel, the two disagree and either may be wrong: no channel, so a line is never filed
+ *   under a channel whose audience may differ from its true source's.
+ * Pure; never throws on an untrusted `time` / `channel`.
+ * @param {object[]} messages  The batch (slim messages: `ts`, `channelId`, `channelName` read).
+ * @param {{ time?: unknown, channel?: unknown }} ref  The answer's `time` and `channel`.
+ * @param {{ timezone: string, locale?: string, channelIds: Set<string>, now: number }} opts
+ *   `channelIds` not a Set = no channel is known (every line comes out without one).
+ * @returns {{ at: number, channelId: string|null }}
+ */
+export function resolveMoment(messages, { time, channel } = {}, { timezone, locale, channelIds, now }) {
+  const known = channelIds instanceof Set ? channelIds : new Set();
+  const dated = (Array.isArray(messages) ? messages : []).filter((m) => Number.isFinite(m?.ts) && known.has(String(m.channelId)));
+  const wanted = clockKey(time);
+  const atTime = (m) => wanted !== '' && clockKey(formatClock(m.ts, timezone, locale)) === wanted;
+  const newest = (list) => list.reduce((best, m) => (best === null || m.ts > best.ts ? m : best), null);
+  const noChannel = { at: newest(dated)?.ts ?? now, channelId: null };
+
+  let source = channelOfRef(channel, known, dated);
+  if (source === undefined) {
+    const batchChannels = new Set(dated.map((m) => String(m.channelId)));
+    source = batchChannels.size === 1 ? [...batchChannels][0] : null;
+  }
+  if (source === null) return noChannel;
+  const own = dated.filter((m) => String(m.channelId) === source);
+  const ownHit = own.find(atTime);
+  if (ownHit) return { at: ownHit.ts, channelId: source };
+  // The minute exists only in other channels: following either the channel or the minute could
+  // file a line from a restricted channel under a public one.
+  if (dated.some(atTime)) return noChannel;
+  return { at: newest(own)?.ts ?? now, channelId: source };
 }
 
 /**
@@ -1124,6 +1278,110 @@ function guardedAliasOps(raw, profile) {
   return { ops, dropped };
 }
 
+/** The strings of a list the analyzer wrote (`self`, `learned.add`, a stage A brief list): a
+ * bare string or an object's `text`; anything else is skipped. */
+function listTexts(list) {
+  return (Array.isArray(list) ? list : []).map((item) => (isPlainObject(item) ? item.text : item)).filter((text) => typeof text === 'string');
+}
+
+/** A `recent.remove` entry as a stored line id: a positive integer, or a string of digits (once
+ * trimmed) naming one; else null. The recent store's own rule (src/memory/recent.js#lineIdOf,
+ * not exported), copied exactly so an entry that is no id is counted here instead of being
+ * ignored by the store: keep the two in step. */
+function recentLineIdOf(raw) {
+  const n = typeof raw === 'string' && /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : raw;
+  return Number.isInteger(n) && n >= 1 ? n : null;
+}
+
+/**
+ * An analyzer answer's `recent` field as its two lists: a bare list is read as `add`, an object as
+ * itself (a key that is not a list as an empty one), anything else as nothing. The one reading of
+ * the field's shape, for the guild apply and the private drop count alike. Untrusted, never a throw.
+ * @param {unknown} raw
+ * @returns {{ add: unknown[], remove: unknown[] }}
+ */
+function recentFieldOf(raw) {
+  const field = Array.isArray(raw) ? { add: raw } : isPlainObject(raw) ? raw : {};
+  return { add: Array.isArray(field.add) ? field.add : [], remove: Array.isArray(field.remove) ? field.remove : [] };
+}
+
+/**
+ * One guild update's `recent` field (`recentFieldOf`), applied through the recent store
+ * (src/memory/store.js#applyRecentOps, src/memory/recent.js#mergeRecent), always as one write so
+ * the lines past `recent.hours` expire at each batch. Untrusted, never a throw. An add that is not
+ * an object with a non-blank string `text` is skipped (`recentInvalid`); the rest are tokenized,
+ * and one whose folded text (src/memory/recent.js#foldText) equals a long-term entry of the same
+ * update (`longTerm`: what this update proposed to a long-term store, whether or not the store
+ * keeps it; R-7) is dropped and counted in `recentOverlap` before the store's cap; the others are
+ * dated and placed by `resolveMoment` over `recent.messages`. The store clamps them, refuses one
+ * with no channel, one already past the window, one equal to a live line and those over
+ * `recent.maxNew`, and evicts past `recent.maxStored`. A remove takes only a line id
+ * (`recentLineIdOf`) the request showed (`recent.shownIds`, when given; any other entry, one that is
+ * no id included, counts in `recentUnshown`). Nothing goes anywhere but the recent store.
+ * @returns {{ recentAdded: number, recentOverlap: number, recentRemoved: number, recentExpired: number,
+ *   recentEvicted: number, recentDropped: number, recentInvalid: number, recentNoChannel: number,
+ *   recentStale: number, recentDuplicate: number, recentOverCap: number, recentUnshown: number }}
+ *   Every add of the field ends in exactly one of `recentAdded`, `recentOverlap`, `recentInvalid`
+ *   (here or the store's: a text that clamps to nothing), `recentNoChannel`, `recentStale`,
+ *   `recentDuplicate` and `recentOverCap` (a new line the storage cap takes at once included).
+ *   `recentRemoved` counts stored lines a remove took, `recentUnshown` remove entries held back
+ *   because they name no line the request showed (an entry that is no id included); a repeated
+ *   shown id, or a shown one no line holds any more, is not counted.
+ *   `recentExpired` / `recentEvicted`: stored lines gone past `recent.hours` / the storage cap.
+ *   `recentDropped`: what the code threw away, the sum of the five drop reasons and `recentUnshown`.
+ */
+function applyRecentField(store, guildId, raw, { recent, tokenize, knownChannelIds, longTerm }) {
+  const field = recentFieldOf(raw);
+  let recentOverlap = 0;
+  let invalid = 0;
+  const adds = [];
+  for (const item of field.add) {
+    if (!isPlainObject(item) || typeof item.text !== 'string' || item.text.trim() === '') {
+      invalid += 1;
+      continue;
+    }
+    const text = tokenize(item.text);
+    if (longTerm.has(foldText(text))) {
+      recentOverlap += 1;
+      continue;
+    }
+    const { at, channelId } = resolveMoment(
+      recent.messages,
+      { time: item.time, channel: item.channel },
+      { timezone: recent.timezone, locale: recent.locale, channelIds: knownChannelIds, now: recent.now },
+    );
+    adds.push({ text, at, channelId, weight: item.weight });
+  }
+  // Each entry is read as a line id first (`'2'` names line 2; `true`, `'1e0'` name none), then
+  // checked against the lines the request showed.
+  const shown = recent.shownIds instanceof Set ? recent.shownIds : null;
+  const removeIds = field.remove.map(recentLineIdOf).filter((id) => id !== null && (shown === null || shown.has(id)));
+  const unshown = field.remove.length - removeIds.length;
+  const counts = store.applyRecentOps(guildId, adds, {
+    now: recent.now,
+    hours: recent.hours,
+    maxStored: recent.maxStored,
+    maxNew: recent.maxNew,
+    chars: recent.chars,
+    clampTolerance: recent.clampTolerance,
+    removeIds,
+  });
+  return {
+    recentAdded: counts.added,
+    recentOverlap,
+    recentRemoved: counts.removed,
+    recentExpired: counts.expired,
+    recentEvicted: counts.evicted,
+    recentDropped: invalid + unshown + counts.dropped,
+    recentInvalid: invalid + counts.invalid,
+    recentNoChannel: counts.noChannel,
+    recentStale: counts.stale,
+    recentDuplicate: counts.duplicate,
+    recentOverCap: counts.overCap,
+    recentUnshown: unshown,
+  };
+}
+
 /**
  * Validate and store the model's memory-update JSON. Never throws on garbage
  * input, never drops a field that was not part of the update. A user id is
@@ -1176,9 +1434,27 @@ function guardedAliasOps(raw, profile) {
  *   A written text is clamped to it and stamped `relationshipScore` (the score after this batch's
  *   delta) and `relationshipWrittenAt` (the batch clock, `relationships.now`, the time this batch's
  *   attitude move is stamped with) -- see src/memory/store.js#applyProfileOps.
+ * @param {{ enabled: boolean, now?: number, hours?: number, maxStored?: number, maxNew?: number, chars?: number,
+ *   clampTolerance?: number, messages?: object[], timezone?: string, locale?: string, shownIds?: Set<number>,
+ *   taken?: string[] }} [options.recent]
+ *   `memorySwitches`' `recent` (`features.recent` on; the settings of src/memory/recent.js#recentSettings
+ *   and the clock), plus what analyze() adds over the batch: `messages`, `timezone` and `locale`
+ *   (where and when each line happened, `resolveMoment`), `shownIds` (the request's `recentIds`: the
+ *   only lines a remove may take) and, from stage A, `taken` (the lesson and self briefs the voice
+ *   queue gets, long-term entries of this update too). Only when `enabled` (and the store has
+ *   `applyRecentOps`) is `update.recent` applied (`applyRecentField`), the lines past `hours`
+ *   expiring in the same write, an answer without the field included; an add equal to an episode,
+ *   a lesson, a self fact or a lore entry this update proposed to a long-term store (whether or
+ *   not the store keeps it, R-7; episodes and self facts only within the store's own per-batch
+ *   caps, `episodes.maxNew` and `cfg.maxSelfFacts`) is dropped (`recentOverlap`). Absent (the
+ *   warmup, the portrait refresh, `features.recent` off) -> the field is ignored and nothing
+ *   expires.
  * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, relationships: number, channels: number, episodes: number, lore: number,
  *   learned: number, interestsChanged: number, aliasesChanged: number, aliasOnly: number, aliasesDropped: number,
- *   droppedUsers: number, droppedFields: number, portraitDropped: number, portraitRequests: { userId: string, reason: string }[] }}
+ *   droppedUsers: number, droppedFields: number, portraitDropped: number, portraitRequests: { userId: string, reason: string }[],
+ *   recentAdded: number, recentOverlap: number, recentRemoved: number, recentExpired: number, recentEvicted: number,
+ *   recentDropped: number, recentInvalid: number, recentNoChannel: number, recentStale: number, recentDuplicate: number,
+ *   recentOverCap: number, recentUnshown: number }}
  *   `users`: authors written. `guild`: patterns/starters/injokes changed. `channels`/`lore`: entries whose stored values changed
  *   (an identical re-send, compared after clamping, counts 0). `learned`: how many valid `guild.learned` add ops were
  *   handed to `store.applyLearnedOps` (a re-add of a stored item counts too -- it is a sighting).
@@ -1188,6 +1464,11 @@ function guardedAliasOps(raw, profile) {
  *   a proposal that was dropped, told apart from none. `droppedUsers`: entries for an id that is neither an author
  *   nor a roster member with a stored profile. `droppedFields`: non-empty keys other than `aliases` dropped from
  *   roster members' entries. `portraitDropped`: authors' non-blank `character`/`style` dropped without `portraitFields`.
+ *   `recentAdded` / `recentRemoved` / `recentExpired`: recent lines stored, taken back by id, gone past
+ *   `recent.hours`; `recentOverlap`: adds dropped as equal to a long-term entry of this update;
+ *   `recentEvicted`, `recentDropped` and its reasons (`recentInvalid`, `recentNoChannel`,
+ *   `recentStale`, `recentDuplicate`, `recentOverCap`, `recentUnshown`): see `applyRecentField`
+ *   (all 0 without `options.recent`).
  */
 export function applyMemoryUpdate(
   store,
@@ -1195,7 +1476,7 @@ export function applyMemoryUpdate(
   update,
   cfg,
   knownUserIds,
-  { knownChannelIds = new Set(), aliasOnlyIds = new Set(), relationships, episodes, lore, timing, batchAuthorNames, portraitFields = false, relationshipChars } = {},
+  { knownChannelIds = new Set(), aliasOnlyIds = new Set(), relationships, episodes, lore, recent, timing, batchAuthorNames, portraitFields = false, relationshipChars } = {},
 ) {
   const result = {
     users: 0,
@@ -1215,11 +1496,30 @@ export function applyMemoryUpdate(
     droppedFields: 0,
     portraitDropped: 0,
     portraitRequests: [],
+    recentAdded: 0,
+    recentOverlap: 0,
+    recentRemoved: 0,
+    recentExpired: 0,
+    recentEvicted: 0,
+    recentDropped: 0,
+    recentInvalid: 0,
+    recentNoChannel: 0,
+    recentStale: 0,
+    recentDuplicate: 0,
+    recentOverCap: 0,
+    recentUnshown: 0,
   };
   if (!update || typeof update !== 'object' || Array.isArray(update)) return result;
 
   const { isKnownId, tokenize, tokenizeArray, tokenizeItemOps, tokenizeEpisodes } = makeTokenizers(store, guildId, knownUserIds, batchAuthorNames);
   const relationshipLimit = relationshipLimitOf(relationshipChars, relationships);
+  // The folded texts of the long-term entries this update proposed to a long-term store, whether
+  // or not the store keeps them (R-7), within the store's own per-batch caps: a recent add equal
+  // to one of them has its home there already (one home per moment).
+  const longTerm = new Set();
+  const takeLongTerm = (text) => {
+    if (typeof text === 'string' && text.trim() !== '') longTerm.add(foldText(text));
+  };
 
   if (update.users && typeof update.users === 'object' && !Array.isArray(update.users)) {
     for (const [userId, raw] of Object.entries(update.users)) {
@@ -1313,8 +1613,15 @@ export function applyMemoryUpdate(
       }
 
       if (episodes?.enabled && Array.isArray(raw.episodes) && raw.episodes.length > 0) {
-        const added = store.addEpisodes(guildId, userId, tokenizeEpisodes(raw.episodes), episodeOptions(episodes, cfg));
+        const tokenizedEpisodes = tokenizeEpisodes(raw.episodes);
+        const added = store.addEpisodes(guildId, userId, tokenizedEpisodes, episodeOptions(episodes, cfg));
         result.episodes += added;
+        // The proposals the store considers (src/memory/episodes.js#mergeEpisodes: the usable ones,
+        // at most `episodes.maxNew`); one past that cap is no home for a recent line.
+        const considered = tokenizedEpisodes
+          .filter((ep) => isPlainObject(ep) && typeof ep.what === 'string' && ep.what.trim() !== '')
+          .slice(0, episodes.maxNew === undefined ? Infinity : episodes.maxNew);
+        for (const ep of considered) takeLongTerm(ep.what);
       }
     }
   }
@@ -1331,6 +1638,7 @@ export function applyMemoryUpdate(
       textChars: lore.textChars,
       clampTolerance: cfg.clampTolerance,
     });
+    for (const entry of tokenizedLore) takeLongTerm(entry?.text);
   }
 
   if (update.channels && typeof update.channels === 'object' && !Array.isArray(update.channels)) {
@@ -1382,6 +1690,7 @@ export function applyMemoryUpdate(
   if (learned) {
     store.applyLearnedOps(guildId, learned.ops, learnedOpsOptions(cfg, timing?.seenAt ?? relationships?.now ?? episodes?.now ?? Date.now()));
     result.learned = learned.added;
+    for (const text of listTexts(guildRaw.learned.add)) takeLongTerm(tokenize(text));
   }
 
   if (Array.isArray(update.self) && update.self.length > 0) {
@@ -1389,7 +1698,16 @@ export function applyMemoryUpdate(
     if (self.length > 0) {
       store.updateGuild(guildId, { self });
       result.self = true;
+      // The facts stored, not the ones past `cfg.maxSelfFacts`.
+      for (const text of self) takeLongTerm(text);
     }
+  }
+
+  // Last, once every long-term entry of this update is known. A fake store without the recent
+  // store (tests) is left alone.
+  if (recent?.enabled && typeof store.applyRecentOps === 'function') {
+    for (const text of listTexts(recent.taken)) takeLongTerm(tokenize(text));
+    Object.assign(result, applyRecentField(store, guildId, update.recent, { recent, tokenize, knownChannelIds, longTerm }));
   }
 
   return result;
@@ -1419,8 +1737,9 @@ function hasContent(value) {
  * the private layer has no portrait, and no caller can make this path write
  * one (only the portrait refresh and the warmup write `character`/`style`,
  * through `applyMemoryUpdate`); a non-blank `character`/`style` is counted
- * in `dropped.portrait`. Every other user, `guild`, `channels`, `lore` and
- * `self` is dropped and only counted in `dropped` (never an id). Never throws
+ * in `dropped.portrait`. Every other user, `guild`, `channels`, `lore`,
+ * `self` and `recent` (the recent store is server memory: nothing from a private
+ * chat goes there) is dropped and only counted in `dropped` (never an id). Never throws
  * on garbage input.
  * @param {object} store
  * @param {string} guildId
@@ -1435,7 +1754,9 @@ function hasContent(value) {
  *   score after this batch's delta and the batch clock (`relationshipWrittenAt`), the clock this
  *   batch's private move is stamped with, so the move is not one since the text.
  * @returns {{ users: number, affinity: number, relationships: number, episodes: number, interestsChanged: number,
- *   dropped: { users: number, guild: boolean, channels: number, lore: number, self: number, portrait: number } }}
+ *   dropped: { users: number, guild: boolean, channels: number, lore: number, self: number, portrait: number, recent: number } }}
+ *   `dropped.recent`: the items of a `recent` field (`add` and `remove` entries; a bare list's
+ *   items), read as the guild apply reads the field (`recentFieldOf`).
  */
 export function applyPrivateUpdate(store, guildId, userId, update, cfg, { relationships, episodes, timing, batchAuthorNames, relationshipChars } = {}) {
   const id = String(userId);
@@ -1445,7 +1766,7 @@ export function applyPrivateUpdate(store, guildId, userId, update, cfg, { relati
     relationships: 0,
     episodes: 0,
     interestsChanged: 0,
-    dropped: { users: 0, guild: false, channels: 0, lore: 0, self: 0, portrait: 0 },
+    dropped: { users: 0, guild: false, channels: 0, lore: 0, self: 0, portrait: 0, recent: 0 },
   };
   if (!isPlainObject(update)) return result;
 
@@ -1455,6 +1776,8 @@ export function applyPrivateUpdate(store, guildId, userId, update, cfg, { relati
   result.dropped.channels = isPlainObject(update.channels) ? Object.keys(update.channels).length : 0;
   result.dropped.lore = Array.isArray(update.lore) ? update.lore.length : 0;
   result.dropped.self = Array.isArray(update.self) ? update.self.length : 0;
+  const recentField = recentFieldOf(update.recent);
+  result.dropped.recent = recentField.add.length + recentField.remove.length;
 
   const raw = users[id];
   if (!isPlainObject(raw)) return result;
@@ -1668,7 +1991,10 @@ function queueStageA(store, guildId, split, config, nowMs) {
  * rules included: a `<known_members>` member gets an alias and nothing else), the attitude delta
  * and the episodes (feeling empty) among it; apply its `self.remove` list; then queue the briefs
  * (`queueStageA`). `nowMs` is the batch's one clock value: the split addresses a reason and a
- * feeling by it, so `options.relationships.now` and `options.episodes.now` must be it too.
+ * feeling by it, so `options.relationships.now` and `options.episodes.now` must be it too. The
+ * `recent` field is neutral data: it passes the split untouched and is written here, with no
+ * voice item; the lesson and self briefs queued from the same answer count as its long-term
+ * entries (`options.recent.taken`), so a recent add equal to one is dropped as an overlap.
  * @param {object} store
  * @param {string} guildId
  * @param {unknown} decision  The parsed stage A answer; untrusted.
@@ -1684,7 +2010,9 @@ function applyDecision(store, guildId, decision, config, knownUserIds, options, 
   const cfg = config.memory ?? {};
   const { tokenize, isKnownId } = makeTokenizers(store, guildId, knownUserIds, options.batchAuthorNames);
   const split = splitDecision(decision, { config, nowMs, knownUserIds, tokenize, isKnownId, seenAt: options.timing?.seenAt });
-  const result = applyMemoryUpdate(store, guildId, split.neutral, cfg, knownUserIds, options);
+  const briefs = split.items.filter((item) => item.kind === 'learned' || item.kind === 'self').map((item) => item.brief?.[0]);
+  const recent = options.recent ? { ...options.recent, taken: [...listTexts(options.recent.taken), ...listTexts(briefs)] } : options.recent;
+  const result = applyMemoryUpdate(store, guildId, split.neutral, cfg, knownUserIds, { ...options, recent });
   result.portraitDropped += split.dropped.portrait;
   if (split.selfRemove.length > 0) {
     result.self = store.applySelfOps(guildId, { remove: split.selfRemove }, selfOpsOptions(cfg, nowMs)).removed > 0;
@@ -1800,12 +2128,15 @@ export function batchContext(messages, getUser, getChannel) {
 }
 
 /**
- * The `relationships`/`episodes`/`lore` arguments of the apply functions,
+ * The `relationships`/`episodes`/`lore`/`recent` arguments of the apply functions,
  * from `config` (read by the caller at the moment of use). `now` is the clock
- * (a function), read once per enabled switch.
+ * (a function), read once per enabled switch. `recent` is
+ * src/memory/recent.js#recentSettings' (`features.recent`, a missing key counts as on) with
+ * `enabled` and the clock; only a guild batch passes it on (a private batch never writes the
+ * recent store).
  * @param {object} config
  * @param {() => number} now
- * @returns {{ relationships?: object, episodes?: object, lore?: object }}
+ * @returns {{ relationships?: object, episodes?: object, lore?: object, recent?: object }}
  */
 export function memorySwitches(config, now) {
   const cfg = config.memory;
@@ -1817,7 +2148,9 @@ export function memorySwitches(config, now) {
   const lore = loreOn
     ? { enabled: true, maxEntries: config.lore?.maxEntries ?? Infinity, textChars: config.lore?.textChars, now: now() }
     : undefined;
-  return { relationships, episodes, lore };
+  const recentOn = recentSettings(config);
+  const recent = recentOn ? { enabled: true, ...recentOn, now: now() } : undefined;
+  return { relationships, episodes, lore, recent };
 }
 
 /** `{ stage }` of an analyzer outcome for a log line, or nothing: an outcome carries `stage` only
@@ -1984,6 +2317,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * `rosterCandidates` offered, taking `rosterTokens`. Of the non-authors,
    * only those sent may get anything from the answer: an alias.
    * `staleRelationships`: how many profiles went with a `relationshipStale` marker.
+   * `recentShown`: how many live recent lines the request's `<recent_notes>` carried (read from
+   * the store only while `features.recent` is on); the answer's `recent` field may remove only
+   * those, and its adds are dated and placed by this batch's messages (`resolveMoment`).
    *
    * With `features.memoryTwoStage` on, the request is stage A (see `analyzerMode`,
    * `applyDecision`): its neutral part is stored at once, its briefs are queued for the voice
@@ -1995,8 +2331,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * @param {string} guildId
    * @param {object[]} messages  Slim messages (oldest first) to summarize; NOT read from or removed off any buffer.
    * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, shown?: number, trimmed?: number,
-   *   roster?: number, rosterCandidates?: number, rosterTokens?: number, staleRelationships?: number, error?: Error,
-   *   stage?: 'single'|'two' }>}
+   *   roster?: number, rosterCandidates?: number, rosterTokens?: number, staleRelationships?: number, recentShown?: number,
+   *   error?: Error, stage?: 'single'|'two' }>}
    */
   async function analyze(guildId, messages) {
     let context;
@@ -2016,9 +2352,12 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
             log.warn('memory: alias roster left out', { guildId, reason: 'store-error', error: errorNameOf(err) });
           }
         }
-        return { profiles: context.profiles, channels: context.channels, rosterProfiles };
+        // The live recent lines the analyzer is shown, read only while the layer is on; a fake
+        // store without the recent store (tests) shows none.
+        const recentLines = recentSettings(hot.config) && typeof store.getRecent === 'function' ? store.getRecent(guildId).lines : [];
+        return { profiles: context.profiles, channels: context.channels, rosterProfiles, recentLines, now: now() };
       },
-      (update, { relationships, episodes, lore }, { rosterIds, stage, nowMs }) => {
+      (update, { relationships, episodes, lore, recent }, { rosterIds, recentIds, stage, nowMs }) => {
         const cfg = hot.config.memory;
         const knownUserIds = new Set(context.authorIds.map(String));
         const knownChannelIds = new Set(context.channelIds.map(String));
@@ -2028,6 +2367,15 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           relationships,
           episodes,
           lore,
+          // Where and when each line happened is read off this batch; a remove takes only a line
+          // the request showed.
+          recent: recent && {
+            ...recent,
+            messages,
+            timezone: hot.config.bot?.timezone,
+            locale: hot.prompts.labels?.locale,
+            shownIds: new Set(recentIds),
+          },
           timing: computeSeenAt(messages),
           batchAuthorNames: batchAuthorNamesMap(messages),
           relationshipChars: voiceLimits(hot.config).relationship,
@@ -2064,9 +2412,10 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * @param {string} userId  The DM partner.
    * @param {object[]} messages  Slim buffered direct messages, oldest first.
    * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, shown?: number, trimmed?: number,
-   *   roster?: number, rosterCandidates?: number, rosterTokens?: number, staleRelationships?: number, error?: Error,
-   *   stage?: 'single'|'two' }>}
-   *   The `roster*` counts are always 0 here: a private batch carries no `<known_members>`.
+   *   roster?: number, rosterCandidates?: number, rosterTokens?: number, staleRelationships?: number, recentShown?: number,
+   *   error?: Error, stage?: 'single'|'two' }>}
+   *   The `roster*` counts and `recentShown` are always 0 here: a private batch carries no
+   *   `<known_members>` and no `<recent_notes>`, and its `recent` field is dropped and counted.
    *   `staleRelationships` is 0 or 1: the partner's private text went with a marker or not.
    */
   async function analyzePrivate(guildId, userId, messages) {
@@ -2181,7 +2530,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     return { descriptions, videos, reads };
   }
 
-  /** The `relationships`/`episodes`/`lore` arguments of the apply functions, from the live config. */
+  /** The `relationships`/`episodes`/`lore`/`recent` arguments of the apply functions, from the live config (see memorySwitches). */
   function applySwitches() {
     return memorySwitches(hot.config, now);
   }
@@ -2190,9 +2539,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * Build, send, parse, apply: the body shared by `analyze()` and
    * `analyzePrivate()`. `requestInput()` (called only once a memory prompt is
    * configured) returns the mode-specific `buildMemoryRequest` fields;
-   * `applyUpdate(update, switches, { rosterIds, stage, nowMs })` stores the parsed answer and
-   * returns the result to report (`rosterIds`: the roster members the request
-   * carried, see `buildMemoryRequest`; `stage`: `analyzerMode`'s; `nowMs`: in the
+   * `applyUpdate(update, switches, { rosterIds, recentIds, stage, nowMs })` stores the parsed answer and
+   * returns the result to report (`rosterIds` / `recentIds`: the roster members and the recent
+   * lines the request carried, see `buildMemoryRequest`; `stage`: `analyzerMode`'s; `nowMs`: in the
    * `two` stage only, the one clock value the switches carry as `now`, for the split
    * and the neutral write alike). A failure's `reason`: 'no-prompt', 'token-limit',
    * 'llm-error' (nothing billed), 'truncated', 'bad-json' (the answer did not
@@ -2219,11 +2568,22 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     const { descriptions, videos, reads } = cachedMedia(guildId, messages);
 
     let completion;
-    let fit; // the request's { shown, trimmed, roster, rosterCandidates, rosterTokens, staleRelationships }, reported with a success
+    let fit; // the request's { shown, trimmed, roster, rosterCandidates, rosterTokens, staleRelationships, recentShown }, reported with a success
     let rosterIds = []; // the roster members the request carried: the only non-authors an answer may give an alias
+    let recentIds = []; // the recent lines the request carried: the only ones an answer may remove
     let voiceDay = null; // the UTC day a role `voice` request counts for (the single-stage fallback)
     try {
-      const { messages: llmMessages, shown, trimmed, rosterIds: sentRoster, rosterCandidates, rosterTokens, staleRelationships } = buildMemoryRequest({
+      const {
+        messages: llmMessages,
+        shown,
+        trimmed,
+        rosterIds: sentRoster,
+        rosterCandidates,
+        rosterTokens,
+        staleRelationships,
+        recentShown,
+        recentIds: sentRecent,
+      } = buildMemoryRequest({
         prompts: hot.prompts,
         config: hot.config,
         calibrator,
@@ -2238,8 +2598,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         ...input,
         stage: stage === 'two' ? 'decide' : 'single',
       });
-      fit = { shown, trimmed, roster: sentRoster.length, rosterCandidates, rosterTokens, staleRelationships };
+      fit = { shown, trimmed, roster: sentRoster.length, rosterCandidates, rosterTokens, staleRelationships, recentShown };
       rosterIds = sentRoster;
+      recentIds = sentRecent;
 
       const options = batchRequestOptions(hot.config, stage);
       if (options.role === 'voice') {
@@ -2285,9 +2646,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         // One clock read for the whole stage A apply: the split addresses the attitude move and
         // the episodes it stores by this instant, so the switches stamp them with it too.
         const nowMs = now();
-        result = applyUpdate(update, memorySwitches(hot.config, () => nowMs), { rosterIds, stage, nowMs });
+        result = applyUpdate(update, memorySwitches(hot.config, () => nowMs), { rosterIds, recentIds, stage, nowMs });
       } else {
-        result = applyUpdate(update, applySwitches(), { rosterIds, stage });
+        result = applyUpdate(update, applySwitches(), { rosterIds, recentIds, stage });
       }
       return { ok: true, usage, estimated, result, ...fit, ...marker };
     } catch (err) {
@@ -2387,6 +2748,10 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           rosterTokens: outcome.rosterTokens,
           // Relationship markers sent; `relationships` (in counts) = texts actually rewritten.
           staleRelationships: outcome.staleRelationships,
+          // Recent lines the request carried; the answer's `recentAdded`, `recentOverlap`,
+          // `recentRemoved`, what the code dropped (`recentDropped` and its reasons) and the
+          // batch's `recentExpired` / `recentEvicted` come with the counts (applyRecentField).
+          recentShown: outcome.recentShown,
           ...counts,
           portraitRequests: portraitRequests.length,
           emojiUsage,

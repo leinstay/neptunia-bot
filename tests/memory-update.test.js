@@ -8,10 +8,10 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createStore } from '../src/memory/store.js';
-import { isDue, buildMemoryRequest, applyMemoryUpdate, applyPrivateUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap, characterText, analyzerTemperature, analyzerMode, feedsCalibration } from '../src/memory/update.js';
+import { isDue, buildMemoryRequest, applyMemoryUpdate, applyPrivateUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap, characterText, analyzerTemperature, analyzerMode, feedsCalibration, memorySwitches, resolveMoment } from '../src/memory/update.js';
 import { voiceLimits, mergeIntoQueue, retryLater } from '../src/memory/voice.js';
 import { createCalibrator, estimateTokens } from '../src/llm/tokens.js';
-import { formatTranscript } from '../src/discord/format.js';
+import { formatClock, formatDate, formatTranscript } from '../src/discord/format.js';
 import { DailyCapError, TokenLimitError } from '../src/llm/openrouter.js';
 import { DAY_MS, HOUR_MS, MINUTE_MS, utcDay } from '../src/time.js';
 import { labels } from './fixtures/labels.js';
@@ -1659,6 +1659,18 @@ test('applyMemoryUpdate: garbage input changes nothing and never throws', () => 
         droppedFields: 0,
         portraitDropped: 0,
         portraitRequests: [],
+        recentAdded: 0,
+        recentOverlap: 0,
+        recentRemoved: 0,
+        recentExpired: 0,
+        recentEvicted: 0,
+        recentDropped: 0,
+        recentInvalid: 0,
+        recentNoChannel: 0,
+        recentStale: 0,
+        recentDuplicate: 0,
+        recentOverCap: 0,
+        recentUnshown: 0,
       });
     }
     assert.deepEqual(store.getGuild(guildId), before);
@@ -5421,7 +5433,7 @@ test('analyzePrivate: applies only users[userId] to the private layer and report
 
     const outcome = await updater.analyzePrivate(guildId, 'u1', [dmMessage({ id: 'm1', direct: true, ts: Date.UTC(2026, 0, 2) })]);
     assert.equal(outcome.ok, true);
-    assert.deepEqual(outcome.result.dropped, { users: 2, guild: true, channels: 1, lore: 1, self: 1, portrait: 2 });
+    assert.deepEqual(outcome.result.dropped, { users: 2, guild: true, channels: 1, lore: 1, self: 1, portrait: 2, recent: 0 });
     assert.equal(outcome.result.users, 1);
 
     const priv = store.getPrivate(guildId, 'u1');
@@ -5518,7 +5530,7 @@ test('tick: a due private buffer is analyzed, shifted after success and logged w
     assert.ok(applied);
     assert.equal(applied.users, 1);
     assert.equal(applied.consumed, 6);
-    assert.deepEqual(applied.dropped, { users: 1, guild: false, channels: 0, lore: 0, self: 1, portrait: 0 });
+    assert.deepEqual(applied.dropped, { users: 1, guild: false, channels: 0, lore: 0, self: 1, portrait: 0, recent: 0 });
     assert.equal(applied.shown, 6, 'a small private batch fits whole');
     assert.equal(applied.trimmed, 0);
     const text = JSON.stringify(logs);
@@ -7947,5 +7959,859 @@ test('runVoice: a write the store refuses is apply-error, logged by the error na
     makeVoiceDue(store, guildId, VOICE_AT);
     assert.equal((await updater.runVoice(guildId)).reason, 'backoff');
     assert.equal(llm.calls.length, 1);
+  });
+});
+
+// ---- the recent store in the analyzer (features.recent) --------------------------
+// A guild batch shows the live recent lines in <recent_notes> so the analyzer does not write one
+// moment twice, and its `recent` answer (add, remove) goes through the recent store
+// (src/memory/recent.js). A line is never copied into a long-term store, and a private batch
+// neither sees nor writes one.
+
+const RECENT_NOW = Date.UTC(2026, 0, 9, 12);
+const FROG_AT = Date.UTC(2026, 0, 9, 9, 19);
+
+/** A recent line the way the store hands it over (src/memory/store.js#getRecent). */
+function recentLine(id, hoursAgo, text, channelId = 'c1', weight = 2) {
+  return { id, at: RECENT_NOW - hoursAgo * HOUR_MS, addedAt: null, channelId, text, who: [], weight };
+}
+
+/** One guild request carrying `recentLines`; `memory`/`llm`/`features` override makeConfig's own. */
+function recentRequest(recentLines, { memory = {}, llm = {}, features, messages, privateChat, rosterProfiles, prompts } = {}) {
+  const base = makeConfig();
+  return buildMemoryRequest({
+    prompts: prompts ?? { memory: 'x', labels },
+    config: makeConfig({ memory: { ...base.memory, ...memory }, llm: { ...base.llm, ...llm }, ...(features ? { features } : {}) }),
+    calibrator: createCalibrator(),
+    profiles: {},
+    guildMemory: {},
+    messages: messages ?? [slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: RECENT_NOW - MINUTE_MS })],
+    selfName: 'Nept',
+    nameOf: (id) => ({ [ZOE]: 'Zoé', [BRAN]: 'Βράνος' })[id] ?? null,
+    recentLines,
+    now: RECENT_NOW,
+    privateChat,
+    rosterProfiles,
+  });
+}
+
+/** The parsed `<recent_notes>` block of a request, or null when it is absent. */
+function recentNotesOf(request) {
+  const body = blockBody(request.messages[1].content, 'recent_notes');
+  return body === null ? null : JSON.parse(body);
+}
+
+/** The transcript's own date and clock of `ms` (UTC, en-US): a note's `when`. */
+function noteWhen(ms) {
+  return `${formatDate(ms, 'UTC', 'en-US')} ${formatClock(ms, 'UTC', 'en-US')}`;
+}
+
+/** A batch over two channels: Zoé gives the persona a frog in c1 at 09:19, Bran writes in c2 at 09:25, Zoé again in c1 at 09:40. */
+function frogBatch() {
+  return [
+    slimMessage({ id: 'm1', channelId: 'c1', channelName: 'general', authorId: ZOE, authorName: 'Zoé', content: 'σου φέρνω έναν βάτραχο', ts: FROG_AT }),
+    slimMessage({ id: 'm2', channelId: 'c2', channelName: 'diary', authorId: BRAN, authorName: 'Βράνος', content: 'σήμερα έβρεξε', ts: FROG_AT + 6 * MINUTE_MS }),
+    slimMessage({ id: 'm3', channelId: 'c1', channelName: 'general', authorId: ZOE, authorName: 'Zoé', content: 'πρόσεχέ τον', ts: FROG_AT + 21 * MINUTE_MS }),
+  ];
+}
+
+/** applyMemoryUpdate's `recent` option for a batch of `messages`, as analyze() builds it from the live config. */
+function recentOption(messages, overrides = {}) {
+  return { ...memorySwitches(makeConfig(), () => RECENT_NOW).recent, messages, timezone: 'UTC', locale: 'en-US', ...overrides };
+}
+
+/** One guild apply of `update` for the authors Zoé and Bran over `messages`. */
+function applyRecent(store, update, messages, options = {}) {
+  return applyMemoryUpdate(store, 'g1', update, MEMORY_CFG, new Set([ZOE, BRAN]), {
+    knownChannelIds: new Set(messages.map((m) => m.channelId)),
+    recent: recentOption(messages),
+    ...options,
+  });
+}
+
+/** Store `items` (`{ text, at, channelId, weight? }`) as live lines at `now`. */
+function seedRecent(store, items, now = RECENT_NOW) {
+  return store.applyRecentOps('g1', items, { now, hours: 72 });
+}
+
+test('memory request: recent_notes carries the live lines, oldest first, with tokens as name (id:...)', () => {
+  const lines = [
+    recentLine(1, 80, 'μια παλιά σημείωση'),
+    recentLine(2, 2, `<@${ZOE}> μου έδωσε έναν βάτραχο να τον προσέχω`, 'c1', 3),
+    recentLine(3, 30, `<@${BRAN}> υποσχέθηκε ένα τραγούδι`, 'c2'),
+  ];
+
+  const request = recentRequest(lines);
+
+  assert.deepEqual(recentNotesOf(request), [
+    { id: 3, when: noteWhen(RECENT_NOW - 30 * HOUR_MS), text: `Βράνος (id:${BRAN}) υποσχέθηκε ένα τραγούδι` },
+    { id: 2, when: noteWhen(RECENT_NOW - 2 * HOUR_MS), text: `Zoé (id:${ZOE}) μου έδωσε έναν βάτραχο να τον προσέχω` },
+  ]);
+  assert.equal(request.recentShown, 2);
+  assert.deepEqual(request.recentIds, [3, 2]);
+  assert.ok(!request.messages[1].content.includes('παλιά σημείωση'), 'a line past memory.recentHours is not shown');
+  assert.ok(!request.messages[1].content.includes(`<@${ZOE}>`), 'no raw token reaches the analyzer');
+});
+
+test('memory request: recent_notes holds at most memory.recentShown of the newest lines; memory.recentHours narrows the window', () => {
+  const lines = [1, 2, 3, 4, 5].map((n) => recentLine(n, 10 - n, `σημείωση ${n}`));
+
+  assert.deepEqual(recentNotesOf(recentRequest(lines, { memory: { recentShown: 2 } })).map((note) => note.id), [4, 5]);
+  assert.deepEqual(recentNotesOf(recentRequest(lines, { memory: { recentHours: 6 } })).map((note) => note.id), [4, 5]);
+  const none = recentRequest(lines, { memory: { recentShown: 0 } });
+  assert.equal(recentNotesOf(none), null, 'recentShown 0 shows none');
+  assert.equal(none.recentShown, 0);
+});
+
+test('memory request: memory.recentShown and memory.recentHours missing fall back to 12 and 72, config.json\'s values', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(shipped.memory.recentShown, 12);
+  assert.equal(shipped.memory.recentHours, 72);
+  const lines = Array.from({ length: 14 }, (_, i) => recentLine(i + 1, 75 - i, `σημείωση ${i + 1}`));
+
+  const notes = recentNotesOf(recentRequest(lines)); // makeConfig().memory carries neither key
+
+  // Lines 1-3 are 75, 74 and 73 hours old: past the window. All 11 live ones fit under 12.
+  assert.deepEqual(notes.map((note) => note.id), [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+  const more = Array.from({ length: 14 }, (_, i) => recentLine(i + 1, 14 - i, `σημείωση ${i + 1}`));
+  assert.equal(recentNotesOf(recentRequest(more)).length, shipped.memory.recentShown);
+});
+
+test('memory request: recent_notes sits after known_members and right before new_messages', () => {
+  const pool = [poolProfile(BRAN, ['Βράνος'], '2026-01-05T00:00:00.000Z')];
+
+  const content = recentRequest([recentLine(1, 1, 'έβρεξε όλο το πρωί')], { rosterProfiles: pool }).messages[1].content;
+
+  const known = content.indexOf('<known_members>');
+  const notes = content.indexOf('<recent_notes>');
+  assert.ok(known !== -1 && known < notes, 'after the roster');
+  assert.ok(content.includes('</recent_notes>\n\n<new_messages>'), 'right before the transcript');
+});
+
+test('memory request: recent_notes is cut before any transcript line and never fails the request', () => {
+  const base = RECENT_NOW - HOUR_MS;
+  const messages = [0, 1, 2, 3, 4, 5].map((i) =>
+    slimMessage({ id: `m${i}`, authorId: '1', authorName: 'Aria', content: `message number ${i} ${'word '.repeat(30)}`, ts: base + i * MINUTE_MS }),
+  );
+  const lines = [1, 2, 3].map((n) => recentLine(n, n, `σημείωση ${n} ${'λέξη '.repeat(30)}`));
+  const tight = { llm: { maxRequestTokens: 300, safetyMargin: 1 }, messages };
+
+  const without = recentRequest([], tight);
+  const withLines = recentRequest(lines, tight);
+
+  assert.ok(without.trimmed > 0, 'the transcript itself is cut at this budget');
+  assert.equal(withLines.shown, without.shown, 'no transcript line gives way to a note');
+  assert.equal(withLines.trimmed, without.trimmed);
+  assert.equal(withLines.recentShown, 0);
+  assert.equal(recentNotesOf(withLines), null);
+  assert.equal(withLines.messages[1].content, without.messages[1].content);
+
+  const roomy = recentRequest(lines, { messages });
+  assert.equal(roomy.recentShown, 3, 'with room every live line is sent');
+  assert.equal(roomy.trimmed, 0);
+});
+
+test('memory request: a private batch carries no recent_notes', () => {
+  const publicProfile = { id: '1', names: ['Aria'], interests: [], details: [], aliases: [] };
+
+  const request = recentRequest([recentLine(1, 1, 'σημείωση για τον κήπο')], { privateChat: { publicProfile, now: RECENT_NOW } });
+
+  assert.equal(recentNotesOf(request), null);
+  assert.equal(request.recentShown, 0);
+  assert.deepEqual(request.recentIds, []);
+  assert.ok(!request.messages[1].content.includes('κήπο'));
+});
+
+test('memory request: features.recent false sends no recent_notes', () => {
+  const request = recentRequest([recentLine(1, 1, 'σημείωση για τον κήπο')], { features: { recent: false } });
+
+  assert.equal(recentNotesOf(request), null);
+  assert.equal(request.recentShown, 0);
+  assert.ok(!request.messages[1].content.includes('κήπο'));
+});
+
+test('memory request: with no live line the request is the one sent without the store', () => {
+  const plain = recentRequest(undefined);
+  const expired = recentRequest([recentLine(1, 100, 'πολύ παλιά σημείωση')]);
+
+  assert.deepEqual(expired.messages, plain.messages);
+  assert.equal(expired.recentShown, 0);
+  assert.equal(plain.recentShown, 0);
+});
+
+test('memory request: the recent placeholders are filled from the live config, else config.json\'s values; maxNewRecent is 0 with features.recent false', () => {
+  const prompts = { memory: 'hours {{recentHours}}, at most {{maxNewRecent}}, {{recentChars}} chars', labels };
+
+  const set = recentRequest([], { prompts, memory: { recentHours: 48, maxNewRecent: 2, recentChars: 120 } });
+  const unset = recentRequest([], { prompts });
+  const off = recentRequest([], { prompts, memory: { recentHours: 48, maxNewRecent: 2, recentChars: 120 }, features: { recent: false } });
+
+  assert.equal(set.messages[0].content, 'hours 48, at most 2, 120 chars');
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(unset.messages[0].content, `hours ${shipped.memory.recentHours}, at most ${shipped.memory.maxNewRecent}, ${shipped.memory.recentChars} chars`);
+  assert.equal(off.messages[0].content, 'hours 48, at most 0, 120 chars', 'the field is ignored, so the prompt states that none is taken');
+});
+
+test('memory request: without now the recent window is measured from the batch\'s newest message', () => {
+  const request = buildMemoryRequest({
+    prompts: { memory: 'x', labels },
+    config: makeConfig(),
+    calibrator: createCalibrator(),
+    profiles: {},
+    guildMemory: {},
+    messages: [
+      slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: RECENT_NOW - 5 * HOUR_MS }),
+      slimMessage({ id: 'm2', authorId: '1', authorName: 'Aria', ts: RECENT_NOW - MINUTE_MS }),
+    ],
+    selfName: 'Nept',
+    recentLines: [recentLine(1, 73, 'σημείωση έξω από το παράθυρο'), recentLine(2, 71, 'σημείωση μέσα στο παράθυρο')],
+  });
+
+  assert.deepEqual(recentNotesOf(request).map((note) => note.id), [2], '72 hours back from the newest message, not the oldest and not the wall clock');
+});
+
+test('memorySwitches: recent carries the live settings and the clock; features.recent false gives none', () => {
+  const on = memorySwitches(makeConfig({ memory: { ...makeConfig().memory, recentHours: 48, maxNewRecent: 2, clampTolerance: 0.2 } }), () => RECENT_NOW).recent;
+  assert.deepEqual(on, { enabled: true, hours: 48, maxStored: 150, maxNew: 2, chars: 160, shown: 12, clampTolerance: 0.2, now: RECENT_NOW });
+
+  assert.equal(memorySwitches(makeConfig({ features: { recent: false } }), () => RECENT_NOW).recent, undefined);
+  assert.equal(memorySwitches(makeConfig({ features: {} }), () => RECENT_NOW).recent.enabled, true, 'a missing key counts as on');
+});
+
+test('resolveMoment: a time is matched in the named channel, a missing leading zero tolerated; else that channel\'s newest message', () => {
+  const messages = frogBatch();
+  const opts = { timezone: 'UTC', locale: 'en-US', channelIds: new Set(['c1', 'c2']), now: RECENT_NOW };
+
+  assert.deepEqual(resolveMoment(messages, { time: '09:19', channel: 'c1' }, opts), { at: FROG_AT, channelId: 'c1' });
+  assert.deepEqual(resolveMoment(messages, { time: '9:19', channel: 'c1' }, opts), { at: FROG_AT, channelId: 'c1' });
+  assert.deepEqual(resolveMoment(messages, { time: '23:59', channel: 'c1' }, opts), { at: FROG_AT + 21 * MINUTE_MS, channelId: 'c1' }, 'a time in no channel');
+  assert.deepEqual(resolveMoment(messages, { channel: 'c2' }, opts), { at: FROG_AT + 6 * MINUTE_MS, channelId: 'c2' });
+  assert.deepEqual(resolveMoment([], { time: '09:19', channel: 'c1' }, opts), { at: RECENT_NOW, channelId: 'c1' }, 'no message: the clock');
+});
+
+test('resolveMoment: a time found only in another channel than the named one gives no channel', () => {
+  const messages = frogBatch();
+  const opts = { timezone: 'UTC', locale: 'en-US', channelIds: new Set(['c1', 'c2']), now: RECENT_NOW };
+
+  // 09:25 is a message of c2 only: the channel and the minute disagree, and neither is followed.
+  assert.deepEqual(resolveMoment(messages, { time: '09:25', channel: 'c1' }, opts), { at: FROG_AT + 21 * MINUTE_MS, channelId: null });
+  assert.deepEqual(resolveMoment(messages, { time: '09:19', channel: 'c2' }, opts), { at: FROG_AT + 21 * MINUTE_MS, channelId: null });
+  const both = [...messages, slimMessage({ id: 'm4', channelId: 'c2', channelName: 'diary', authorId: BRAN, ts: FROG_AT + 30 * 1000 })];
+  assert.deepEqual(resolveMoment(both, { time: '09:19', channel: 'c1' }, opts), { at: FROG_AT, channelId: 'c1' }, 'the minute is in both: the named channel');
+  assert.deepEqual(resolveMoment(both, { time: '09:19', channel: 'c2' }, opts), { at: FROG_AT + 30 * 1000, channelId: 'c2' });
+});
+
+test('resolveMoment: a channel that names no batch channel gives none; with no channel given only a one-channel batch gives one', () => {
+  const messages = frogBatch();
+  const opts = { timezone: 'UTC', locale: 'en-US', channelIds: new Set(['c1', 'c2']), now: RECENT_NOW };
+  const none = { at: FROG_AT + 21 * MINUTE_MS, channelId: null };
+
+  // 09:25 is a message of c2 only, yet the time never stands in for a channel.
+  assert.deepEqual(resolveMoment(messages, { time: '09:25', channel: 'c9' }, opts), none, 'a channel the batch does not hold');
+  assert.deepEqual(resolveMoment(messages, { time: '09:25' }, opts), none, 'two channels, none given');
+  assert.deepEqual(resolveMoment(messages, { time: '23:59' }, opts), none, 'two channels, no match');
+  assert.equal(resolveMoment(messages, { channel: 'c9' }, opts).channelId, null);
+  assert.equal(resolveMoment(messages, { channel: '#staff' }, opts).channelId, null, 'a name no batch channel carries');
+  assert.equal(resolveMoment(messages, { channel: { id: 'c1' } }, opts).channelId, null, 'not a reference at all');
+  assert.equal(resolveMoment(messages, { channel: 123456789012345680 }, opts).channelId, null, 'an id that lost its precision');
+
+  const oneChannel = messages.filter((m) => m.channelId === 'c1');
+  const oneOpts = { ...opts, channelIds: new Set(['c1']) };
+  assert.deepEqual(resolveMoment(oneChannel, { time: '09:19' }, oneOpts), { at: FROG_AT, channelId: 'c1' }, 'one channel, none given');
+  assert.deepEqual(resolveMoment(oneChannel, { time: '23:59', channel: '  ' }, oneOpts), { at: FROG_AT + 21 * MINUTE_MS, channelId: 'c1' }, 'a blank channel is none given');
+  assert.deepEqual(resolveMoment(oneChannel, { time: '09:19', channel: 'c9' }, oneOpts), none, 'a channel the batch lacks is never replaced by its only one');
+  assert.equal(resolveMoment(messages, { time: '09:25', channel: 'c2' }, oneOpts).channelId, null, 'a channel outside the known set is never taken');
+});
+
+test('resolveMoment: a channel given as #name, its name, <#id> or the heading\'s #name (id:...) is that channel, and the conflict rule still applies', () => {
+  const messages = frogBatch(); // c1 is #general, c2 is #diary
+  const opts = { timezone: 'UTC', locale: 'en-US', channelIds: new Set(['c1', 'c2']), now: RECENT_NOW };
+  const none = { at: FROG_AT + 21 * MINUTE_MS, channelId: null };
+
+  for (const ref of ['#general', 'general', 'GENERAL', '#General', '<#c1>', '#general (id:c1)', ' c1 ']) {
+    assert.deepEqual(resolveMoment(messages, { time: '09:19', channel: ref }, opts), { at: FROG_AT, channelId: 'c1' }, ref);
+    assert.deepEqual(resolveMoment(messages, { time: '23:59', channel: ref }, opts), { at: FROG_AT + 21 * MINUTE_MS, channelId: 'c1' }, `${ref}: no minute matches`);
+    assert.deepEqual(resolveMoment(messages, { time: '09:25', channel: ref }, opts), none, `${ref}: the minute is #diary's only`);
+  }
+  // A line of #diary dated by a minute only #general has: never filed under #general.
+  assert.deepEqual(resolveMoment(messages, { time: '09:19', channel: '#diary' }, opts), none);
+  assert.deepEqual(resolveMoment(messages, { time: '09:25', channel: '#diary' }, opts), { at: FROG_AT + 6 * MINUTE_MS, channelId: 'c2' });
+  assert.equal(resolveMoment(messages, { time: '09:19', channel: '<#c9>' }, opts).channelId, null, 'a mention of a channel outside the batch');
+  assert.equal(resolveMoment(messages, { time: '09:19', channel: '#general (id:c9)' }, opts).channelId, null, 'the heading\'s id decides, not its name');
+  const twins = [...messages, slimMessage({ id: 'm4', channelId: 'c3', channelName: 'General', authorId: BRAN, ts: FROG_AT + 25 * MINUTE_MS })];
+  const twinOpts = { ...opts, channelIds: new Set(['c1', 'c2', 'c3']) };
+  assert.equal(resolveMoment(twins, { time: '09:19', channel: '#general' }, twinOpts).channelId, null, 'a name two batch channels share');
+});
+
+test('memory update: a recent add is tokenized, dated by its HH:MM and stored with its channel', () => {
+  withStore((store) => {
+    const update = { recent: { add: [{ text: `Η Zoé (id:${ZOE}) μου έδωσε έναν βάτραχο να τον προσέχω`, time: '09:19', channel: 'c1', weight: 3 }] } };
+
+    const result = applyRecent(store, update, frogBatch());
+
+    assert.equal(result.recentAdded, 1);
+    const [line] = store.getRecent('g1').lines;
+    assert.deepEqual(
+      { text: line.text, at: line.at, channelId: line.channelId, who: line.who, weight: line.weight },
+      { text: `Η <@${ZOE}> μου έδωσε έναν βάτραχο να τον προσέχω`, at: FROG_AT, channelId: 'c1', who: [ZOE], weight: 3 },
+    );
+  });
+});
+
+test('memory update: an unmatched time dates the line by the newest message of its channel', () => {
+  withStore((store) => {
+    const update = {
+      recent: {
+        add: [
+          { text: 'η βροχή κράτησε όλο το πρωί', time: '23:59', channel: 'c1' },
+          { text: 'ο Βράνος έγραψε για τη βροχή', channel: 'c2' },
+        ],
+      },
+    };
+
+    applyRecent(store, update, frogBatch());
+
+    assert.deepEqual(
+      store.getRecent('g1').lines.map((line) => [line.channelId, line.at]),
+      [
+        ['c1', FROG_AT + 21 * MINUTE_MS],
+        ['c2', FROG_AT + 6 * MINUTE_MS],
+      ],
+    );
+  });
+});
+
+test('memory update: a recent add naming a channel the batch does not hold, or none in a batch of several channels, keeps no channel and is not stored', () => {
+  withStore((store) => {
+    const update = {
+      recent: [
+        // 09:25 is a message of c2 only: the time never stands in for the channel.
+        { text: 'ο Βράνος μίλησε για τη βροχή', time: '09:25', channel: 'c9' },
+        { text: 'κάποιος ανέφερε μια γιορτή', time: '09:25' },
+        { text: 'κάτι συνέβη κάπου', channel: 'c9' },
+      ],
+    };
+
+    const result = applyRecent(store, update, frogBatch());
+
+    assert.deepEqual([result.recentAdded, result.recentNoChannel, result.recentDropped], [0, 3, 3], 'a bare list is read as add');
+    assert.deepEqual(store.getRecent('g1').lines, []);
+  });
+
+  withStore((store) => {
+    const oneChannel = frogBatch().filter((m) => m.channelId === 'c1');
+
+    const result = applyRecent(store, { recent: [{ text: 'η Zoé έφερε έναν βάτραχο', time: '09:19' }] }, oneChannel);
+
+    assert.equal(result.recentAdded, 1, 'a batch of one channel says where a line with none comes from');
+    assert.deepEqual(store.getRecent('g1').lines.map((line) => [line.text, line.at, line.channelId]), [['η Zoé έφερε έναν βάτραχο', FROG_AT, 'c1']]);
+  });
+});
+
+test('memory update: a recent add with no channel to file it under is not stored and is counted as noChannel', () => {
+  withStore((store) => {
+    const update = {
+      recent: {
+        add: [
+          // 09:25 is a message of c2 only: the line could come from either channel.
+          { text: 'τα μέλη σχεδιάζουν κάτι για αύριο', time: '09:25', channel: 'c1' },
+          { text: 'κάποιος ανέφερε μια γιορτή', time: '23:59' },
+          { text: 'η βροχή ξανάρχισε', time: '23:59', channel: '#staff' },
+          // 09:19 is a message of #general only: a #diary line is never filed under #general.
+          { text: 'ο Βράνος έγραψε για τη βροχή', time: '09:19', channel: '#diary' },
+          { text: 'η Zoé ρώτησε για τον βάτραχο', time: '09:25', channel: '<#c1>' },
+        ],
+      },
+    };
+
+    const result = applyRecent(store, update, frogBatch(), { recent: recentOption(frogBatch(), { maxNew: 5 }) });
+
+    assert.deepEqual(
+      { added: result.recentAdded, noChannel: result.recentNoChannel, dropped: result.recentDropped },
+      { added: 0, noChannel: 5, dropped: 5 },
+    );
+    assert.deepEqual(store.getRecent('g1').lines, []);
+  });
+});
+
+test('memory update: a recent add naming its channel by #name, name or <#id> is filed under that channel', () => {
+  withStore((store) => {
+    const update = {
+      recent: {
+        add: [
+          { text: 'ο Βράνος έγραψε για τη βροχή', time: '09:25', channel: '#diary' },
+          { text: 'η Zoé έφερε έναν βάτραχο', time: '09:19', channel: '<#c1>' },
+          { text: 'η Zoé ζήτησε να τον προσέχω', time: '9:40', channel: 'General' },
+        ],
+      },
+    };
+
+    const result = applyRecent(store, update, frogBatch());
+
+    assert.equal(result.recentAdded, 3);
+    assert.deepEqual(
+      store.getRecent('g1').lines.map((line) => [line.channelId, line.at]),
+      [
+        ['c2', FROG_AT + 6 * MINUTE_MS],
+        ['c1', FROG_AT],
+        ['c1', FROG_AT + 21 * MINUTE_MS],
+      ],
+    );
+  });
+});
+
+test('memory update: every recent add or remove the code throws away is counted by its reason and in recentDropped', () => {
+  withStore((store) => {
+    seedRecent(store, [{ text: 'Η βροχή σταμάτησε', at: FROG_AT, channelId: 'c1' }]);
+    const messages = frogBatch();
+    const update = {
+      recent: {
+        add: [
+          'σκέτο κείμενο',
+          { text: '   ', channel: 'c1' },
+          { text: 42, channel: 'c1' },
+          { text: 'η βροχη  σταματησε', channel: 'c1' },
+          { text: 'ένα', channel: 'c1' },
+          { text: 'δύο', channel: 'c1' },
+        ],
+        remove: [1],
+      },
+    };
+
+    const result = applyRecent(store, update, messages, { recent: recentOption(messages, { maxNew: 1, shownIds: new Set() }) });
+
+    assert.deepEqual(
+      {
+        added: result.recentAdded,
+        invalid: result.recentInvalid,
+        duplicate: result.recentDuplicate,
+        overCap: result.recentOverCap,
+        unshown: result.recentUnshown,
+        removed: result.recentRemoved,
+        noChannel: result.recentNoChannel,
+        stale: result.recentStale,
+        dropped: result.recentDropped,
+      },
+      { added: 1, invalid: 3, duplicate: 1, overCap: 1, unshown: 1, removed: 0, noChannel: 0, stale: 0, dropped: 6 },
+    );
+    assert.deepEqual(store.getRecent('g1').lines.map((line) => line.text), ['Η βροχή σταμάτησε', 'ένα']);
+  });
+
+  withStore((store) => {
+    const messages = frogBatch();
+
+    // A one-hour window: the batch's 09:19 is past it already.
+    const result = applyRecent(store, { recent: { add: [{ text: 'μια παλιά στιγμή', time: '09:19', channel: 'c1' }] } }, messages, {
+      recent: recentOption(messages, { hours: 1 }),
+    });
+
+    assert.deepEqual([result.recentAdded, result.recentStale, result.recentDropped], [0, 1, 1]);
+    assert.deepEqual(store.getRecent('g1').lines, []);
+  });
+});
+
+test('memory update: stored lines the storage cap pushes out are counted in recentEvicted', () => {
+  withStore((store) => {
+    seedRecent(store, [
+      { text: 'ελαφριά σημείωση', at: FROG_AT, channelId: 'c1', weight: 1 },
+      { text: 'βαριά σημείωση', at: FROG_AT, channelId: 'c1', weight: 3 },
+    ]);
+    const messages = frogBatch();
+
+    const result = applyRecent(store, { recent: { add: [{ text: 'καινούργια σημείωση', channel: 'c1' }] } }, messages, {
+      recent: recentOption(messages, { maxStored: 2 }),
+    });
+
+    assert.deepEqual([result.recentAdded, result.recentEvicted, result.recentDropped], [1, 1, 0]);
+    assert.deepEqual(store.getRecent('g1').lines.map((line) => line.text), ['βαριά σημείωση', 'καινούργια σημείωση']);
+  });
+});
+
+test('memory update: a recent add equal to an episode, a lesson, a self fact or a lore entry of the same update is dropped and counted', () => {
+  withStore((store) => {
+    store.touchUser('g1', ZOE, 'Zoé', FROG_AT - DAY_MS);
+    const messages = frogBatch();
+    const update = {
+      users: { [ZOE]: { episodes: [{ date: '2026-01-09', what: `Η Zoé (id:${ZOE}) μου χάρισε έναν βάτραχο`, weight: 3 }] } },
+      guild: { learned: { add: [{ text: 'Το γκγκ σημαίνει καληνύχτα' }] } },
+      self: ['Φυλάω έναν βάτραχο στο συρτάρι'],
+      lore: [{ title: 'Ο βάτραχος', keys: ['βάτραχος'], text: 'Ο βάτραχος του σέρβερ ζει στο general' }],
+      recent: {
+        add: [
+          { text: `η <@${ZOE}> μου χάρισε έναν  βατραχο`, time: '09:19', channel: 'c1' },
+          { text: 'το γκγκ σημαίνει καληνύχτα', time: '09:19', channel: 'c1' },
+          { text: 'Φυλάω έναν βάτραχο στο συρτάρι', channel: 'c1' },
+          { text: 'Ο βάτραχος του σέρβερ ζει στο general', channel: 'c1' },
+          { text: 'ο Βράνος είπε ότι αύριο βρέχει', time: '09:25', channel: 'c2' },
+        ],
+      },
+    };
+
+    const result = applyRecent(store, update, messages, { episodes: EPISODES_CFG, lore: LORE_CFG, recent: recentOption(messages, { maxNew: 1 }) });
+
+    assert.equal(result.recentOverlap, 4, 'case, accents, spacing and the token form are folded away');
+    assert.equal(result.recentAdded, 1, 'an overlap takes no slot of maxNewRecent');
+    assert.deepEqual(store.getRecent('g1').lines.map((line) => line.text), ['ο Βράνος είπε ότι αύριο βρέχει']);
+    assert.equal(result.episodes, 1, 'the long-term stores take their own entries');
+    assert.equal(result.lore, 1);
+    assert.equal(result.learned, 1);
+    assert.equal(result.self, true);
+  });
+});
+
+test('memory update: an add equal to an entry no long-term store was offered (a non-author\'s episode, lore off) is kept', () => {
+  withStore((store) => {
+    const messages = frogBatch();
+    const update = {
+      users: { 999999999999999999: { episodes: [{ what: 'μια στιγμή κάποιου άγνωστου' }] } },
+      lore: [{ title: 'Ο κήπος', keys: ['κήπος'], text: 'Ο κήπος ανθίζει' }],
+      recent: { add: [{ text: 'μια στιγμή κάποιου άγνωστου', channel: 'c1' }, { text: 'Ο κήπος ανθίζει', channel: 'c1' }] },
+    };
+
+    // A member outside the batch and no lore option: neither entry is stored, so neither is the moment's home.
+    const result = applyRecent(store, update, messages, { episodes: EPISODES_CFG });
+
+    assert.equal(result.recentOverlap, 0);
+    assert.equal(result.recentAdded, 2);
+  });
+});
+
+test('memory update: an add equal to an episode past memory.maxNewEpisodes or a self fact past memory.maxSelfFacts is kept', () => {
+  withStore((store) => {
+    store.touchUser('g1', ZOE, 'Zoé', FROG_AT - DAY_MS);
+    const messages = frogBatch();
+    const frog = `η <@${ZOE}> μου χάρισε έναν βάτραχο`;
+    const update = {
+      users: { [ZOE]: { episodes: [{ what: '' }, { what: 'πρώτη στιγμή' }, { what: 'δεύτερη στιγμή' }, { what: 'τρίτη στιγμή' }, { what: frog }] } },
+      self: ['μου αρέσει η βροχή', 'φυλάω έναν βάτραχο'],
+      recent: {
+        add: [
+          { text: 'τρίτη στιγμή', channel: 'c1' },
+          { text: frog, channel: 'c1' },
+          { text: 'μου αρέσει η βροχή', channel: 'c1' },
+          { text: 'φυλάω έναν βάτραχο', channel: 'c1' },
+        ],
+      },
+    };
+
+    // EPISODES_CFG takes 3 new episodes per member: the 3 usable ones before the frog.
+    const result = applyMemoryUpdate(store, 'g1', update, { ...MEMORY_CFG, maxSelfFacts: 1 }, new Set([ZOE, BRAN]), {
+      knownChannelIds: new Set(['c1', 'c2']),
+      episodes: EPISODES_CFG,
+      recent: recentOption(messages, { maxNew: 5 }),
+    });
+
+    assert.equal(result.episodes, 3);
+    assert.deepEqual(store.getGuild('g1').self, ['μου αρέσει η βροχή']);
+    assert.equal(result.recentOverlap, 2, 'the third episode and the one self fact the stores took');
+    assert.deepEqual(store.getRecent('g1').lines.map((line) => line.text), [frog, 'φυλάω έναν βάτραχο']);
+  });
+});
+
+test('memory update: recent adds are clamped, capped at memory.maxNewRecent and never stored twice', () => {
+  withStore((store) => {
+    seedRecent(store, [{ text: 'Η βροχή σταμάτησε', at: FROG_AT, channelId: 'c1' }]);
+    const long = `${'μια πολύ μεγάλη πρόταση για τη βροχή '.repeat(10)}τέλος`;
+    const update = {
+      recent: {
+        add: [
+          { text: 'η βροχη  σταματησε', channel: 'c1' },
+          { text: long, channel: 'c1' },
+          { text: 'ένα', channel: 'c1' },
+          { text: 'δύο', channel: 'c1' },
+          { text: 'τρία', channel: 'c1' },
+        ],
+      },
+    };
+
+    const messages = frogBatch();
+    const result = applyRecent(store, update, messages, { recent: recentOption(messages, { chars: 40, clampTolerance: 1 }) });
+
+    assert.equal(result.recentAdded, 3, 'the first three new ones, after the duplicate');
+    const texts = store.getRecent('g1').lines.map((line) => line.text);
+    assert.equal(texts.length, 4);
+    assert.equal(texts[0], 'Η βροχή σταμάτησε');
+    assert.ok(texts[1].length <= 40 && long.startsWith(texts[1]), 'cut to memory.recentChars at a word boundary');
+    assert.deepEqual(texts.slice(2), ['ένα', 'δύο']);
+  });
+});
+
+test('memory update: recent remove deletes only the stored ids the request showed', () => {
+  withStore((store) => {
+    seedRecent(store, [
+      { text: 'πρώτη', at: FROG_AT, channelId: 'c1' },
+      { text: 'δεύτερη', at: FROG_AT, channelId: 'c1' },
+      { text: 'τρίτη', at: FROG_AT, channelId: 'c1' },
+    ]);
+    const messages = frogBatch();
+
+    // true, [1], '1e0', '0x1' and '1.0' all coerce to 1 but are no id by the store's rule.
+    const remove = [1, '2', 3, 99, 'x', true, [1], '1e0', '0x1', '1.0'];
+    const result = applyRecent(store, { recent: { remove } }, messages, { recent: recentOption(messages, { shownIds: new Set([1, 2]) }) });
+
+    assert.equal(result.recentRemoved, 2);
+    assert.deepEqual([result.recentUnshown, result.recentDropped], [8, 8], '3 and 99 were not shown, the other six are no id');
+    assert.deepEqual(store.getRecent('g1').lines.map((line) => line.id), [3], 'a line the request never showed stays');
+
+    const byText = applyRecent(store, { recent: { remove: ['τρίτη', { id: 3 }] } }, messages);
+    assert.deepEqual([byText.recentRemoved, byText.recentUnshown], [0, 2], 'by id only, never by text; an entry that is no id is counted');
+    const direct = applyRecent(store, { recent: { remove: [3] } }, messages);
+    assert.equal(direct.recentRemoved, 1, 'without shown ids any stored id may go');
+    assert.deepEqual(store.getRecent('g1').lines, []);
+  });
+});
+
+test('memory update: a recent line is never copied into a long-term store', () => {
+  withStore((store) => {
+    store.touchUser('g1', ZOE, 'Zoé', FROG_AT - DAY_MS);
+    seedRecent(store, [{ text: `<@${ZOE}> μου έδωσε έναν βάτραχο`, at: FROG_AT, channelId: 'c1' }]);
+    const before = JSON.stringify([store.getUser('g1', ZOE), store.getGuild('g1'), store.getLore('g1')]);
+    const messages = frogBatch();
+
+    applyRecent(store, { recent: { add: [{ text: 'ο Βράνος υποσχέθηκε ένα τραγούδι', channel: 'c2' }], remove: [1] } }, messages, {
+      episodes: EPISODES_CFG,
+      lore: LORE_CFG,
+      relationships: RELATIONSHIPS_CFG,
+    });
+
+    assert.equal(JSON.stringify([store.getUser('g1', ZOE), store.getGuild('g1'), store.getLore('g1')]), before);
+    assert.deepEqual(store.getRecent('g1').lines.map((line) => line.text), ['ο Βράνος υποσχέθηκε ένα τραγούδι']);
+  });
+});
+
+test('memory update: features.recent false ignores the field and expires nothing; on, an old line expires at the next batch', () => {
+  withStore((store) => {
+    seedRecent(store, [{ text: 'μια σημείωση από πριν', at: RECENT_NOW - 100 * HOUR_MS, channelId: 'c1' }], RECENT_NOW - 99 * HOUR_MS);
+    const messages = frogBatch();
+    const update = { recent: { add: [{ text: 'καινούργια σημείωση', channel: 'c1' }] } };
+    const off = memorySwitches(makeConfig({ features: { recent: false } }), () => RECENT_NOW).recent;
+
+    const ignored = applyRecent(store, update, messages, { recent: off });
+
+    assert.deepEqual([ignored.recentAdded, ignored.recentOverlap, ignored.recentRemoved, ignored.recentExpired], [0, 0, 0, 0]);
+    assert.deepEqual(store.getRecent('g1').lines.map((line) => line.text), ['μια σημείωση από πριν']);
+
+    const applied = applyRecent(store, update, messages);
+    assert.equal(applied.recentExpired, 1);
+    assert.equal(applied.recentAdded, 1);
+    assert.deepEqual(store.getRecent('g1').lines.map((line) => line.text), ['καινούργια σημείωση']);
+  });
+});
+
+test('memory update: an answer without a recent field still expires the lines past memory.recentHours', () => {
+  for (const update of [{}, { users: { [ZOE]: { details: { add: ['μένει κοντά στη θάλασσα'] } } } }]) {
+    withStore((store) => {
+      seedRecent(store, [{ text: 'μια σημείωση από πριν', at: RECENT_NOW - 100 * HOUR_MS, channelId: 'c1' }], RECENT_NOW - 99 * HOUR_MS);
+
+      const result = applyRecent(store, update, frogBatch());
+
+      assert.equal(result.recentExpired, 1);
+      assert.deepEqual(store.getRecent('g1').lines, []);
+    });
+  }
+});
+
+test('private update: a recent field is dropped and counted', () => {
+  withStore((store) => {
+    const update = { users: { u1: { relationship: 'μιλάμε συχνά' } }, recent: { add: [{ text: 'α', channel: 'dm1' }, { text: 'β' }], remove: [1] } };
+
+    const result = applyPrivateUpdate(store, 'g1', 'u1', update, MEMORY_CFG);
+
+    assert.equal(result.dropped.recent, 3);
+    assert.deepEqual(store.getRecent('g1').lines, []);
+    assert.equal(applyPrivateUpdate(store, 'g1', 'u1', { recent: [{ text: 'γ' }] }, MEMORY_CFG).dropped.recent, 1, 'a bare list counts its items');
+  });
+});
+
+test('analyzePrivate: a private batch shows no recent_notes and never writes the recent store', async () => {
+  await withStoreAsync(async (store) => {
+    seedRecent(store, [{ text: 'σημείωση για τον κήπο', at: RECENT_NOW - HOUR_MS, channelId: 'c1' }]);
+    const llm = recordingLlm({ users: { u1: { relationship: 'μιλάμε' } }, recent: { add: [{ text: 'ιδιωτική στιγμή', channel: 'dm1' }], remove: [1] } });
+    const updater = createMemoryUpdater({ hot: privateHot(), store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => RECENT_NOW });
+
+    const outcome = await updater.analyzePrivate('g1', 'u1', [dmMessage({ id: 'm1', ts: RECENT_NOW - MINUTE_MS })]);
+
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.result.dropped.recent, 2);
+    assert.equal(blockBody(llm.calls[0].messages[1].content, 'recent_notes'), null);
+    assert.ok(!llm.calls[0].messages[1].content.includes('κήπο'));
+    assert.deepEqual(store.getRecent('g1').lines.map((line) => line.text), ['σημείωση για τον κήπο']);
+  });
+});
+
+test('run: the request shows the live lines, the answer\'s recent field applies and "memory: update applied" logs the recent counts', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    seedRecent(
+      store,
+      [
+        { text: 'μια σημείωση που λήγει', at: RECENT_NOW - 100 * HOUR_MS, channelId: 'c1' },
+        { text: 'ο κήπος άνθισε', at: RECENT_NOW - 2 * HOUR_MS, channelId: 'c1' },
+      ],
+      RECENT_NOW - 99 * HOUR_MS,
+    );
+    for (const message of frogBatch()) store.pushBuffer(guildId, message, 100);
+    const llm = recordingLlm({ recent: { add: [{ text: `η <@${ZOE}> μου έφερε έναν βάτραχο`, time: '09:19', channel: 'c1' }], remove: [2, 1] } });
+    const hot = { config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 3, minBatchMessages: 1 } }), prompts: { memory: 'memory system prompt', labels } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => RECENT_NOW });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+    assert.deepEqual(
+      JSON.parse(blockBody(llm.calls[0].messages[1].content, 'recent_notes')).map((note) => note.id),
+      [2],
+      'the expired line is not shown',
+    );
+    assert.deepEqual(store.getRecent(guildId).lines.map((line) => [line.text, line.at, line.channelId]), [[`η <@${ZOE}> μου έφερε έναν βάτραχο`, FROG_AT, 'c1']]);
+    const applied = logs.find((entry) => entry.msg === 'memory: update applied');
+    assert.deepEqual(
+      {
+        recentShown: applied.recentShown,
+        recentAdded: applied.recentAdded,
+        recentOverlap: applied.recentOverlap,
+        recentRemoved: applied.recentRemoved,
+        recentExpired: applied.recentExpired,
+        recentUnshown: applied.recentUnshown,
+        recentDropped: applied.recentDropped,
+      },
+      { recentShown: 1, recentAdded: 1, recentOverlap: 0, recentRemoved: 1, recentExpired: 1, recentUnshown: 1, recentDropped: 1 },
+      'the expired line is counted as expired, not as removed; its remove as one of a line not shown',
+    );
+    assert.ok(!JSON.stringify(logs).includes('βάτραχο'), 'counts only');
+  });
+});
+
+test('run: the notes the analyzer is shown are the lines live at the updater\'s clock, not at the batch\'s newest message', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    // 73 h less 30 min before the clock (12:00): past memory.recentHours (72) at the clock, inside
+    // it at the batch's newest message (09:40).
+    seedRecent(
+      store,
+      [
+        { text: 'μια σημείωση στο όριο', at: RECENT_NOW - 73 * HOUR_MS + 30 * MINUTE_MS, channelId: 'c1' },
+        { text: 'ο κήπος άνθισε', at: RECENT_NOW - 2 * HOUR_MS, channelId: 'c1' },
+      ],
+      RECENT_NOW - 2 * HOUR_MS,
+    );
+    for (const message of frogBatch()) store.pushBuffer(guildId, message, 100);
+    const llm = recordingLlm({});
+    const hot = { config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 3, minBatchMessages: 1 } }), prompts: { memory: 'memory system prompt', labels } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => RECENT_NOW });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+    assert.equal(llm.calls.length, 1);
+    assert.deepEqual(JSON.parse(blockBody(llm.calls[0].messages[1].content, 'recent_notes')).map((note) => note.text), ['ο κήπος άνθισε']);
+    assert.equal(logs.find((entry) => entry.msg === 'memory: update applied').recentShown, 1);
+  });
+});
+
+/** The recent counters `memory: update applied` carries on every guild batch. */
+const RECENT_LOG_KEYS = [
+  'recentShown',
+  'recentAdded',
+  'recentOverlap',
+  'recentRemoved',
+  'recentExpired',
+  'recentEvicted',
+  'recentDropped',
+  'recentInvalid',
+  'recentNoChannel',
+  'recentStale',
+  'recentDuplicate',
+  'recentOverCap',
+  'recentUnshown',
+];
+
+test('run: a batch with no recent field logs every recent count as 0', async () => {
+  const applied = await appliedLogFor(6, 50000);
+  for (const key of RECENT_LOG_KEYS) {
+    assert.equal(applied[key], 0, key);
+  }
+});
+
+test('run: a remove takes only a line the request showed; one it did not show stays and is counted', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    seedRecent(store, [
+      { text: 'ο κήπος άνθισε', at: RECENT_NOW - 3 * HOUR_MS, channelId: 'c1' },
+      { text: 'έβρεξε όλο το πρωί', at: RECENT_NOW - 2 * HOUR_MS, channelId: 'c1' },
+    ]);
+    for (const message of frogBatch()) store.pushBuffer(guildId, message, 100);
+    const llm = recordingLlm({ recent: { remove: [1, 2] } });
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 3, minBatchMessages: 1, recentShown: 1 } }),
+      prompts: { memory: 'memory system prompt', labels },
+    };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => RECENT_NOW });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+    assert.deepEqual(JSON.parse(blockBody(llm.calls[0].messages[1].content, 'recent_notes')).map((note) => note.id), [2], 'only the newer line is shown');
+    assert.deepEqual(store.getRecent(guildId).lines.map((line) => line.id), [1], 'the line the request never showed stays');
+    const applied = logs.find((entry) => entry.msg === 'memory: update applied');
+    assert.deepEqual([applied.recentRemoved, applied.recentUnshown, applied.recentDropped], [1, 1, 1]);
+  });
+});
+
+test('run: an answer with no recent field still expires the lines past memory.recentHours; with features.recent false they stay', async () => {
+  for (const [features, expired, left] of [
+    [{}, 1, []],
+    [{ recent: false }, 0, ['μια σημείωση που λήγει']],
+  ]) {
+    await withStoreAsync(async (store) => {
+      const guildId = 'g1';
+      seedRecent(store, [{ text: 'μια σημείωση που λήγει', at: RECENT_NOW - 100 * HOUR_MS, channelId: 'c1' }], RECENT_NOW - 99 * HOUR_MS);
+      for (const message of frogBatch()) store.pushBuffer(guildId, message, 100);
+      const llm = recordingLlm({ users: { [ZOE]: { details: { add: ['μένει κοντά στη θάλασσα'] } } } });
+      const hot = {
+        config: makeConfig({ features, memory: { ...makeConfig().memory, batchMessages: 3, minBatchMessages: 1 } }),
+        prompts: { memory: 'memory system prompt', labels },
+      };
+      const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => RECENT_NOW });
+
+      const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+      assert.equal(logs.find((entry) => entry.msg === 'memory: update applied').recentExpired, expired, JSON.stringify(features));
+      assert.deepEqual(store.getRecent(guildId).lines.map((line) => line.text), left);
+    });
+  }
+});
+
+test('analyze (two-stage): stage A sees the notes, writes a recent add itself and queues no voice item for it', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, ZOE, 'Zoé', FROG_AT - DAY_MS);
+    seedRecent(store, [{ text: 'ο κήπος άνθισε', at: RECENT_NOW - 2 * HOUR_MS, channelId: 'c1' }]);
+    const llm = recordingLlm({
+      self: { add: ['φυλάει έναν βάτραχο'] },
+      guild: { learned: { add: [{ brief: 'Το γκγκ σημαίνει καληνύχτα' }] } },
+      recent: {
+        add: [
+          { text: 'Φυλάει έναν βάτραχο', time: '09:19', channel: 'c1' },
+          { text: 'το γκγκ σημαινει  καληνυχτα', time: '09:19', channel: 'c1' },
+          { text: 'ο Βράνος υποσχέθηκε ένα τραγούδι', time: '09:25', channel: 'c2', weight: 3 },
+        ],
+      },
+    });
+    const updater = createMemoryUpdater({ hot: twoStageHot(), store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => RECENT_NOW });
+
+    const outcome = await updater.analyze(guildId, frogBatch());
+
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.stage, 'two');
+    assert.ok(llm.calls[0].messages[0].content.startsWith('decide prompt for Nept'), 'the stage A request');
+    assert.deepEqual(JSON.parse(blockBody(llm.calls[0].messages[1].content, 'recent_notes')).map((note) => note.text), ['ο κήπος άνθισε']);
+    assert.equal(outcome.result.recentOverlap, 2, 'a self claim and a lesson of the same answer are their home, case and accents folded');
+    assert.equal(outcome.result.recentAdded, 1);
+    assert.deepEqual(
+      store.getRecent(guildId).lines.map((line) => [line.text, line.channelId, line.weight]),
+      [
+        ['ο κήπος άνθισε', 'c1', 2],
+        ['ο Βράνος υποσχέθηκε ένα τραγούδι', 'c2', 3],
+      ],
+    );
+    assert.deepEqual(queuedKinds(store, guildId), ['learned', 'self'], 'only the lesson and the self claim wait for the voice model');
   });
 });
