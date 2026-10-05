@@ -685,6 +685,16 @@ test('answerReply: the destination of a read-only call and the search flag reach
   assert.ok(!without.request.user.includes(labels.senses.search));
 });
 
+test('answerReply: the sandbox never runs the server search, so <senses> never offers it', async () => {
+  assert.ok(Object.hasOwn(SANDBOX_OMITS, 'recallAvailable'));
+  const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
+  const input = sandboxRequestInput({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, at: NOW, recallAvailable: true });
+  assert.equal(input.recallAvailable, null);
+  const result = await replay(storedMoment(), { hot: kindHot({ webLookup: true }), searchAvailable: true });
+  assert.ok(result.request.user.includes(labels.senses.search));
+  assert.ok(!result.request.user.includes(labels.senses.recall));
+});
+
 test('answerReply: with the prompt cache on, samples 1 and 2 carry the same marked user part', async () => {
   const cachedHot = () => {
     const hot = fakeHot({ promptCache: true });

@@ -897,6 +897,7 @@ function lookupCandidates(lookup, labels, timezone) {
  * undefined when no image client is wired) picks the drawing line.
  * `privateChat` adds `senses.privateChat`; outside a private chat,
  * `features.privateMessages === true` adds `senses.privateAware` instead.
+ * `recallAvailable` (outside a private chat) adds `senses.recall` right after the search line.
  * `customEmoji` (the `<emoji>` block is possible) adds `senses.customEmoji`;
  * `gifs` (features.gifs on and a non-empty library) adds `senses.gifs` right after it.
  * `gifWatching` (GIFs are watched now, src/memory/gif-watch.js#gifWatchBlocker)
@@ -912,6 +913,7 @@ function renderSenses(
   labels,
   {
     searchAvailable = false,
+    recallAvailable = false,
     drawQuota,
     privateChat = false,
     customEmoji = false,
@@ -967,6 +969,10 @@ function renderSenses(
   lines.push(senses.voice, videoOn ? (senses.linksWatch ?? senses.links) : senses.links);
   if (readOn && senses.linksRead) lines.push(senses.linksRead);
   if (searchOn && senses.search) lines.push(senses.search);
+  // The search of the server's own message history (`recallAvailable`: a server
+  // turn where the runner is available; its own switch, not the web one); an
+  // older labels.json without the line shows nothing.
+  if (!privateChat && recallAvailable === true && senses.recall) lines.push(senses.recall);
   // Drawing (features.imageGeneration, a missing key counts as on) needs the
   // image client (`drawQuota` present): one line, the spent forms first. An
   // older labels.json without senses.draw shows nothing.
@@ -1461,6 +1467,9 @@ function pulledAuthors(pulledFits) {
  *   the server part needs `labels.lookup.serverHeader`, its stretch `labels.lookup.stretch`.
  * @param {boolean} [input.searchAvailable]  Whether a web search key is configured
  *   (lookup.hasSearch()); `senses.search` renders only when it is true.
+ * @param {boolean} [input.recallAvailable]  Whether the search of the server's own history could
+ *   run this turn (src/behavior/turn.js#recallAvailable, never in a private chat); `senses.recall`
+ *   renders, right after the web search line, only when it is true (and never in a private chat).
  * @param {{ spent: boolean, userSpent: boolean }} [input.drawQuota]  The image client's
  *   quota for this turn (src/llm/images.js#quota); omitted -> no drawing line in `<senses>`.
  * @param {string} [input.drawReason]  For `triggerKind: 'drawFailed'`: the failure reason,
@@ -1701,6 +1710,7 @@ export function buildRequest(input) {
   const customEmoji = config.features?.customEmoji !== false && Array.isArray(input.customEmoji) ? input.customEmoji : [];
   const sensesText = renderSenses(config, labels, {
     searchAvailable: input.searchAvailable === true,
+    recallAvailable: input.recallAvailable === true,
     drawQuota: input.drawQuota,
     privateChat,
     customEmoji: customEmoji.length > 0,

@@ -2512,9 +2512,11 @@ export function createTurnRunner({
       // reads once done). A routed call is read in its source (routedPull), with its captions.
       let lookupStage = null;
       let lookupChain = null;
+      // The server search is possible this turn (never in a private chat): the lookup stage runs it
+      // and `<senses>` says it exists. Asked once, so both agree.
+      const serverOn = !isPrivate && recallAvailable();
       if (asked && !answersDrawFailure) {
         const webOn = webLookupOn && webCfg.search?.enabled !== false && typeof lookup.search === 'function';
-        const serverOn = !isPrivate && recallAvailable();
         if (webOn || serverOn) {
           lookupChain = previews.settled
             .then(() => {
@@ -2682,6 +2684,8 @@ export function createTurnRunner({
           reads: reads ?? null,
           lookup: lookupResult ?? null,
           searchAvailable: features.webLookup === true && typeof lookup?.hasSearch === 'function' && lookup.hasSearch() === true,
+          // The search of the server's own history: the value the lookup stage used.
+          recallAvailable: serverOn,
           drawQuota: drawQuota ?? null,
           drawReason,
           // The `<emoji>` block: the index's emoji (ranked by guildMemory.emojiUsage) and their cached captions.

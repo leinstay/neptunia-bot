@@ -61,6 +61,7 @@ export const SANDBOX_OMITS = Object.freeze({
   privateProfile: 'never a private chat: the private layer is out of bounds',
   reads: 'no web lookup: no link is read',
   lookup: 'no web lookup: no search is run',
+  recallAvailable: 'no server search is run: <senses> does not offer it',
   drawQuota: 'no drawing is offered: a sandbox never draws, so <senses> has no drawing line',
   drawReason: 'a failed drawing\'s reason is not stored with a moment',
   focus: 'no room question: a live turn has no caller for it either',
@@ -381,6 +382,7 @@ export function sandboxRequestInput({
     privateProfile: null,
     reads: null,
     lookup: null,
+    recallAvailable: null,
     drawQuota: null,
     drawReason: null,
     focus: null,
@@ -407,7 +409,7 @@ export function sandboxRequestInput({
  * channel inside `memory.recentHours` at `at` and the members' moments of
  * those hours (`recentLinesOf`; a real moment's view holds the lines added
  * before it, src/mentor/moment.js). Left out, unlike a real turn: every input
- * of `SANDBOX_OMITS` (neighbours, the web lookup, a drawing offer, a room
+ * of `SANDBOX_OMITS` (neighbours, the web lookup, the server search, a drawing offer, a room
  * question, the recent lines of other channels, a private chat), pictures (a
  * user message with image parts is sent as its text-only re-render), an
  * owner-forced turn's text, the daily GIF cap, and a custom-emoji reaction is

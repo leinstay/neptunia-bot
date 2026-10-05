@@ -2135,6 +2135,26 @@ test('createTurnRunner: recall -- a recall that found nothing leaves no server p
   assert.equal(turnLookupOf(alone.llm), null);
 });
 
+test('createTurnRunner: recall -- senses.recall reaches the request only on a server turn where the runner is available', async () => {
+  const sensesHas = ({ llm }) => llm.turnCalls[0].messages[1].content.includes(labels.senses.recall);
+  const throwing = { ...fakeRecall(), available: () => { throw new Error('boom'); } };
+  const noRun = { available: () => true };
+  const cases = [
+    { name: 'available', run: { recall: fakeRecall() }, expected: true },
+    { name: 'available, no web lookup either', run: { hot: lookupHot({ webLookup: false }), lookup: null, recall: fakeRecall() }, expected: true },
+    { name: 'unavailable', run: { recall: fakeRecall({ available: false }) }, expected: false },
+    { name: 'not wired', run: { recall: null }, expected: false },
+    { name: 'no run function', run: { recall: noRun }, expected: false },
+    { name: 'available() throws', run: { recall: throwing }, expected: false },
+    { name: 'private chat', run: { recall: fakeRecall(), dm: true }, expected: false },
+  ];
+  for (const { name, run, expected } of cases) {
+    const turn = await runRecallTurn({ llm: lookupLlm('x y'), ...run });
+    assert.equal(turn.result.outcome, 'spoke', name);
+    assert.equal(sensesHas(turn), expected, name);
+  }
+});
+
 test('createTurnRunner: recall -- a stretch from recall reaches the block under its header', async () => {
   const stretch = { channelId: 'c2', channelName: 'jardin', startTs: NOW - 3 * 24 * 3_600_000, lines: '>> [11:00] Ana: le lapin' };
   const llm = lookupLlm('server: κουνέλι');

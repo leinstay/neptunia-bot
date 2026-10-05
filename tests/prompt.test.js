@@ -2155,6 +2155,40 @@ test('buildRequest: an older labels set without linksRead/search keeps only the 
   assert.equal(senses.length, withLabels.length - 2);
 });
 
+test('buildRequest: recallAvailable true -> the recall line follows the search line, whatever the web lookup does', () => {
+  const senses = sensesOf(buildRequest(baseInput({ config: webConfig({ mediaDescriptions: true }), searchAvailable: true, recallAvailable: true }))).split('\n');
+  const at = senses.indexOf(labels.senses.search);
+  assert.ok(at !== -1);
+  assert.equal(senses[at + 1], labels.senses.recall);
+  assert.equal(senses[at + 2], labels.senses.files);
+
+  // Its own switch: no web lookup at all, the recall line is still there.
+  const noWeb = sensesOf(buildRequest(baseInput({ config: fakeConfig({ features: { webLookup: false } }), recallAvailable: true }))).split('\n');
+  assert.ok(!noWeb.includes(labels.senses.search));
+  assert.equal(noWeb[noWeb.indexOf(labels.senses.links) + 1], labels.senses.recall);
+});
+
+test('buildRequest: no recall line unless recallAvailable is true -- false, omitted or null', () => {
+  for (const recallAvailable of [false, undefined, null]) {
+    const senses = sensesOf(buildRequest(baseInput({ config: webConfig(), searchAvailable: true, recallAvailable }))).split('\n');
+    assert.ok(!senses.includes(labels.senses.recall), String(recallAvailable));
+  }
+});
+
+test('buildRequest: a private chat shows no recall line even when recallAvailable is true', () => {
+  const senses = sensesOf(buildRequest(privateScene({ recallAvailable: true }))).split('\n');
+  assert.ok(!senses.includes(labels.senses.recall));
+});
+
+test('buildRequest: an older labels set without senses.recall renders no recall line and no gap', () => {
+  const { recall: _recall, ...olderSenses } = labels.senses;
+  const older = fakePrompts({ labels: { ...labels, senses: olderSenses } });
+  const withLabel = sensesOf(buildRequest(baseInput({ config: webConfig(), searchAvailable: true, recallAvailable: true }))).split('\n');
+  const senses = sensesOf(buildRequest(baseInput({ config: webConfig(), searchAvailable: true, recallAvailable: true, prompts: older }))).split('\n');
+  assert.equal(senses.length, withLabel.length - 1);
+  assert.ok(senses.every((line) => line.trim() !== ''));
+});
+
 // --- <about_chat>: what people taught the persona (guild.learned) ------------------
 
 const TEACHER_A = '311111111111111111';

@@ -81,6 +81,7 @@ export const labels = {
     linksWatch: 'links show their site, title and snippet; a video-site link may come with a watch summary',
     linksRead: 'links show their site, title and snippet; a link may come with an excerpt of the page, read first-hand',
     search: 'a question you cannot answer may come with a <lookup> block of what was found online',
+    recall: 'a question about this server\'s own past may come with a server part in the <lookup> block',
     files: 'files show only their name, or a short preview for plain text ones',
     draw: 'you can hand a scene to a drawing sub-process; the picture is posted after your words',
     drawSpent: 'the daily picture quota is spent, no drawing until tomorrow',
