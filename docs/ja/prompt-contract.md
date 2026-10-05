@@ -34,7 +34,8 @@
 | `describe-gif.md` | いいえ | GIF 説明モデルのアウトオブキャラクタープロンプト（`media.gif.watch`）: 短い無音クリップを入力、1 行のコンパクトな説明を出力: アクション、表現する内容、可視テキスト。常に英語。キャラクターカードなし。ファイルがない場合は `describe-video.md` にフォールバック | `{{today}}` `{{maxChars}}` `{{seconds}}` |
 | `rewatch.md` | はい | 分類器: ペルソナが動画を再視聴する必要があるか、または読み込めなかった動画をリトライする必要があるか（`features.videoRewatch`）。番号付きの最近の動画リストとステータス、および新しいメッセージを受け取る。出力は 1 行: `<number> \| <question>`、`<number> \| retry` または `none` | `{{name}}` |
 | `rewatch-answer.md` | はい | 再視聴のアウトオブキャラクタープロンプト: 動画モデルがクリップを再度視聴し、1 つの質問に回答する。言語と制約のルールは `describe-video.md` と同じ。キャラクターカードなし | `{{question}}` `{{maxChars}}` |
-| `address.md` | はい | 分類器: タグなしメッセージがペルソナ宛かどうか | `{{name}}` |
+| `address.md` | はい | 分類器: タグなしメッセージがペルソナ宛か、ペルソナについてか、どちらでもないか。出力は 1 語: `yes`、`overheard` または `no` | `{{name}}` |
+| `overheard.md` | いいえ | タスク: メッセージがペルソナについて話しているが、ペルソナに話しかけていない。トリガー種別が `overheard` でファイルが存在し空でない場合、モードプロンプトの代わりに使用。ファイルが存在しないか空の場合はモードプロンプトにフォールバック（劣化） | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
 | `lookup.md` | いいえ | 分類器: ペルソナがこのメッセージに答えるためにウェブ検索が必要か（`features.webLookup`）。短いトランスクリプトと `<candidate>` ブロックを受け取る。出力は 1 行: 検索クエリ（プレーンワード、最大 12 語）または `none` | `{{name}}` |
 | `read-link.md` | いいえ | リンク読み取りのアウトオブキャラクタープロンプト（`features.webLookup`、`web.links.enabled`）: フェッチしたページを 1 段落に要約する。ページのタイトルと本文を受け取る。キャラクターカードなし | `{{maxChars}}` |
 | `search-summary.md` | いいえ | 検索要約のアウトオブキャラクタープロンプト（`features.webLookup`、`web.search.enabled`）: 番号付き検索結果をインラインソース付きの 1 つのノートに要約する。キャラクターカードなし | `{{query}}` `{{maxChars}}` |
@@ -52,6 +53,7 @@
 `{{target}}` 呼び出しメッセージのインデックス（`#87`）。
 システムメッセージ = `system-prompt` + `character-card` + `rules` + `format`。アナライザーの場合: `memory.md` のみ。
 強制ターン（`/nep interject`、`/nep initiate`）では、`forced.md` が存在する場合、モードプロンプトの後に追加されます。
+`overheard` ターンでは、`overheard.md` がモードプロンプトを置き換えます（追加ではなくタスクテキストそのもの）。`overheard.md` が存在しないか空の場合、モードプロンプトが代わりに使用されます（劣化: モードプロンプトはメッセージをペルソナ宛として扱い、実際と異なる）。
 プライベートチャットでは、`private.md` がモードプロンプトの後（`forced.md` の前）に同じ `{{name}}` と `{{author}}` プレースホルダーで追加されます。
 アナライザーとウォームアップの `profile.md` および `server.md` はキャラクターカードと `rules.md` をユーザーメッセージ内の
 `<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`describe-video.md`、`describe-gif.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md`、`variety.md` はカードを受け取りません。
@@ -72,13 +74,13 @@
 | `<server>` | 現在のチャンネルの詳細（Discord カテゴリとトピック、目的、投稿内容、トーン、アクティビティ、最新メッセージ、トップライター。`labels.server.currentMark` でマーク）に加え、このターンで `<other_channels>` に供給した隣接チャンネルのみ。他のチャンネルは含まない |
 | `<lore>` | 直近のメッセージにキーが出現するサーバーのロアブックエントリ（常時表示マーク付きのエントリも含む）: イベント、繰り返し登場するキャラクター、長期にわたるストーリー。ロアブックのように数百エントリが存在できるが、該当する少数だけが表示される |
 | `<self_facts>` | ペルソナが自身について主張した内容 |
-| `<people>` | メンバープロファイル。発話者が先頭で `labels.profile.interlocutorMark` でマーク。各メンバーにペルソナの態度を付し、発話者には**エピソード**も含む: ペルソナが二人の間で記憶している出来事（日付と短い引用付き） |
+| `<people>` | メンバープロファイル。発話者が先頭で `labels.profile.interlocutorMark` でマーク（`overheard` ターンでは省略: 発話者はペルソナについて話しており、ペルソナに話しかけていない）。各メンバーにペルソナの態度を付し、発話者には**エピソード**も含む: ペルソナが二人の間で記憶している出来事（日付と短い引用付き） |
 | `<other_channels>` | 隣接チャンネルごとに最大 `context.neighborMessages` 件のメッセージ。`context.neighborMaxAgeMinutes` より古いものは含まない |
 | `<worn>` | ペルソナが最近のメッセージで使い回している表現手法（`features.variety`）: `labels.variety.intro`、続いて手法ごとに `- <shape> ("<example>", ...)`。パスが実行されなかった、何も検出しなかった、またはスイッチがオフの場合は省略 |
 | `<lookup>` | ペルソナがこのターンでオンラインで調べた内容（`features.webLookup`）: クエリ、要約された回答、ソースサイト、または「何も見つからなかった」行。検索分類器が発火し検索が完了した場合にのみ表示される |
 | `<chat>` | 現在のチャンネルの最新 `context.channelMessages` 件のメッセージ |
 | `<tempo>` | 10 分 / 1 時間 / 1 日のカウント、参加人数、沈黙時間、判定（live / slow / dead） |
-| `<task>` | `reply` / `interject` / `initiate`、プレースホルダー補完済み |
+| `<task>` | `reply` / `interject` / `initiate` / `overheard`（`overheard.md` が存在する場合）、プレースホルダー補完済み |
 
 バジェットの優先順位（このリストの下からセクションがトリムされる）: system + task + clock + tempo + senses
 （カットされない）→ 発話者のプロファイル（エピソード付き）→ lookup（全体として保持または削除）→ about_chat → self_facts → lore → server → chat（新しい順）→
@@ -215,7 +217,7 @@ server.category | topic | purpose | topics | tone               {text}
 server.activity                          {activity} = server.activityLive | activitySlow | activityDead
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
-triggers.mention | reply | name | followUp   followUp = an untagged message the address classifier judged to be for the persona; such a turn posts plain, never as a Discord reply
+triggers.mention | reply | name | followUp | overheard   followUp = an untagged message the address classifier judged to be for the persona; overheard = talk about the persona, not to it. Both post plain, never as a Discord reply. overheard falls back to followUp, then reply
 triggers.private                         the trigger for a private (DM) message
 triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
 draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons; daily and userDaily are reserved but no longer reached by triggers.drawFailed — an image cap now posts limits.notice instead of a follow-up turn
@@ -253,7 +255,7 @@ variety.intro                            first line of the `<worn>` block: tells
 入力: `<character>` · `<existing_profiles>`（ユーザー ID 別の JSON、現在の `affinity`（スコア、段階、理由）、
 該当時は `relationshipStale`、保存済みの `episodes` を含む）· `<existing_lore>` ·
 `<existing_guild>`（JSON: パターン、スターター、内輪ネタ、学んだ項目）· `<existing_channels>`（チャンネル ID 別の JSON: `name`、Discord の `category`、`topic`、保存済みの
-`purpose`、`topics`、`tone`）· `<new_messages>` は `## #channel-name (id:123)` の下にグループ化、行形式は
+`purpose`、`topics`、`tone`）· `<known_members>`（サーバーバッチのみ、プライベートバッチには含まれない。部分的または完全に欠落する場合あり: このバッチで書き込みをしていない保存済みメンバー。各メンバーの表示名とエイリアス付き。アナライザーがそのメンバーにエイリアスを記録できるようにする。最大 `memory.aliasRosterSize` 件、最近確認された順、`0` = オフ。バジェットではトランスクリプトより前にランクされ、必須ではないためリクエストを失敗させることはない）· `<new_messages>` は `## #channel-name (id:123)` の下にグループ化、行形式は
 `[14:32] nick (id:123): text`、ペルソナ宛の行は `→ ` で始まり、自分の行には `labels.self` を使用。
 
 出力: 素の JSON オブジェクト。プロファイルは**差分更新**されます。アナライザーは変更だけを返し、保存済みの再要約は行わないため、バッチごとの書き換えで事実が劣化しません:
@@ -287,8 +289,9 @@ variety.intro                            first line of the `<worn>` block: tells
 - 保存済み項目の入力ビュー: 関心 `{ topic, note, seen, last }`、詳細 `{ id, text, seen, last }`（`seen` = weight、`last` = `YYYY-MM-DD`、不明の場合は省略）。
 - **帰属、すべてのプロファイルフィールドに適用。** ある人物について記録されるのは、その人物自身のメッセージからのみです。本人が話題にする、繰り返す、実質のある発言をする場合です。他人のトピックにその場にいた、または一度返信しただけでは、その人のものにはなりません。ノートにはそのトピックについて言われたことだけを含めます。どのトピックまたはどの人物に属するか不明確な場合は、記録しないか `"sure": false` でマークします。サーバーの全員がやっていることは `guild.patterns` や `lore` に属し、個々のプロファイルには書きません。
 - **各散文フィールドの定義。** `character`: その人が他者とどう振る舞うか、具体的な繰り返される習慣を数個（4–7 個）、ペルソナの声で記述する（「ラベルより習慣」: 形容詞の羅列や評価は決してしない）。スキル、知識、仕事、趣味、一度限りの行動はキャラクターではありません。保存済みの形容詞/評価テキストはバッチから書き直し、パッチしません。`character`、`relationship`、態度の `reason`、エピソードの `feeling` はカードに基づくペルソナの声で書きます（一人称可、臨床的な語彙は不可）。`style`: その人がどう書くか（長さ、リズム、語彙、絵文字の使い方）であり、何をするか、何について話すかではありません。`relationship`: ペルソナとこの人がどういう関係にあるか。近況報告や他者との関係ではありません。保存済みテキストが空で、バッチでペルソナとこの人が実際にやり取りしている（または affinity/episodes がすでにある）場合に初回を書き、以降は変更が必要なときだけ返します。プロファイルに `relationshipStale` がある場合、テキストの書き直しが必要です。`writtenAt` はテキストが書かれたときの段階（テキスト未作成の場合は `none`）、`now` は現在の段階（`affinity.band`）です。コードは `relationship` が書かれるたびに `relationshipScore` をプロファイルにスタンプし、段階を比較してドリフトを検出します。スイッチ `relationships.rewriteOnBandChange`（デフォルト true、キー欠落 = オン）。各フィールド ≤ `memory.fieldChars`；フィールドが省略された場合、保存済みのテキストは変更されません。`character` と `style` は `profile.md`（ウォームアップとポートレートリフレッシュ）のみが書き込み、ストリームアナライザーは直接編集しません。アナライザーはバッチがそれを必要とする場合に `portrait`（保存済みテキストが見落としている点を示す一行のヒント）を返し、コードがリフレッシュをキューに入れます。
-- **メンバーはニックネームではなく ID で参照します。** ニックネームは頻繁に変わるため、アナライザーが書くすべての自由テキストフィールド（プロファイル散文、関心のノート、詳細のテキスト、エピソードの `what`/`feeling`、態度の reason、`guild` フィールド、チャンネルノート、ロアブックの `text`、`self`）でメンバーは `<@id>` トークンとして記述します（id はトランスクリプトの `nick (id:123)` または `<existing_profiles>` から取得）。アナライザーが誰のことか確信している場合のみ使用します。そうでない場合は名前をそのまま記述します。id を創作しません。逐語的な `quote` とロアブックの `keys`/`title` はそのまま残します。コードは使用時にトークンを解決します。チャットモデルには `<@id>` がメンバーの現在の名前（トランスクリプトに表示されるのと同じ文字列、`@name` も機能します）になり、アナライザーには `name (id:123)` になります。入力時にはモデルが書いた `name (id:123)` をコードがトークンに戻し、不明な id はそのまま残します。
+- **メンバーはニックネームではなく ID で参照します。** ニックネームは頻繁に変わるため、アナライザーが書くすべての自由テキストフィールド（プロファイル散文、関心のノート、詳細のテキスト、エピソードの `what`/`feeling`、態度の reason、`guild` フィールド、チャンネルノート、ロアブックの `text`、`self`）でメンバーは `<@id>` トークンとして記述します（id はトランスクリプトの `nick (id:123)`、`<existing_profiles>` または `<known_members>` から取得）。アナライザーが誰のことか確信している場合のみ使用します。そうでない場合は名前をそのまま記述します。id を創作しません。逐語的な `quote` とロアブックの `keys`/`title` はそのまま残します。コードは使用時にトークンを解決します。チャットモデルには `<@id>` がメンバーの現在の名前（トランスクリプトに表示されるのと同じ文字列、`@name` も機能します）になり、アナライザーには `name (id:123)` になります。入力時にはモデルが書いた `name (id:123)` をコードがトークンに戻し、不明な id はそのまま残します。
 - **エイリアス**は、チャットの中で人々が実際にメンバーを呼ぶ名前（短縮形や翻訳名などの安定したニックネーム）であり、Discord の表示名ではありません。`users.<id>.aliases: { "add": ["…"], "remove": ["…"] }`。関心と同様にランク付き項目として保存されます（`memory.maxAliases` 件表示、`memory.maxAliasesStored` 件保持、`memory.aliasHalfLifeDays`）。既知のエイリアスの `add` は目撃としてカウントされます。入力ビューではプレーンなリストとして表示され、チャットモデルには `labels.profile.aliases` `{text}` を通じて表示されます。現在の名前またはエイリアスが直近のトランスクリプトに出現するメンバーは、発言していなくても `<people>` に含まれます。トリガーまたは直近 5 件のメッセージで（メンション、現在の名前、エイリアス、4 文字以上の名前のプレフィックスマッチで）参照されたメンバーは、発話者の次にフル表示されます（最大 `context.askedAboutProfiles` 件）。その他の最近の参加者はコンパクト形式（名前、エイリアス、キャラクター、態度、トップ 5 トピック）で続きます。バジェットはコンパクトな方から先にトリムします。
+  `<known_members>` に含まれるメンバー（ロスターメンバー）には `aliases` のみ適用されます。回答内のその他のキーは破棄されカウントされます。ロスターメンバーにプロファイルが新規作成されることはありません（既に存在している必要があります）。提案されたエイリアスに対する保護（全メンバー、著者とロスター共通）: `<@` トークンまたは `(id:` マーカーを含む場合は破棄、メンバーの保存済み表示名と一致する場合は破棄（大文字小文字不問、句読点無視）。`aliases` の下の単純な配列（`{ add, remove }` ではなく）は、まだ保存されていない名前のみの追加として読み取られます（保存済みのエイリアスをバンプすることはありません）。ロスターメンバーのエイリアスの `firstSeen`/`lastSeen` 日付は、そのメンバー自身がメッセージを書いていないため、バッチ内の最新メッセージから取得されます。
 - **メインチャンネルがポートレートの情報源です。** `memory.mainChannelIds`（デフォルト `[]`）は人々が互いに話すチャンネルをリストします。`<existing_channels>` でそのようなチャンネルは `"main": true` を持ちます（そうでない場合はキー省略）。`character` と `style` はメインチャンネルでその人が他者とどう話すかから判断します。日記やトピック特化チャンネルは関心と詳細を供給し、話し方は供給しません。その人のメインチャンネルメッセージがまだない間は、ポートレートは暫定的で短いものになります。その人のメインチャンネルメッセージを含むバッチでのポートレートリフレッシュは両フィールドを**洗練**します: 全体の新しいテキスト（≤ `memory.fieldChars`）を返し、まだ当てはまるものを引き継ぎ、バッチが示したものを追加し、新しい証拠が古いものより優先され、もう見られないものを削除します。こうしてポートレートは時間と共にその人を追いかけます。メインとマークされたチャンネルがない場合、すべてのチャンネルがメインとして扱われます。
 - **サーバーレベルのノートはサーバーについてです。** ある人が自分のチャンネルでやっていることは `guild` のパターン、スターター、内輪ネタではなく、`lore` でもありません。内輪ネタは複数の人が使っているものです。
 - **制限はモデルに対してはソフト、コード内ではクリーンです。** プロンプトは制限値 L（プレースホルダー、`{{loreTextChars}}` は `lore.textChars` から）を示します。コードは `L * memory.clampTolerance`（デフォルト 1.25）まで受け付け、それを超えた場合は最後の文または単語の境界で切り、`<@id>` トークンの途中では切らず、宙ぶらりんの開き括弧や末尾のセパレーターを除去します。途中で途切れた保存済みノートやテキスト（古いバージョンによるカット）は、その主題が次に話題になった際に全体を書き直します。
@@ -303,6 +306,7 @@ variety.intro                            first line of the `<worn>` block: tells
 - `episodes` は追記のみで、書き直しません: 数か月間記憶に値する新しい瞬間だけを返します。侮辱、親切、約束、賭け、喧嘩、共有されたジョーク、ペルソナに何かを頼んだこと、または決してしないよう頼んだこと。`what` は 1 行。`quote` はその人自身の言葉を逐語的に、短く（≤ 120 文字）、または空。`feeling` はペルソナがどう受け取ったかをキャラクターカードを通じて判断。`weight` は 1–5（5 = 決して忘れない）。バッチごとにユーザーあたり最大 `memory.maxNewEpisodes` 件。ほとんどのバッチでは追加なし。入力には保存済みのエピソードが表示されるため、同じ出来事を二度記録しません。コードはメンバーごとに `memory.maxEpisodes` 件保持し、最も軽いものから、次に最も古いものから削除します。
 - `lore` はサーバーのロアブックです: 会話を超えて残るもの、すなわちイベント（「X が去った日」）、繰り返し登場するキャラクターやペット、長期にわたるストーリー、対立、伝統。`title` はアイデンティティ（同じタイトルのエントリは更新であり、マージ後の全体テキストを持つ）、`keys` は 2–6 個の単語または短いフレーズで、そのことが話題になるとき人々が実際に入力するもの（名前、ニックネーム、ミームの文言、チャットの言語で、小文字）、`text` ≤ `lore.textChars`（`{{loreTextChars}}`）。入力の `<existing_lore>` には保存済みのタイトルとキーのリスト、およびバッチが触れるエントリの全テキストが表示されます。オーナーが追加したエントリ（`/nep lore add`）はアナライザーが変更しません。
 - 文字列フィールド ≤ `memory.fieldChars`。詳細 ≤ `memory.maxDetails`、内輪ネタ ≤ `memory.maxInjokes`、self ≤ `memory.maxSelfFacts`。ノートはチャットの言語で記述します。観測された事実のみ。センシティブな情報（住所、電話番号、書類、健康、財務、本名）は記録しません。
+- **`memory: update applied` のカウンター**（各バッチ後にログ出力）: `roster`（`<known_members>` に含まれたメンバー数）、`rosterCandidates`（バジェットに提供されたロスターエントリ数）、`rosterTokens`（送信されたロスターが使用した推定トークン数）、`aliasesChanged`（著者とロスターの中で保存済みエイリアスリストが実際に変更されたメンバー数）、`aliasOnly`（その中のロスターメンバー数）、`droppedUsers`（著者でもプロファイルを持つロスターメンバーでもない id のエントリ数）、`droppedFields`（ロスターメンバーのエントリから破棄された非 `aliases` キー数）。
 
 ## チャンネルマップ
 
@@ -330,18 +334,20 @@ variety.intro                            first line of the `<worn>` block: tells
 態度と `relationship` はウォームアップされません。ライブ会話からのみ蓄積されます。
 
 `profile.md` の出力: `{ "character": "", "style": "", "interests": [{ topic, note, times }], "details": [{ text, times }],
-"episodes": [...], "aliases": [""] }`。ブロック `<character>` `<member>` `<draft>`（任意）`<hint>`（任意、ポートレートリフレッシュ時のみ）`<snippets>`。スニペット内の本人の行は `labels.warmup.ownMark` で始まり、コンテキスト行は `labels.warmup.contextMark` で始まります。エイリアスは他の人の行（その人をどう呼んでいるか）から得られるため、本人の行の帰属ルールは適用されません。
+"episodes": [...], "aliases": [""] }`。ブロック `<character>` `<member>` `<draft>`（任意）`<hint>`（任意、ポートレートリフレッシュ時のみ）`<snippets>`。スニペット内の本人の行は `labels.warmup.ownMark` で始まり、コンテキスト行は `labels.warmup.contextMark` で始まります。エイリアスは他の人の行（その人をどう呼んでいるか）から得られるため、本人の行の帰属ルールは適用されません。エイリアスの証拠として、明示的に名前を示す発言が一つあれば十分です。からかいで一度だけ言われた名前はエイリアスにはなりません。
 
 ## アドレス分類器
 
-ペルソナが誰かに応答した後、そのチャンネルで会話ウィンドウが開きます（`mention.followUpMinutes`、応答ごとに延長）。ウィンドウ内でトリガー（メンション、ペルソナへのリプライ、名前）を持たないメッセージは無条件には応答されません。コードはチャンネルの直近 `mention.followUpContext`（デフォルト 15）行を送信します。ペルソナ自身の行は `labels.self` でマーク、新しいメッセージは `<candidate>` としてマークされ、`address.md` に `classifier.text` モデルロール（デフォルト `anthropic/claude-sonnet-4.6`）で送信されます。出力は 1 行: 候補がペルソナに話しかけているか、ペルソナとのやり取りを続けている場合は `yes`、人々が自分たち同士で話しているか別の相手に話している場合は `no`。別のメンバーへの明示的な @メンションは、モデルに尋ねる前に常に `no`。返信先の著者に Discord が付加する暗黙のピングはそのようなメンションとして扱いません。`mention.followUpClassifyReplies` がオン（デフォルト `true`、キー欠落 = オン）のとき、別のメンバーのメッセージへのリプライは通常のテキストと同様に分類器に送られます。スイッチオフの場合、別のメンバーへのリプライは自動的に `no` です。フォローアップ候補は、`mention.oneAtATime` 下でサーバーのどこかでターンが実行中の間は分類されません（オフの場合は自身のチャンネルでターン実行中）。ビジー状態のターンに出くわした `yes` はドロップされログに記録されるだけで、キューには入りません。
+ペルソナが誰かに応答した後、そのチャンネルで会話ウィンドウが開きます（`mention.followUpMinutes`、応答ごとに延長）。ウィンドウ内でトリガー（メンション、ペルソナへのリプライ、名前）を持たないメッセージは無条件には応答されません。コードはチャンネルの直近 `mention.followUpContext`（デフォルト 15）行を送信します。ペルソナ自身の行は `labels.self` でマーク、新しいメッセージは `<candidate>` としてマークされ、`address.md` に `classifier.text` モデルロール（デフォルト `anthropic/claude-sonnet-4.6`）で送信されます。出力は 1 語: 候補がペルソナに話しかけているか、ペルソナとのやり取りを続けている場合は `yes`、人々がペルソナについて他の相手や部屋に向かって話している場合は `overheard`、会話がペルソナに無関係な場合は `no`。別のメンバーへの明示的な @メンションは、モデルに尋ねる前に常に `no`。返信先の著者に Discord が付加する暗黙のピングはそのようなメンションとして扱いません。`mention.followUpClassifyReplies` がオン（デフォルト `true`、キー欠落 = オン）のとき、別のメンバーのメッセージへのリプライは通常のテキストと同様に分類器に送られます。スイッチオフの場合、別のメンバーへのリプライは自動的に `no` です。フォローアップ候補は、`mention.oneAtATime` 下でサーバーのどこかでターンが実行中の間は分類されません（オフの場合は自身のチャンネルでターン実行中）。ビジー状態のターンに出くわした `yes` や `overheard` はドロップされログに記録されるだけで、キューには入りません。
 
-`yes` は通常のリプライターンを実行します（モデルは `<skip/>` を返す可能性があります）。3 回連続の `no`（`mention.followUpNoStreak`、デフォルト 3）でウィンドウが閉じます。スイッチ `features.followUp`（デフォルトオン）。カウントと判定のみログに記録されます。
+`yes` は通常のリプライターンを実行します（モデルは `<skip/>` を返す可能性があります）。`overheard` はトリガー種別 `overheard` のリプライモードターンを実行します。タスクテキストは `prompts/overheard.md`（存在しない場合はモードプロンプトにフォールバック）、発話者のプロファイル見出しに `interlocutorMark` なし、プレーン投稿、リピートペナルティ非対象、レール拒否時のリミット通知なし、検索・再視聴分類器なし、描画は非リクエスト扱い（画像上限通知なし、ユーザー別画像カウントなし、`drawFailed` フォローアップなし）。`mention.followUpOverheard` がオフの場合、`overheard` 回答は通常のフォローアップターンとして開始されます（ログには `answer: 'overheard'` が記録されます）。`overheard` 判定時にクラシファイアコール中に新しいメッセージが保留されていた場合、保留メッセージが先に分類されます: `yes` ならそのためのフォローアップターン、`overheard` なら保留メッセージの `overheard` ターン、`no` なら元の候補の `overheard` ターンが開始されます。
+
+3 回連続の `no`（`mention.followUpNoStreak`、デフォルト 3）でウィンドウが閉じます。`overheard` は連続判定では `yes` としてカウントされます。スイッチ `features.followUp`（デフォルトオン）。カウント、判定、`follow-up: verdict` の `answer` がログに記録されます。
 ウィンドウの状態は再起動後も維持されます。アクティブなウィンドウは `data/state.json` の `followUpWindows` に保存され、起動時に復元されます。期限切れのウィンドウは削除されます。
 
 ## 再視聴分類器
 
-ペルソナに話しかけられた（リプライターン）とき、チャンネルの直近 `media.video.rewatch.recentMessages`（デフォルト
+ペルソナに直接話しかけられた（リプライターン、`overheard` や自発的ターンではない）とき、チャンネルの直近 `media.video.rewatch.recentMessages`（デフォルト
 60）件のメッセージに動画がある場合、分類器がそのメッセージがそれらの動画について質問しているか、または読み込めなかった
 動画のリトライを求めているかを判定します。候補は視聴済み動画とエラー状態の動画（リクエストされたリトライはターンの `media.video.maxPerTurn` 試行とは独立した
 専用スロットを使用します）です。分類器には最大
@@ -387,7 +393,7 @@ variety.intro                            first line of the `<worn>` block: tells
 
 ## 検索分類器
 
-ペルソナに話しかけられた（リプライターン）とき、以下のすべてが成立する場合（`features.webLookup` がオン、
+ペルソナに直接話しかけられた（リプライターン、`overheard` や自発的ターンではない）とき、以下のすべてが成立する場合（`features.webLookup` がオン、
 `web.search.enabled` が false でない、`lookup.md` プロンプトが存在する、`web.search.maxPerTurn` が 1 以上、
 `BRAVE_SEARCH_API_KEY` が設定されている）、分類器がトリガーメッセージにウェブ検索が必要かを判定します。`classifier.text`
 モデルロールを使用します。コードは `lookup.md` をシステムプロンプトとして送信し、ユーザーメッセージに短い `<transcript>`
@@ -420,7 +426,9 @@ variety.intro                            first line of the `<worn>` block: tells
 
 ## 多様性パス
 
-各ターンの前に、`classifier.text` パスがペルソナの最近の自身のメッセージを読み、ペルソナが陥っている繰り返しの手法（言い回し、構造的な型、繰り返すジョークのパターン）を特定します。結果はターンのリクエスト内の `<worn>` ブロックになります。スイッチ `features.variety`（未設定 = オン）。
+`classifier.text` パスがペルソナの最近の自身のメッセージを読み、ペルソナが陥っている繰り返しの手法（言い回し、構造的な型、繰り返すジョークのパターン）を特定します。結果はターンのリクエスト内の `<worn>` ブロックになります。スイッチ `features.variety`（未設定 = オン）。
+
+`features.varietyPrecompute` がオン（デフォルト）の場合、パスはペルソナがテキストを投稿した直後に開始され、次の `fetchHistory` が返すメッセージに基づきます。ターンは自身のメッセージセットを検索し、キャッシュに一致する結果があればモデルリクエストなしで使用、同じメッセージのパスが実行中であれば参加して最大 `variety.timeoutMs` 待機、それ以外は独自のリクエストを開始します。リクエストは `variety.requestTimeoutMs`（デフォルト 30000）まで実行されます。ターンの待機 `variety.timeoutMs` が先に切れた場合、リクエストは継続し遅延した結果は次のターンのために保存されます。参加したパスが失敗したターンはブロックを受け取らず、独自のリクエストも開始しません。一時停止中や `features.variety` がオフの場合、何も保存されません。
 
 ### メッセージの選択
 
@@ -442,17 +450,17 @@ variety.intro                            first line of the `<worn>` block: tells
 
 ### キャッシュとストレージ
 
-同じメッセージセットが連続して 2 度問い合わせされることはありません。ギルドレベルのキャッシュがメッセージ id の SHA-1 をキーとし、モデルリクエストなしで前回の結果を再利用します。
+ギルドレベルのキャッシュがメッセージ id の SHA-1 をキーとし、モデルリクエストなしで前回の結果を再利用します。キャッシュスロットは完了した結果を 1 件保持し、新しい結果が古いものを置き換えます。1 スロットあたり最大 4 件のパスが同時に実行可能で、キーが一致するターンはいずれかに参加します。失敗はキャッシュされないため、同じメッセージは次のターンで再度問い合わせされます。
 
 `worn` はギルドメモリ（`data/guilds/<id>/guild.json`）に保存されます: 最新のパスの `{ at, key, channelId, lines, patterns }`。`wornHistory` は最大 `variety.history`（デフォルト 20）件の過去パスのリングで、shape と count のみ（examples なし）。プライベートチャットで実行されたパスはそのターン用の patterns を生成しますが、ギルドメモリには保存されません。プライベートでの内容がオーナーの表示や他の会話に漏れることはありません。
 
 ### タイムアウトと失敗
 
-`variety.timeoutMs`（デフォルト 8000）がモデルリクエストを制限します。タイムアウトまたは失敗は `<worn>` ブロックを生成せず、ターンはブロックなしで続行し、最後に保存されたパスはそのまま残ります。
+`variety.timeoutMs`（デフォルト 8000）はターンが結果を待つ時間です。`variety.requestTimeoutMs`（デフォルト 30000）はリクエスト自体の制限時間です。ターンの待機を超えたパスは実行を続行し、遅延した結果は次のターンのために保存されます。タイムアウトまたは失敗はそのターン用の `<worn>` ブロックを生成せず、ターンはブロックなしで続行します。
 
 ### Mentor
 
-Mentor サンドボックスは、状況ごとに 1 回の多様性パスを実行し、mentor のトークン予算から差し引かれます（`llm.maxRequestsPerDay` にはカウントされません）。特定された手法は状況レコードの `worn` として保存されます。ジャッジは `<worn>` ブロックを見ることはありません。
+Mentor サンドボックスは、状況ごとに 1 回の多様性パスを実行し、mentor のトークン予算から差し引かれます（`llm.maxRequestsPerDay` にはカウントされません）。サンドボックスは `variety.timeoutMs` をリクエストタイムアウトとして使用します（遅延した結果を使える次のターンがないため）。特定された手法は状況レコードの `worn` として保存されます。ジャッジは `<worn>` ブロックを見ることはありません。
 
 ## 描画
 
@@ -484,14 +492,14 @@ Mentor サンドボックスは、状況ごとに 1 回の多様性パスを実�
 
 ### 失敗ターン
 
-リプライターンで生成が失敗した場合（誰かが画像を依頼した場合）、2 回目のターンが自動的に発火します:
+誰かが依頼したターン（メンション、リプライ、名前トリガー、フォローアップ。`overheard` や自発的ターンではない）で生成が失敗した場合、2 回目のターンが自動的に発火します:
 
 - `triggerKind: 'drawFailed'`、失敗理由が `labels.draw.reasons.*` を通じて `labels.triggers.drawFailed` の `{reason}` プレースホルダーにレンダリングされます。
 - モードは `reply`、同じトリガーメッセージ、リプライ可。
 - 2 回目のターン自体の `<draw>` は無効化されるため、モデルは生成をリトライできません。
 - チャンネルのアイドル通知は 2 回目のターンが終了するまで保留されるため、保留中のピングはフォローアップの後にのみ処理されます。
 
-自発的ターン（誰も依頼していない）では、失敗はログに記録されるだけでフォローアップは実行されません。
+自発的または `overheard` ターン（誰も依頼していない）では、失敗はログに記録されるだけでフォローアップは実行されません。
 
 画像上限（`ImageCapError`、理由 `daily` または `userDaily`）は失敗ターンを発火しません。代わりにリミット通知（`labels.limits.notice`）をプレーンリプライとして投稿します。`draw.reasons.daily` と `draw.reasons.userDaily` は `labels.json` に予約されていますが、`triggers.drawFailed` 経由では到達しなくなりました。
 
@@ -738,6 +746,6 @@ Mentor は 4 つのプロンプトファイルを使用します。状況/スコ
 
 ## リミット通知
 
-レールがトリガーされたアクション（メンション、リプライ、名前トリガー、フォローアップ、プライベートメッセージ）を拒否した場合、ボットは `labels.limits.notice` から 1 行を投稿。`{limit}`（config キー）、`{used}`、`{cap}` が設定される。自発的ターンはサイレント。ドライランではログとミラーに記録。
+レールがトリガーされたアクション（メンション、リプライ、名前トリガー、フォローアップ、プライベートメッセージ。`overheard` や自発的ターンではない）を拒否した場合、ボットは `labels.limits.notice` から 1 行を投稿。`{limit}`（config キー）、`{used}`、`{cap}` が設定される。自発的ターンと `overheard` ターンはサイレント。ドライランではログとミラーに記録。
 
 `{limit}` に表示される config キー: `llm.maxRequestsPerDay`、`llm.maxRequestTokens`、`image.maxPerDay`、`image.maxPerUserPerDay`、`private.maxPerUserPerDay`、`private.maxPerOwnerPerDay`。

@@ -34,7 +34,8 @@
 | `describe-gif.md` | 否 | 角色外提示，用于 GIF 描述器（`media.gif.watch`）：输入一段短无声片段，输出一行紧凑描述：动作、表达的含义、可见文字。始终英语。不接收角色卡。不存在时代码回退到 `describe-video.md` | `{{today}}` `{{maxChars}}` `{{seconds}}` |
 | `rewatch.md` | 是 | 分类器：角色是否需要重看视频或重试未加载的视频（`features.videoRewatch`）。接收带状态的编号近期视频列表和新消息。输出为一行：`<number> \| <question>`、`<number> \| retry` 或 `none` | `{{name}}` |
 | `rewatch-answer.md` | 是 | 角色外提示，用于重看回答：视频模型再次观看片段并回答一个问题。语言和限制规则与 `describe-video.md` 相同。不接收角色卡 | `{{question}}` `{{maxChars}}` |
-| `address.md` | 是 | 分类器：未标记的消息是否在对角色说话 | `{{name}}` |
+| `address.md` | 是 | 分类器：未标记的消息是否在对角色说话、在谈论角色还是两者都不是。输出为一个词：`yes`、`overheard` 或 `no` | `{{name}}` |
+| `overheard.md` | 否 | 任务：消息在谈论角色，而不是在对角色说话。触发类型为 `overheard` 且文件存在且非空时，代替模式提示使用；文件缺失或为空时回退到模式提示（降级） | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
 | `lookup.md` | 否 | 分类器：角色是否需要搜索网络来回答这条消息（`features.webLookup`）。接收一段短对话记录和一个 `<candidate>` 块。输出为一行：一个搜索查询（纯文字，最多 12 个词）或 `none` | `{{name}}` |
 | `read-link.md` | 否 | 角色外提示，用于链接阅读器（`features.webLookup`，`web.links.enabled`）：将获取的页面浓缩为一个段落。接收页面标题和正文。不接收角色卡 | `{{maxChars}}` |
 | `search-summary.md` | 否 | 角色外提示，用于搜索浓缩器（`features.webLookup`，`web.search.enabled`）：将编号的搜索结果浓缩为带内联来源的笔记。不接收角色卡 | `{{query}}` `{{maxChars}}` |
@@ -52,6 +53,7 @@
 `{{target}}` 呼叫消息的索引（`#87`）。
 系统消息 = `system-prompt` + `character-card` + `rules` + `format`。分析器则单独使用 `memory.md`。
 在强制回合（`/nep interject`、`/nep initiate`）中，如果 `forced.md` 存在，则追加在模式提示之后。
+在 `overheard` 回合中，`overheard.md` 替代模式提示（它是任务文本本身，而非追加）。当 `overheard.md` 缺失或为空时，使用模式提示代替（降级：模式提示将消息描述为对角色说话，与实际不符）。
 在私聊中，`private.md` 追加在模式提示之后（`forced.md` 之前），使用相同的 `{{name}}` 和 `{{author}}` 占位符。
 分析器和预热的 `profile.md`、`server.md` 在用户消息中以 `<character>` 块接收角色卡和 `rules.md`。
 `channel.md`、`describe.md`、`describe-video.md`、`describe-gif.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md` 和 `variety.md` 不接收角色卡。
@@ -72,13 +74,13 @@
 | `<server>` | 当前频道的完整信息（Discord 分类和话题、用途、人们写什么、氛围、活跃度、最后一条消息、最活跃作者；以 `labels.server.currentMark` 标记），加上仅限本轮向 `<other_channels>` 提供了消息的相邻频道；不包含其他频道 |
 | `<lore>` | 关键词出现在近期消息中的服务器世界书条目（加上标记为 always 的条目）：事件、常驻角色、长期故事。如同世界书：可存在数百个，仅显示相关的少数 |
 | `<self_facts>` | 角色声称过的关于自身的事实 |
-| `<people>` | 成员档案；呼叫者排首位，以 `labels.profile.interlocutorMark` 标记；每个档案包含角色的态度，呼叫者还包含**回忆**：角色记住的关于两人之间的时刻，附带日期和简短引用 |
+| `<people>` | 成员档案；呼叫者排首位，以 `labels.profile.interlocutorMark` 标记（`overheard` 回合中省略：作者在谈论角色而非对角色说话）；每个档案包含角色的态度，呼叫者还包含**回忆**：角色记住的关于两人之间的时刻，附带日期和简短引用 |
 | `<other_channels>` | 每个相邻频道最多 `context.neighborMessages` 条消息，不超过 `context.neighborMaxAgeMinutes` 的时效 |
 | `<worn>` | 角色在近期消息中过度使用的手法（`features.variety`）：`labels.variety.intro`，然后每个手法一行 `- <shape> ("<example>", ...)`。过程未执行、未发现或开关关闭时省略 |
 | `<lookup>` | 角色本轮在线查询的内容（`features.webLookup`）：查询词、浓缩的答案和来源站点，或"未找到"行。仅在搜索分类器触发且搜索完成后出现 |
 | `<chat>` | 当前频道最新的 `context.channelMessages` 条消息 |
 | `<tempo>` | 10 分钟 / 1 小时 / 1 天的消息计数，不同人数，沉默时长，一个判定（活跃 / 缓慢 / 沉寂） |
-| `<task>` | `reply` / `interject` / `initiate`，占位符已填充 |
+| `<task>` | `reply` / `interject` / `initiate` / `overheard`（当 `overheard.md` 存在时），占位符已填充 |
 
 预算优先级（区块从此列表的底部开始裁剪）：系统提示 + 任务 + 时钟 + 节奏 + 感知
 （永不裁剪）→ 呼叫者的档案含回忆 → 查询结果（整体保留或丢弃）→ 聊天习惯 → 自述事实 → 世界书 → 服务器 → 对话记录（最新优先）→
@@ -218,7 +220,7 @@ server.category | topic | purpose | topics | tone               {text}
 server.activity                          {activity} = server.activityLive | activitySlow | activityDead
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
-triggers.mention | reply | name | followUp   followUp = an untagged message the address classifier judged to be for the persona; such a turn posts plain, never as a Discord reply
+triggers.mention | reply | name | followUp | overheard   followUp = an untagged message the address classifier judged to be for the persona; overheard = talk about the persona, not to it. Both post plain, never as a Discord reply. overheard falls back to followUp, then reply
 triggers.private                         the trigger for a private (DM) message
 triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
 draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons; daily and userDaily are reserved but no longer reached by triggers.drawFailed — an image cap now posts limits.notice instead of a follow-up turn
@@ -257,7 +259,7 @@ variety.intro                            first line of the `<worn>` block: tells
 输入：`<character>` · `<existing_profiles>`（按用户 id 的 JSON，包含当前 `affinity`（分数、区间和原因），
 适用时含 `relationshipStale`，以及已存储的 `episodes`）· `<existing_lore>` ·
 `<existing_guild>`（JSON：规律、开场白、内部梗、学到的条目）· `<existing_channels>`（按频道 id 的 JSON：`name`、Discord `category`、`topic`、已存储的
-`purpose`、`topics`、`tone`）· `<new_messages>` 按 `## #channel-name (id:123)` 分组，行格式为
+`purpose`、`topics`、`tone`）· `<known_members>`（仅服务器批次，私聊批次不含；可能部分或完全缺失：本批次中未写入的已存储成员，各带其显示名和别名，使分析器能为其中一人记录别名；最多 `memory.aliasRosterSize` 条，按最近可见排列，`0` = 关闭；在预算中排在对话记录之前，非必需因此不会导致请求失败）· `<new_messages>` 按 `## #channel-name (id:123)` 分组，行格式为
 `[14:32] nick (id:123): text`，对角色说话的行以 `→ ` 开头，角色自身的行使用 `labels.self`。
 
 输出：一个裸 JSON 对象。档案以增量方式更新：分析器返回变更内容，而非对已存储内容的重新概括，因此事实
@@ -332,7 +334,7 @@ variety.intro                            first line of the `<worn>` block: tells
   排队进行刷新。
 - **成员通过 id 引用，而非昵称。**昵称随时变化，因此分析器撰写的每个自由文本字段（档案文本、兴趣笔记、
   细节文本、回忆的 `what`/`feeling`、态度原因、`guild` 字段、频道笔记、世界书 `text`、`self`）中的成员
-  都写作 `<@id>` 标记（id 来自对话记录的 `nick (id:123)` 或 `<existing_profiles>`）。仅在分析器确定
+  都写作 `<@id>` 标记（id 来自对话记录的 `nick (id:123)`、`<existing_profiles>` 或 `<known_members>`）。仅在分析器确定
   所指之人时使用；否则保留原名不变；id 绝不会被编造。逐字引用的 `quote` 和世界书 `keys`/`title` 保持
   原样。代码在使用时解析标记：对聊天模型 `<@id>` 变为该成员的当前名称（与对话记录中显示的相同，因此
   `@name` 仍然有效），对分析器则变为 `name (id:123)`；在输入端，代码将模型写回的 `name (id:123)` 转回
@@ -345,6 +347,7 @@ variety.intro                            first line of the `<worn>` block: tells
   触发消息或最近五条消息中被提及的成员（通过提及、当前名称或别名、4 个字符以上名称的前缀匹配）紧随呼叫
   者之后以完整形式显示（最多 `context.askedAboutProfiles` 个），其他近期参与者以简要形式显示（名称、
   别名、性格、态度、前 5 个话题）；预算先裁剪简要形式的档案。
+  对于 `<known_members>` 中的成员（名册成员），仅应用 `aliases`；回答中的其他键被丢弃并计数。名册成员不会被创建新档案（必须已存在）。对提议别名的保护（所有成员，作者和名册共同适用）：包含 `<@` 标记或 `(id:` 标记时丢弃，与成员的任一存储显示名匹配时丢弃（不区分大小写，忽略标点）。`aliases` 下的裸数组（而非 `{ add, remove }`）被读取为仅添加尚未存储的名称（不会更新已存储的别名）。名册成员别名的 `firstSeen`/`lastSeen` 日期来自批次中最新的消息，因为该成员自己未写入任何消息。
 - **主频道是画像的来源。**`memory.mainChannelIds`（默认 `[]`）列出人们相互交谈的频道；在
   `<existing_channels>` 中此类频道带有 `"main": true`（否则省略此键）。`character` 和 `style` 根据该
   成员在主频道中与他人交谈的方式来判断；日记和主题频道提供兴趣和细节，而非说话方式。在该成员没有主频道
@@ -389,6 +392,7 @@ variety.intro                            first line of the `<worn>` block: tells
 - 字符串字段 ≤ `memory.fieldChars`；细节 ≤ `memory.maxDetails`，内部梗 ≤ `memory.maxInjokes`，自述 ≤
   `memory.maxSelfFacts`。笔记使用聊天所用的语言。仅记录观察到的事实；不记录敏感信息（地址、电话、证件、
   健康、财务、真实全名）。
+- **`memory: update applied` 上的计数器**（每批次后记录）：`roster`（`<known_members>` 中发送的成员数）、`rosterCandidates`（提供给预算的名册条目数）、`rosterTokens`（发送的名册占用的估计 token 数）、`aliasesChanged`（作者和名册中存储别名列表实际发生变化的成员数）、`aliasOnly`（其中的名册成员数）、`droppedUsers`（既非作者也非有存储档案的名册成员的 id 条目数）、`droppedFields`（从名册成员条目中丢弃的非 `aliases` 键数）。
 
 ## 频道地图
 
@@ -434,7 +438,7 @@ variety.intro                            first line of the `<worn>` block: tells
 `profile.md` 输出：`{ "character": "", "style": "", "interests": [{ topic, note, times }], "details": [{ text, times }],
 "episodes": [...], "aliases": [""] }`；块 `<character>` `<member>` `<draft>`（可选）`<hint>`（可选，仅画像
 刷新时）`<snippets>`。片段中自身的行以 `labels.warmup.ownMark` 开头；上下文行以
-`labels.warmup.contextMark` 开头。别名来自其他人的行（他们如何称呼该成员），因此自身消息的归属规则不适用
+`labels.warmup.contextMark` 开头。别名来自其他人的行（他们如何称呼该成员），因此自身消息的归属规则不适用。一次明确的命名陈述足以作为别名的证据；随口说一次的戏谑名称不算别名
 于别名。
 
 ## 地址分类器
@@ -443,21 +447,21 @@ variety.intro                            first line of the `<worn>` block: tells
 携带触发信号（无提及、无对角色消息的回复、无名字）的消息不会被盲目回复：代码将频道最近的
 `mention.followUpContext`（默认 15）行发送给 `address.md`，角色自身的行以 `labels.self` 标记，加上以
 `<candidate>` 标记的新消息，使用 `classifier.text` 模型角色（默认 `anthropic/claude-sonnet-4.6`）。输出
-为一行：当候选消息是在对角色说话或延续与角色的对话时为 `yes`，当人们在相互交谈或对其他人说话时为 `no`。
+为一个词：当候选消息是在对角色说话或延续与角色的对话时为 `yes`，当人们在对别人或整个房间谈论角色时为 `overheard`，当对话与角色无关时为 `no`。
 对另一成员的显式 @提及在询问模型之前即为 `no`；Discord 为被回复作者自动添加的隐式提醒不算作此类提及。当
 `mention.followUpClassifyReplies` 开启（默认 `true`，缺失键 = 开启）时，对另一成员消息的回复会像普通文本一样发送给
 分类器。关闭该开关时，对另一成员的任何回复自动为 `no`。
 
-在 `mention.oneAtATime` 下服务器任何位置有回合执行时（关闭该开关时则为自身频道有回合执行时），后续候选不会被分类；遇到繁忙回合的 `yes` 会被丢弃并记录，不会进入队列。
+在 `mention.oneAtATime` 下服务器任何位置有回合执行时（关闭该开关时则为自身频道有回合执行时），后续候选不会被分类；遇到繁忙回合的 `yes` 或 `overheard` 会被丢弃并记录，不会进入队列。
 
-`yes` 触发正常的回复回合（模型仍可
-`<skip/>`）；连续三个 `no`（`mention.followUpNoStreak`，默认 3）关闭窗口。开关 `features.followUp`
-（默认开启）。仅记录计数和判定结果。
+`yes` 触发正常的回复回合（模型仍可 `<skip/>`）。`overheard` 触发触发类型为 `overheard` 的回复模式回合：任务文本来自 `prompts/overheard.md`（缺失时回退到模式提示），作者档案标题无 `interlocutorMark`，纯文本发布，不计入重复惩罚，限制拒绝时无通知，无搜索或重看分类器，绘画视为未请求（无图片配额通知，无用户级图片计数，无 `drawFailed` 后续）。`mention.followUpOverheard` 关闭时，`overheard` 回答启动普通跟进回合（日志中仍记录 `answer: 'overheard'`）。当 `overheard` 判定时分类器调用期间有更新的消息被搁置，先分类搁置消息：`yes` 则为其启动跟进回合，`overheard` 则为搁置消息启动 `overheard` 回合，`no` 则为原始候选启动 `overheard` 回合。
+
+连续三个 `no`（`mention.followUpNoStreak`，默认 3）关闭窗口；`overheard` 在连续判定中视为 `yes`。开关 `features.followUp`（默认开启）。记录计数、判定结果以及 `follow-up: verdict` 上的 `answer`。
 窗口状态在重启后保留：活跃窗口保存在 `data/state.json` 的 `followUpWindows` 中，启动时恢复，过期的窗口会被丢弃。
 
 ## 重看分类器
 
-当角色被呼叫（回复回合）且频道最近 `media.video.rewatch.recentMessages`（默认 60）条消息中有视频时，分类器判断
+当角色被直接呼叫（回复回合，非 `overheard` 或自发回合）且频道最近 `media.video.rewatch.recentMessages`（默认 60）条消息中有视频时，分类器判断
 该消息是否在询问其中某个视频，或请求重试一个未加载的视频。候选包括已观看视频和错误状态视频（请求的重试使用独立于回合 `media.video.maxPerTurn`
 尝试次数的专用槽位）。分类器最多收到 `media.video.rewatch.maxCandidates`（默认 6）个视频，按最新
 消息优先排列。代码将 `rewatch.md` 作为系统提示发送到 `classifier.text` 模型角色（默认 `anthropic/claude-sonnet-4.6`），
@@ -498,7 +502,7 @@ variety.intro                            first line of the `<worn>` block: tells
 
 ## 搜索分类器
 
-当角色被呼叫（回复回合）且以下条件全部满足时（`features.webLookup` 开启、`web.search.enabled` 不为 false、
+当角色被直接呼叫（回复回合，非 `overheard` 或自发回合）且以下条件全部满足时（`features.webLookup` 开启、`web.search.enabled` 不为 false、
 `lookup.md` 提示文件存在、`web.search.maxPerTurn` 至少为 1、且已配置 `BRAVE_SEARCH_API_KEY`），分类器判断触发消息
 是否需要网络搜索。它使用 `classifier.text` 模型角色。代码将 `lookup.md` 作为系统提示，用户消息包含一个短的
 `<transcript>`（与重看分类器相同，角色自身的行以 `labels.self` 标记）和一个 `<candidate>` 块：
@@ -528,7 +532,9 @@ variety.intro                            first line of the `<worn>` block: tells
 
 ## 多样性过程
 
-每轮之前，`classifier.text` 过程读取角色近期的自身消息，识别角色正在陷入的重复手法（惯用表达、结构性套路、重复的玩笑模式）。结果成为本轮请求中的 `<worn>` 块。开关 `features.variety`（缺失 = 开启）。
+`classifier.text` 过程读取角色近期的自身消息，识别角色正在陷入的重复手法（惯用表达、结构性套路、重复的玩笑模式）。结果成为本轮请求中的 `<worn>` 块。开关 `features.variety`（缺失 = 开启）。
+
+当 `features.varietyPrecompute` 开启（默认）时，过程在角色发布文本后立即启动，基于下次 `fetchHistory` 将返回的消息。回合查找自身消息集：缓存中有匹配结果则直接使用无需模型请求；同一消息的过程正在进行中则加入并最多等待 `variety.timeoutMs`；否则启动自己的请求。请求运行至 `variety.requestTimeoutMs`（默认 30000）：如果回合的等待 `variety.timeoutMs` 先到期，请求继续运行，迟到的结果保存给下一回合。加入的过程失败的回合不获得块，也不启动自己的请求。暂停期间或 `features.variety` 关闭时不保存任何内容。
 
 ### 消息选取
 
@@ -550,17 +556,17 @@ variety.intro                            first line of the `<worn>` block: tells
 
 ### 缓存与存储
 
-同一组消息不会连续被询问两次。服务器级缓存以消息 id 的 SHA-1 为键，无需模型请求即可复用上次结果。
+服务器级缓存以消息 id 的 SHA-1 为键，无需模型请求即可复用上次结果。一个缓存槽保存一个已完成的结果；更新的结果替换旧的。每个槽最多可同时进行 4 个过程；键匹配的回合加入其中任一。失败不会被缓存，因此同一组消息会被下一回合再次询问。
 
 `worn` 存储在服务器记忆中（`data/guilds/<id>/guild.json`）：最新过程的 `{ at, key, channelId, lines, patterns }`。`wornHistory` 是最多 `variety.history`（默认 20）次历史过程的环，仅 shape 和 count，不含 examples。在私聊中执行的过程会为本轮产生 patterns，但不保存到服务器记忆，私聊中的内容不会出现在所有者视图或其他对话中。
 
 ### 超时与失败
 
-`variety.timeoutMs`（默认 8000）限制模型请求。超时或失败不产生 `<worn>` 块；本轮在没有该块的情况下继续，最近存储的过程保持不变。
+`variety.timeoutMs`（默认 8000）是回合等待过程结果的时间。`variety.requestTimeoutMs`（默认 30000）是请求本身的截止时间。超过回合等待的过程继续运行；迟到的结果保存给下一回合。超时或失败不为该回合产生 `<worn>` 块；回合在没有该块的情况下继续。
 
 ### Mentor
 
-Mentor 沙盒为每个场景执行一次多样性过程，计入 mentor 的 token 预算（不计入 `llm.maxRequestsPerDay`）。识别的手法保存为场景记录上的 `worn`。评分者不会看到 `<worn>` 块。
+Mentor 沙盒为每个场景执行一次多样性过程，计入 mentor 的 token 预算（不计入 `llm.maxRequestsPerDay`）。沙盒使用 `variety.timeoutMs` 作为请求超时（它没有后续回合来使用迟到的结果）。识别的手法保存为场景记录上的 `worn`。评分者不会看到 `<worn>` 块。
 
 ## 绘画
 
@@ -595,7 +601,7 @@ Mentor 沙盒为每个场景执行一次多样性过程，计入 mentor 的 toke
 
 ### 失败回合
 
-当回复回合中生成失败时（有人请求了图片），自动触发第二个回合：
+当有人请求的回合（提及、回复、名字触发或跟进，非 `overheard` 或自发回合）中生成失败时，自动触发第二个回合：
 
 - `triggerKind: 'drawFailed'`，失败原因通过 `labels.draw.reasons.*` 渲染到 `labels.triggers.drawFailed` 的
   `{reason}` 占位符中。
@@ -603,7 +609,7 @@ Mentor 沙盒为每个场景执行一次多样性过程，计入 mentor 的 toke
 - 第二个回合自身的 `<draw>` 被移除，因此模型无法重试生成。
 - 频道的空闲通知被保留到第二个回合结束，因此挂起的 ping 仅在后续回合完成后才被排空。
 
-自发回合（无人请求）中，失败仅记录日志，不触发后续回合。
+自发或 `overheard` 回合（无人请求）中，失败仅记录日志，不触发后续回合。
 
 图片配额超限（`ImageCapError`，原因 `daily` 或 `userDaily`）不会触发失败回合。代之以限制通知（`labels.limits.notice`）作为普通回复发布。`draw.reasons.daily` 和 `draw.reasons.userDaily` 保留在 `labels.json` 中，但不再通过 `triggers.drawFailed` 到达。
 
@@ -850,6 +856,6 @@ Mentor 使用四个提示文件：场景/评分一对，加上特征文件和诊
 
 ## 限制通知
 
-当限制（rail）拒绝了被触发的操作（提及、回复、名字触发、follow-up 或私信）时，机器人发布 `labels.limits.notice` 的一行，填充 `{limit}`（配置键）、`{used}` 和 `{cap}`。自发回合保持沉默。试运行中通知被记录并镜像。
+当限制（rail）拒绝了被请求的操作（提及、回复、名字触发、follow-up 或私信，非 `overheard` 或自发回合）时，机器人发布 `labels.limits.notice` 的一行，填充 `{limit}`（配置键）、`{used}` 和 `{cap}`。自发和 `overheard` 回合保持沉默。试运行中通知被记录并镜像。
 
 `{limit}` 中可能出现的配置键：`llm.maxRequestsPerDay`、`llm.maxRequestTokens`、`image.maxPerDay`、`image.maxPerUserPerDay`、`private.maxPerUserPerDay`、`private.maxPerOwnerPerDay`。

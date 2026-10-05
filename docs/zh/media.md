@@ -30,7 +30,7 @@
 
 ### 重看
 
-当有人对角色提出关于已观看视频的问题时，分类器（`prompts/rewatch.md`，使用 `classifier.text` 角色）判断是否需要再看一遍。如果需要，视频模型使用 `prompts/rewatch-answer.md` 再次观看片段，回答与原始摘要一起出现在对话记录中。当有人再次询问未能加载的视频时，同一分类器也可以重试加载。每回合最多一次重看或重试；回答缓存一小时。开关 `features.videoRewatch`（默认开启）。
+当有人直接呼叫角色（非 `overheard` 或自发回合）并对已观看的视频提出问题时，分类器（`prompts/rewatch.md`，使用 `classifier.text` 角色）判断是否需要再看一遍。如果需要，视频模型使用 `prompts/rewatch-answer.md` 再次观看片段，回答与原始摘要一起出现在对话记录中。当有人再次询问未能加载的视频时，同一分类器也可以重试加载。每回合最多一次重看或重试；回答缓存一小时。开关 `features.videoRewatch`（默认开启）。
 
 视频提示是 `prompts/describe-video.md`。设置位于 `media.video` 下。每个键和模型对比表请参阅[配置](configuration.md#mediavideo)。
 
@@ -46,7 +46,7 @@
 
 ## 搜索
 
-当角色被呼叫且触发消息提出了需要聊天之外事实的问题时，分类器（`prompts/lookup.md`，使用 `classifier.text` 角色）生成一个网络搜索查询。搜索通过 Brave Search 运行（`.env` 中的 `BRAVE_SEARCH_API_KEY`；免费层：每月 2,000 次查询，之后每 1,000 次 $5），编号的结果通过 `prompts/search-summary.md` 浓缩，答案出现在 `<chat>` 之前的 `<lookup>` 块中。
+当角色被直接呼叫（非 `overheard` 或自发回合）且触发消息提出了需要聊天之外事实的问题时，分类器（`prompts/lookup.md`，使用 `classifier.text` 角色）生成一个网络搜索查询。搜索通过 Brave Search 运行（`.env` 中的 `BRAVE_SEARCH_API_KEY`；免费层：每月 2,000 次查询，之后每 1,000 次 $5），编号的结果通过 `prompts/search-summary.md` 浓缩，答案出现在 `<chat>` 之前的 `<lookup>` 块中。
 
 分类器仅在以下条件全部满足时触发：存在触发消息、`features.webLookup` 开启、`web.search.enabled` 不为 false、`lookup.md` 提示文件存在、`web.search.maxPerTurn` 至少为 1、且已配置 `BRAVE_SEARCH_API_KEY`。没有密钥时，链接阅读仍然可用但搜索不可用。
 
@@ -72,7 +72,7 @@
 
 ### 失败
 
-当回复回合中绘画失败时，触发第二个回合，触发标签中包含失败原因，以便角色告知请求者发生了什么。第二个回合自身的 `<draw>` 被移除。自发回合中失败仅记录日志。图片配额超限（每日或每成员）不触发失败回合，而是发布限制通知（`labels.limits.notice`），显示哪个限制和数值。
+当有人请求的回合（提及、回复、名字触发或跟进）中绘画失败时，触发第二个回合，触发标签中包含失败原因，以便角色告知请求者发生了什么。第二个回合自身的 `<draw>` 被移除。自发或 `overheard` 回合中失败仅记录日志。图片配额超限（每日或每成员）不触发失败回合；在被请求的回合中发布限制通知（`labels.limits.notice`），显示哪个限制和数值。
 
 设置位于 `image` 下。每个键请参阅[配置](configuration.md#image)，支持的模型请参阅[配置：图片输出](configuration.md#图片输出imagemodel)。
 

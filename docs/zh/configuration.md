@@ -27,7 +27,8 @@
 | `imageGeneration` | `false` | 允许角色通过绘画子进程绘制图片。缺失的键视为开启。在 `config.local.json` 中启用；需要 `image.model` 中配置支持图像生成的模型。参见[媒体：绘画](media.md#绘画) |
 | `privateMessages` | `false` | 回复公会成员的私信。需要已存储的公共档案且 `affinity.score >= private.minAffinity`。参见[消息与记忆：私有层](messages-and-memory.md#私有层) |
 | `mentor` | `false` | 手动测试子进程，使用独立模型。必须严格为 `true` 才能启用；缺失的键视为关闭。参见 [Mentor](#mentor) |
-| `variety` | `true` | 每轮之前，模型过程识别角色在近期消息中过度使用的表达手法。缺失的键视为开启 |
+| `variety` | `true` | 模型过程识别角色在近期消息中过度使用的表达手法。结果作为 `<worn>` 块包含在回合请求中。缺失的键视为开启 |
+| `varietyPrecompute` | `true` | 角色发布文本后立即启动多样性过程，使下一回合可以直接使用结果。关闭时过程仅在回合时运行，但迟到的结果仍会保存。缺失的键视为开启 |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
 | `adminCommands` | `true` | 所有者斜杠命令；设为 `false` 时注销命令 |
@@ -218,6 +219,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `followUpClassifyReplies` | `true` | 将对另一成员消息的回复发送给分类器而非自动 `no`。缺失键 = 开启。关闭时，任何回复在询问模型之前即为 `no` |
 | `followUpContext` | `15` | 发送给分类器的对话记录行数 |
 | `followUpMaxOutputTokens` | `8` | 分类器的最大输出 token 数 |
+| `followUpOverheard` | `true` | 开启时，地址分类器的 `overheard` 回答启动使用 `prompts/overheard.md` 的独立回合。关闭时 `overheard` 回答视为普通 `yes`（跟进回合）。缺失的键视为开启 |
 | `followUpNoStreak` | `3` | 连续 `no` 判定次数达到此值关闭窗口 |
 
 后续窗口保存在 `data/state.json` 的 `followUpWindows` 中，启动时恢复；过期的窗口会被丢弃。
@@ -282,6 +284,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `learnedHalfLifeDays` | `720` | 所学条目的权重半衰期（天） |
 | `maxAliases` | `5` | 每档案向角色和分析器展示的别名数 |
 | `maxAliasesStored` | `15` | 每档案保存的别名数；按频率和近期程度排名最高的会被展示 |
+| `aliasRosterSize` | `40` | 服务器分析器批次 `<known_members>` 块中的成员：未作为批次作者的已存储档案，使分析器能为其记录别名。`0` 关闭名册。私聊批次不包含名册 |
 | `aliasHalfLifeDays` | `365` | 别名的权重半衰期（天） |
 | `maxInjokes` | `15` | 服务器内部梗最大数量 |
 | `maxSelfFacts` | `20` | 自述事实最大数量 |
@@ -392,7 +395,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 ## `variety`
 
-多样性过程的设置（`features.variety`）。每轮之前，角色近期的消息会发送给 `classifier.text` 模型，由其识别重复的表达手法。结果以 `<worn>` 块的形式出现在本轮请求中。超时或过程失败不会延迟或中断本轮，本轮会在没有该块的情况下继续。全部热重载。
+多样性过程的设置（`features.variety`）。角色近期的消息会发送给 `classifier.text` 模型，由其识别重复的表达手法。当 `features.varietyPrecompute` 开启时，过程在角色发布文本后立即启动，使下一回合可以直接使用结果；回合时使用缓存的结果，或加入正在进行的过程并最多等待 `variety.timeoutMs`。结果以 `<worn>` 块的形式出现在本轮请求中。超时或过程失败不会延迟或中断本轮，本轮会在没有该块的情况下继续。全部热重载。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
@@ -403,7 +406,8 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `maxPatterns` | `4` | 一次过程最多可识别的手法数 |
 | `shapeChars` | `140` | 一个手法描述的最大字符数 |
 | `maxOutputTokens` | `500` | 过程的最大输出 token 数 |
-| `timeoutMs` | `8000` | 请求超时（毫秒）；过慢或失败的过程不会延迟本轮 |
+| `timeoutMs` | `8000` | 回合等待过程结果的时间（毫秒）。超过此等待的过程继续运行至 `requestTimeoutMs`；迟到的结果会保存并在下一回合使用。Mentor 沙盒将此值用作请求超时 |
+| `requestTimeoutMs` | `30000` | 多样性模型调用的请求超时（毫秒）。过程在此时间截止；`variety.timeoutMs` 仅为回合的等待时间 |
 | `history` | `20` | `/nep variety` 显示的历史过程环的容量 |
 
 ## `private`

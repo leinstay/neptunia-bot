@@ -6,7 +6,7 @@
 
 消息经过服务器、频道和自身消息过滤。如果角色被呼叫（@提及、回复或名字触发），忽略启发式会根据基础概率进行判定，该概率会因空提及、重复标记、垃圾消息和呼叫者的关系分数而调整。判定失败时消息会被忽略；被忽略的消息仍会出现在下次回复构建的对话记录中。
 
-角色回复某人后，该频道内接下来 `mention.followUpMinutes` 分钟的未标记消息会被发送到 `classifier.text` 角色上的分类器，判断它们是否在延续对话；连续三个 `no` 判定（`mention.followUpNoStreak`）关闭窗口。后续窗口在重启后保留。`features.followUp` 可关闭此功能。
+角色回复某人后，该频道内接下来 `mention.followUpMinutes` 分钟的未标记消息会被发送到 `classifier.text` 角色上的分类器，回答 `yes`、`overheard` 或 `no`。`yes` 延续对话；`overheard`（谈论角色而非对角色说话）在 `mention.followUpOverheard` 开启（默认）时启动使用 `prompts/overheard.md` 的独立回合，否则视为普通跟进。连续三个 `no` 判定（`mention.followUpNoStreak`）关闭窗口；`overheard` 在连续判定中视为 `yes`。后续窗口在重启后保留。`features.followUp` 可关闭此功能。
 
 自发回合由混沌定时器或逐消息窃听概率（`spontaneous.eavesdropChance`）触发。`spontaneous.deadAfterMinutes` 的沉默后，即使角色自己的消息是频道中的最后一条，角色也可以发起话题；但它永远不会在自己的最后一条消息上插话。角色不会在沉默超过 `spontaneous.maxChannelSilenceHours` 小时的频道中主动发言；但该频道中的直接提及仍会回复。
 
@@ -41,7 +41,7 @@
 
 ### 确认
 
-兴趣、细节和别名共享一个确认机制。新条目起始权重为 1（或当分析器标记 `"sure": false` 时为 0）。在不同场合的观察（间隔至少 `memory.confirmGapHours`）使权重增加 1。条目在权重达到 `memory.confirmAfter` 时变为已确认；在此之前角色看到它时会带有"(未确认)"标记。条目按 `log2(weight + 0.5) + lastSeen / halfLife` 排名，因此频繁且近期的排在最前。
+兴趣和细节共享一个确认机制。新条目起始权重为 1（或当分析器标记 `"sure": false` 时为 0）。在不同场合的观察（间隔至少 `memory.confirmGapHours`）使权重增加 1。条目在权重达到 `memory.confirmAfter` 时变为已确认；在此之前角色看到它时会带有"(未确认)"标记。别名使用相同的排名和观察机制，但 `"sure": false` 机制和未确认标记不适用于别名。三者均按 `log2(weight + 0.5) + lastSeen / halfLife` 排名，因此频繁且近期的排在最前。
 
 ## 回忆
 

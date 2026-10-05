@@ -6,7 +6,7 @@ How the persona processes messages and remembers people.
 
 A message passes through guild, channel and self-message filters. If the persona was called (@mention, reply, or name trigger), an ignore heuristic rolls against a base chance adjusted for bare pings, repeated tags, spam, and the caller's relationship score. When the roll fails, the message is ignored; the ignored messages are still in the transcript when the next reply is built.
 
-After the persona answers someone, untagged messages in that channel for the next `mention.followUpMinutes` minutes are sent to a classifier on the `classifier.text` role that decides whether they continue the exchange; three `no` in a row (`mention.followUpNoStreak`) close the window. Follow-up windows survive restarts. `features.followUp` switches it off.
+After the persona answers someone, untagged messages in that channel for the next `mention.followUpMinutes` minutes are sent to a classifier on the `classifier.text` role that answers `yes`, `overheard` or `no`. A `yes` continues the exchange; an `overheard` (talk about the persona, not to it) starts its own kind of turn with `prompts/overheard.md` when `mention.followUpOverheard` is on (the default), or counts as a plain follow-up otherwise. Three `no` in a row (`mention.followUpNoStreak`) close the window; `overheard` counts as `yes` for the streak. Follow-up windows survive restarts. `features.followUp` switches it off.
 
 Spontaneous turns fire from a chaotic timer or the per-message eavesdrop chance (`spontaneous.eavesdropChance`). After `spontaneous.deadAfterMinutes` of silence the persona may open a topic even when its own line was the last one; it never interjects on its own last line. The persona will not speak unprompted in a channel silent for more than `spontaneous.maxChannelSilenceHours` hours; a direct ping there is still answered.
 
@@ -41,7 +41,7 @@ The portrait of a member's character and manner of speech is drawn from the chan
 
 ### Confirmation
 
-Interests, details and aliases share a confirmation mechanism. A new item starts at weight 1 (or 0 when the analyzer marks it `"sure": false`). A sighting on a separate occasion (at least `memory.confirmGapHours` apart) raises the weight by 1. An item is confirmed when weight reaches `memory.confirmAfter`; until then the persona sees it with a "(unconfirmed)" mark. Items are ranked by `log2(weight + 0.5) + lastSeen / halfLife`, so what is frequent AND recent is on top.
+Interests and details share a confirmation mechanism. A new item starts at weight 1 (or 0 when the analyzer marks it `"sure": false`). A sighting on a separate occasion (at least `memory.confirmGapHours` apart) raises the weight by 1. An item is confirmed when weight reaches `memory.confirmAfter`; until then the persona sees it with a "(unconfirmed)" mark. Aliases use the same ranking and sighting mechanics, but the `"sure": false` mechanism and the unconfirmed mark do not apply to them. All three are ranked by `log2(weight + 0.5) + lastSeen / halfLife`, so what is frequent AND recent is on top.
 
 ## Episodes
 
