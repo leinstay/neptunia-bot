@@ -19,8 +19,8 @@
 | `/nep rule add <text>` | `prompts.local/rules.md` にルールを追記 |
 | `/nep rule list` | ルール一覧を番号付きで表示 |
 | `/nep rule remove <number>` | 番号指定でルールを削除 |
-| `/nep model show` | 各ロール（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）のアクティブなモデルを表示 |
-| `/nep model set <role> <id>` | ロール（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）のモデルを設定 |
+| `/nep model show` | 各ロール（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`、`voice`）のアクティブなモデルを表示 |
+| `/nep model set <role> <id>` | ロール（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`、`voice`）のモデルを設定。`voice` ロールは `memory.voiceModel` に書き込む |
 | `/nep route list` | `llm.providerByModel` のすべてのルート、各ロールの現在のモデルと適用されるルーティングを表示。アクセスキー `route.list`（読み取り専用） |
 | `/nep route set <model> <providers> [role] [fallbacks]` | モデルプレフィックスを指定のプロバイダーのみにルーティング。`model` はモデル id またはプレフィックス（例: `google/`、`@` やスペース不可）。`providers` はプロバイダー slug のカンマ区切りリスト（例: `google-vertex`、小文字、数字、ハイフン）。`role` はルートを 1 つのロールに限定（デフォルト: 任意）。`fallbacks` はこれらが利用不可の場合に他のプロバイダーを許可（デフォルト: false）。`config.local.json` の `llm.providerByModel` に `{ "only": [...], "allow_fallbacks": ... }` を書き込みリロード。アクセスキー `route.set` |
 | `/nep route remove <model> [role]` | ルートを削除。キーは `config.local.json` に存在する必要がある。`config.json` にのみ設定されたキーはこの方法では削除不可。アクセスキー `route.remove` |
@@ -28,7 +28,7 @@
 | `/nep memory channel [channel]` | チャンネル指定あり: 保存されたノートの全文（目的、トピック、トーン、メッセージ数、アクティビティ、トップライター）。指定なし: ペルソナが把握している全チャンネルの一覧（最終メッセージ順） |
 | `/nep memory server` | サーバー全体のノート: 会話のしかた、会話の始め方、内輪ネタ、自己言及、およびプロファイル・チャンネル・ロアブックエントリの件数 |
 | `/nep memory refresh <user>` | メンバーのポートレートを強制リフレッシュ |
-| `/nep memory forget <user>` | 保存されたプロファイルとプライベートメモリを削除。実行中のアナライザーバッチの完了を待つ |
+| `/nep memory forget <user>` | 保存されたプロファイル、プライベートメモリ、およびキューされたボイスアイテム（そのメンバーが教えたレッスンを含む）を削除。実行中のアナライザーバッチの完了を待つ |
 | `/nep memory affinity <user> [score] [reason]` | 態度を表示または設定（-100..100） |
 | `/nep memory wipe <confirm>` | このサーバーのアナライザーメモリをすべて消去。確認のためサーバー名を正確に入力。削除対象: メンバープロファイルとプライベートメモリ、サーバーの傾向（パターン、スターター、内輪ネタ）、学習項目、絵文字ランキング、多様性パスの履歴、チャンネルマップ、アナライザーのロア、ウォームアップの進捗。保持対象: オーナーのロアエントリ、メディア説明キャッシュ、GIF ライブラリ、トークンキャリブレーション、日次カウンター、自発スケジュール。実行中のアナライザーバッチの完了を待つ |
 | `/nep private show <user>` | メンバーのプライベートメモリを表示: リレーションシップ、インタレスト、ディテール、エピソード、プライベートと実効アティチュード、本日のリプライ数。プライベートレイヤーなしの場合はプレーン応答。オーナー専用; グラント不可 |

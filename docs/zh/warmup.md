@@ -42,9 +42,15 @@
 
 ## 画像刷新
 
-预热完成后，流分析器从实时批次中保持记忆更新。当它检测到存储的画像遗漏了某个反复出现的习惯或与该人当前的写作方式矛盾时，引擎会排队进行画像刷新：采样该成员最新的 `warmup.refreshMessages`（默认 400）条消息，采样方式与预热相同，并以存储的画像作为草稿、分析器的笔记作为提示调用 `profile.md`。新的性格和风格替换存储的版本；刷新回答中的兴趣、细节、回忆和别名会被忽略，因为这些内容通过流分析器的增量更新持续流入。
+预热完成后，流分析器从实时批次中保持记忆更新。画像通过两种方式刷新。
 
-每个成员的画像最多每 `memory.portraitRefreshHours`（默认 24）小时刷新一次，整个服务器每天最多 `memory.portraitRefreshPerDay`（默认 20）次。每次刷新计入每日请求上限。`/nep memory refresh <user>` 无视计时器强制刷新。
+**按计数器**（`features.portraitRefresh`）。定期调度器每 `memory.portraitCheckMinutes`（默认 60）分钟检查一次，寻找自上次画像以来写了至少 `memory.portraitRefreshMessages`（默认 300）条自身消息，且上次成功刷新距今至少 `memory.portraitRefreshDays`（默认 3）天的成员。每天最多刷新 `memory.portraitRefreshPerDay`（默认 3）人，按活跃度排序。没有画像时间戳的成员会计入所有消息，因此部署后会有多人同时符合条件；日限额将其分散。失败的尝试等待 `memory.portraitRetryHours`（默认 24）小时。采样量被控制在 50k token 限制以内。
+
+**按分析器提示。** 当流分析器检测到存储画像遗漏的反复习惯或写作方式的变化时，返回一行提示，代码将刷新排队。此路径使用现有的每成员冷却时间 `memory.portraitRefreshHours`（默认 24 小时）。流分析器不再能直接覆写 `character` 或 `style`。
+
+两种路径共享日限额。`/nep memory refresh <user>` 无视计时器强制刷新，但仍计入限额。每次刷新计入 `llm.maxRequestsPerDay`。
+
+刷新时以存储的画像为 `<draft>`、分析器笔记为 `<hint>`（如有）调用 `profile.md`。草稿是合并基础：与采样一致的保留（压缩腾出空间），矛盾的修改，新的反复习惯添加，采样中未出现的不删除。新的性格和风格替换存储的版本；回答中的兴趣、细节、回忆和别名被忽略。
 
 ## 命令
 

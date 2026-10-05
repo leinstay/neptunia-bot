@@ -78,7 +78,7 @@ The drawing prompt may quote members (it includes the scene text the model wrote
 
 ### Failure
 
-When the drawing fails on a turn someone asked for (a mention, reply, name trigger or follow-up), a second turn fires with the failure reason in the trigger label, so the persona can tell the requester what happened. The second turn's own `<draw>` is dropped. On a spontaneous or overheard turn, a failure is only logged. An image cap (daily or per-member) does not fire the failure turn; it posts a limit notice (`labels.limits.notice`) instead on asked-for turns, naming the limit and the numbers.
+When the drawing fails on a turn someone asked for (a mention, reply, name trigger or follow-up), a second turn fires with the failure reason in the trigger label, so the persona can tell the requester what happened. The second turn's own `<draw>` is dropped. On a spontaneous or overheard turn, a failure is only logged. An image cap (daily or per-member) does not fire the failure turn; it posts a limit notice (`labels.limits.notice`) instead on asked-for turns, naming the limit and the numbers. On a turn answering a call from a read-only channel, the limit notice is posted plain in the destination channel (no Discord reply to a message in another channel).
 
 Settings live under `image`. See [Configuration](configuration.md#image) for every key and [Configuration: Pictures out](configuration.md#pictures-out-imagemodel) for the supported models.
 

@@ -26,6 +26,10 @@
 | `webLookup` | `false` | 阅读聊天中发布的链接并在被问到事实性问题时搜索网络。与其他功能不同，缺失的键视为关闭。搜索需要 `.env` 中的 `BRAVE_SEARCH_API_KEY`；没有密钥时只有链接阅读可用。参见[媒体：链接与搜索](media.md#链接) |
 | `imageGeneration` | `false` | 允许角色通过绘画子进程绘制图片。缺失的键视为开启。在 `config.local.json` 中启用；需要 `image.model` 中配置支持图像生成的模型。参见[媒体：绘画](media.md#绘画) |
 | `privateMessages` | `false` | 回复公会成员的私信。需要已存储的公共档案且 `affinity.score >= private.minAffinity`。参见[消息与记忆：私有层](messages-and-memory.md#私有层) |
+| `channelPull` | `true` | 当最近的消息或触发器包含真实的频道提及时，将该频道拉入回合请求。缺失键 = 开。参见 `context.pull.*` |
+| `elsewhere` | `true` | 响应机器人可读但不可写的频道中的呼叫（@提及、回复、名字）。回复发送到 `memory.mainChannelIds` 中第一个可用的频道。缺失键 = 开 |
+| `portraitRefresh` | `true` | 根据消息计数器定期刷新成员画像。缺失键 = 开 |
+| `memoryTwoStage` | `false` | 将记忆分析器拆分为两个阶段：中性 GPT 模型判定变更（阶段 A），然后语音模型撰写角色文本（阶段 B）。必须严格为 `true` 才能启用；缺失键 = 关。参见 `memory.voiceModel` 和 `memory.voice.*` |
 | `mentor` | `false` | 手动测试子进程，使用独立模型。必须严格为 `true` 才能启用；缺失的键视为关闭。参见 [Mentor](#mentor) |
 | `promptCache` | `false` | 为系统消息添加提供商的提示缓存标记。缓存读取仅为正常输入成本的一小部分；某些提供商不将缓存读取计入 token 配额。必须严格为 `true` 才能启用；缺失的键视为关闭。参见 `llm.cache.*` |
 | `variety` | `true` | 模型过程识别角色在近期消息中过度使用的表达手法。结果作为 `<worn>` 块包含在回合请求中。缺失的键视为开启 |
@@ -113,6 +117,7 @@
 | `caps.people` | `9000` | Token 上限：其他档案 |
 | `caps.neighbors` | `3000` | Token 上限：相邻频道 |
 | `caps.server` | `4000` | Token 上限：频道地图 |
+| `caps.pulled` | `4000` | Token 上限：拉取的频道块（`<channel_view>`） |
 | `channelActivity.liveMessagesPerDay` | `20` | 每日消息数 = “活跃”频道 |
 | `channelActivity.deadAfterDays` | `7` | 无消息天数 = “沉寂”频道 |
 | `vision.maxImages` | `4` | 每请求最大图片数 |
@@ -265,9 +270,15 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `model` | `null` | 分析器模型（`null` = `llm.model`） |
-| `mainChannelIds` | `[]` | 人们相互交流的频道；成员性格和风格的画像取自这些频道；为空表示所有频道均计入 |
+| `mainChannelIds` | `[]` | 人们相互交流的频道；成员性格和风格的画像取自这些频道；为空表示所有频道均计入。也是只读频道呼叫响应的目标频道（`features.elsewhere`）：使用列表中第一个可用的频道 |
 | `portraitRefreshHours` | `24` | 每成员画像刷新最短间隔（小时） |
-| `portraitRefreshPerDay` | `20` | 每服务器每天最大画像刷新次数。日计数器存储在 `state.json` 中（`portraitDay` / `portraitCount`），`/nep warmup reset` 不会清除它 |
+| `portraitRefreshMessages` | `300` | 自上次画像以来的成员自身消息数达到此值时触发代码刷新。也是采样大小 |
+| `portraitRefreshDays` | `3` | 自上次成功刷新以来经过此天数后触发代码刷新 |
+| `portraitRefreshPerDay` | `3` | 每服务器每天最大画像刷新次数（代码触发、分析器提示和 `/nep memory refresh` 共享此限额）。日计数器存储在 `state.json` 中（`portraitDay` / `portraitCount`），`/nep warmup reset` 不会清除它 |
+| `portraitRetryHours` | `24` | 失败的刷新尝试后等待多少小时再重试同一成员 |
+| `portraitCheckMinutes` | `60` | 画像调度器检查需要刷新的成员的频率（分钟） |
+| `keepNewestEpisodes` | `5` | 最新添加的情节（按添加时间）免于淘汰。`0` = 旧规则：先淘汰最轻的，再淘汰最老的 |
+| `voiceModel` | `null` | 两阶段分析器阶段 B 使用的模型，负责撰写角色文本。`null` 使用对话模型（`llm.model`）。通过 `/nep model set voice` 设置 |
 | `batchMessages` | `60` | 理想批次大小 |
 | `minBatchMessages` | `15` | 更新前的最少消息数 |
 | `maxBatchAgeMinutes` | `180` | 超过此时长强制更新（分钟） |
@@ -313,6 +324,10 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `decayPerDay` | `0.04` | 每日向零漂移；每天损失 `decayPerDay * |score| * (|score| / 100) ^ decayPower`。`0` 或缺失 = 关 |
 | `decayPower` | `1` | 衰减曲线的指数；值越高，接近零的分数衰减越慢。非正数 = 1 |
 | `rewriteOnBandChange` | `true` | 当态度区间与写入时不同时，标记已存储的 `relationship` 文本需要重写。缺失键 = 开 |
+| `rewriteOnDrift` | `8` | 当分数自写入以来偏移了这么多点时标记重写，即使在同一区间内。`0` = 关 |
+| `rewriteAfterMoves` | `6` | 自写入以来产生了这么多条态度历史记录时标记重写。`0` = 关 |
+| `bandHysteresis` | `2` | 超过旧区间边界多少点才将区间变化视为重写原因。防止在区间边界附近波动时的无谓重写 |
+| `textChars` | `600` | relationship 文本的最大字符数。填充分析器提示词中的 `{{relationshipChars}}` |
 
 启用 `damping` 后，推离零点的分数变化会按 `(1 - |score| / 100) ^ dampingPower` 缩放，因此极端值需要持续努力才能达到；趋向零的变化全额应用。分数以小数精度存储，以整数显示；`/nep memory affinity` 可直接设置分数，不受阻尼影响。
 
@@ -476,7 +491,6 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `maxChannelShare` | `0.5` | 单个频道在样本中的最大占比 |
 | `messagesPerChannel` | `200` | 用于描述频道的最新消息数 |
 | `serverSampleMessages` | `600` | 服务器请求使用的近期主频道消息数 |
-| `refreshMessages` | `400` | 画像刷新采样的消息数 |
 | `fetchLimitPerChannel` | `15000` | 每频道为样本池获取的消息数 |
 | `maxOutputTokens` | `6000` | 每次预热请求的最大输出 token 数 |
 | `maxRequestTokens` | `120000` | 每次预热请求的最大 token 数（输入 + 输出） |

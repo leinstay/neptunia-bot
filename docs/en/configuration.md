@@ -29,6 +29,10 @@ Every key in `config.json` with its default, grouped by section.
 | `webLookup` | `false` | Read links posted in chat and search the web when asked a factual question. Unlike other features, a missing key counts as OFF. Needs `BRAVE_SEARCH_API_KEY` in `.env` for search; without it only link reading works. See [Media: Links and search](media.md#links) |
 | `imageGeneration` | `false` | Let the persona draw pictures through a drawing sub-process. A missing key counts as on. Turn on in `config.local.json`; needs an image-capable model in `image.model`. See [Media: Drawing](media.md#drawing) |
 | `privateMessages` | `false` | Answer direct messages from guild members. Needs a stored public profile and `affinity.score >= private.minAffinity`. See [Messages and memory: Private layer](messages-and-memory.md#private-layer) |
+| `channelPull` | `true` | Pull another channel into a turn's request when the recent messages or the trigger contain a real channel mention. A missing key counts as on. See `context.pull.*` |
+| `elsewhere` | `true` | Answer a call (@mention, reply, name) from a channel where the bot can read but not send. The answer goes to the first usable channel in `memory.mainChannelIds`. A missing key counts as on |
+| `portraitRefresh` | `true` | Refresh a member's portrait by message counters on a periodic schedule. A missing key counts as on |
+| `memoryTwoStage` | `false` | Split the memory analyzer into two stages: a neutral GPT model decides what changed (stage A), then the voice model words the persona's texts (stage B). Must be exactly `true` to enable; a missing key counts as off. See `memory.voiceModel` and `memory.voice.*` |
 | `mentor` | `false` | Manual testing sub-process with its own model. Must be exactly `true` to enable; a missing key counts as off. See [Mentor](#mentor) |
 | `promptCache` | `false` | Mark the system message for the provider's prompt cache. A cached read costs a fraction of normal input; some providers do not count cached reads against token quotas. Must be exactly `true` to enable; a missing key counts as off. See `llm.cache.*` |
 | `variety` | `true` | A model pass names the devices the persona is overusing in its own recent lines. The result becomes a `<worn>` block in the turn's request. A missing key counts as on |
@@ -118,6 +122,7 @@ The three helper model roles, grouped under one key. Each is set independently, 
 | `caps.server` | `4000` | Token cap: channel map |
 | `caps.emoji` | `800` | Token cap: custom emoji |
 | `caps.gifs` | `600` | Token cap: GIF library |
+| `caps.pulled` | `4000` | Token cap: pulled channel block (`<channel_view>`) |
 | `channelActivity.liveMessagesPerDay` | `20` | Daily messages = "active" channel |
 | `channelActivity.deadAfterDays` | `7` | Days without messages = "dead" channel |
 | `vision.maxImages` | `4` | Max images per request |
@@ -138,6 +143,34 @@ Settings for the custom emoji block (`features.customEmoji`). The memory analyze
 | `storeMax` | `200` | Custom emoji kept in the usage ranking; the top `max` are shown |
 | `halfLifeDays` | `30` | Recency half-life for the usage ranking (days); rank = log2(count + 0.5) + last / halfLife; an emoji not used recently sinks below one used often |
 | `backfillMessages` | `500` | Messages read per channel from history at startup to seed the ranking. Runs once when `features.customEmoji` is on and no backfill has run yet for this server; the result is stamped in `guild.json`. `0` disables the backfill |
+
+### `context.pull`
+
+Settings for pulling another channel into a turn's request (`features.channelPull`). When the recent messages or the trigger contain a real Discord channel mention (`<#id>`), the mentioned channel's latest messages are rendered as a `<channel_view>` block. The window ends at that channel's newest message, however old.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `windowMinutes` | `60` | Minutes of messages to pull, ending at the channel's newest message |
+| `minMessages` | `5` | Minimum messages in the window; the window extends further back to reach this count |
+| `maxMessages` | `60` | Maximum messages pulled per channel |
+| `maxPictures` | `10` | Pictures whose captions are included; cached captions are free, fresh ones are requested only when the turn is certain to run |
+| `maxNewDescriptions` | `8` | Fresh describer requests for pictures in a pulled channel per turn |
+| `describeTimeoutMs` | `15000` | Timeout for fresh caption requests (ms) |
+| `scanMessages` | `20` | Recent messages of the current channel scanned for channel mentions |
+| `maxChannels` | `1` | Channels that can be pulled per turn |
+| `maxAgeDays` | `0` | Refuse a pull when the channel's newest message is older than this many days. `0` = no limit |
+| `sameAudience` | `true` | Check that every role allowed to view the destination channel can also view the source. When false, content from a restricted channel can reach a wider audience |
+
+## `elsewhere`
+
+Settings for answering calls from channels where the bot can read but not send (`features.elsewhere`). A call (mention, reply, name) in such a channel waits for the conversation there to settle, then the persona answers in the first usable channel of `memory.mainChannelIds` with a link back to the call.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `settleSeconds` | `90` | Seconds after the last message in the source channel before the call is answered |
+| `settleMaxSeconds` | `300` | Maximum seconds from the first call in a burst before the answer fires regardless |
+| `rememberPings` | `20` | Calls remembered in the ring per channel |
+| `pingMaxAgeDays` | `7` | Days before a remembered call expires from the ring |
 
 ## `gifs`
 
@@ -292,9 +325,15 @@ Follow-up windows are persisted in `data/state.json` under `followUpWindows` and
 |---|---|---|
 | `model` | `null` | Analyzer model (`null` = llm.model) |
 | `temperature` | `0.3` | Sampling temperature of every analyzer-role request: stream analyzer batches (server and private), the warmup's channel, profile and server requests and the portrait refresh |
-| `mainChannelIds` | `[]` | Channels where people talk to each other; the portrait of a member's character and style is drawn from them; empty means every channel counts |
-| `portraitRefreshHours` | `24` | Min hours between portrait refreshes per member |
-| `portraitRefreshPerDay` | `20` | Max portrait refreshes per server per day. The day counter lives in `state.json` as `portraitDay` / `portraitCount` and survives `/nep warmup reset` |
+| `mainChannelIds` | `[]` | Channels where people talk to each other; the portrait of a member's character and style is drawn from them; empty means every channel counts. Also the destination for answers to calls from read-only channels (`features.elsewhere`): the first usable channel in the list is used |
+| `portraitRefreshHours` | `24` | Min hours between portrait refreshes triggered by the analyzer's cue per member |
+| `portraitRefreshMessages` | `300` | Own messages since the last portrait before a code-triggered refresh is due. Also the sample size for the refresh |
+| `portraitRefreshDays` | `3` | Days since the last successful refresh before a code-triggered refresh is due |
+| `portraitRefreshPerDay` | `3` | Max portrait refreshes per server per day (code-triggered, analyzer cue and `/nep memory refresh` share this cap). The day counter lives in `state.json` as `portraitDay` / `portraitCount` and survives `/nep warmup reset` |
+| `portraitRetryHours` | `24` | Hours to wait after a failed refresh attempt before trying the same member again |
+| `portraitCheckMinutes` | `60` | How often the portrait scheduler checks for members due a refresh |
+| `keepNewestEpisodes` | `5` | The newest episodes (by when they were added) are exempt from eviction. `0` uses the previous rule: evict lightest first, then oldest |
+| `voiceModel` | `null` | Model for stage B of the two-stage analyzer, which words the persona's texts. `null` uses the talk model (`llm.model`). Set through `/nep model set voice` |
 | `batchMessages` | `60` | Ideal batch size |
 | `minBatchMessages` | `15` | Min messages before update |
 | `maxBatchAgeMinutes` | `180` | Force update after (min) |
@@ -328,6 +367,20 @@ Follow-up windows are persisted in `data/state.json` under `followUpWindows` and
 
 The analyzer prompt reads these limits as placeholders, so raising a value takes effect on the next batch. Bigger profiles cost context tokens (`context.caps.people`, `context.caps.interlocutor`) and analyzer output (`memory.maxOutputTokens`).
 
+### `memory.voice`
+
+Settings for stage B of the two-stage analyzer (`features.memoryTwoStage`). Stage B takes the neutral briefs queued by stage A and words them in the persona's voice. The queue is persisted in `data/guilds/<id>/voice.json` and survives restarts.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `maxItems` | `24` | Items per voice request, fitted under the 50k token rail |
+| `maxPerDay` | `100` | Voice requests per UTC day. `0` prevents sending (useful for stage-A-only simulation runs) |
+| `maxOutputTokens` | `3000` | Max output tokens per voice request |
+| `retryMinutes` | `15` | Back-off after a voice answer that left an item out; the delay doubles on each miss |
+| `maxAttempts` | `4` | Answers that left an item out before it takes the degraded path. A failed request (bad JSON, timeout) does not count toward this |
+| `queueMax` | `100` | Items kept in the queue; the oldest non-character items overflow to the degraded path |
+| `queueHours` | `24` | Hours before a queued item expires to the degraded path. Character items never expire |
+
 ## `relationships`
 
 | Key | Default | Meaning |
@@ -340,6 +393,10 @@ The analyzer prompt reads these limits as placeholders, so raising a value takes
 | `decayPerDay` | `0.04` | Daily drift toward zero; per day the score loses `decayPerDay * |score| * (|score| / 100) ^ decayPower`. `0` or missing = off |
 | `decayPower` | `1` | Exponent of the decay curve; higher values make scores close to zero decay slower. Not a positive number = 1 |
 | `rewriteOnBandChange` | `true` | Flag a stored `relationship` text for rewrite when the attitude band has changed since it was written. Missing key = on |
+| `rewriteOnDrift` | `8` | Flag the text for rewrite when the score has drifted this many points since the text was written, even within the same band. `0` = off |
+| `rewriteAfterMoves` | `6` | Flag the text for rewrite after this many attitude history entries since the text was written. `0` = off |
+| `bandHysteresis` | `2` | Points past the old band's edge before a band change is counted as a rewrite cause. Prevents rewrites from scores that hover near a band boundary |
+| `textChars` | `600` | Max characters for the relationship text. Fills `{{relationshipChars}}` in the analyzer prompt |
 
 With `damping` on, a change that pushes the score further from zero is scaled by `(1 - |score| / 100) ^ dampingPower`, so extremes take sustained effort; a change back toward zero applies at full strength. The score is stored with fractional precision and shown as a whole number; `/nep memory affinity` sets it directly without damping.
 
@@ -504,7 +561,6 @@ Settings for the manual testing sub-process (`features.mentor`). The mentor inve
 | `maxChannelShare` | `0.5` | Max share of samples from one channel |
 | `messagesPerChannel` | `200` | Newest messages a channel is described from |
 | `serverSampleMessages` | `600` | Recent main-channel messages for the server request |
-| `refreshMessages` | `400` | Messages sampled for a portrait refresh |
 | `fetchLimitPerChannel` | `15000` | Messages fetched per channel for the sample pool |
 | `maxOutputTokens` | `6000` | Max output tokens per warmup request |
 | `maxRequestTokens` | `120000` | Max tokens per warmup request (input + output) |
@@ -524,7 +580,11 @@ Default: `anthropic/claude-opus-4.6`. A cheaper option: `anthropic/claude-sonnet
 
 ### Analyzer (`memory.model`)
 
-Role `analyzer`. Reasons over long transcripts and returns strict JSON. Needs the same tier of intelligence as the voice. `null` (default) uses the persona's model. The same examples apply.
+Role `analyzer`. Reasons over long transcripts and returns strict JSON. Needs the same tier of intelligence as the voice. `null` (default) uses the persona's model. The same examples apply. In two-stage mode (`features.memoryTwoStage`), this model runs stage A (neutral decisions).
+
+### Memory voice (`memory.voiceModel`)
+
+Role `voice`. Words the persona's texts from stage B of the two-stage analyzer: relationship notes, attitude reasons, episode feelings, lessons, self-facts, server patterns, starters and the character portrait. `null` (default) uses the talk model. Set through `/nep model set voice`.
 
 ### Text classifiers (`classifier.text`)
 

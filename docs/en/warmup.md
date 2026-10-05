@@ -42,9 +42,15 @@ When the provider returns HTTP 429, the warmup waits `warmup.rateLimitWaitMinute
 
 ## Portrait refresh
 
-After the warmup finishes, the stream analyzer keeps memory current from live batches. When it detects that a stored portrait misses a recurring habit or contradicts how the person now writes, the engine queues a portrait refresh: the member's newest `warmup.refreshMessages` (default 400) messages are sampled the same way as the warmup, and `profile.md` is called with the stored portrait as a draft and the analyzer's note as a hint. The new character and style replace the stored ones; interests, details, episodes and aliases from the refresh answer are ignored because those keep flowing through the stream analyzer's incremental updates.
+After the warmup finishes, the stream analyzer keeps memory current from live batches. Portraits are refreshed in two ways.
 
-A portrait can be refreshed at most once every `memory.portraitRefreshHours` (default 24) hours per member, up to `memory.portraitRefreshPerDay` (default 20) per day across the server. Each refresh counts against the daily request cap. `/nep memory refresh <user>` forces one regardless of the timer.
+**By counters** (`features.portraitRefresh`). A periodic scheduler checks every `memory.portraitCheckMinutes` (default 60) minutes for members who have written at least `memory.portraitRefreshMessages` (default 300) own messages since their last portrait AND whose last successful refresh was at least `memory.portraitRefreshDays` (default 3) ago. It refreshes up to `memory.portraitRefreshPerDay` (default 3) members per day, most active first. A member whose portrait has never been refreshed counts all their messages, so several may qualify at once after deploy; the daily cap spreads them over a few days. A failed attempt backs off for `memory.portraitRetryHours` (default 24) hours. The sample is fitted under the 50k token rail.
+
+**By the analyzer's cue.** When the stream analyzer detects a recurring habit or a change in how someone writes that the stored portrait misses or contradicts, it returns a one-line portrait hint, and code queues a refresh. This path uses the existing per-member cooldown of `memory.portraitRefreshHours` (default 24) hours. The stream analyzer can no longer overwrite `character` or `style` directly.
+
+Both paths share the daily cap. `/nep memory refresh <user>` forces a refresh regardless of timers but still counts against it. Each refresh counts against `llm.maxRequestsPerDay`.
+
+A refresh calls `profile.md` with the stored portrait as a `<draft>` and the analyzer's note as a `<hint>` (when present). The draft is a merge base: what still holds stays (condensed to make room), what the sample contradicts is revised, new recurring habits are added, and a point the sample merely does not show is not dropped. The new character and style replace the stored ones; interests, details, episodes and aliases from the answer are ignored.
 
 ## Commands
 
