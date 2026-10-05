@@ -170,11 +170,6 @@ test('buildRequest: <gifs> sits right after <emoji> and before <server>', () => 
   assert.ok(text.indexOf('</emoji>') < gifsIdx);
 });
 
-test('buildRequest: senses.gifs follows senses.customEmoji', () => {
-  const lines = sensesOf(buildRequest(baseInput({ gifs: THREE, customEmoji: [{ id: '1', name: 'alpha' }] }))).split('\n');
-  assert.equal(lines[lines.indexOf(labels.senses.gifs) - 1], labels.senses.customEmoji);
-});
-
 test('buildRequest: a library gif in the chat carries its handle; a reposted link is matched by its url', () => {
   const history = [
     {

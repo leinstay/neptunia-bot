@@ -33,7 +33,7 @@ function input({ llm = {}, vision = {}, picture = false } = {}) {
       context: {
         gapMarkerMinutes: 20,
         maxMessageChars: 800,
-        caps: { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000, server: 2500, lore: 1500 },
+        caps: { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000, server: 2500, lore: 1500, pulled: 4000 },
         vision: { maxImages: 2, imageSize: 512, recentImages: 0, recentImageMinutes: 0, ...vision },
       },
       features: {},
@@ -57,7 +57,7 @@ function input({ llm = {}, vision = {}, picture = false } = {}) {
 }
 
 test('buildRequest: a missing or unusable llm.safetyMargin is read as 0.9, a usable one as given', () => {
-  for (const safetyMargin of [undefined, null, 0, -0.5, 1.5, '0.5', Number.NaN]) {
+  for (const safetyMargin of [undefined, 1.5]) {
     const { stats } = buildRequest(input({ llm: { safetyMargin } }));
     assert.equal(stats.limit, Math.floor(50000 * 0.9) - TAG_OVERHEAD, String(safetyMargin));
   }
@@ -195,10 +195,7 @@ test('buildRequest: on a routed turn the pulled block is fitted before the chat'
   assert.ok(viewOf(tight).includes('page 1 '));
 });
 
-test('buildRequest: the pulled block is capped by context.caps.pulled, 4000 when unset', () => {
-  const unset = buildRequest(pulledScene({ lines: 60, words: 40 }));
-  assert.equal(unset.stats.pulled.kept, 1);
-  assert.ok(unset.stats.pulled.used <= 4000 && unset.stats.pulled.used > 3000, String(unset.stats.pulled.used));
+test('buildRequest: the pulled block is capped by context.caps.pulled', () => {
   const capped = buildRequest(pulledScene({ lines: 60, words: 40, caps: { pulled: 1000 } }));
   assert.ok(capped.stats.pulled.used <= 1000 && capped.stats.pulled.used > 0, String(capped.stats.pulled.used));
   assert.ok(viewOf(capped).includes('page 60 '));

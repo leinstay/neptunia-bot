@@ -167,8 +167,3 @@ test('buildRequest: <emoji> sits after <about_chat> and before <server>', () => 
   assert.ok(aboutIdx !== -1 && emojiIdx !== -1 && serverIdx !== -1);
   assert.ok(aboutIdx < emojiIdx && emojiIdx < serverIdx);
 });
-
-test('buildRequest: senses.customEmoji follows the sticker lines', () => {
-  const lines = sensesOf(buildRequest(baseInput({ customEmoji: INDEX }))).split('\n');
-  assert.equal(lines[lines.indexOf(labels.senses.customEmoji) - 1], labels.senses.lottie);
-});

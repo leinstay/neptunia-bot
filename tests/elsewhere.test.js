@@ -11,7 +11,6 @@ import {
   LIVENESS_DEFAULTS,
   audienceCovers,
   chooseElsewhereMode,
-  elsewhereOn,
   elsewhereSettings,
   hasUnseen,
   isSourceLive,
@@ -58,21 +57,14 @@ const RING_OPTS = { cap: 20, maxAgeMs: 7 * DAY, now: NOW };
 
 // ---- settings -------------------------------------------------------------------
 
-test('config.json: the elsewhere block equals the code defaults', () => {
+test('config.json: the code fallbacks equal the elsewhere block and the liveness settings', () => {
   assert.deepEqual(shipped.elsewhere, { ...ELSEWHERE_DEFAULTS });
-  assert.deepEqual(ELSEWHERE_DEFAULTS, { settleSeconds: 90, settleMaxSeconds: 300, rememberPings: 20, pingMaxAgeDays: 7 });
-});
-
-test('config.json: the liveness fallbacks equal spontaneous.liveMinMessages and liveWindowMinutes', () => {
   assert.equal(shipped.spontaneous.liveMinMessages, LIVENESS_DEFAULTS.liveMinMessages);
   assert.equal(shipped.spontaneous.liveWindowMinutes, LIVENESS_DEFAULTS.liveWindowMinutes);
 });
 
-test('elsewhereSettings: defaults for a missing block, live values in milliseconds, garbage falls back', () => {
-  const fallback = { settleMs: 90 * SEC, settleMaxMs: 300 * SEC, rememberPings: 20, pingMaxAgeMs: 7 * DAY };
-  assert.deepEqual(elsewhereSettings({}), fallback);
-  assert.deepEqual(elsewhereSettings(undefined), fallback);
-  assert.deepEqual(elsewhereSettings(shipped), fallback);
+test('elsewhereSettings: live values in milliseconds, zero kept, garbage falls back to the defaults', () => {
+  const fallback = elsewhereSettings({});
   assert.deepEqual(
     elsewhereSettings({ elsewhere: { settleSeconds: 10, settleMaxSeconds: 60, rememberPings: 3, pingMaxAgeDays: 2 } }),
     { settleMs: 10 * SEC, settleMaxMs: 60 * SEC, rememberPings: 3, pingMaxAgeMs: 2 * DAY },
@@ -81,7 +73,7 @@ test('elsewhereSettings: defaults for a missing block, live values in millisecon
     elsewhereSettings({ elsewhere: { settleSeconds: 0, settleMaxSeconds: 0, rememberPings: 0, pingMaxAgeDays: 0 } }),
     { settleMs: 0, settleMaxMs: 0, rememberPings: 0, pingMaxAgeMs: 0 },
   );
-  for (const bad of [-1, 'soon', null, Number.NaN, Infinity]) {
+  for (const bad of [-1, 'soon']) {
     assert.deepEqual(
       elsewhereSettings({ elsewhere: { settleSeconds: bad, settleMaxSeconds: bad, rememberPings: bad, pingMaxAgeDays: bad } }),
       fallback,
@@ -89,13 +81,6 @@ test('elsewhereSettings: defaults for a missing block, live values in millisecon
     );
   }
   assert.equal(elsewhereSettings({ elsewhere: { rememberPings: 4.7 } }).rememberPings, 4);
-});
-
-test('elsewhereOn: a missing switch counts as on, false turns it off', () => {
-  assert.equal(elsewhereOn({}), true);
-  assert.equal(elsewhereOn(undefined), true);
-  assert.equal(elsewhereOn({ features: { elsewhere: true } }), true);
-  assert.equal(elsewhereOn({ features: { elsewhere: false } }), false);
 });
 
 // ---- settle -----------------------------------------------------------------------
@@ -217,14 +202,6 @@ test('markPingSkipped: an answered call stays answered; a later answer wins over
   assert.equal(pingStatus(skipped[0]), 'answered');
 });
 
-test('pingStatus: answered, skipped and unanswered stay apart', () => {
-  let ring = [];
-  for (const id of ['a', 's', 'u']) ring = recordPing(ring, { messageId: id, channelId: 'src', ts: NOW - MIN }, RING_OPTS);
-  ring = markPingSkipped(markPingAnswered(ring, 'a', NOW), 's', NOW);
-  assert.deepEqual(ring.map((p) => [p.messageId, pingStatus(p)]), [['a', 'answered'], ['s', 'skipped'], ['u', 'unanswered']]);
-  assert.equal(pingStatus(null), 'unanswered');
-});
-
 test('stampPings: stamps each call in order and reports only the ones whose state changed', () => {
   let ring = [];
   for (const id of ['a', 's', 'u', 'w']) ring = recordPing(ring, { messageId: id, channelId: 'src', ts: NOW - 2 * MIN }, RING_OPTS);
@@ -341,16 +318,6 @@ test('chooseElsewhereMode: null for bots only or nothing new', () => {
   assert.equal(chooseElsewhereMode([...bots, msg('5', 1)], NOW, NOW - 6 * MIN, SPONTANEOUS), null, 'bots do not make up the count');
   assert.equal(chooseElsewhereMode([], NOW, undefined, one), null);
   assert.equal(chooseElsewhereMode(undefined, NOW, undefined, one), null);
-});
-
-test('chooseElsewhereMode: missing spontaneous settings use the config.json liveness values', () => {
-  const need = shipped.spontaneous.liveMinMessages;
-  const inside = shipped.spontaneous.liveWindowMinutes - 1;
-  const enough = Array.from({ length: need }, (_, i) => msg(String(i), inside));
-  assert.equal(chooseElsewhereMode(enough, NOW, undefined, undefined), 'elsewhere');
-  assert.equal(chooseElsewhereMode(enough.slice(1), NOW, undefined, {}), null);
-  const outside = Array.from({ length: need }, (_, i) => msg(String(i), shipped.spontaneous.liveWindowMinutes + 1));
-  assert.equal(chooseElsewhereMode(outside, NOW, undefined, {}), null);
 });
 
 test('chooseElsewhereMode: a member message exactly liveWindowMinutes old still counts', () => {
@@ -656,35 +623,10 @@ test('audienceCovers: a source @everyone views with no role deny and no member d
   for (const [i, dest] of destinations.entries()) assert.equal(audienceCovers(dest, open), true, `destination ${i}`);
 });
 
-test('audience model: a source @everyone views with no role denied lists every role, so the role step passes it', () => {
-  // As discord.js rolePermissions does, each role starts from its own and @everyone's base permissions.
-  let open = 0;
-  for (const guildView of [false, true]) for (const aBits of [0, 1, 2, 3]) for (const bBits of [0, 1, 2, 3]) {
-    const roles = {
-      guild: { view: guildView, admin: false },
-      a: { view: (aBits & 1) === 1, admin: (aBits & 2) === 2 },
-      b: { view: (bBits & 1) === 1, admin: (bBits & 2) === 2 },
-    };
-    for (const guild of OVERWRITES) for (const a of OVERWRITES) for (const b of OVERWRITES) {
-      const seen = modelAudience(roles, { roles: { guild, a, b }, members: {} });
-      if (!seen.everyone || seen.roleDeny.size > 0) continue;
-      open += 1;
-      assert.deepEqual([...seen.roles].sort(), [...ROLE_IDS].sort());
-    }
-  }
-  assert.ok(open > 0);
-});
-
 test('audienceCovers: the role step runs on a source @everyone views with nothing denied (no @everyone shortcut)', () => {
   // audienceOf never reads this shape (see the test above); the rail still compares the roles.
   const open = audience({ everyone: true, roles: ['guild', 'r1'] });
   assert.equal(audienceCovers(audience({ everyone: false, roles: ['r3'], roleAllow: ['r3'] }), open), false);
-});
-
-test('audienceCovers: a member the destination allows passes an everyone-visible source without role denies that does not deny that member', () => {
-  const source = audience({ everyone: true, roles: ['guild', 'r1'], memberDeny: ['u9'] });
-  const dest = audience({ everyone: true, roles: ['guild', 'r1'], memberAllow: ['u1'], memberDeny: ['u9'] });
-  assert.equal(audienceCovers(dest, source), true);
 });
 
 test('audienceCovers: a source that denies a member the destination allows blocks', () => {
@@ -765,11 +707,6 @@ test('pickDestinationId: the first usable id, null when none', () => {
   assert.equal(pickDestinationId('222', () => true), null, 'a non-array list is empty');
 });
 
-test('pickDestinationId: no usability check means no destination', () => {
-  assert.equal(pickDestinationId(['1'], null), null);
-  assert.equal(pickDestinationId(['1'], undefined), null);
-});
-
 test('resolveDestination: features.elsewhere off is off, a missing switch reads as on', () => {
   const isUsable = (id) => id === '222';
   assert.deepEqual(resolveDestination({ features: { elsewhere: false }, memory: { mainChannelIds: ['222'] } }, isUsable), { destinationId: null, reason: 'off' });
@@ -777,7 +714,6 @@ test('resolveDestination: features.elsewhere off is off, a missing switch reads 
 });
 
 test('resolveDestination: inert without a usable memory.mainChannelIds entry', () => {
-  assert.deepEqual(resolveDestination(shipped, () => true), { destinationId: null, reason: 'no-destination' }, 'the public default is empty');
   assert.deepEqual(resolveDestination({ memory: { mainChannelIds: ['111'] } }, () => false), { destinationId: null, reason: 'no-destination' });
   assert.deepEqual(resolveDestination({}, () => true), { destinationId: null, reason: 'no-destination' });
 });

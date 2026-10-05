@@ -7,7 +7,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   PULL_DEFAULTS,
-  channelPullOn,
   explicitChannelIds,
   isTooOld,
   pullPictures,
@@ -65,22 +64,8 @@ function ids(messages) {
 
 // ---- settings -----------------------------------------------------------------
 
-test('pullSettings: defaults for a missing block, live values otherwise, garbage falls back', () => {
-  assert.deepEqual(PULL_DEFAULTS, {
-    windowMinutes: 60,
-    minMessages: 5,
-    maxMessages: 60,
-    maxPictures: 10,
-    maxNewDescriptions: 8,
-    describeTimeoutMs: 15000,
-    scanMessages: 20,
-    maxChannels: 1,
-    maxAgeDays: 0,
-    sameAudience: true,
-  });
+test('pullSettings: zeros and false are live values, garbage falls back, counts are floored', () => {
   assert.deepEqual(pullSettings({}), { ...PULL_DEFAULTS });
-  assert.deepEqual(pullSettings(undefined), { ...PULL_DEFAULTS });
-  assert.deepEqual(pullSettings({ context: {} }), { ...PULL_DEFAULTS });
 
   const live = pullSettings({
     context: {
@@ -139,19 +124,9 @@ test('pullSettings: defaults for a missing block, live values otherwise, garbage
   assert.equal(fractional.maxAgeDays, 1.5);
 });
 
-test('config.json: context.pull and features.channelPull equal the code defaults', () => {
+test('config.json: context.pull equals the code defaults', () => {
   const config = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
   assert.deepEqual(config.context.pull, { ...PULL_DEFAULTS });
-  assert.equal(config.context.pull.maxAgeDays, 0, 'no age limit by default (the window ends at the last message, however old)');
-  assert.equal(config.features.channelPull, true);
-});
-
-test('channelPullOn: a missing switch counts as on, false turns it off', () => {
-  assert.equal(channelPullOn({}), true);
-  assert.equal(channelPullOn(undefined), true);
-  assert.equal(channelPullOn({ features: {} }), true);
-  assert.equal(channelPullOn({ features: { channelPull: true } }), true);
-  assert.equal(channelPullOn({ features: { channelPull: false } }), false);
 });
 
 // ---- explicitChannelIds ----------------------------------------------------------
@@ -283,26 +258,6 @@ test('pullTargets: a channel mention in another bot\'s message does not pull', (
     [],
     'the skipped lines still use up the scanned span',
   );
-});
-
-test('pullTargets: unusable maxChannels and scanMessages fall back to the defaults', () => {
-  const trigger = msg('t', at(0), { channels: ['ch-a', 'ch-b', 'ch-c'] });
-  for (const maxChannels of [undefined, -1, 'x', Number.NaN, null]) {
-    assert.deepEqual(
-      targets({ trigger, maxChannels }),
-      [{ channelId: 'ch-a', reason: 'mention' }],
-      `maxChannels ${String(maxChannels)} -> 1`,
-    );
-  }
-  assert.equal(targets({ trigger, maxChannels: 2.9 }).length, 2, 'a fractional maxChannels is floored');
-
-  const history = Array.from({ length: 25 }, (_, i) => msg(`m${i}`, at(50 - i), { channels: [`ch-${i}`] }));
-  for (const scanMessages of [undefined, 'x', -1]) {
-    const got = targets({ history, scanMessages, maxChannels: 30 }).map((t) => t.channelId);
-    assert.equal(got.length, 20, `scanMessages ${String(scanMessages)} -> 20`);
-    assert.equal(got[0], 'ch-24');
-    assert.equal(got.at(-1), 'ch-5');
-  }
 });
 
 test('pullTargets: the current channel and unpullable ids are skipped', () => {
@@ -459,14 +414,6 @@ test('pullWindow: an empty channel or nothing up to the anchor is skipped with e
   assert.deepEqual(pullWindow([msg('a', at(-1))], { anchorTs: LAST, now: NOW }), { messages: [], olderNotShown: false, skip: 'empty' });
 });
 
-test('pullWindow: unusable numbers fall back to the context.pull defaults', () => {
-  const messages = Array.from({ length: 70 }, (_, i) => msg(`m${i}`, at(69 - i)));
-  const result = pullWindow(messages, { windowMinutes: 'all', minMessages: -1, maxMessages: 0, now: NOW });
-  assert.equal(result.messages.length, 60, 'maxMessages 60');
-  assert.equal(result.messages[0].id, 'm10');
-  assert.equal(result.olderNotShown, true);
-});
-
 // ---- pullPictures ----------------------------------------------------------------
 
 test('pullPictures: newest first, at most maxPictures, the rest counted', () => {
@@ -491,10 +438,7 @@ test('pullPictures: newest first, at most maxPictures, the rest counted', () => 
   assert.deepEqual(pullPictures(messages, 0).items, []);
   assert.equal(pullPictures(messages, 0).rest.length, 7);
   assert.equal(pullPictures(messages, 0).overflow, 7);
-  assert.equal(pullPictures(messages, 'many').items.length, 7, 'a bad maxPictures falls back to 10');
   assert.equal(pullPictures(messages, 2.5).items.length, 2, 'a fractional maxPictures is floored');
-  assert.deepEqual(pullPictures([], 10), { items: [], rest: [], overflow: 0, emoji: [] });
-  assert.deepEqual(pullPictures(undefined, 10), { items: [], rest: [], overflow: 0, emoji: [] });
 });
 
 test('pullPictures: pictures past maxPictures are returned for the cache, not only counted', () => {

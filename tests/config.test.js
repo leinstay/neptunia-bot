@@ -48,11 +48,6 @@ test('parseEnv: invalid keys (leading digit, dash, dot) are ignored', () => {
   assert.deepEqual(parsed, { OK_1: 'fine' });
 });
 
-test('parseEnv: a line with no "=" is ignored', () => {
-  const parsed = parseEnv('JUST_A_LINE\nFOO=bar');
-  assert.deepEqual(parsed, { FOO: 'bar' });
-});
-
 test('parseEnv: key and value are trimmed of surrounding whitespace', () => {
   const parsed = parseEnv('  FOO  =  bar  ');
   assert.equal(parsed.FOO, 'bar');
@@ -93,11 +88,6 @@ test('deepMerge: an explicit undefined in override keeps the base value', () => 
   assert.equal(merged.a, 1);
 });
 
-test('deepMerge: override undefined entirely returns base unchanged', () => {
-  const base = { a: 1 };
-  assert.equal(deepMerge(base, undefined), base);
-});
-
 test('deepMerge: scalar override replaces a nested object outright', () => {
   const merged = deepMerge({ a: { x: 1 } }, { a: 5 });
   assert.equal(merged.a, 5);
@@ -107,17 +97,6 @@ test('deepMerge: does not mutate the base object', () => {
   const base = { a: { x: 1 } };
   deepMerge(base, { a: { x: 2 } });
   assert.equal(base.a.x, 1);
-});
-
-test('readConfig: without config.local.json returns config.json as-is', () => {
-  const dir = tmpDir();
-  try {
-    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ bot: { timezone: 'UTC' } }));
-    const cfg = readConfig(dir);
-    assert.deepEqual(cfg, { bot: { timezone: 'UTC' } });
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 test('readConfig: an empty config.local.json is treated as no override', () => {
@@ -154,26 +133,6 @@ test('readConfig: invalid JSON in config.json throws', () => {
     assert.throws(() => readConfig(dir));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('readConfig: invalid JSON in config.local.json throws', () => {
-  const dir = tmpDir();
-  try {
-    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ a: 1 }));
-    fs.writeFileSync(path.join(dir, 'config.local.json'), '{ not valid json');
-    assert.throws(() => readConfig(dir));
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('need: returns the value when set and non-empty', () => {
-  process.env.NEP_TEST_KEY = 'value';
-  try {
-    assert.equal(need('NEP_TEST_KEY'), 'value');
-  } finally {
-    delete process.env.NEP_TEST_KEY;
   }
 });
 

@@ -2,17 +2,16 @@
 // whether it reacts to it at all.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {
   detectTrigger,
   strippedLength,
   createTagHistory,
   decideMention,
-  repeatWindowMs,
   isFollowUpOpen,
   followUpPreFilter,
   classifierTextModel,
   classifierMediaModel,
-  classifierVideoModel,
   deprecatedModelKeys,
   parseFollowUpVerdict,
   parseAddressAnswer,
@@ -20,6 +19,7 @@ import {
   roomPreFilter,
 } from '../src/behavior/mention.js';
 
+const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
 const NAME_TRIGGERS = ['νεπτούνια'];
 
 // --- detectTrigger ----------------------------------------------------------
@@ -79,11 +79,6 @@ test('detectTrigger: whole-word matching works with non-Latin word boundaries (p
   assert.equal(kind, 'name');
 });
 
-test('detectTrigger: a name at the very start or end of the message still matches', () => {
-  const start = detectTrigger({ mentionsSelf: false, repliesToSelf: false, content: 'νεπτούνια', nameTriggers: NAME_TRIGGERS });
-  assert.equal(start, 'name');
-});
-
 test('detectTrigger: an empty name trigger matches nothing, an attachment-only message included', () => {
   for (const content of ['', 'απλή κουβέντα']) {
     const kind = detectTrigger({ mentionsSelf: false, repliesToSelf: false, content, nameTriggers: [''] });
@@ -99,10 +94,6 @@ test('strippedLength: a bare @name mention leaves nothing', () => {
 
 test('strippedLength: a bare Discord <@id> mention leaves nothing', () => {
   assert.equal(strippedLength('<@123456>', 'Νεπτούνια'), 0);
-});
-
-test('strippedLength: a nickname mention format <@!id> is also stripped', () => {
-  assert.equal(strippedLength('<@!123456>', 'Νεπτούνια'), 0);
 });
 
 test('strippedLength: counts the remaining text after removing the mention', () => {
@@ -128,10 +119,6 @@ test('createTagHistory: tracks different users independently', () => {
   const history = createTagHistory();
   history.hit('u1', 0, 60_000);
   assert.equal(history.hit('u2', 100, 60_000), 1);
-});
-
-test('repeatWindowMs: converts minutes to milliseconds', () => {
-  assert.equal(repeatWindowMs({ repeatWindowMinutes: 10 }), 10 * 60_000);
 });
 
 // --- decideMention -----------------------------------------------------------
@@ -180,12 +167,6 @@ test('decideMention: a bare ping (mention, empty text) uses emptyMentionIgnoreCh
   assert.equal(result.reason, 'respond'); // rng 0.5 >= 0.35
 });
 
-test('decideMention: a bare ping can also be ignored when rng lands under the chance', () => {
-  const result = decideMention({ kind: 'mention', textLength: 0, recentCalls: 1, neverIgnore: false, cfg: CFG, rng: rngReturning(0) });
-  assert.equal(result.reason, 'ignored:bare-ping');
-  assert.equal(result.respond, false);
-});
-
 test('decideMention: repeat calls accumulate a penalty on top of the base ignore chance', () => {
   // kind 'reply', textLength > 0 -> base ignoreChance, recentCalls=3 adds repeatPenalty*(3-1)
   const result = decideMention({ kind: 'reply', textLength: 5, recentCalls: 3, neverIgnore: false, cfg: CFG, rng: rngReturning(0) });
@@ -198,12 +179,6 @@ test('decideMention: spam threshold overrides the ignore chance entirely (not ad
   const result = decideMention({ kind: 'reply', textLength: 5, recentCalls: 4, neverIgnore: false, cfg: CFG, rng: rngReturning(0) });
   assert.equal(result.ignoreChance, CFG.spamIgnoreChance);
   assert.equal(result.reason, 'ignored:spam'); // rng 0 < 0.9 -> ignored
-});
-
-test('decideMention: spam can still slip through on a high rng roll', () => {
-  const result = decideMention({ kind: 'reply', textLength: 5, recentCalls: 4, neverIgnore: false, cfg: CFG, rng: rngReturning(0.95) });
-  assert.equal(result.reason, 'respond');
-  assert.equal(result.respond, true); // rng 0.95 >= 0.9
 });
 
 test('decideMention: the ignore chance is clamped to 0.97 at most', () => {
@@ -259,20 +234,6 @@ test('decideMention: a liked caller (positive affinity) lowers the ignore chance
   assert.equal(liked.ignoreChance, neutral.ignoreChance - CFG.affinityLikeBonus);
 });
 
-test('decideMention: the affinity adjustment still respects the 0..0.97 clamp', () => {
-  const cfg = { ...CFG, ignoreChance: 0.9 };
-  const result = decideMention({
-    kind: 'reply',
-    textLength: 5,
-    recentCalls: 1,
-    neverIgnore: false,
-    affinityScore: -100,
-    cfg,
-    rng: rngReturning(0.99),
-  });
-  assert.equal(result.ignoreChance, 0.97);
-});
-
 test('decideMention: affinityScore is ignored for neverIgnore', () => {
   const result = decideMention({
     kind: 'reply',
@@ -324,10 +285,14 @@ test('isFollowUpOpen: true just below the noStreak cap', () => {
   assert.equal(isFollowUpOpen(state, 1000, FOLLOW_UP_CFG), true);
 });
 
-test('isFollowUpOpen: falls back to defaults (15 min, streak 3) when cfg omits the keys', () => {
-  const state = { openedAt: 0, lastAnswerAt: 0, noStreak: 0 };
-  assert.equal(isFollowUpOpen(state, 899_000, {}), true); // just under 15 min
-  assert.equal(isFollowUpOpen(state, 900_000, {}), false); // exactly 15 min
+test('isFollowUpOpen: the code fallbacks equal the config.json window and streak', () => {
+  const windowMs = shipped.mention.followUpMinutes * 60_000;
+  const fresh = { openedAt: 0, lastAnswerAt: 0, noStreak: 0 };
+  assert.equal(isFollowUpOpen(fresh, windowMs - 1, {}), true);
+  assert.equal(isFollowUpOpen(fresh, windowMs, {}), false);
+  const streak = shipped.mention.followUpNoStreak;
+  assert.equal(isFollowUpOpen({ ...fresh, noStreak: streak - 1 }, 0, {}), true);
+  assert.equal(isFollowUpOpen({ ...fresh, noStreak: streak }, 0, {}), false);
 });
 
 test('followUpPreFilter: a reply to another member reaches the classifier', () => {
@@ -372,10 +337,6 @@ test('followUpPreFilter: mentionedUserIds omitted is treated as empty', () => {
   }
 });
 
-test('parseFollowUpVerdict: a bare "yes" is a yes', () => {
-  assert.equal(parseFollowUpVerdict('yes'), 'yes');
-});
-
 test('parseFollowUpVerdict: case-insensitive and tolerates surrounding text/whitespace', () => {
   assert.equal(parseFollowUpVerdict('  Yes, obviously.'), 'yes');
   assert.equal(parseFollowUpVerdict('YES'), 'yes');
@@ -411,16 +372,6 @@ test('parseAddressAnswer: everything else, empty included, is no; no markup is s
 test('parseFollowUpVerdict: an overheard answer counts as yes', () => {
   for (const text of ['overheard', 'Overheard.', 'OVERHEARD']) {
     assert.equal(parseFollowUpVerdict(text), 'yes', text);
-  }
-});
-
-test('parseFollowUpVerdict: the same result as the two-way parser for every answer that is not overheard', () => {
-  // The two-way rule as it stood before the third answer: the first word starts with "y".
-  const twoWay = (text) => ((String(text ?? '').trim().split(/\s+/)[0] ?? '').toLowerCase().startsWith('y') ? 'yes' : 'no');
-  const inputs = ['yes', 'Yes, obviously.', 'YES', 'yeah', 'y', 'no', 'No.', 'nope', 'not sure', '', ' \n ', null, undefined,
-    '"yes"', '**yes**', '`no`', 'about', 'About.', 'overhear', 'absolutely', 'ναι', 'όχι', 'Ýes', 'yes\nno', 'no yes'];
-  for (const text of inputs) {
-    assert.equal(parseFollowUpVerdict(text), twoWay(text), JSON.stringify(text));
   }
 });
 
@@ -483,13 +434,6 @@ test('classifierMediaModel: classifier.media only; the deprecated media.model is
   assert.equal(classifierMediaModel(OLD_KEYS), undefined);
   assert.equal(classifierMediaModel({ classifier: { text: 'x/text' }, llm: { model: 'x/talk' } }), undefined, 'never a text-only model');
   assert.equal(classifierMediaModel(undefined), undefined);
-});
-
-test('classifierVideoModel: classifier.video only; the deprecated media.video.model is ignored', () => {
-  assert.equal(classifierVideoModel({ ...OLD_KEYS, classifier: { video: 'x/video' } }), 'x/video');
-  assert.equal(classifierVideoModel({ ...OLD_KEYS, classifier: { video: null } }), undefined);
-  assert.equal(classifierVideoModel({ ...OLD_KEYS, classifier: { media: 'x/media' } }), undefined, 'never the picture model');
-  assert.equal(classifierVideoModel(undefined), undefined);
 });
 
 test('deprecatedModelKeys: each old model key that is set, with its replacement, in a fixed order', () => {

@@ -22,10 +22,14 @@ const RABBIT = Date.UTC(2026, 9, 1, 18, 44);
 const GUILD = 'g1';
 const PROMPT = 'You are {{name}}; {{answerChars}}.';
 
-/** The shipped config.json with the given groups merged over a fresh copy (one level deep). */
+// The recall settings the runner tests rely on, pinned here instead of read from the shipped defaults.
+const RECALL_PIN = { maxForms: 8, maxPeople: 2, dateSamples: 4, clusterGapMinutes: 30, maxClusters: 8, windowMessages: 16, answerChars: 1200, stretchChars: 1500, maxPerDay: 100, timeoutMs: 30000, maxOutputTokens: 500 };
+
+/** The shipped config.json with the recall settings pinned and the given groups merged over a fresh copy (one level deep). */
 function config(overrides = {}) {
   const base = structuredClone(SHIPPED_CONFIG);
   base.bot = { ...base.bot, timezone: 'UTC' };
+  base.recall = { ...RECALL_PIN };
   for (const [key, value] of Object.entries(overrides)) base[key] = { ...base[key], ...value };
   return base;
 }
