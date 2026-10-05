@@ -296,6 +296,27 @@ function relationshipScoreOf(opts, affinity) {
   return Number.isFinite(affinity?.score) ? affinity.score : 0;
 }
 
+/**
+ * Write a `relationship` text onto a public profile or a private layer, in place, with its two
+ * stamps -- the one writer of that field for `applyProfileOps` and `applyPrivateOps`. Only a
+ * non-empty string is written (an absent or blank one never blanks the stored text), clamped to
+ * `opts.relationshipChars` (`relationships.textChars`), else `opts.fieldChars`. Stamped next to
+ * it: `relationshipScore` (see `relationshipScoreOf`) and `relationshipWrittenAt`, the ISO time of
+ * `opts.now` (else the wall clock) -- the clock the batch's attitude moves are stamped with
+ * (src/memory/affinity.js#applyDelta), so src/memory/affinity.js#relationshipStaleOf counts the
+ * moves since the text like with like. A profile written before the stamp existed keeps none
+ * until its next text.
+ * @param {object} target  A normalised profile or private layer.
+ * @param {unknown} text
+ * @param {object} opts    As for `applyProfileOps`.
+ */
+function writeRelationship(target, text, opts) {
+  if (typeof text !== 'string' || !text.trim()) return;
+  target.relationship = clampText(text, opts.relationshipChars ?? opts.fieldChars, { tolerance: opts.clampTolerance });
+  target.relationshipScore = relationshipScoreOf(opts, target.affinity);
+  target.relationshipWrittenAt = new Date(Number.isFinite(opts.now) ? opts.now : Date.now()).toISOString();
+}
+
 /** The sighting time of one profile/private batch: `opts.seenAt`, else `opts.now`, else the wall clock. */
 function seenAtOf(opts) {
   if (Number.isFinite(opts?.seenAt)) return opts.seenAt;
@@ -616,7 +637,8 @@ export function createStore({ dataDir }) {
      * Apply one analyzer batch's INCREMENTAL profile update (see
      * docs/prompt-contract.md, "The analyzer"): `character`/`style`/
      * `relationship` replace the stored text only when given as a non-empty
-     * string, clamped to `opts.fieldChars` -- an absent or empty field never
+     * string, clamped to `opts.fieldChars` (`relationship` to
+     * `opts.relationshipChars` when given) -- an absent or empty field never
      * blanks what is already stored. `ops.interests` (`{ add, update, seen,
      * remove }`) merges via src/memory/interests.js#applyInterestOps;
      * `ops.details` (`{ add, seen, remove }`) merges via
@@ -636,10 +658,13 @@ export function createStore({ dataDir }) {
      *   noteChars?: number, interestHalfLifeDays?: number, maxDetails?: number, maxDetailsStored?: number,
      *   detailHalfLifeDays?: number, maxAliases?: number, maxAliasesStored?: number, aliasHalfLifeDays?: number,
      *   confirmGapHours?: number, seenAt?: number, now?: number, clampTolerance?: number,
-     *   relationshipScore?: number }} [opts]
+     *   relationshipScore?: number, relationshipChars?: number }} [opts]
      *   `relationshipScore`: stamped as `profile.relationshipScore` whenever a `relationship` text
-     *   is written (falls back to the stored score) -- the band the text was written in, see
-     *   src/memory/update.js#buildMemoryRequest (`relationshipStale`).
+     *   is written (falls back to the stored score), and `profile.relationshipWrittenAt` = the ISO
+     *   time of `opts.now` (else the wall clock) next to it -- the score and the moment the text
+     *   was written, see src/memory/affinity.js#relationshipStaleOf (`relationshipStale`).
+     *   `relationshipChars`: the relationship text's limit (`relationships.textChars`); omitted ->
+     *   `fieldChars`.
      *   `maxInterestsStored`/`maxDetailsStored`/`interestHalfLifeDays`/`detailHalfLifeDays` drive the
      *   storage-cap-vs-shown-cap split and the rank decay -- see
      *   docs/prompt-contract.md, "More is stored than shown, and rank decays with age".
@@ -654,13 +679,13 @@ export function createStore({ dataDir }) {
 
       const seenAt = seenAtOf(opts);
 
-      for (const key of ['character', 'style', 'relationship']) {
+      for (const key of ['character', 'style']) {
         const value = ops?.[key];
         if (typeof value === 'string' && value.trim()) {
           profile[key] = clampText(value, opts.fieldChars, { tolerance: opts.clampTolerance });
-          if (key === 'relationship') profile.relationshipScore = relationshipScoreOf(opts, profile.affinity);
         }
       }
+      writeRelationship(profile, ops?.relationship, opts);
 
       applyItemOps(profile, ops, opts, seenAt);
 
@@ -843,8 +868,10 @@ export function createStore({ dataDir }) {
      * @param {{ relationship?: string,
      *   interests?: { add?: object[], update?: object[], seen?: string[], remove?: string[] },
      *   details?: { add?: unknown[], seen?: unknown[], remove?: unknown[] } }} ops
-     * @param {object} [opts]  As for `applyProfileOps`; `relationshipScore` falls back to this
-     *   layer's own score (the analyzer passes the effective one it showed the model).
+     * @param {object} [opts]  As for `applyProfileOps` (the text clamped to `relationshipChars`,
+     *   else `fieldChars`, and stamped `relationshipScore` and `relationshipWrittenAt` in this
+     *   layer); `relationshipScore` falls back to this layer's own score (the analyzer passes the
+     *   effective one it showed the model).
      * @returns {object} The updated private layer.
      */
     applyPrivateOps(guildId, userId, ops, opts = {}) {
@@ -853,11 +880,7 @@ export function createStore({ dataDir }) {
 
       const seenAt = seenAtOf(opts);
 
-      const relationship = ops?.relationship;
-      if (typeof relationship === 'string' && relationship.trim()) {
-        priv.relationship = clampText(relationship, opts.fieldChars, { tolerance: opts.clampTolerance });
-        priv.relationshipScore = relationshipScoreOf(opts, priv.affinity);
-      }
+      writeRelationship(priv, ops?.relationship, opts);
 
       applyItemOps(priv, ops, opts, seenAt);
 

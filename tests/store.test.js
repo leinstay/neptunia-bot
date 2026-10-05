@@ -2124,6 +2124,80 @@ test('applyPrivateOps: stamps relationshipScore when the private relationship te
   assert.equal(store.getPrivate('g1', 'u1').relationshipScore, 61);
 });
 
+const WRITTEN_NOW = Date.UTC(2026, 9, 5, 9, 30, 0);
+// Three sentences of about 40 characters each: a limit of 50 (x 1.25 = 62) keeps the first sentence only.
+const LONG_RELATIONSHIP = 'Μιλάμε συχνά για βιβλία και για ταξίδια. Μου λέει πάντα την αλήθεια χωρίς φόβο. Γελάμε με τα ίδια αστεία κάθε βράδυ μαζί.';
+
+test('applyProfileOps: a written relationship is stamped relationshipWrittenAt and clamped to relationshipChars', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Zoé', 1000);
+
+  store.applyProfileOps('g1', 'u1', { details: { add: ['owns a cat'] } }, { fieldChars: 400, relationshipChars: 50, now: WRITTEN_NOW - 1000 });
+  assert.equal(store.getUser('g1', 'u1').relationshipWrittenAt, undefined, 'no relationship text -> no stamp');
+
+  const profile = store.applyProfileOps('g1', 'u1', { character: LONG_RELATIONSHIP, relationship: LONG_RELATIONSHIP }, {
+    fieldChars: 400,
+    relationshipChars: 50,
+    relationshipScore: 12.5,
+    now: WRITTEN_NOW,
+  });
+  assert.equal(profile.relationship, 'Μιλάμε συχνά για βιβλία και για ταξίδια.', 'cut at the sentence boundary inside 50 x 1.25');
+  assert.equal(profile.character, LONG_RELATIONSHIP, 'the portrait keeps fieldChars');
+  assert.equal(profile.relationshipWrittenAt, new Date(WRITTEN_NOW).toISOString());
+  assert.equal(profile.relationshipScore, 12.5);
+
+  store.applyProfileOps('g1', 'u1', { relationship: '   ' }, { fieldChars: 400, relationshipChars: 50, now: WRITTEN_NOW + 5000 });
+  assert.equal(store.getUser('g1', 'u1').relationshipWrittenAt, new Date(WRITTEN_NOW).toISOString(), 'a blank text stamps nothing');
+});
+
+test('applyProfileOps: without relationshipChars the relationship keeps the fieldChars clamp; no clock = the wall clock', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const before = Date.now();
+  const profile = store.applyProfileOps('g1', 'u1', { relationship: LONG_RELATIONSHIP }, { fieldChars: 400 });
+  assert.equal(profile.relationship, LONG_RELATIONSHIP);
+  const stamp = Date.parse(profile.relationshipWrittenAt);
+  assert.ok(stamp >= before && stamp <= Date.now(), 'stamped now');
+});
+
+test('applyPrivateOps: a written private relationship is stamped relationshipWrittenAt and clamped to relationshipChars', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.applyPrivateOps('g1', 'u1', { details: { add: ['a secret'] } }, { fieldChars: 400, relationshipChars: 50, now: WRITTEN_NOW - 1000 });
+  assert.equal(store.getPrivate('g1', 'u1').relationshipWrittenAt, undefined);
+
+  const priv = store.applyPrivateOps('g1', 'u1', { relationship: LONG_RELATIONSHIP }, { fieldChars: 400, relationshipChars: 50, relationshipScore: -9, now: WRITTEN_NOW });
+  assert.equal(priv.relationship, 'Μιλάμε συχνά για βιβλία και για ταξίδια.');
+  assert.equal(priv.relationshipWrittenAt, new Date(WRITTEN_NOW).toISOString());
+  assert.equal(priv.relationshipScore, -9);
+  assert.equal(store.getUser('g1', 'u1'), null, 'the public profile is not created');
+});
+
+test('store: relationshipWrittenAt and relationshipScore survive a restart, public and private', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', 'u1', 'Zoé', 1000);
+  store.applyProfileOps('g1', 'u1', { relationship: 'Παλιοί φίλοι.' }, { fieldChars: 400, relationshipScore: 31, now: WRITTEN_NOW });
+  store.applyPrivateOps('g1', 'u1', { relationship: 'Μου εμπιστεύεται μυστικά.' }, { fieldChars: 400, relationshipScore: 44, now: WRITTEN_NOW + 60_000 });
+  store.flush();
+
+  const restarted = createStore({ dataDir: dir });
+  assert.equal(restarted.getUser('g1', 'u1').relationshipWrittenAt, new Date(WRITTEN_NOW).toISOString());
+  assert.equal(restarted.getUser('g1', 'u1').relationshipScore, 31);
+  assert.equal(restarted.getPrivate('g1', 'u1').relationshipWrittenAt, new Date(WRITTEN_NOW + 60_000).toISOString());
+  assert.equal(restarted.getPrivate('g1', 'u1').relationshipScore, 44);
+});
+
+test('getUser / getPrivate: a profile written before relationshipWrittenAt existed loads without one and gets none on read', () => {
+  const dir = tmpDataDir();
+  writeRaw(userFileOf(dir, 'g1', 'u1'), { id: 'u1', relationship: 'x', relationshipScore: 42, affinity: { score: 10, reason: '', history: [] } });
+  writeRaw(privateFile(dir, 'g1', 'u1'), { relationship: 'y', relationshipScore: -9, affinity: { score: 10 } });
+  const store = createStore({ dataDir: dir });
+  assert.equal(store.getUser('g1', 'u1').relationshipWrittenAt, undefined);
+  assert.equal(store.getPrivate('g1', 'u1').relationshipWrittenAt, undefined);
+});
+
 // --- the voice queue (src/memory/voice.js), self facts, filling voice texts ----
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');

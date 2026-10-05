@@ -9,6 +9,7 @@ import path from 'node:path';
 
 import { createStore } from '../src/memory/store.js';
 import { isDue, buildMemoryRequest, applyMemoryUpdate, applyPrivateUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap, characterText, analyzerTemperature } from '../src/memory/update.js';
+import { voiceLimits } from '../src/memory/voice.js';
 import { createCalibrator, estimateTokens } from '../src/llm/tokens.js';
 import { formatTranscript } from '../src/discord/format.js';
 import { TokenLimitError } from '../src/llm/openrouter.js';
@@ -859,10 +860,11 @@ test('analyze: a hot change to memory.clampTolerance between two updates is pick
     const guildId = 'g1';
     const longText = 'x'.repeat(600);
     const hot = {
-      config: makeConfig({ memory: { ...makeConfig().memory, fieldChars: 100, clampTolerance: 1 } }),
+      config: makeConfig({ memory: { ...makeConfig().memory, fieldChars: 100, clampTolerance: 1 }, relationships: { textChars: 100 } }),
       prompts: { memory: 'sys', labels },
     };
-    // `relationship`: a prose field a stream batch still writes (character/style need the portrait refresh).
+    // `relationship`: a prose field a stream batch still writes (character/style need the portrait
+    // refresh), clamped to relationships.textChars.
     const llm = { complete: async () => ({ text: JSON.stringify({ users: { 1: { relationship: longText } } }) }) };
     const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
 
@@ -5693,28 +5695,41 @@ function profilesViewOf(profile, configOverrides = {}, privateChat) {
 
 test('buildMemoryRequest: relationshipStale when the band moved since the relationship text was written', () => {
   const view = profilesViewOf({ relationship: 'Barely knows them', relationshipScore: 26, affinity: { score: 64, reason: 'r', history: [] } });
-  assert.deepEqual(view.relationshipStale, { writtenAt: 'fond', now: 'devoted' });
+  assert.deepEqual(view.relationshipStale, { writtenAt: 'fond', now: 'devoted', cause: 'band' });
   assert.equal(view.affinity.band, 'devoted');
 });
 
 test('buildMemoryRequest: a missing relationshipScore counts as 0 (neutral)', () => {
   const view = profilesViewOf({ relationship: 'Barely knows them', affinity: { score: 30, reason: '', history: [] } });
-  assert.deepEqual(view.relationshipStale, { writtenAt: 'neutral', now: 'fond' });
+  assert.deepEqual(view.relationshipStale, { writtenAt: 'neutral', now: 'fond', cause: 'band' });
 });
 
+// Drift and moves off: the band rule alone, as it stood before those two triggers existed (the
+// same data with the defaults is flagged `drift`, see the next test).
 test('buildMemoryRequest: no relationshipStale within the same band, with an empty text, or with the switch off', () => {
-  const sameBand = profilesViewOf({ relationship: 'Friends', relationshipScore: 26, affinity: { score: 59, reason: '', history: [] } });
+  const bandOnly = { rewriteOnDrift: 0, rewriteAfterMoves: 0 };
+  const sameBand = profilesViewOf({ relationship: 'Friends', relationshipScore: 26, affinity: { score: 59, reason: '', history: [] } }, { relationships: bandOnly });
   assert.equal(sameBand.relationshipStale, undefined);
 
   const off = profilesViewOf(
     { relationship: 'Friends', relationshipScore: 0, affinity: { score: 80, reason: '', history: [] } },
-    { relationships: { rewriteOnBandChange: false } },
+    { relationships: { rewriteOnBandChange: false, ...bandOnly } },
   );
   assert.equal(off.relationshipStale, undefined);
   assert.equal(off.affinity.band, 'devoted', 'the band itself is still shown');
 
   const missingKey = profilesViewOf({ relationship: 'Friends', relationshipScore: 0, affinity: { score: 80, reason: '', history: [] } }, { relationships: {} });
-  assert.deepEqual(missingKey.relationshipStale, { writtenAt: 'neutral', now: 'devoted' }, 'a missing switch counts as on');
+  assert.deepEqual(missingKey.relationshipStale, { writtenAt: 'neutral', now: 'devoted', cause: 'band' }, 'a missing switch counts as on');
+});
+
+test('buildMemoryRequest: with the default settings the same band and the switch off are flagged drift', () => {
+  const sameBand = profilesViewOf({ relationship: 'Friends', relationshipScore: 26, affinity: { score: 59, reason: '', history: [] } });
+  assert.deepEqual(sameBand.relationshipStale, { writtenAt: 'fond', now: 'fond', cause: 'drift' });
+  const off = profilesViewOf(
+    { relationship: 'Friends', relationshipScore: 0, affinity: { score: 80, reason: '', history: [] } },
+    { relationships: { rewriteOnBandChange: false } },
+  );
+  assert.deepEqual(off.relationshipStale, { writtenAt: 'neutral', now: 'devoted', cause: 'drift' }, 'the switch reaches band and first only');
 });
 
 test('buildMemoryRequest: an empty relationship with episodes gets relationshipStale writtenAt "none"', () => {
@@ -5723,14 +5738,14 @@ test('buildMemoryRequest: an empty relationship with episodes gets relationshipS
     affinity: { score: 0, reason: '', history: [] },
     episodes: [{ date: '2026-01-01', what: 'shared a joke', weight: 2 }],
   });
-  assert.deepEqual(view.relationshipStale, { writtenAt: 'none', now: 'neutral' });
+  assert.deepEqual(view.relationshipStale, { writtenAt: 'none', now: 'neutral', cause: 'first' });
 });
 
 test('buildMemoryRequest: an empty relationship with a non-zero score or a reason gets writtenAt "none"', () => {
   const scored = profilesViewOf({ relationship: '', affinity: { score: 30, reason: '', history: [] } });
-  assert.deepEqual(scored.relationshipStale, { writtenAt: 'none', now: 'fond' });
+  assert.deepEqual(scored.relationshipStale, { writtenAt: 'none', now: 'fond', cause: 'first' });
   const reasoned = profilesViewOf({ relationship: '  ', affinity: { score: 0, reason: 'was kind once', history: [] } });
-  assert.deepEqual(reasoned.relationshipStale, { writtenAt: 'none', now: 'neutral' });
+  assert.deepEqual(reasoned.relationshipStale, { writtenAt: 'none', now: 'neutral', cause: 'first' });
 });
 
 test('buildMemoryRequest: an empty relationship with score 0, no reason and no episodes gets no marker', () => {
@@ -5758,7 +5773,7 @@ test('analyzePrivate: an empty private relationship with a non-zero effective sc
     await updater.analyzePrivate(guildId, 'u1', [dmMessage({ id: 'm1', direct: true, ts: Date.UTC(2026, 0, 2, 10) })]);
 
     const mine = JSON.parse(blockBody(sent[1].content, 'existing_profiles')).u1;
-    assert.deepEqual(mine.relationshipStale, { writtenAt: 'none', now: 'warm' });
+    assert.deepEqual(mine.relationshipStale, { writtenAt: 'none', now: 'warm', cause: 'first' });
   });
 });
 
@@ -5851,6 +5866,338 @@ test('analyzePrivate: the view compares the effective band with the private rela
 
     const mine = JSON.parse(blockBody(sent[1].content, 'existing_profiles')).u1;
     assert.equal(mine.affinity.band, 'warm');
-    assert.deepEqual(mine.relationshipStale, { writtenAt: 'neutral', now: 'warm' });
+    assert.deepEqual(mine.relationshipStale, { writtenAt: 'neutral', now: 'warm', cause: 'band' });
+  });
+});
+
+// ---- relationship drift, moves and the length limit (relationshipWrittenAt, relationshipChars) ----
+
+const TEXT_WRITTEN_MS = Date.UTC(2026, 9, 1, 12, 0, 0);
+
+/** `count` attitude moves stamped one hour apart, starting one hour after TEXT_WRITTEN_MS. */
+function movesAfterText(count) {
+  return Array.from({ length: count }, (_, i) => ({
+    ts: new Date(TEXT_WRITTEN_MS + (i + 1) * 3600_000).toISOString(),
+    delta: 1,
+    appliedDelta: 1,
+    score: 30,
+    reason: 'μια κουβέντα',
+  }));
+}
+
+test('buildMemoryRequest: relationshipStale carries cause next to writtenAt and now', () => {
+  const written = { relationship: 'Φίλοι.', relationshipScore: 26, relationshipWrittenAt: new Date(TEXT_WRITTEN_MS).toISOString() };
+  const drift = profilesViewOf({ ...written, affinity: { score: 34, reason: '', history: [] } });
+  assert.deepEqual(drift.relationshipStale, { writtenAt: 'fond', now: 'fond', cause: 'drift' });
+
+  const moves = profilesViewOf({ ...written, relationshipScore: 30, affinity: { score: 30, reason: '', history: movesAfterText(6) } });
+  assert.deepEqual(moves.relationshipStale, { writtenAt: 'fond', now: 'fond', cause: 'moves' });
+  assert.deepEqual(Object.keys(moves.relationshipStale), ['writtenAt', 'now', 'cause']);
+
+  const edge = profilesViewOf({ ...written, relationshipScore: 59, affinity: { score: 61, reason: '', history: [] } });
+  assert.equal(edge.relationshipStale, undefined, 'one point past the edge is inside bandHysteresis (2)');
+});
+
+test('buildMemoryRequest: a drift across an edge inside bandHysteresis names in now the band affinity.band shows', () => {
+  const view = profilesViewOf({
+    relationship: 'Φίλοι.',
+    relationshipScore: 53,
+    relationshipWrittenAt: new Date(TEXT_WRITTEN_MS).toISOString(),
+    affinity: { score: 61, reason: '', history: [] },
+  });
+  assert.deepEqual(view.relationshipStale, { writtenAt: 'fond', now: 'devoted', cause: 'drift' });
+  assert.equal(view.relationshipStale.now, view.affinity.band);
+});
+
+test('buildMemoryRequest: the relationships.* settings reach the marker from the live config', () => {
+  const written = { relationship: 'Φίλοι.', relationshipScore: 59, relationshipWrittenAt: new Date(TEXT_WRITTEN_MS).toISOString() };
+  const edge = profilesViewOf({ ...written, affinity: { score: 61, reason: '', history: movesAfterText(2) } }, { relationships: { bandHysteresis: 0 } });
+  assert.equal(edge.relationshipStale.cause, 'band');
+  const drift = profilesViewOf({ ...written, affinity: { score: 56, reason: '', history: [] } }, { relationships: { rewriteOnDrift: 3 } });
+  assert.equal(drift.relationshipStale.cause, 'drift');
+  const moves = profilesViewOf({ ...written, affinity: { score: 59, reason: '', history: movesAfterText(2) } }, { relationships: { rewriteAfterMoves: 2 } });
+  assert.equal(moves.relationshipStale.cause, 'moves');
+});
+
+test('buildMemoryRequest: an unstamped relationship text counts every stored move', () => {
+  const view = profilesViewOf({ relationship: 'Φίλοι.', relationshipScore: 30, affinity: { score: 30, reason: '', history: movesAfterText(6) } });
+  assert.equal(view.relationshipStale.cause, 'moves');
+});
+
+test('buildMemoryRequest: returns staleRelationships, the number of markers sent', () => {
+  const build = (config) =>
+    buildMemoryRequest({
+      prompts: { memory: 'sys', labels },
+      config,
+      calibrator: createCalibrator(),
+      profiles: {
+        1: { names: ['Ζωή'], relationship: 'Φίλοι.', relationshipScore: 26, affinity: { score: 64, reason: '', history: [] } },
+        2: { names: ['Νίκος'], relationship: '', affinity: { score: 12, reason: '', history: [] } },
+        3: { names: ['Ἄννα'], relationship: 'Γνωστοί.', relationshipScore: 3, affinity: { score: 3, reason: '', history: [] } },
+      },
+      guildMemory: {},
+      messages: [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })],
+      selfName: 'Nept',
+    });
+  assert.equal(build(makeConfig({ features: { relationships: true } })).staleRelationships, 2);
+  assert.equal(build(makeConfig({ features: { relationships: false } })).staleRelationships, 0);
+});
+
+test('buildMemoryRequest: {{relationshipChars}} is filled from relationships.textChars, missing = 600', () => {
+  const systemOf = (config) =>
+    buildMemoryRequest({
+      prompts: { memory: 'Relationship under {{relationshipChars}} chars, fields under {{fieldChars}}.', labels },
+      config,
+      calibrator: createCalibrator(),
+      profiles: {},
+      guildMemory: {},
+      messages: [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })],
+      selfName: 'Nept',
+    }).messages[0].content;
+  assert.equal(systemOf(makeConfig({ relationships: { textChars: 450 } })), 'Relationship under 450 chars, fields under 400.');
+  assert.equal(systemOf(makeConfig()), 'Relationship under 600 chars, fields under 400.');
+  assert.equal(systemOf(makeConfig({ relationships: { textChars: 'many' } })), 'Relationship under 600 chars, fields under 400.', 'unusable -> 600');
+});
+
+test('buildMemoryRequest: {{relationshipChars}} is the limit voiceLimits gives stage B, whatever relationships.textChars holds', () => {
+  const systemOf = (config) =>
+    buildMemoryRequest({
+      prompts: { memory: '{{relationshipChars}}', labels },
+      config,
+      calibrator: createCalibrator(),
+      profiles: {},
+      guildMemory: {},
+      messages: [slimMessage({ id: 'm1', ts: Date.UTC(2026, 0, 1, 12, 0, 0) })],
+      selfName: 'Nept',
+    }).messages[0].content;
+  for (const textChars of [450, 12.5, undefined, null, 'many', 0, -5, NaN, Infinity]) {
+    const config = makeConfig({ relationships: { textChars } });
+    assert.equal(systemOf(config), String(voiceLimits(config).relationship), `textChars ${String(textChars)}`);
+  }
+  const tracked = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(systemOf(makeConfig()), String(tracked.relationships.textChars), 'missing -> config.json');
+});
+
+// Three sentences of about 40 characters each: a limit of 50 (x 1.25 = 62) keeps the first sentence only.
+const LONG_RELATIONSHIP = 'Μιλάμε συχνά για βιβλία και για ταξίδια. Μου λέει πάντα την αλήθεια χωρίς φόβο. Γελάμε με τα ίδια αστεία κάθε βράδυ μαζί.';
+const FIRST_SENTENCE = 'Μιλάμε συχνά για βιβλία και για ταξίδια.';
+
+test('applyMemoryUpdate: a written relationship is stamped relationshipWrittenAt on the batch clock and clamped to relationships.textChars', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    const relationships = { ...RELATIONSHIPS_CFG, textChars: 50 };
+    applyMemoryUpdate(store, guildId, { users: { 1: { relationship: LONG_RELATIONSHIP, affinity: { delta: 4, reason: 'kind' } } } }, MEMORY_CFG, new Set(['1']), { relationships });
+
+    const profile = store.getUser(guildId, '1');
+    assert.equal(profile.relationship, FIRST_SENTENCE);
+    assert.equal(profile.relationshipWrittenAt, new Date(RELATIONSHIPS_CFG.now).toISOString());
+    assert.equal(profile.affinity.history.at(-1).ts, profile.relationshipWrittenAt, 'the same clock as the batch move');
+    assert.equal(profile.relationshipScore, 4);
+  });
+});
+
+test('applyMemoryUpdate: the relationshipChars option wins; without it or relationships.textChars the limit is 600', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    const longer = `${'Μιλάμε συχνά για βιβλία και για ταξίδια. '.repeat(20)}`.trim();
+    applyMemoryUpdate(store, guildId, { users: { 1: { relationship: longer } } }, MEMORY_CFG, new Set(['1']), { relationshipChars: 50, relationships: { ...RELATIONSHIPS_CFG, textChars: 1000 } });
+    assert.equal(store.getUser(guildId, '1').relationship, FIRST_SENTENCE);
+
+    // Neither a relationshipChars nor a relationships option (a caller passing no limit at all):
+    // the 600 fallback, not fieldChars. The configured limit with features.relationships off is
+    // the analyze()/analyzePrivate() tests below.
+    applyMemoryUpdate(store, guildId, { users: { 1: { relationship: `${longer} ` } } }, MEMORY_CFG, new Set(['1']));
+    const stored = store.getUser(guildId, '1').relationship;
+    assert.ok([...stored].length <= 750 && [...stored].length > 600, 'clamped to 600 x the default tolerance, not fieldChars (400)');
+  });
+});
+
+test('applyMemoryUpdate: the batch that writes the text does not count its own move toward rewriteAfterMoves', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    applyMemoryUpdate(store, guildId, { users: { 1: { relationship: 'Φίλοι.', affinity: { delta: 3, reason: 'kind' } } } }, MEMORY_CFG, new Set(['1']), { relationships: RELATIONSHIPS_CFG });
+    const view = profilesViewOf(store.getUser(guildId, '1'), { relationships: { rewriteAfterMoves: 1 } });
+    assert.equal(view.relationshipStale, undefined);
+
+    applyMemoryUpdate(store, guildId, { users: { 1: { affinity: { delta: 2, reason: 'again' } } } }, MEMORY_CFG, new Set(['1']), {
+      relationships: { ...RELATIONSHIPS_CFG, now: RELATIONSHIPS_CFG.now + 60_000 },
+    });
+    const later = profilesViewOf(store.getUser(guildId, '1'), { relationships: { rewriteAfterMoves: 1 } });
+    assert.equal(later.relationshipStale.cause, 'moves', 'a later move counts');
+  });
+});
+
+test('applyPrivateUpdate: a written private relationship is stamped relationshipWrittenAt and clamped to relationships.textChars', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    seedPrivate(store, guildId);
+    const relationships = { ...RELATIONSHIPS_CFG, textChars: 50 };
+    applyPrivateUpdate(store, guildId, 'u1', { users: { u1: { relationship: LONG_RELATIONSHIP } } }, MEMORY_CFG, { relationships });
+
+    const priv = store.getPrivate(guildId, 'u1');
+    assert.equal(priv.relationship, FIRST_SENTENCE);
+    assert.equal(priv.relationshipWrittenAt, new Date(RELATIONSHIPS_CFG.now).toISOString());
+    assert.equal(store.getUser(guildId, 'u1').relationshipWrittenAt, undefined, 'the public profile is untouched');
+  });
+});
+
+test('applyPrivateUpdate: the relationshipChars option wins over relationships.textChars; neither -> 600', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    seedPrivate(store, guildId);
+    applyPrivateUpdate(store, guildId, 'u1', { users: { u1: { relationship: LONG_RELATIONSHIP } } }, MEMORY_CFG, {
+      relationshipChars: 50,
+      relationships: { ...RELATIONSHIPS_CFG, textChars: 1000 },
+    });
+    assert.equal(store.getPrivate(guildId, 'u1').relationship, FIRST_SENTENCE);
+
+    const longer = `${'Μιλάμε συχνά για βιβλία και για ταξίδια. '.repeat(20)}`.trim();
+    applyPrivateUpdate(store, guildId, 'u1', { users: { u1: { relationship: longer } } }, MEMORY_CFG);
+    const stored = store.getPrivate(guildId, 'u1').relationship;
+    assert.ok([...stored].length <= 750 && [...stored].length > 600, 'clamped to 600 x the default tolerance, not fieldChars (400)');
+  });
+});
+
+test('analyze: with features.relationships off a written relationship is still clamped to relationships.textChars', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    const hot = { config: makeConfig({ features: { relationships: false }, relationships: { textChars: 50 } }), prompts: { memory: 'sys', labels } };
+    const llm = { complete: async () => ({ text: JSON.stringify({ users: { 1: { relationship: LONG_RELATIONSHIP } } }) }) };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1' })]);
+    assert.equal(outcome.ok, true);
+    assert.equal(store.getUser(guildId, '1').relationship, FIRST_SENTENCE);
+  });
+});
+
+test('analyzePrivate: with features.relationships off a written private relationship is still clamped to relationships.textChars', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    seedPrivate(store, guildId);
+    const hot = privateHot({}, { features: { relationships: false }, relationships: { textChars: 50 } });
+    const llm = { complete: async () => ({ text: JSON.stringify({ users: { u1: { relationship: LONG_RELATIONSHIP } } }) }) };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const outcome = await updater.analyzePrivate(guildId, 'u1', [dmMessage({ id: 'm1', direct: true, ts: Date.UTC(2026, 0, 2, 10) })]);
+    assert.equal(outcome.ok, true);
+    assert.equal(store.getPrivate(guildId, 'u1').relationship, FIRST_SENTENCE);
+  });
+});
+
+test('analyze: relationships.textChars is read at the moment of use', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'nick', Date.now());
+    const hot = { config: makeConfig({ relationships: { textChars: 50 } }), prompts: { memory: 'sys', labels } };
+    const llm = { complete: async () => ({ text: JSON.stringify({ users: { 1: { relationship: LONG_RELATIONSHIP } } }) }) };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    await updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1' })]);
+    assert.equal(store.getUser(guildId, '1').relationship, FIRST_SENTENCE);
+
+    hot.config.relationships.textChars = 1000;
+    await updater.analyze(guildId, [slimMessage({ id: 'm2', authorId: '1' })]);
+    assert.equal(store.getUser(guildId, '1').relationship, LONG_RELATIONSHIP);
+  });
+});
+
+/** An updater whose analyzePrivate answers `{}` and hands back the partner's sent `<existing_profiles>` entry. */
+function privateViewProbe(store, guildId, hot) {
+  let sent = null;
+  const llm = { complete: async (messages) => ((sent = messages), { text: '{}' }) };
+  const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+  return async () => {
+    await updater.analyzePrivate(guildId, 'u1', [dmMessage({ id: 'm1', direct: true, ts: Date.UTC(2026, 0, 2, 10) })]);
+    return JSON.parse(blockBody(sent[1].content, 'existing_profiles')).u1;
+  };
+}
+
+test('analyzePrivate: rewriteAfterMoves private moves since the private text is cause moves; public moves do not count', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const at = (hours) => ({ maxDelta: 15, historySize: 20, damping: false, truncate: false, now: TEXT_WRITTEN_MS + hours * 3600_000 });
+    store.touchUser(guildId, 'u1', 'Zoé', Date.UTC(2026, 0, 1));
+    store.adjustAffinity(guildId, 'u1', 10, 'public reason', at(-2));
+    store.adjustPrivateAffinity(guildId, 'u1', 4, 'private reason', at(-1));
+    store.applyPrivateOps(guildId, 'u1', { relationship: 'Μου τα λέει όλα.' }, { fieldChars: 400, relationshipScore: 14, now: TEXT_WRITTEN_MS });
+    // Eight public moves after the private text, netting 0: the effective score stays 14 (warm).
+    for (let i = 1; i <= 8; i += 1) store.adjustAffinity(guildId, 'u1', i % 2 ? 0.5 : -0.5, 'small', at(i));
+    const viewOf = privateViewProbe(store, guildId, privateHot());
+
+    assert.equal(store.getUser(guildId, 'u1').affinity.history.length, 9, 'the public moves are stored');
+    let mine = await viewOf();
+    assert.equal(mine.affinity.band, 'warm');
+    assert.equal(mine.relationshipStale, undefined, 'public moves do not count toward the private text');
+
+    for (let i = 1; i <= 5; i += 1) store.adjustPrivateAffinity(guildId, 'u1', i % 2 ? 0.5 : -0.5, 'small', at(10 + i));
+    mine = await viewOf();
+    assert.equal(mine.relationshipStale, undefined, 'five private moves, under rewriteAfterMoves (6)');
+
+    store.adjustPrivateAffinity(guildId, 'u1', -0.5, 'small', at(16));
+    mine = await viewOf();
+    assert.deepEqual(mine.relationshipStale, { writtenAt: 'warm', now: 'warm', cause: 'moves' });
+    assert.deepEqual(Object.keys(mine.affinity), ['score', 'band', 'reason'], 'the history itself is never shown');
+  });
+});
+
+test('analyzePrivate: the private batch that writes the text does not count its own move; a later private move does', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, 'u1', 'Zoé', Date.UTC(2026, 0, 1));
+    store.adjustAffinity(guildId, 'u1', 10, 'public reason', { maxDelta: 15, damping: false, now: TEXT_WRITTEN_MS - 3600_000 });
+    const batchAt = (ms) => ({ relationships: { ...RELATIONSHIPS_CFG, now: ms } });
+    applyPrivateUpdate(store, guildId, 'u1', { users: { u1: { relationship: 'Μου τα λέει όλα.', affinity: { delta: 3, reason: 'kind' } } } }, MEMORY_CFG, batchAt(TEXT_WRITTEN_MS));
+    const priv = store.getPrivate(guildId, 'u1');
+    assert.equal(priv.affinity.history.at(-1).ts, priv.relationshipWrittenAt, 'the private move and the text share the private batch clock');
+    const viewOf = privateViewProbe(store, guildId, privateHot({}, { relationships: { rewriteAfterMoves: 1 } }));
+
+    assert.equal((await viewOf()).relationshipStale, undefined);
+
+    applyPrivateUpdate(store, guildId, 'u1', { users: { u1: { affinity: { delta: 1, reason: 'again' } } } }, MEMORY_CFG, batchAt(TEXT_WRITTEN_MS + 60_000));
+    assert.equal((await viewOf()).relationshipStale.cause, 'moves', 'a later private move counts');
+  });
+});
+
+test('run: "memory: update applied" logs staleRelationships next to relationships', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const base = Date.now() - 60_000;
+    store.touchUser(guildId, '1', 'Ἀλκμήνη', base);
+    store.adjustAffinity(guildId, '1', 30, 'start', { maxDelta: 30, historySize: 10, damping: false, now: base });
+    store.pushBuffer(guildId, slimMessage({ id: 'm1', authorId: '1', authorName: 'Ἀλκμήνη', ts: base }), 100);
+    const hot = {
+      config: makeConfig({ features: { relationships: true }, memory: { ...makeConfig().memory, batchMessages: 1, minBatchMessages: 1 } }),
+      prompts: { memory: 'memory system prompt', labels },
+    };
+    const llm = { complete: async () => ({ text: JSON.stringify({ users: { 1: { relationship: 'Καλή παρέα.' } } }) }) };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+    const applied = logs.find((entry) => entry.msg === 'memory: update applied');
+    assert.equal(applied.staleRelationships, 1, 'the empty text was flagged first');
+    assert.equal(applied.relationships, 1, 'and rewritten');
+    assert.ok(!JSON.stringify(logs).includes('Καλή παρέα'), 'counts only');
+  });
+});
+
+test('runPrivate: "memory: private update applied" logs staleRelationships', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    seedPrivate(store, guildId); // effective 14, private relationship empty -> first
+    const hot = privateHot({ batchMessages: 1, minBatchMessages: 1 });
+    const updater = createMemoryUpdater({ hot, store, llm: { complete: async () => ({ text: '{}' }) }, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+    updater.observe(guildId, dmMessage({ id: 'a1', ts: Date.now() - 1000 }), { private: 'u1' });
+
+    const { logs } = await withCapturedLogs(() => updater.runPrivate(guildId, 'u1'));
+
+    const applied = logs.find((entry) => entry.msg === 'memory: private update applied');
+    assert.equal(applied.staleRelationships, 1);
+    assert.equal(applied.relationships, 0);
   });
 });

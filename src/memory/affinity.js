@@ -4,7 +4,9 @@
 // `delta`; this module clamps it, folds it into the stored score and keeps a
 // short history of what moved it. Also used by `decideMention` to make the
 // persona a little quicker to ignore someone it dislikes, a little slower to
-// ignore someone it likes. See docs/prompt-contract.md, "The analyzer".
+// ignore someone it likes, and by the analyzer's request builder to decide
+// when the stored relationship text no longer matches the score
+// (`relationshipStaleOf`). See docs/en/prompt-contract.md, "The analyzer".
 
 import { clampText } from './clamp.js';
 import { DAY_MS } from '../time.js';
@@ -30,6 +32,119 @@ export function affinityBand(score) {
   if (score < 25) return 'warm';
   if (score < 60) return 'fond';
   return 'devoted';
+}
+
+// Each band's lowest and highest edge, the thresholds of `affinityBand` above. Which side of an
+// edge a score exactly on it belongs to is `affinityBand`'s business; to `bandGap` an edge value
+// is 0 away from both bands that meet there.
+const BAND_EDGES = Object.freeze({
+  hostile: [-Infinity, -60],
+  dislike: [-60, -25],
+  cool: [-25, -8],
+  neutral: [-8, 8],
+  warm: [8, 25],
+  fond: [25, 60],
+  devoted: [60, Infinity],
+});
+
+/**
+ * How far `score` lies outside `band`: 0 inside it (or exactly on one of its edges), else the
+ * distance to the nearest edge, rounded to the stored precision (2 decimals). The edges are
+ * `affinityBand`'s thresholds. An unknown band name or a score that is not a finite number gives
+ * 0: no distance is measured, so nothing is ever flagged on it.
+ * @param {number} score
+ * @param {string} band  One of the names `affinityBand` returns.
+ * @returns {number}
+ */
+export function bandGap(score, band) {
+  const edges = Object.hasOwn(BAND_EDGES, band) ? BAND_EDGES[band] : null;
+  if (!edges || !Number.isFinite(score)) return 0;
+  const [low, high] = edges;
+  if (score < low) return round2(low - score);
+  if (score > high) return round2(score - high);
+  return 0;
+}
+
+/**
+ * Code fallbacks of the `relationships.*` keys `relationshipStaleOf` reads, equal to config.json:
+ * `bandHysteresis` points past the old band's edge before a band change counts, `rewriteOnDrift`
+ * score points since the text was written, `rewriteAfterMoves` attitude moves since then.
+ */
+export const RELATIONSHIP_STALE_DEFAULTS = Object.freeze({ bandHysteresis: 2, rewriteOnDrift: 8, rewriteAfterMoves: 6 });
+
+/** A finite number of at least 0, else `fallback` (a missing or unusable setting). */
+function settingOf(value, fallback) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+/** How many `history` moves are stamped strictly after `writtenAt` (an ISO string): every stored
+ * move when the stamp is missing or unreadable. Either way a move whose own `ts` cannot be read
+ * never counts. */
+function movesSince(history, writtenAt) {
+  const times = (Array.isArray(history) ? history : []).map((move) => Date.parse(move?.ts)).filter(Number.isFinite);
+  const since = typeof writtenAt === 'string' ? Date.parse(writtenAt) : NaN;
+  if (!Number.isFinite(since)) return times.length;
+  return times.filter((ts) => ts > since).length;
+}
+
+/**
+ * Whether a member's stored relationship text is due for a rewrite, and why: the
+ * `relationshipStale` marker the analyzer sees (src/memory/update.js#buildMemoryRequest), or null.
+ * First match wins:
+ *   - `first`: the text is empty and the profile has something a first version can be written
+ *     from (a non-zero score, a reason, episodes). `writtenAt` is then `'none'`;
+ *   - `band`: the score left the band the text was written in by at least `bandHysteresis` points
+ *     past that band's edge (`bandGap`), so a score wandering back and forth across one edge does
+ *     not flip the text each time; 0 = any band change counts;
+ *   - `drift`: the score moved `rewriteOnDrift` points or more since the text was written, inside
+ *     one band or not (0 = off);
+ *   - `moves`: `rewriteAfterMoves` attitude moves or more are stamped after the text was written
+ *     (`writtenAt`); with no readable stamp every stored move counts (0 = off). A move whose own
+ *     `ts` cannot be read never counts. The history keeps `relationships.historySize` moves, so a
+ *     larger number never fires. A move stamped at the very moment of writing (the batch that
+ *     wrote the text) is not counted.
+ * `now` is always the band of `score`, the band the request shows as `affinity.band`. So a
+ * `drift` or `moves` marker can carry two different bands: a crossing still inside
+ * `bandHysteresis`, or `rewriteOnBandChange` off.
+ * `rewriteOnBandChange: false` turns off `band` AND `first`, the reach that switch always had;
+ * `drift` and `moves` have their own 0.
+ * A private view (src/memory/update.js#analyzePrivate) passes the effective score and the private
+ * layer's OWN history, stamped on the private batch clock like its `relationshipWrittenAt`: the
+ * private text counts its own moves, while a public move reaches it only through the effective
+ * score (`band`, `drift`).
+ * @param {{ text?: string, score?: number, writtenScore?: number, writtenAt?: string,
+ *   history?: object[], hasReason?: boolean, hasEpisodes?: boolean }} view
+ *   `text`: the stored relationship text; `score`: the current (precise) score, missing = 0;
+ *   `writtenScore`: `relationshipScore`, the score the text was written at, missing = 0;
+ *   `writtenAt`: `relationshipWrittenAt`, when it was written (ISO); `history`: `affinity.history`
+ *   (entries with an ISO `ts`); `hasReason` / `hasEpisodes`: the profile has a reason / episodes.
+ * @param {{ rewriteOnBandChange?: boolean, bandHysteresis?: number, rewriteOnDrift?: number,
+ *   rewriteAfterMoves?: number }} [cfg]  `config.relationships`, read by the caller at the moment
+ *   of use. `rewriteOnBandChange` missing = on; a number missing or not a finite number of at
+ *   least 0 falls back to RELATIONSHIP_STALE_DEFAULTS.
+ * @returns {{ writtenAt: string, now: string, cause: 'first'|'band'|'drift'|'moves' }|null}
+ *   `writtenAt`: the band of `writtenScore` (or `'none'`), `now`: the band of `score`.
+ */
+export function relationshipStaleOf(view, cfg = {}) {
+  const score = Number.isFinite(view?.score) ? view.score : 0;
+  const now = affinityBand(score);
+  const bandRule = cfg?.rewriteOnBandChange !== false;
+  const text = typeof view?.text === 'string' ? view.text.trim() : '';
+  if (!text) {
+    if (!bandRule) return null;
+    return score !== 0 || view?.hasReason || view?.hasEpisodes ? { writtenAt: 'none', now, cause: 'first' } : null;
+  }
+
+  const writtenScore = Number.isFinite(view?.writtenScore) ? view.writtenScore : 0;
+  const writtenAt = affinityBand(writtenScore);
+  const marker = (cause) => ({ writtenAt, now, cause });
+  const hysteresis = settingOf(cfg?.bandHysteresis, RELATIONSHIP_STALE_DEFAULTS.bandHysteresis);
+  if (bandRule && writtenAt !== now && bandGap(score, writtenAt) >= hysteresis) return marker('band');
+  const drift = settingOf(cfg?.rewriteOnDrift, RELATIONSHIP_STALE_DEFAULTS.rewriteOnDrift);
+  if (drift > 0 && round2(Math.abs(score - writtenScore)) >= drift) return marker('drift');
+  const moves = settingOf(cfg?.rewriteAfterMoves, RELATIONSHIP_STALE_DEFAULTS.rewriteAfterMoves);
+  if (moves > 0 && movesSince(view?.history, view?.writtenAt) >= moves) return marker('moves');
+  return null;
 }
 
 function normalizeAffinity(affinity) {
