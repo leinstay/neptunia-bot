@@ -317,12 +317,6 @@ test('answerFacts: a profile without rare gives none', () => {
   assert.deepEqual(answerFacts(answer, null).rareMarks, {});
 });
 
-test('answerFacts: reports the comma count', () => {
-  const facts = answerFacts({ messages: [{ text: 'Ναι, ναι, όχι' }, { text: 'Λοιπόν, καλά' }] }, { unused: [], length: { p75: 40 } });
-  assert.equal(facts.commas, 3);
-  assert.equal(answerFacts({ messages: [] }, null).commas, 0);
-});
-
 test('answerFacts: no density under 150 characters', () => {
   const profile = { unused: [], length: { p75: 400 } };
   const facts = answerFacts({ messages: [{ text: pad('Ναι, ναι, ', 149) }] }, profile);
@@ -330,6 +324,7 @@ test('answerFacts: no density under 150 characters', () => {
   assert.equal(facts.commas, 2);
   assert.equal(facts.commaPer1000, null);
   assert.equal(answerFacts({ messages: [] }, profile).commaPer1000, null);
+  assert.equal(answerFacts({ messages: [] }, null).commas, 0);
 });
 
 test('answerFacts: density from 150 characters on', () => {

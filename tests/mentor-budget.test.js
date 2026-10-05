@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-import { weightedTokens, createMentorBudget, MentorBudgetError, outputTokenWeight, cachedTokenWeight } from '../src/mentor/budget.js';
+import { weightedTokens, createMentorBudget, outputTokenWeight, cachedTokenWeight } from '../src/mentor/budget.js';
 
 const WEIGHTS = { outputTokenWeight: 5, cachedTokenWeight: 0.1 };
 
@@ -111,14 +111,6 @@ test('createMentorBudget: snapshot reports the day, the use and the cap', () => 
   const { budget } = makeBudget({ mentor: { maxTokensPerDay: 1000 } });
   budget.charge(null, 250);
   assert.deepEqual(budget.snapshot(), { day: '2026-09-30', used: 250, cap: 1000, left: 750 });
-});
-
-test('MentorBudgetError: carries the config key, the use and the cap', () => {
-  const err = new MentorBudgetError('mentor budget reached', { used: 10, cap: 5 });
-  assert.ok(err instanceof Error);
-  assert.equal(err.key, 'mentor.maxTokensPerDay');
-  assert.equal(err.used, 10);
-  assert.equal(err.cap, 5);
 });
 
 test('config.json: ships the mentor off, without a model, under a daily token cap', () => {

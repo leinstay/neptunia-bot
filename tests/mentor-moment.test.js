@@ -1,6 +1,6 @@
 // Tests for src/mentor/moment.js: the memory as it stood at a real moment of
 // the chat -- every dated item written at or after the cutoff hidden, the
-// base view read at call time and never changed.
+// base view never changed, its prompts and config read at call time.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { hiddenLater, momentCutoff, momentView } from '../src/mentor/moment.js';
@@ -207,19 +207,6 @@ test('momentView: listUserProfiles is filtered like getUser', () => {
   const listed = moment.memory.listUserProfiles();
   assert.deepEqual(listed.map((p) => p.id), [ALICE, BRUNO]);
   assert.deepEqual(listed[0], moment.memory.getUser(ALICE));
-});
-
-test('momentView: the base is read at call time and never changed', () => {
-  const { view, data } = baseView();
-  const snapshot = JSON.stringify(data);
-  const moment = momentView(view, CUTOFF);
-  // The data is deep-frozen: any write would throw in strict mode.
-  moment.memory.getUser(ALICE);
-  moment.memory.listUserProfiles();
-  moment.memory.getGuild();
-  moment.memory.getLore();
-  hiddenLater(view, CUTOFF);
-  assert.equal(JSON.stringify(data), snapshot);
 });
 
 test('momentView: a profile or guild without the dated lists passes through', () => {

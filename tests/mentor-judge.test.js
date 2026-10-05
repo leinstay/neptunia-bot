@@ -213,21 +213,18 @@ function groupsWith(n, low) {
   return Array.from({ length: 5 }, (_, i) => (i + 1 === n ? low : [score({ overall: 9 }), score({ overall: 8 }), score({ overall: 9 })]));
 }
 
-test('verdict: a situation whose overall median is under the floor fails the case', () => {
-  const groups = groupsWith(2, [score({ overall: 3 }), score({ overall: 4 }), score({ overall: 3 })]);
-  const result = verdict(groups.flat(), PASS, groups);
-  // The medians over all fifteen answers pass on their own.
-  assert.equal(result.medians.overall, 9);
-  assert.equal(result.passed, false);
-  assert.deepEqual(result.reasons, ['situation 2: overall 3 is under the floor 5']);
-});
-
-test('verdict: a situation under the floor on goal fails the case', () => {
-  const groups = groupsWith(4, [score({ goal: 4 }), score({ goal: 2 }), score({ goal: 9 })]);
-  const result = verdict(groups.flat(), PASS, groups);
-  assert.equal(result.medians.goal, 7);
-  assert.equal(result.passed, false);
-  assert.deepEqual(result.reasons, ['situation 4: goal 4 is under the floor 5']);
+test('verdict: a situation whose median is under the floor on overall or on goal fails the case', () => {
+  for (const [axis, n, low, median, reason] of [
+    ['overall', 2, [score({ overall: 3 }), score({ overall: 4 }), score({ overall: 3 })], 9, 'situation 2: overall 3 is under the floor 5'],
+    ['goal', 4, [score({ goal: 4 }), score({ goal: 2 }), score({ goal: 9 })], 7, 'situation 4: goal 4 is under the floor 5'],
+  ]) {
+    const groups = groupsWith(n, low);
+    const result = verdict(groups.flat(), PASS, groups);
+    // The medians over all fifteen answers pass on their own.
+    assert.equal(result.medians[axis], median, `${axis}: the median over all answers`);
+    assert.equal(result.passed, false, `${axis}: the case fails`);
+    assert.deepEqual(result.reasons, [reason], `${axis}: the reason`);
+  }
 });
 
 test('verdict: without groups the rule is unchanged', () => {
