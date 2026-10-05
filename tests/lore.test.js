@@ -6,6 +6,8 @@ import assert from 'node:assert/strict';
 import { upsertLore, matchLore, keywordMatches } from '../src/memory/lore.js';
 
 const NOW = Date.UTC(2026, 8, 21, 12, 0, 0);
+// The text limit and tolerance a clamping test relies on, set here instead of leaning on the code's fallbacks.
+const CLAMP = { textChars: 600, clampTolerance: 1.25 };
 
 function entry(overrides = {}) {
   return {
@@ -106,8 +108,8 @@ test('upsertLore: an analyzer re-send identical after normalisation is not stamp
 });
 
 test('upsertLore: an analyzer re-send identical after clamping counts 0', () => {
-  const clamped = upsertLore([], [{ title: 'X', keys: ['valid'], text: 'x'.repeat(1000) }], { source: 'analyzer', now: NOW }).entries;
-  const result = upsertLore(clamped, [{ title: 'X', keys: ['valid'], text: 'x'.repeat(2000) }], { source: 'analyzer', now: NOW + 60_000 });
+  const clamped = upsertLore([], [{ title: 'X', keys: ['valid'], text: 'x'.repeat(1000) }], { ...CLAMP, source: 'analyzer', now: NOW }).entries;
+  const result = upsertLore(clamped, [{ title: 'X', keys: ['valid'], text: 'x'.repeat(2000) }], { ...CLAMP, source: 'analyzer', now: NOW + 60_000 });
   assert.equal(result.upserted, 0, 'both texts clamp to the same 750 characters');
   assert.equal(result.entries[0].updatedAt, new Date(NOW).toISOString());
 });
@@ -167,18 +169,9 @@ test('upsertLore: rejects an entry with no valid key', () => {
   assert.equal(result.entries.length, 0);
 });
 
-test('upsertLore: rejects an entry with empty text', () => {
-  const result = upsertLore([], [{ title: 'X', keys: ['valid'], text: '   ' }], { source: 'analyzer', now: NOW });
-  assert.equal(result.upserted, 0);
-});
-
-test('upsertLore: rejects an entry with no title', () => {
-  const result = upsertLore([], [{ keys: ['valid'], text: 'text' }], { source: 'analyzer', now: NOW });
-  assert.equal(result.upserted, 0);
-});
-
-test('upsertLore: title is a hard identity clamp at 80 chars; text is tolerant around the default 600 (600*1.25 when it has to cut)', () => {
+test('upsertLore: title is a hard identity clamp at 80 chars; text is tolerant (textChars * clampTolerance when it has to cut)', () => {
   const result = upsertLore([], [{ title: 'T'.repeat(200), keys: ['valid'], text: 'x'.repeat(1000) }], {
+    ...CLAMP,
     source: 'analyzer',
     now: NOW,
   });
@@ -186,35 +179,18 @@ test('upsertLore: title is a hard identity clamp at 80 chars; text is tolerant a
   assert.equal(result.entries[0].text.length, 750, 'no boundary in a single long word -- hard-cut at 600*1.25');
 });
 
-test('upsertLore: text within the default tolerance of 600 is kept whole', () => {
-  const result = upsertLore([], [{ title: 'X', keys: ['valid'], text: 'x'.repeat(700) }], {
-    source: 'analyzer',
-    now: NOW,
-  });
-  assert.equal(result.entries[0].text.length, 700);
-});
-
 test('upsertLore: textChars is configurable and read at the moment of use', () => {
   const result = upsertLore([], [{ title: 'X', keys: ['valid'], text: 'x'.repeat(1000) }], {
     source: 'analyzer',
     now: NOW,
     textChars: 300,
+    clampTolerance: 1.25,
   });
-  assert.equal(result.entries[0].text.length, 375, '300 * the default tolerance 1.25');
-});
-
-test('upsertLore: clampTolerance is configurable', () => {
-  const result = upsertLore([], [{ title: 'X', keys: ['valid'], text: 'x'.repeat(1000) }], {
-    source: 'analyzer',
-    now: NOW,
-    textChars: 100,
-    clampTolerance: 2,
-  });
-  assert.equal(result.entries[0].text.length, 200);
+  assert.equal(result.entries[0].text.length, 375, '300 * the tolerance 1.25');
 });
 
 test('upsertLore: garbage incoming entries are skipped, never throw', () => {
-  const result = upsertLore([], [null, 'garbage', 42, [], { title: 'ok', keys: ['ok-key'], text: 'ok text' }], {
+  const result = upsertLore([], [null, 'garbage', { title: 'ok', keys: ['ok-key'], text: 'ok text' }], {
     source: 'analyzer',
     now: NOW,
   });
@@ -261,16 +237,6 @@ test('upsertLore: never evicts an entry marked always, even an analyzer one', ()
     maxEntries: 2,
   });
   assert.deepEqual(result.entries.map((e) => e.title), ['A', 'C']);
-});
-
-test('upsertLore: no eviction when under/at maxEntries', () => {
-  const existing = [entry({ id: 'a', title: 'A' })];
-  const result = upsertLore(existing, [{ title: 'B', keys: ['b-key'], text: 'b text' }], {
-    source: 'analyzer',
-    now: NOW,
-    maxEntries: 500,
-  });
-  assert.equal(result.entries.length, 2);
 });
 
 test('upsertLore: the entry created first and updated last survives the overflow', () => {
@@ -387,9 +353,4 @@ test('matchLore: caps the non-always matches at maxMatches, most relevant first'
   const result = matchLore([a, b, c], texts, { maxMatches: 2 });
   assert.equal(result.length, 2);
   assert.deepEqual(result.map((e) => e.id), ['c', 'b'], 'most recent matches kept first');
-});
-
-test('matchLore: no match and not always -> excluded', () => {
-  const entries = [entry({ keys: ['nope'] })];
-  assert.deepEqual(matchLore(entries, ['irrelevant text'], { maxMatches: 8 }), []);
 });

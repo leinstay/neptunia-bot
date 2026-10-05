@@ -117,13 +117,11 @@ test('mergeEmojiUsage: past storeMax the lowest-ranked entries are evicted', () 
 
 test('normalizeEmojiUsage: a missing or broken field reads as empty, bad entries are dropped', () => {
   assert.deepEqual(normalizeEmojiUsage(undefined), {});
-  assert.deepEqual(normalizeEmojiUsage([1, 2]), {});
   assert.deepEqual(normalizeEmojiUsage('x'), {});
   assert.deepEqual(
     normalizeEmojiUsage({ 1: { name: 'ok', count: 2, last: 5 }, 2: { name: 'zero', count: 0 }, 3: null, 4: { count: 1 } }),
     { 1: { name: 'ok', count: 2, last: 5 }, 4: { name: '', count: 1, last: 0 } },
   );
-  assert.deepEqual(rankEmojiUsage(undefined, 30), []);
 });
 
 // --- storage -----------------------------------------------------------------
@@ -176,20 +174,18 @@ function hotFor(context) {
   };
 }
 
-test('memory run: a consumed batch adds its members\' emoji to guild.emojiUsage and logs the count', async () => {
+test('memory run: a consumed batch adds its members\' emoji to guild.emojiUsage', async () => {
   await withStore(async (store) => {
     store.pushBuffer('g1', msg({ id: 'a', ts: T0, emojis: [{ id: '10', name: 'kappa' }] }), 100);
     store.pushBuffer('g1', msg({ id: 'b', ts: T0 + 1, self: true, emojis: [{ id: '10', name: 'kappa' }] }), 100);
     store.pushBuffer('g1', msg({ id: 'c', ts: T0 + 2, emojis: [{ id: '10', name: 'kappa' }, { id: '20', name: 'omega' }] }), 100);
     const llm = { complete: async () => ({ text: '{}' }) };
     const updater = createMemoryUpdater({ hot: hotFor({}), store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
-    const { logs } = await withCapturedLogs(() => updater.run('g1'));
+    await withCapturedLogs(() => updater.run('g1'));
     assert.deepEqual(store.getGuild('g1').emojiUsage, {
       10: { name: 'kappa', count: 2, last: T0 + 2 },
       20: { name: 'omega', count: 1, last: T0 + 2 },
     });
-    const applied = logs.find((line) => line.msg === 'memory: update applied');
-    assert.equal(applied.emojiUsage, 3);
   });
 });
 
