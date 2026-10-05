@@ -5557,10 +5557,11 @@ test('buildMemoryRequest: the decide stage uses memory-decide and leaves style o
     single.messages[1].content.replace(',"style":"σύντομες φράσεις"', ''),
     'the rest of the user message is the single-stage one',
   );
-  const { messages: singleMessages, ...singleFit } = single;
-  const { messages: decideMessages, ...decideFit } = decide;
+  const { messages: singleMessages, profilesTokens: singleProfilesTokens, ...singleFit } = single;
+  const { messages: decideMessages, profilesTokens: decideProfilesTokens, ...decideFit } = decide;
   assert.equal(singleMessages.length, decideMessages.length);
   assert.deepEqual(decideFit, singleFit, 'roster, markers, fit and counts as in a single-stage request');
+  assert.ok(decideProfilesTokens < singleProfilesTokens, 'the profiles block is smaller by the style left out');
   assert.deepEqual(decideFit.rosterIds, [ZOE]);
 });
 
@@ -7933,5 +7934,179 @@ test('analyze (two-stage): stage A sees the notes, writes a recent add itself an
       ],
     );
     assert.deepEqual(queuedKinds(store, guildId), ['learned', 'self'], 'only the lesson and the self claim wait for the voice model');
+  });
+});
+
+// ---- the analyzer's profile view: capped lists, whole or compact by lines shown ----
+
+/** A stored-shape profile whose `character` is `chars` Greek letters long (one raw token per two). */
+function heavyProfile(name, chars, extra = {}) {
+  return { names: [name], character: 'λ'.repeat(chars), style: '', relationship: '', interests: [], details: [], ...extra };
+}
+
+/** One guild line of `authorId` at `ts`. */
+function authorLine(id, authorId, authorName, ts) {
+  return slimMessage({ id, authorId, authorName, content: 'γεια', ts });
+}
+
+/** makeConfig() with `llm.maxRequestTokens` = `tokens` (no safety margin) and `memory` merged in. */
+function budgetConfig(tokens, memory = {}) {
+  const base = makeConfig();
+  return makeConfig({ llm: { ...base.llm, maxRequestTokens: tokens, safetyMargin: 1 }, memory: { ...base.memory, ...memory } });
+}
+
+const profilesOf = (request) => JSON.parse(blockBody(request.messages[1].content, 'existing_profiles'));
+
+test('buildMemoryRequest: existing_profiles sends at most memory.analyzerEpisodes episodes, heaviest then newest, and the stored list keeps every one', () => {
+  const episodes = [
+    { date: '2026-01-01', what: 'α', quote: '', feeling: '', weight: 2 },
+    { date: '2026-01-02', what: 'β', quote: '', feeling: '', weight: 5 },
+    { date: '2026-01-03', what: 'γ', quote: '', feeling: '', weight: 2 },
+    { date: '2026-01-04', what: 'δ', quote: '', feeling: '', weight: 1 },
+  ];
+  const profile = heavyProfile('Zoé', 10, { episodes });
+  const build = (analyzerEpisodes) =>
+    buildMemoryRequest({
+      prompts: { memory: 'sys', labels },
+      config: makeConfig({ memory: { ...makeConfig().memory, analyzerEpisodes } }),
+      calibrator: createCalibrator(),
+      profiles: { 1: profile },
+      guildMemory: {},
+      messages: [authorLine('m1', '1', 'Zoé', Date.UTC(2026, 0, 5, 12))],
+      selfName: 'Nept',
+    });
+
+  assert.deepEqual(profilesOf(build(2))['1'].episodes.map((ep) => ep.what), ['β', 'γ'], 'the first two of the reply side order');
+  assert.deepEqual(profilesOf(build(10))['1'].episodes.map((ep) => ep.what), ['β', 'γ', 'α', 'δ'], 'fewer than the cap: all, in that order');
+  assert.equal('episodes' in profilesOf(build(0))['1'], false, '0 sends none');
+  assert.deepEqual(profile.episodes.map((ep) => ep.what), ['α', 'β', 'γ', 'δ'], 'the stored profile is never trimmed');
+});
+
+test('analyze: an episode equal to a stored one the request did not show is still rejected by code', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const at = Date.UTC(2026, 0, 10, 12);
+    store.touchUser(guildId, '1', 'Zoé', at - DAY_MS);
+    store.addEpisodes(
+      guildId,
+      '1',
+      [
+        { date: '2026-01-02', what: 'έφερε γλυκά', weight: 5 },
+        { date: '2026-01-03', what: 'τραγούδησε', weight: 4 },
+        { date: '2026-01-04', what: 'έχασε το κλειδί', weight: 1 },
+      ],
+      { maxEpisodes: 20, maxNew: 5, now: at - DAY_MS },
+    );
+    const llm = recordingLlm({ users: { 1: { episodes: [{ date: '2026-01-04', what: 'Έχασε  το κλειδί', weight: 2 }] } } });
+    const hot = { config: makeConfig({ memory: { ...makeConfig().memory, analyzerEpisodes: 2 } }), prompts: { memory: 'sys', labels } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => at });
+
+    const outcome = await updater.analyze(guildId, [authorLine('m1', '1', 'Zoé', at - MINUTE_MS)]);
+
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(profilesOf(llm.calls[0])['1'].episodes.map((ep) => ep.what), ['έφερε γλυκά', 'τραγούδησε'], 'the light one was not shown');
+    assert.equal(outcome.result.episodes, 0, 'the same moment is not stored twice');
+    assert.deepEqual(store.getUser(guildId, '1').episodes.map((ep) => ep.what), ['έφερε γλυκά', 'τραγούδησε', 'έχασε το κλειδί']);
+  });
+});
+
+test('buildMemoryRequest: with a tight budget the authors with the most lines shown keep their whole profile, the others go compact', () => {
+  const t0 = Date.UTC(2026, 0, 5, 12);
+  // Cyra writes first but least; Aria most.
+  const messages = [
+    authorLine('m1', '3', 'Cyra', t0),
+    authorLine('m2', '2', 'Bea', t0 + 1000),
+    authorLine('m3', '1', 'Aria', t0 + 2000),
+    authorLine('m4', '1', 'Aria', t0 + 3000),
+    authorLine('m5', '2', 'Bea', t0 + 4000),
+    authorLine('m6', '1', 'Aria', t0 + 5000),
+  ];
+  const profiles = { 1: heavyProfile('Aria', 1600), 2: heavyProfile('Bea', 1600), 3: heavyProfile('Cyra', 1600) };
+  const build = (config) =>
+    buildMemoryRequest({ prompts: { memory: 'sys', labels }, config, calibrator: createCalibrator(), profiles, guildMemory: {}, messages, selfName: 'Nept' });
+
+  // Room for the transcript and one whole profile (about 800 tokens each), not two.
+  const tight = build(budgetConfig(1400));
+  const sent = profilesOf(tight);
+  assert.equal(tight.shown, 6, 'every line is read: the profiles take only what the transcript left');
+  assert.equal(sent['1'].character, profiles[1].character, 'the busiest author is whole');
+  for (const id of ['2', '3']) {
+    assert.deepEqual(Object.keys(sent[id]).sort(), ['affinity', 'compact', 'names'], `${id}: id, names and attitude only`);
+    assert.equal(sent[id].compact, true);
+    assert.deepEqual(sent[id].names, profiles[id].names);
+  }
+  assert.deepEqual([tight.profilesWhole, tight.profilesCompact], [1, 2]);
+  const blockText = `<existing_profiles>\n${blockBody(tight.messages[1].content, 'existing_profiles')}\n</existing_profiles>`;
+  assert.equal(tight.profilesTokens, createCalibrator().apply(estimateTokens(blockText)) + 2);
+
+  const roomy = build(budgetConfig(50000));
+  assert.deepEqual([roomy.profilesWhole, roomy.profilesCompact], [3, 0]);
+  assert.equal(profilesOf(roomy)['3'].character, profiles[3].character);
+  assert.ok(roomy.profilesTokens > tight.profilesTokens);
+});
+
+test('run: a compact author is still written, and "memory: update applied" counts the profiles sent whole and compact and the block tokens', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const t0 = Date.UTC(2026, 0, 5, 12);
+    for (const [id, name] of [['1', 'Aria'], ['2', 'Bea']]) {
+      store.touchUser(guildId, id, name, t0 - DAY_MS);
+      store.applyProfileOps(guildId, id, { character: 'λ'.repeat(1600) }, { fieldChars: 2000 });
+    }
+    for (const message of [authorLine('m1', '2', 'Bea', t0), authorLine('m2', '1', 'Aria', t0 + 1000), authorLine('m3', '1', 'Aria', t0 + 2000)]) {
+      store.pushBuffer(guildId, message, 100);
+    }
+    const llm = recordingLlm({ users: { 2: { interests: { add: [{ topic: 'κιθάρα', note: 'παίζει τα βράδια' }] } } } });
+    const hot = { config: budgetConfig(1300, { batchMessages: 3, minBatchMessages: 1 }), prompts: { memory: 'sys', labels } };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => t0 + HOUR_MS });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+    const sent = profilesOf(llm.calls[0]);
+    assert.equal(sent['2'].compact, true, 'Bea went compact');
+    assert.equal(sent['1'].compact, undefined, 'Aria went whole');
+    assert.deepEqual(store.getUser(guildId, '2').interests.map((item) => item.topic), ['κιθάρα'], 'the update for the compact author is applied');
+    const applied = logs.find((entry) => entry.msg === 'memory: update applied');
+    assert.deepEqual([applied.profilesWhole, applied.profilesCompact], [1, 1]);
+    assert.ok(Number.isInteger(applied.profilesTokens) && applied.profilesTokens > 0);
+  });
+});
+
+test('buildMemoryRequest: the notes markers count only the lines the request shows, and run stamps nothing it did not flag', async () => {
+  const long = notesLines('c1', 20).map((m) => ({ ...m, content: 'λ'.repeat(400) }));
+  const channels = { c1: notesChannel('γενικό', { updatedAt: notesDaysAgo(30) }) };
+  const guildMemory = { patterns: 'μιμίδια', notesUpdatedAt: notesDaysAgo(9) };
+  const build = (tokens) =>
+    buildMemoryRequest({ prompts: { memory: 'sys', labels }, config: budgetConfig(tokens), calibrator: createCalibrator(), profiles: {}, guildMemory, channels, messages: long, selfName: 'Nept', now: NOTES_NOW });
+
+  const cut = build(2500);
+  assert.ok(cut.shown > 0 && cut.shown < 20, `a part of the batch is shown (${cut.shown})`);
+  assert.equal('stale' in channelsOf(cut).c1, false, 'fewer than memory.notesMinLines lines shown in the channel');
+  assert.equal('stale' in guildOf(cut), false, 'fewer than memory.notesMinLines lines shown');
+  assert.deepEqual(cut.staleNotes, { channels: [], guild: false });
+
+  const whole = build(50000);
+  assert.equal(whole.shown, 20);
+  assert.deepEqual(channelsOf(whole).c1.stale, { days: 30 });
+  assert.deepEqual(whole.staleNotes, { channels: ['c1'], guild: true });
+
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    for (const message of long) {
+      touchMemory(store, guildId, message);
+      store.pushBuffer(guildId, message, 100);
+    }
+    store.getChannel(guildId, 'c1').updatedAt = notesDaysAgo(30);
+    const marked = [];
+    store.markNotesChecked = (...args) => marked.push(args);
+    const hot = { config: budgetConfig(2500, { batchMessages: 20, minBatchMessages: 1 }), prompts: { memory: 'sys', labels } };
+    const updater = createMemoryUpdater({ hot, store, llm: recordingLlm({}), calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => NOTES_NOW });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+    const applied = logs.find((entry) => entry.msg === 'memory: update applied');
+    assert.ok(applied.deferred > 0, 'the cut batch left lines for the next one');
+    assert.equal(applied.notesFlagged, 0);
+    assert.deepEqual(marked, [], 'nothing was stamped re-checked');
   });
 });

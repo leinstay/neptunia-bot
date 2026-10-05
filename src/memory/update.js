@@ -43,6 +43,7 @@ import { applyAliasOps } from './aliases.js';
 import { emojiUsageOpts } from './emoji-usage.js';
 import { gifOpts } from './gifs.js';
 import { topByRank } from './ranking.js';
+import { topEpisodes } from './episodes.js';
 import { teacherToken, toTokens, fromTokens } from './mentions.js';
 import { INJOKE_CHARS, MEMORY_LIMIT_DEFAULTS, SELF_CHARS } from './text-limits.js';
 import { clampText } from './clamp.js';
@@ -471,6 +472,39 @@ function aliasRosterSize(config) {
   return Number.isInteger(size) && size >= 0 ? size : 40;
 }
 
+/**
+ * `memory.analyzerEpisodes`: how many of one member's stored episodes `<existing_profiles>` shows
+ * the analyzer at most -- the first ones of the reply side's order
+ * (src/memory/episodes.js#topEpisodes), so the moments most likely to be told again are the ones
+ * it sees; 0 = none. Only the view is capped: the stored list keeps every episode, and a new one
+ * is checked for a duplicate against all of them (src/memory/episodes.js#mergeEpisodes). Missing
+ * or not a non-negative integer -> 8, config.json's value. Read at each request.
+ * @param {object} [config]  The live config.
+ * @returns {number}
+ */
+export function analyzerEpisodes(config) {
+  const count = config?.memory?.analyzerEpisodes;
+  return Number.isInteger(count) && count >= 0 ? count : 8;
+}
+
+/**
+ * How many lines each author has in `lines` (the persona's own skipped), keyed by id as a
+ * string, plus the index of each author's first line there.
+ * @param {object[]} lines
+ * @returns {{ counts: Map<string, number>, first: Map<string, number> }}
+ */
+function authorLineCounts(lines) {
+  const counts = new Map();
+  const first = new Map();
+  lines.forEach((m, index) => {
+    if (!m || m.self) return;
+    const id = String(m.authorId);
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+    if (!first.has(id)) first.set(id, index);
+  });
+  return { counts, first };
+}
+
 /** The distinct non-self author ids of `messages`, as strings, in first-seen order. */
 function batchAuthorIds(messages) {
   return [...new Set((messages ?? []).filter((m) => !m?.self).map((m) => String(m.authorId)))];
@@ -664,6 +698,14 @@ function recentNoteItems(lines, { config, now, timezone, locale, nameOf }) {
  * @param {object} input.config       Live config.
  * @param {object} input.calibrator   From createCalibrator().
  * @param {object} input.profiles     Stored profiles of the batch's distinct non-self authors, keyed by user id.
+ *   Each goes into `<existing_profiles>` whole or compact. Whole: the prose fields and the attitude
+ *   as stored, the ranked top of interests, details and aliases (`memory.maxInterests`,
+ *   `maxDetails`, `maxAliases`) and of episodes (`memory.analyzerEpisodes`, see
+ *   `analyzerEpisodes`); the stored profile is never trimmed. Compact: `names` (a guild batch),
+ *   `affinity` (relationships on) and `compact: true`, nothing else. Every profile is compact at
+ *   first; whole ones take what the transcript left (after the roster, before the recent notes),
+ *   offered only for authors with a line shown, the most lines shown first, so a heavy batch
+ *   sends its quieter authors compact rather than costing a line or failing.
  * @param {object} input.guildMemory  Stored guild memory.
  * @param {object} [input.channels]   Stored channel entries of the batch's distinct channels, keyed by channel id.
  * @param {object[]} input.messages   Slim buffered messages (oldest first) to summarize.
@@ -713,15 +755,16 @@ function recentNoteItems(lines, { config, now, timezone, locale, nameOf }) {
  *   measured from; omitted -> the batch's newest message.
  *
  * Stale notes (guild batches only): a channel entry of `<existing_channels>` whose channel has at
- * least `memory.notesMinLines` lines in this batch, main or not, carries `"stale": { "days": n }`
+ * least `memory.notesMinLines` lines among the lines the request shows, main or not, carries `"stale": { "days": n }`
  * when its notes are stale (`notesStale`: its `updatedAt`, which only a real change of
  * purpose/topics/tone stamps, and its `notesCheckedAt`); `<existing_guild>` carries the same once
- * the batch has at least `memory.notesMinLines` lines and the server notes are stale (its
+ * the request shows at least `memory.notesMinLines` lines and the server notes are stale (its
  * `notesUpdatedAt` and `notesCheckedAt`). `n` = whole days since the text last changed, null when
  * never. `memory.notesStaleDays` 0 sends no marker. A JSON field only: the wording that asks for a
  * re-check is the prompt's.
  * @returns {{ messages: object[], consumed: number, shown: number, deferred: number, rosterIds: string[],
- *   rosterCandidates: number, rosterTokens: number, staleRelationships: number, recentShown: number,
+ *   rosterCandidates: number, rosterTokens: number, profilesWhole: number, profilesCompact: number,
+ *   profilesTokens: number, staleRelationships: number, recentShown: number,
  *   recentIds: number[], staleNotes: { channels: string[], guild: boolean } }}
  *   `shown`: the oldest lines of the batch, contiguous, that fit the token cap -- what
  *   `<new_messages>` carries and the only lines this request consumes (`consumed === shown`); the
@@ -733,7 +776,9 @@ function recentNoteItems(lines, { config, now, timezone, locale, nameOf }) {
  *   sent -- the only non-authors an answer may give an alias (applyMemoryUpdate's `aliasOnlyIds`).
  *   `rosterCandidates`: the roster entries offered to the budget (after `memory.aliasRosterSize`),
  *   sent or not; `rosterTokens`: the estimated tokens the sent entries took from the request.
- *   `staleRelationships`: the profiles sent with a `relationshipStale` marker
+ *   `profilesWhole` / `profilesCompact`: the profiles `<existing_profiles>` carries whole and
+ *   compact; `profilesTokens`: the estimated tokens of that block.
+ *   `staleRelationships`: the whole profiles sent with a `relationshipStale` marker (a compact one carries none)
  *   (src/memory/affinity.js#relationshipStaleOf, settings `relationships.rewriteOnBandChange`,
  *   `bandHysteresis`, `rewriteOnDrift`, `rewriteAfterMoves`); 0 with relationships off.
  *   `recentShown`: the recent lines `<recent_notes>` actually carries; `recentIds`: their ids, in
@@ -753,8 +798,10 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const system = fillPromptTemplate(decide ? prompts['memory-decide'] : prompts.memory, memoryTemplateValues(config, selfName));
   const characterBlock = relationships ? block('character', characterText(prompts, selfName)) : '';
 
-  const existingProfiles = {};
-  let staleRelationships = 0;
+  // Each profile twice: whole (what the analyzer rewrites, its lists capped to their ranked top)
+  // and compact (id, names, attitude), sent when the whole one does not fit (see the fit below).
+  const profileViews = [];
+  const episodeCap = analyzerEpisodes(config);
   for (const [id, profile] of Object.entries(profiles ?? {})) {
     const fields = pickProfileFields(profile);
     if (privateChat) {
@@ -803,55 +850,69 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
         },
         config.relationships,
       );
-      if (stale) {
-        fields.relationshipStale = stale;
-        staleRelationships += 1;
-      }
+      if (stale) fields.relationshipStale = stale;
     }
-    if (episodesOn && Array.isArray(profile?.episodes) && profile.episodes.length > 0) {
-      fields.episodes = profile.episodes.map(({ date, what, quote, weight }) => ({ date, what: resolveText(what, resolveName), quote, weight }));
+    // The reply side's top episodes only (heaviest, then newest): the stored list keeps them all.
+    const episodes = episodesOn ? topEpisodes(profile?.episodes, episodeCap) : [];
+    if (episodes.length > 0) {
+      fields.episodes = episodes.map(({ date, what, quote, weight }) => ({ date, what: resolveText(what, resolveName), quote, weight }));
     }
-    existingProfiles[id] = fields;
+    const compact = privateChat ? {} : { names: fields.names };
+    if (fields.affinity) compact.affinity = fields.affinity;
+    compact.compact = true;
+    profileViews.push({ id, whole: fields, compact, text: `${JSON.stringify(id)}:${JSON.stringify(fields)}` });
   }
-  const profilesBlock = block('existing_profiles', JSON.stringify(existingProfiles));
+  /** The `<existing_profiles>` block: the members of `wholeIds` whole, every other one compact. */
+  const profilesBlockOf = (wholeIds) =>
+    block('existing_profiles', JSON.stringify(Object.fromEntries(profileViews.map((view) => [view.id, wholeIds.has(view.id) ? view.whole : view.compact]))));
   const loreBlock = loreOn ? existingLoreBlock(loreEntries, messages.map((m) => m.content).filter(Boolean), resolveName) : '';
 
   // The clock of the recent window and of the notes' staleness.
   const clock = Number.isFinite(now) ? now : Math.max(...messages.map((m) => (Number.isFinite(m?.ts) ? m.ts : -Infinity)));
   // Server and channel notes nothing has changed or re-checked for `memory.notesStaleDays`, guild
-  // batches only, once the batch has enough lines to judge them by (see the JSDoc above).
+  // batches only, once the lines the request shows are enough to judge them by (see the JSDoc
+  // above). Fitted with the markers of the whole batch, then built again from the lines shown: a
+  // marker can only drop, so the request only gets smaller.
   const notes = notesSettings(config);
-  const staleNotes = { channels: [], guild: false };
-  const linesIn = new Map();
-  if (!privateChat) {
-    for (const m of messages) linesIn.set(String(m.channelId), (linesIn.get(String(m.channelId)) ?? 0) + 1);
-  }
-
-  const guildView = pickGuildFields(guildMemory, resolveName, config.memory ?? {});
-  if (!privateChat && messages.length >= notes.minLines) {
-    const stale = notesStale({ updatedAt: guildMemory?.notesUpdatedAt, checkedAt: guildMemory?.notesCheckedAt }, clock, notes.staleDays);
-    if (stale) {
-      guildView.stale = stale;
-      staleNotes.guild = true;
-    }
-  }
-  const guildBlock = block('existing_guild', JSON.stringify(guildView));
-
+  const guildFields = pickGuildFields(guildMemory, resolveName, config.memory ?? {});
   const mainChannels = mainChannelSet(config.memory?.mainChannelIds);
-  const existingChannels = {};
-  for (const [id, channel] of Object.entries(channels ?? {})) {
+  const channelFields = Object.entries(channels ?? {}).map(([id, channel]) => {
     const fields = pickChannelFields(channel, resolveName);
     if (mainChannels.has(String(id))) fields.main = true;
-    if (!privateChat && (linesIn.get(String(id)) ?? 0) >= notes.minLines) {
-      const stale = notesStale({ updatedAt: channel?.updatedAt, checkedAt: channel?.notesCheckedAt }, clock, notes.staleDays);
+    return { id, channel, fields };
+  });
+  const notesBlocks = (lines) => {
+    const staleNotes = { channels: [], guild: false };
+    const linesIn = new Map();
+    if (!privateChat) {
+      for (const m of lines) linesIn.set(String(m.channelId), (linesIn.get(String(m.channelId)) ?? 0) + 1);
+    }
+    const guildView = { ...guildFields };
+    if (!privateChat && lines.length >= notes.minLines) {
+      const stale = notesStale({ updatedAt: guildMemory?.notesUpdatedAt, checkedAt: guildMemory?.notesCheckedAt }, clock, notes.staleDays);
       if (stale) {
-        fields.stale = stale;
-        staleNotes.channels.push(String(id));
+        guildView.stale = stale;
+        staleNotes.guild = true;
       }
     }
-    existingChannels[id] = fields;
-  }
-  const channelsBlock = privateChat ? '' : block('existing_channels', JSON.stringify(existingChannels));
+    const existingChannels = {};
+    for (const { id, channel, fields } of channelFields) {
+      const view = { ...fields };
+      if (!privateChat && (linesIn.get(String(id)) ?? 0) >= notes.minLines) {
+        const stale = notesStale({ updatedAt: channel?.updatedAt, checkedAt: channel?.notesCheckedAt }, clock, notes.staleDays);
+        if (stale) {
+          view.stale = stale;
+          staleNotes.channels.push(String(id));
+        }
+      }
+      existingChannels[id] = view;
+    }
+    return {
+      guildBlock: block('existing_guild', JSON.stringify(guildView)),
+      channelsBlock: privateChat ? '' : block('existing_channels', JSON.stringify(existingChannels)),
+      staleNotes,
+    };
+  };
 
   const privateBlock = privateChat ? block('private', labels.memory.privateNote) : '';
   const publicProfileBlock = privateChat
@@ -873,7 +934,9 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
         }),
       )
     : '';
-  const fixedBlocks = [privateBlock, characterBlock, profilesBlock, publicProfileBlock, loreBlock, guildBlock, channelsBlock].filter(Boolean);
+  /** The fixed blocks in the order the user message carries them. */
+  const fixedBlocksOf = (profilesBlock, notesView) =>
+    [privateBlock, characterBlock, profilesBlock, publicProfileBlock, loreBlock, notesView.guildBlock, notesView.channelsBlock].filter(Boolean);
 
   const formatOptions = {
     timezone,
@@ -904,37 +967,67 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   // does not write the same moment again.
   const recentItems = privateChat ? [] : recentNoteItems(recentLines, { config, now: clock, timezone, locale: labels.locale, nameOf: resolveName });
 
-  const { kept, stats } = fitSections(
-    [
-      {
-        name: 'fixed',
-        required: true,
-        items: [system, ...fixedBlocks].filter(Boolean),
-      },
-      // The batch's oldest line, ranked before the roster: whatever the roster would take, the
-      // request carries a line whenever one fits at all.
-      { name: 'oldestLine', items: transcriptTexts.slice(0, 1) },
-      // Ranked before the rest of the transcript, so a heavy batch cannot starve it; not
-      // required, so it never raises a token-limit failure: an entry that does not fit is skipped
-      // and the next, older one is still tried, so what is sent may have gaps.
-      { name: 'roster', keep: 'first', items: rosterEntries.map((entry) => entry.text) },
-      // The rest, oldest first and contiguous: the first line that does not fit ends what is
-      // shown, and it and every later line stay in the buffer for the next batch.
-      { name: 'transcript', keep: 'oldest', items: transcriptTexts.slice(1) },
-      // Ranked after the transcript: it takes only what the transcript left, so it is cut first
-      // and never costs a transcript line; not required, so it never fails the request. The
-      // newest notes survive a cut.
-      { name: 'recent', keep: 'newest', items: recentItems.map((item) => item.text) },
-    ],
-    requestTokenLimit(config),
-    sectionCost(calibrator),
-  );
-
+  const cost = sectionCost(calibrator);
+  const batchNotes = notesBlocks(messages);
+  // Every profile compact is the required floor; a whole profile is an upgrade over it, priced at
+  // its full text (the compact one stays counted too, so the real request is never larger).
+  const allCompact = profilesBlockOf(new Set());
+  const fit = (upgrades) =>
+    fitSections(
+      [
+        {
+          name: 'fixed',
+          required: true,
+          items: [system, ...fixedBlocksOf(allCompact, batchNotes)].filter(Boolean),
+        },
+        // The batch's oldest line, ranked before the roster: whatever the roster would take, the
+        // request carries a line whenever one fits at all.
+        { name: 'oldestLine', items: transcriptTexts.slice(0, 1) },
+        // Ranked before the rest of the transcript, so a heavy batch cannot starve it; not
+        // required, so it never raises a token-limit failure: an entry that does not fit is skipped
+        // and the next, older one is still tried, so what is sent may have gaps.
+        { name: 'roster', keep: 'first', items: rosterEntries.map((entry) => entry.text) },
+        // The rest, oldest first and contiguous: the first line that does not fit ends what is
+        // shown, and it and every later line stay in the buffer for the next batch.
+        { name: 'transcript', keep: 'oldest', items: transcriptTexts.slice(1) },
+        // Whole profiles take what the transcript left, the authors with the most lines shown
+        // first: memory is sent for the chat the request reads, never in its place. One that does
+        // not fit is skipped and stays compact, a smaller one after it is still tried.
+        { name: 'profiles', keep: 'first', items: upgrades.map((view) => view.text) },
+        // Ranked after the transcript and the profiles: it takes only what they left, so it is cut
+        // first and never costs a transcript line; not required, so it never fails the request.
+        // The newest notes survive a cut.
+        { name: 'recent', keep: 'newest', items: recentItems.map((item) => item.text) },
+      ],
+      requestTokenLimit(config),
+      cost,
+    );
   // One transcript item per message, so the lines shown are the batch's first `shown` messages.
-  const shown = kept.oldestLine.length === 0 ? 0 : 1 + leadingRun(transcriptTexts.slice(1), kept.transcript);
-  if (shown === 0 && messages.length > 0) {
+  const shownOf = (kept) => (kept.oldestLine.length === 0 ? 0 : 1 + leadingRun(transcriptTexts.slice(1), kept.transcript));
+
+  // Every section before the profiles is the same in both fits, so the first one (no whole
+  // profile) already settles the lines shown. Only an author with a line among them can be
+  // written by this request: those are offered whole, the most lines shown first (then the
+  // earliest line, then the input order). A private batch's one profile is the partner's,
+  // offered whether or not a line of their own is shown.
+  const reach = shownOf(fit([]).kept);
+  if (reach === 0 && messages.length > 0) {
     throw new SectionsTooLargeError('no transcript line fits the token limit beside the required prompt sections');
   }
+  const { counts, first } = authorLineCounts(messages.slice(0, reach));
+  const upgrades = profileViews
+    .map((view, index) => ({ view, index, lines: counts.get(view.id) ?? 0, at: first.get(view.id) ?? Infinity }))
+    .filter((entry) => entry.lines > 0 || privateChat)
+    .sort((a, b) => b.lines - a.lines || a.at - b.at || a.index - b.index)
+    .map((entry) => entry.view);
+  const { kept, stats } = fit(upgrades);
+  const shown = shownOf(kept);
+
+  const keptProfileTexts = new Set(kept.profiles);
+  const wholeIds = new Set(upgrades.filter((view) => keptProfileTexts.has(view.text)).map((view) => view.id));
+  const profilesBlock = profilesBlockOf(wholeIds);
+  const staleRelationships = profileViews.filter((view) => wholeIds.has(view.id) && view.whole.relationshipStale).length;
+  const shownNotes = notesBlocks(messages.slice(0, shown));
 
   const keptRosterTexts = new Set(kept.roster);
   const keptRoster = rosterEntries.filter((entry) => keptRosterTexts.has(entry.text));
@@ -946,7 +1039,7 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
   const keptTranscriptItems = transcriptItems.slice(0, shown);
   const newMessagesBlock = block('new_messages', renderTranscript(keptTranscriptItems, timezone, labels));
 
-  const user = [...fixedBlocks, rosterBlock, recentBlock, newMessagesBlock].filter(Boolean).join('\n\n');
+  const user = [...fixedBlocksOf(profilesBlock, shownNotes), rosterBlock, recentBlock, newMessagesBlock].filter(Boolean).join('\n\n');
 
   return {
     messages: [
@@ -963,10 +1056,14 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     // of the roster, and how often the roster itself was cut.
     rosterCandidates: rosterEntries.length,
     rosterTokens: stats.roster?.used ?? 0,
+    // How many profiles went whole and how many compact, and what the block cost.
+    profilesWhole: wholeIds.size,
+    profilesCompact: profileViews.length - wholeIds.size,
+    profilesTokens: cost(profilesBlock),
     staleRelationships,
     recentShown: keptRecent.length,
     recentIds: keptRecent.map((item) => item.id),
-    staleNotes,
+    staleNotes: shownNotes.staleNotes,
   };
 }
 
@@ -2455,6 +2552,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * who did not write in the batch (see `buildMemoryRequest`), of
    * `rosterCandidates` offered, taking `rosterTokens`. Of the non-authors,
    * only those sent may get anything from the answer: an alias.
+   * `profilesWhole` / `profilesCompact` / `profilesTokens`: how many profiles went whole and
+   * compact, and the tokens of `<existing_profiles>` (see `buildMemoryRequest`).
    * `staleRelationships`: how many profiles went with a `relationshipStale` marker.
    * `staleNotes`: the channel ids and whether the server notes went with a stale marker.
    * `recentShown`: how many live recent lines the request's `<recent_notes>` carried (read from
@@ -2472,7 +2571,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * @param {object[]} messages  Slim messages (oldest first) to summarize; NOT read from or removed off any buffer.
    * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, consumed?: number,
    *   shown?: number, deferred?: number, roster?: number, rosterCandidates?: number, rosterTokens?: number,
-   *   staleRelationships?: number, recentShown?: number, staleNotes?: { channels: string[], guild: boolean },
+   *   profilesWhole?: number, profilesCompact?: number, profilesTokens?: number, staleRelationships?: number, recentShown?: number, staleNotes?: { channels: string[], guild: boolean },
    *   error?: Error, stage?: 'single'|'two' }>}
    */
   async function analyze(guildId, messages) {
@@ -2555,7 +2654,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * @param {object[]} messages  Slim buffered direct messages, oldest first.
    * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, consumed?: number,
    *   shown?: number, deferred?: number, roster?: number, rosterCandidates?: number, rosterTokens?: number,
-   *   staleRelationships?: number, recentShown?: number, staleNotes?: { channels: string[], guild: boolean },
+   *   profilesWhole?: number, profilesCompact?: number, profilesTokens?: number, staleRelationships?: number, recentShown?: number, staleNotes?: { channels: string[], guild: boolean },
    *   error?: Error, stage?: 'single'|'two' }>}
    *   `consumed`/`shown`/`deferred` as `analyze()`'s. The `roster*` counts and `recentShown` are
    *   always 0 here and `staleNotes` empty: a private batch carries no `<known_members>`, no
@@ -2714,7 +2813,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     const { descriptions, videos, reads } = cachedMedia(guildId, messages);
 
     let completion;
-    let fit; // the request's { consumed, shown, deferred, roster, rosterCandidates, rosterTokens, staleRelationships, recentShown, staleNotes }, reported with a success
+    let fit; // the request's { consumed, shown, deferred, roster, rosterCandidates, rosterTokens, profilesWhole, profilesCompact, profilesTokens, staleRelationships, recentShown, staleNotes }, reported with a success
     let rosterIds = []; // the roster members the request carried: the only non-authors an answer may give an alias
     let recentIds = []; // the recent lines the request carried: the only ones an answer may remove
     let consumedMessages = []; // the oldest messages the request showed: the only ones the answer is applied against
@@ -2728,6 +2827,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         rosterIds: sentRoster,
         rosterCandidates,
         rosterTokens,
+        profilesWhole,
+        profilesCompact,
+        profilesTokens,
         staleRelationships,
         recentShown,
         recentIds: sentRecent,
@@ -2747,7 +2849,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         ...input,
         stage: stage === 'two' ? 'decide' : 'single',
       });
-      fit = { consumed, shown, deferred, roster: sentRoster.length, rosterCandidates, rosterTokens, staleRelationships, recentShown, staleNotes };
+      fit = { consumed, shown, deferred, roster: sentRoster.length, rosterCandidates, rosterTokens, profilesWhole, profilesCompact, profilesTokens, staleRelationships, recentShown, staleNotes };
       rosterIds = sentRoster;
       recentIds = sentRecent;
       consumedMessages = messages.slice(0, consumed);
@@ -2767,8 +2869,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       // the error carries one, e.g. 429) lets a caller tell a rate limit apart
       // from a genuine failure without parsing `detail`.
       // A `SectionsTooLargeError` (buildMemoryRequest's fitSections could not
-      // even fit the required sections -- profiles alone over the cap, no
-      // room left to trim -- or not one transcript line beside them) is the
+      // even fit the required sections -- the prompt, the notes and every
+      // author's compact profile -- or not one transcript line beside them) is the
       // same kind of failure as a `TokenLimitError` from the provider call
       // itself: the request does not fit the per-request token cap, full stop.
       // Both surface as 'token-limit' so a caller can split the batch instead
@@ -2846,12 +2948,13 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     if (outcome.reason === 'truncated' || outcome.reason === 'bad-json' || outcome.reason === 'token-limit') {
       // Retrying the same-size batch can never succeed: 'truncated'/'bad-json'
       // means the completion is being cut by the output cap, and 'token-limit'
-      // means the request itself (stored profiles included) does not fit the
-      // per-request cap -- neither is transient bad luck. A plain back-off
-      // would just retry the exact same buffer forever: halve the
-      // batch size for next time instead, same as the output-cap case, so
-      // the following attempt asks for fewer messages and pulls in fewer
-      // distinct authors' profiles.
+      // means the request itself (the compact profiles of its authors
+      // included) does not fit the per-request cap -- neither is transient
+      // bad luck. A plain back-off would just retry the exact same buffer
+      // forever: halve the batch size for next time instead, same as the
+      // output-cap case, so the following attempt asks for fewer messages and
+      // pulls in fewer distinct authors. Whole profiles never fail a request:
+      // one that does not fit is sent compact (buildMemoryRequest).
       sizeFactors.set(key, (sizeFactors.get(key) ?? 1) / 2);
       log.warn(`${what} failed, halving the batch size for next time`, {
         ...fields,
@@ -2911,6 +3014,10 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           roster: outcome.roster,
           rosterCandidates: outcome.rosterCandidates,
           rosterTokens: outcome.rosterTokens,
+          // Profiles sent whole and compact (the ones that did not fit), and the block's tokens.
+          profilesWhole: outcome.profilesWhole,
+          profilesCompact: outcome.profilesCompact,
+          profilesTokens: outcome.profilesTokens,
           // Relationship markers sent; `relationships` (in counts) = texts actually rewritten.
           staleRelationships: outcome.staleRelationships,
           // Notes markers sent (channels plus the server notes); `channels` / `guild` (in counts)

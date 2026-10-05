@@ -185,3 +185,11 @@ test('config.json: the recall budget fallbacks (forms, clusters, run limit, summ
     assert.equal(recallSettings({ recall: {} })[key], shipped.recall[key], key);
   }
 });
+
+test('config.json: the code fallback of memory.analyzerEpisodes is the shipped value', async () => {
+  const { analyzerEpisodes } = await import('../src/memory/update.js');
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const shipped = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
+  assert.equal(analyzerEpisodes({}), shipped.memory.analyzerEpisodes);
+  assert.equal(analyzerEpisodes({ memory: {} }), shipped.memory.analyzerEpisodes);
+});
