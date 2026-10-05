@@ -10,6 +10,12 @@
 // private buffer instead and are analyzed into that member's private layer
 // only (`runPrivate`/`analyzePrivate`, via `applyPrivateUpdate`): nothing said
 // in private ever reaches the public profile, the server notes or the lore.
+// With `features.memoryTwoStage` on (and its two prompts present, see
+// `analyzerMode`) a batch, guild or private, is stage A of the two-stage
+// analyzer instead: prompts/memory-decide.md returns neutral decisions plus
+// short briefs for every text written in the persona's voice; the neutral part
+// is stored at once through the same apply functions, the briefs go into the
+// guild's voice queue (src/memory/voice.js) for the voice model to word later.
 // Memory is persistent: nothing here ever wipes it — a failed update just
 // leaves the buffer alone and backs off for a while.
 
@@ -37,7 +43,7 @@ import { videoStateFromCache } from './describe.js';
 import { isVideoVisionOn } from './youtube-check.js';
 import { block, fillPromptTemplate, renderProfile } from '../behavior/prompt.js';
 import { effectiveAffinity } from '../behavior/private.js';
-import { voiceLimits } from './voice.js';
+import { degradedApply, mergeIntoQueue, splitDecision, voiceLimits } from './voice.js';
 
 const BACKOFF_MS = 15 * 60_000;
 const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
@@ -53,6 +59,88 @@ const CHANNEL_FIELDS = ['purpose', 'topics', 'tone']; // the analyzer's own fiel
 export function analyzerTemperature(config) {
   const temperature = config?.memory?.temperature;
   return Number.isFinite(temperature) ? temperature : 0.3;
+}
+
+// The prompts the two-stage analyzer needs: stage A's system message, and the voice model's,
+// without which the queue stage A fills could never be worded.
+const TWO_STAGE_PROMPTS = ['memory-decide', 'memory-voice'];
+
+/**
+ * The prompt keys of TWO_STAGE_PROMPTS that are missing or blank in `prompts`.
+ * @param {object} [prompts]
+ * @returns {string[]}
+ */
+function missingTwoStagePrompts(prompts) {
+  return TWO_STAGE_PROMPTS.filter((key) => !hasContent(prompts?.[key]));
+}
+
+/**
+ * Which analyzer a batch runs: `two` (stage A, prompts/memory-decide.md, then the voice queue)
+ * only when `features.memoryTwoStage` is exactly true (a missing key counts as off) AND both
+ * `prompts['memory-decide']` and `prompts['memory-voice']` are non-blank; anything else runs
+ * today's single-stage `prompts.memory` request. Pure; read at each batch, so a live edit of
+ * the switch or of either prompt reaches the next one.
+ * @param {object} [config]   The live config.
+ * @param {object} [prompts]  The live prompts.
+ * @returns {'single'|'two'}
+ */
+export function analyzerMode(config, prompts) {
+  if (config?.features?.memoryTwoStage !== true) return 'single';
+  return missingTwoStagePrompts(prompts).length === 0 ? 'two' : 'single';
+}
+
+/**
+ * Whether a request's provider-counted prompt tokens may feed the shared calibration ratio
+ * (src/llm/tokens.js): only when the request goes out on the talk model (`llm.model`), the
+ * model whose tokenizer the ratio tracks; a request on any other model passes
+ * `skipCalibration: true`. Its budget is still checked against the same calibrated estimate.
+ * @param {object} [config]  The live config.
+ * @param {string|null} [model]  The model the request names; empty, null or undefined = the
+ *   request goes out on `llm.model`.
+ * @returns {boolean}
+ */
+export function feedsCalibration(config, model) {
+  const talk = config?.llm?.model;
+  return (model || talk) === talk;
+}
+
+/**
+ * The `llm.complete` options of one analyzer batch (`analyze` / `analyzePrivate`), from the live
+ * config at the moment of use. With `features.memoryTwoStage` off the request goes out as it
+ * always did: on `memory.model`, without `skipCalibration` or `reasoning`. With it on:
+ * - `two` (stage A, the neutral decisions): on `memory.model`, plus `memory.reasoning` when that
+ *   is a plain object (sent verbatim, src/llm/openrouter.js; a reasoning model otherwise spends
+ *   the output budget on reasoning);
+ * - `single` (a two-stage prompt is missing, see `analyzerMode`): today's request words every
+ *   text in the persona's voice, which two-stage mode keeps on the voice model, so it goes out on
+ *   `memory.voiceModel` (null = `llm.model`), never on `memory.model`;
+ * and both pass `skipCalibration` per `feedsCalibration`.
+ * @param {object} config  The live config.
+ * @param {'single'|'two'} stage  The batch's `analyzerMode`.
+ * @returns {object}
+ */
+function batchRequestOptions(config, stage) {
+  const cfg = config.memory ?? {};
+  const twoStageOn = config.features?.memoryTwoStage === true;
+  const options = {
+    model: (twoStageOn && stage !== 'two' ? cfg.voiceModel : cfg.model) || undefined,
+    // The fallback on the voice model stays role `analyzer` until `voice` is a role of
+    // src/discord/commands.js#MODEL_ROLE_PATHS (`/nep route set` refuses any other role), so
+    // an `@analyzer` provider pin keeps covering it.
+    role: 'analyzer',
+    maxOutputTokens: cfg.maxOutputTokens,
+    temperature: analyzerTemperature(config),
+    // A 150-message batch with an 8000-token answer on a large model can
+    // take longer than the chat timeout -- the analyzer gets its own,
+    // much larger budget (see docs/prompt-contract.md, "The analyzer").
+    timeoutMs: cfg.timeoutMs ?? config.llm?.timeoutMs,
+  };
+  if (!twoStageOn) return options;
+  // Off the talk model the provider's prompt count says nothing about the ratio the other
+  // requests are checked with.
+  options.skipCalibration = !feedsCalibration(config, options.model);
+  if (stage === 'two' && isPlainObject(cfg.reasoning)) options.reasoning = cfg.reasoning;
+  return options;
 }
 
 // Fallbacks for the memory-prompt placeholders below (and for the guild
@@ -476,6 +564,11 @@ export function characterText(prompts, selfName) {
  *   fail. Entries that do not fit are skipped in newest-first order (budget.js, `keep: 'first'`):
  *   a long entry can be skipped while a shorter, older one still fits, so the roster sent may
  *   have gaps anywhere, not only a cut tail.
+ * @param {'single'|'decide'} [input.stage]  `decide` = stage A of the two-stage analyzer:
+ *   the system message is `prompts['memory-decide']` (the same placeholders filled), and a guild
+ *   profile's view leaves `style` out (stage A writes no portrait; `character` stays as
+ *   context). Everything else -- blocks, roster, markers, the fit and the return value -- is the
+ *   single-stage request's. Omitted or `single` -> `prompts.memory`.
  * @returns {{ messages: object[], consumed: number, shown: number, trimmed: number, rosterIds: string[],
  *   rosterCandidates: number, rosterTokens: number, staleRelationships: number }}
  *   `consumed` is always the whole batch; `shown` of it made it into `<new_messages>` (the newest
@@ -488,17 +581,18 @@ export function characterText(prompts, selfName) {
  *   (src/memory/affinity.js#relationshipStaleOf, settings `relationships.rewriteOnBandChange`,
  *   `bandHysteresis`, `rewriteOnDrift`, `rewriteAfterMoves`); 0 with relationships off.
  */
-export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, videos, reads, nameOf, privateChat, rosterProfiles }) {
+export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, videos, reads, nameOf, privateChat, rosterProfiles, stage = 'single' }) {
   const { timezone } = config.bot;
   const labels = requireLabels(prompts);
   if (privateChat && (!labels.memory?.privateNote || !labels.memory?.privateChannel)) {
     throw new Error('prompts.labels is incomplete: memory.privateNote and memory.privateChannel are required for a private batch');
   }
+  const decide = stage === 'decide';
   const relationships = config.features?.relationships !== false;
   const episodesOn = config.features?.episodes !== false;
   const loreOn = config.features?.lore !== false;
   const resolveName = typeof nameOf === 'function' ? nameOf : () => null;
-  const system = fillPromptTemplate(prompts.memory, memoryTemplateValues(config, selfName));
+  const system = fillPromptTemplate(decide ? prompts['memory-decide'] : prompts.memory, memoryTemplateValues(config, selfName));
   const characterBlock = relationships ? block('character', characterText(prompts, selfName)) : '';
 
   const existingProfiles = {};
@@ -513,7 +607,8 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
       delete fields.style;
     } else {
       fields.character = resolveText(fields.character, resolveName);
-      fields.style = resolveText(fields.style, resolveName);
+      if (decide) delete fields.style;
+      else fields.style = resolveText(fields.style, resolveName);
     }
     fields.relationship = resolveText(fields.relationship, resolveName);
     fields.interests = existingInterestsView(fields.interests, config.memory?.maxInterests, config.memory?.interestHalfLifeDays, resolveName);
@@ -851,6 +946,31 @@ function profileOpsOptions(cfg, nowMs, seenAt) {
     clampTolerance: cfg.clampTolerance,
     now: nowMs,
     seenAt,
+  };
+}
+
+/** `store.applyLearnedOps` options from `config.memory`, the lesson dated `seenAt`: every writer
+ * of a lesson here (the single-stage apply, the voice queue's degraded path) uses the same limits. */
+function learnedOpsOptions(cfg, seenAt) {
+  return {
+    maxLearned: cfg.maxLearned ?? MEMORY_LIMIT_DEFAULTS.maxLearned,
+    maxLearnedStored: cfg.maxLearnedStored ?? MEMORY_LIMIT_DEFAULTS.maxLearnedStored,
+    learnedChars: cfg.learnedChars ?? MEMORY_LIMIT_DEFAULTS.learnedChars,
+    learnedHalfLifeDays: cfg.learnedHalfLifeDays ?? MEMORY_LIMIT_DEFAULTS.learnedHalfLifeDays,
+    confirmGapHours: cfg.confirmGapHours,
+    clampTolerance: cfg.clampTolerance,
+    seenAt,
+  };
+}
+
+/** `store.applySelfOps` options from `config.memory`: `maxSelfFacts` validated (the store refuses
+ * anything but a number of at least 0; config.json's 20 otherwise), stamped `nowMs`. */
+function selfOpsOptions(cfg, nowMs) {
+  const max = cfg.maxSelfFacts;
+  return {
+    maxSelfFacts: typeof max === 'number' && Number.isFinite(max) && max >= 0 ? max : MEMORY_LIMIT_DEFAULTS.maxSelfFacts,
+    clampTolerance: cfg.clampTolerance,
+    now: nowMs,
   };
 }
 
@@ -1212,15 +1332,7 @@ export function applyMemoryUpdate(
     clampTolerance: cfg.clampTolerance,
   });
   if (learned) {
-    store.applyLearnedOps(guildId, learned.ops, {
-      maxLearned: cfg.maxLearned ?? MEMORY_LIMIT_DEFAULTS.maxLearned,
-      maxLearnedStored: cfg.maxLearnedStored ?? MEMORY_LIMIT_DEFAULTS.maxLearnedStored,
-      learnedChars: cfg.learnedChars ?? MEMORY_LIMIT_DEFAULTS.learnedChars,
-      learnedHalfLifeDays: cfg.learnedHalfLifeDays ?? MEMORY_LIMIT_DEFAULTS.learnedHalfLifeDays,
-      confirmGapHours: cfg.confirmGapHours,
-      clampTolerance: cfg.clampTolerance,
-      seenAt: timing?.seenAt ?? relationships?.now ?? episodes?.now ?? Date.now(),
-    });
+    store.applyLearnedOps(guildId, learned.ops, learnedOpsOptions(cfg, timing?.seenAt ?? relationships?.now ?? episodes?.now ?? Date.now()));
     result.learned = learned.added;
   }
 
@@ -1339,6 +1451,160 @@ export function applyPrivateUpdate(store, guildId, userId, update, cfg, { relati
 }
 
 /**
+ * Whether stage A stored what a reason or a feeling item fills in later, so the item has an
+ * address: a reason item needs an attitude history entry stamped its `payload.at` (none when the
+ * score did not move -- at its bound, damped to nothing -- or no history is kept), a feeling item
+ * a stored episode added at `payload.at` with exactly its `date` and `what` (none for a repeat of
+ * a moment stored earlier, or one evicted on arrival). Every other kind needs nothing stored.
+ * @param {object} item  An item of src/memory/voice.js#splitDecision.
+ * @param {(item: object) => (object|null)} holderOf  The stored profile, or private layer, it is about.
+ * @returns {boolean}
+ */
+function hasVoiceAddress(item, holderOf) {
+  if (item.kind !== 'reason' && item.kind !== 'feeling') return true;
+  const holder = holderOf(item);
+  const { at, date, what } = item.payload ?? {};
+  if (item.kind === 'reason') {
+    const history = holder?.affinity?.history;
+    return Array.isArray(history) && history.some((move) => move?.ts === at);
+  }
+  const stored = holder?.episodes;
+  return Array.isArray(stored) && stored.some((ep) => ep?.addedAt === at && ep.date === date && ep.what === what);
+}
+
+/**
+ * Run the store writes src/memory/voice.js#degradedApply planned for items that left the voice
+ * queue unworded: a feeling keeps stage A's tone (store.fillEpisodeFeeling, in the item's layer),
+ * a lesson and a self fact are stored from their brief. Those are the only kinds that path
+ * writes; any other write is skipped.
+ * @param {object} store
+ * @param {string} guildId
+ * @param {object[]} writes  degradedApply's `writes`.
+ * @param {object} cfg       `config.memory`.
+ * @param {number} nowMs     The batch clock (stamps a changed self list).
+ * @returns {number}  The writes that landed.
+ */
+function runDegradedWrites(store, guildId, writes, cfg, nowMs) {
+  let landed = 0;
+  for (const write of writes) {
+    if (write.kind === 'feeling') {
+      const episode = { at: write.at, date: write.date, what: write.what };
+      if (store.fillEpisodeFeeling(guildId, write.userId, episode, write.text, { layer: write.layer, clampTolerance: cfg.clampTolerance })) landed += 1;
+    } else if (write.kind === 'learned') {
+      const add = { text: write.text };
+      if (write.from) add.from = write.from;
+      if (write.sure === false) add.sure = false;
+      store.applyLearnedOps(guildId, { add: [add], seen: [], remove: [] }, learnedOpsOptions(cfg, write.seenAt));
+      landed += 1;
+    } else if (write.kind === 'self') {
+      landed += store.applySelfOps(guildId, { add: [write.text] }, selfOpsOptions(cfg, nowMs)).added;
+    }
+  }
+  return landed;
+}
+
+/**
+ * The voice half of one stage A batch, run right after its neutral part was stored on the clock
+ * `nowMs` the split used: drops the reason and feeling items that have nothing to fill
+ * (`hasVoiceAddress`), folds the rest into the guild's voice queue in one synchronous
+ * read-modify-write (store.updateVoiceQueue with src/memory/voice.js#mergeIntoQueue, so an item a
+ * portrait refresh queued meanwhile stays), and sends what that pushed past
+ * `memory.voice.queueMax` down the degraded path at once (logged as `memory: voice dropped`,
+ * counts only). Nothing here waits for the voice model.
+ * @param {object} store
+ * @param {string} guildId
+ * @param {{ items: object[], dropped: { off: number, foreign: number, shape: number } }} split
+ *   splitDecision's result.
+ * @param {object} config  The live config.
+ * @param {number} nowMs
+ * @returns {{ voiceQueued: number, voiceOverflow: number, voiceDegraded: number, voiceDropped: number }}
+ *   `voiceQueued`: items put in the queue, new or folded into a queued one; `voiceOverflow`:
+ *   queued items pushed out past the cap; `voiceDegraded`: their degraded writes that landed;
+ *   `voiceDropped`: briefs never queued (a switched-off feature, a member who is not an author of
+ *   the batch, a shape the split cannot read, nothing stored to fill).
+ */
+function queueStageA(store, guildId, split, config, nowMs) {
+  const holderOf = (item) => (item.layer === 'private' ? store.getPrivate(guildId, item.userId) : store.getUser(guildId, item.userId));
+  const items = split.items.filter((item) => hasVoiceAddress(item, holderOf));
+  const { off, foreign, shape } = split.dropped;
+  const counts = { voiceQueued: 0, voiceOverflow: 0, voiceDegraded: 0, voiceDropped: off + foreign + shape + split.items.length - items.length };
+  if (items.length === 0) return counts;
+
+  const { overflow, added, merged } = store.updateVoiceQueue(guildId, (queue) => mergeIntoQueue(queue, items, nowMs, config));
+  counts.voiceQueued = added + merged;
+  counts.voiceOverflow = overflow.length;
+  if (overflow.length > 0) {
+    const hasMember = (userId, layer) => holderOf({ userId, layer }) != null;
+    const { writes } = degradedApply(overflow, { config, hasMember });
+    counts.voiceDegraded = runDegradedWrites(store, guildId, writes, config.memory ?? {}, nowMs);
+    log.info('memory: voice dropped', { guildId, expired: 0, overflow: overflow.length, degraded: counts.voiceDegraded });
+  }
+  return counts;
+}
+
+/**
+ * Stage A of a guild batch (the two-stage analyzer, see `analyzerMode`): split the parsed
+ * prompts/memory-decide.md answer (src/memory/voice.js#splitDecision), store its neutral part at
+ * once through `applyMemoryUpdate` with the options a single-stage batch gets (round 2's roster
+ * rules included: a `<known_members>` member gets an alias and nothing else), the attitude delta
+ * and the episodes (feeling empty) among it; apply its `self.remove` list; then queue the briefs
+ * (`queueStageA`). `nowMs` is the batch's one clock value: the split addresses a reason and a
+ * feeling by it, so `options.relationships.now` and `options.episodes.now` must be it too.
+ * @param {object} store
+ * @param {string} guildId
+ * @param {unknown} decision  The parsed stage A answer; untrusted.
+ * @param {object} config     The live config.
+ * @param {Set<string>} knownUserIds  The batch's authors.
+ * @param {object} options    `applyMemoryUpdate`'s options.
+ * @param {number} nowMs
+ * @returns {object}  `applyMemoryUpdate`'s result (its `portraitDropped` also counting the
+ *   `character` / `style` / `portrait` keys the split dropped, `self` true when a stored self fact
+ *   was removed) plus `queueStageA`'s counts.
+ */
+function applyDecision(store, guildId, decision, config, knownUserIds, options, nowMs) {
+  const cfg = config.memory ?? {};
+  const { tokenize, isKnownId } = makeTokenizers(store, guildId, knownUserIds, options.batchAuthorNames);
+  const split = splitDecision(decision, { config, nowMs, knownUserIds, tokenize, isKnownId, seenAt: options.timing?.seenAt });
+  const result = applyMemoryUpdate(store, guildId, split.neutral, cfg, knownUserIds, options);
+  result.portraitDropped += split.dropped.portrait;
+  if (split.selfRemove.length > 0) {
+    result.self = store.applySelfOps(guildId, { remove: split.selfRemove }, selfOpsOptions(cfg, nowMs)).removed > 0;
+  }
+  return { ...result, ...queueStageA(store, guildId, split, config, nowMs) };
+}
+
+/**
+ * Stage A of a private batch: the same split (`layer: 'private'`), its neutral part stored in the
+ * member's private layer only through `applyPrivateUpdate` (which drops and counts every public
+ * key, so nothing said in private reaches the public profile or the server), its briefs queued as
+ * private items of that member (`queueStageA`). `nowMs` as for `applyDecision`.
+ * @param {object} store
+ * @param {string} guildId
+ * @param {string} userId     The DM partner.
+ * @param {unknown} decision  The parsed stage A answer; untrusted.
+ * @param {object} config     The live config.
+ * @param {object} options    `applyPrivateUpdate`'s options.
+ * @param {number} nowMs
+ * @returns {object}  `applyPrivateUpdate`'s result (`dropped.portrait` also counting the portrait
+ *   keys the split dropped, `dropped.self` also the claims of a stage A `self` object's `add` and
+ *   `remove` lists, which applyPrivateUpdate counts only in the single-stage list shape) plus
+ *   `queueStageA`'s counts.
+ */
+function applyPrivateDecision(store, guildId, userId, decision, config, options, nowMs) {
+  const id = String(userId);
+  const knownUserIds = new Set([id]);
+  const { tokenize, isKnownId } = makeTokenizers(store, guildId, knownUserIds, options.batchAuthorNames);
+  const split = splitDecision(decision, { config, nowMs, knownUserIds, tokenize, isKnownId, seenAt: options.timing?.seenAt, layer: 'private' });
+  const result = applyPrivateUpdate(store, guildId, id, split.neutral, config.memory ?? {}, options);
+  result.dropped.portrait += split.dropped.portrait;
+  const { self } = split.neutral;
+  if (isPlainObject(self)) {
+    for (const list of [self.add, self.remove]) if (Array.isArray(list)) result.dropped.self += list.length;
+  }
+  return { ...result, ...queueStageA(store, guildId, split, config, nowMs) };
+}
+
+/**
  * Record that a normalized message happened, for the counters kept on a
  * user's profile and a channel's map entry: `touchUser` (skipped for the
  * persona's own messages) and `touchChannel`, whose `topWriters` tally also
@@ -1435,6 +1701,18 @@ export function memorySwitches(config, now) {
   return { relationships, episodes, lore };
 }
 
+/** `{ stage }` of an analyzer outcome for a log line, or nothing: an outcome carries `stage` only
+ * while `features.memoryTwoStage` was on for its batch, so with the switch off a line is as before. */
+function stageField(outcome) {
+  return outcome?.stage ? { stage: outcome.stage } : {};
+}
+
+/** `stageField` plus `voiceQueued` (the briefs the batch put in the voice queue, 0 when the
+ * single-stage path ran), for an applied-update line. */
+function stageLogFields(outcome) {
+  return outcome?.stage ? { ...stageField(outcome), voiceQueued: outcome.result?.voiceQueued ?? 0 } : {};
+}
+
 /** `nameOf` for buildMemoryRequest's token resolution: a member's current
  * stored name, or null when the guild has no profile for that id -- see
  * docs/prompt-contract.md, "Members are referred to by id, never by
@@ -1467,6 +1745,26 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
   // for less, floored at MIN_LIVE_BATCH messages; deleted (back to 1) on the
   // next success. Never persisted: a restart always starts at normal size.
   const sizeFactors = new Map();
+  // Whether the two-stage switch is on while its prompts are not there (the batches run single):
+  // `memory: two-stage unavailable` is logged once each time this turns true.
+  let twoStageUnavailable = false;
+
+  /**
+   * The analyzer one batch runs (`analyzerMode`), read from the live config and prompts at the
+   * moment of use. With the switch on and a prompt missing it runs today's single-stage path (on
+   * the voice model, see `batchRequestOptions`) and warns once per change of that state (again
+   * only after the prompts came back and went again).
+   * @returns {'single'|'two'}
+   */
+  function stageOfBatch() {
+    const stage = analyzerMode(hot.config, hot.prompts);
+    const unavailable = hot.config.features?.memoryTwoStage === true && stage === 'single';
+    if (unavailable && !twoStageUnavailable) {
+      log.warn('memory: two-stage unavailable', { reason: 'no-prompt', missing: missingTwoStagePrompts(hot.prompts) });
+    }
+    twoStageUnavailable = unavailable;
+    return stage;
+  }
 
   /**
    * Called for every guild message the persona sees, including its own.
@@ -1561,10 +1859,18 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * only those sent may get anything from the answer: an alias.
    * `staleRelationships`: how many profiles went with a `relationshipStale` marker.
    *
+   * With `features.memoryTwoStage` on, the request is stage A (see `analyzerMode`,
+   * `applyDecision`): its neutral part is stored at once, its briefs are queued for the voice
+   * model, and `result` also carries the queue counts (`voiceQueued`, `voiceOverflow`,
+   * `voiceDegraded`, `voiceDropped`). Every outcome then carries `stage`: the analyzer that ran
+   * (`two`, or `single` when a two-stage prompt is missing: today's request, sent on the voice
+   * model). With the switch off there is no `stage` and everything is as before.
+   *
    * @param {string} guildId
    * @param {object[]} messages  Slim messages (oldest first) to summarize; NOT read from or removed off any buffer.
    * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, shown?: number, trimmed?: number,
-   *   roster?: number, rosterCandidates?: number, rosterTokens?: number, staleRelationships?: number, error?: Error }>}
+   *   roster?: number, rosterCandidates?: number, rosterTokens?: number, staleRelationships?: number, error?: Error,
+   *   stage?: 'single'|'two' }>}
    */
   async function analyze(guildId, messages) {
     let context;
@@ -1586,27 +1892,23 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         }
         return { profiles: context.profiles, channels: context.channels, rosterProfiles };
       },
-      (update, { relationships, episodes, lore }, { rosterIds }) => {
+      (update, { relationships, episodes, lore }, { rosterIds, stage, nowMs }) => {
         const cfg = hot.config.memory;
         const knownUserIds = new Set(context.authorIds.map(String));
         const knownChannelIds = new Set(context.channelIds.map(String));
-        const result = applyMemoryUpdate(
-          store,
-          guildId,
-          update,
-          cfg,
-          knownUserIds,
-          {
-            knownChannelIds,
-            aliasOnlyIds: new Set(rosterIds),
-            relationships,
-            episodes,
-            lore,
-            timing: computeSeenAt(messages),
-            batchAuthorNames: batchAuthorNamesMap(messages),
-            relationshipChars: voiceLimits(hot.config).relationship,
-          },
-        );
+        const options = {
+          knownChannelIds,
+          aliasOnlyIds: new Set(rosterIds),
+          relationships,
+          episodes,
+          lore,
+          timing: computeSeenAt(messages),
+          batchAuthorNames: batchAuthorNamesMap(messages),
+          relationshipChars: voiceLimits(hot.config).relationship,
+        };
+        // Stage A drops every portrait key, the `portrait` cue included: nothing to report.
+        if (stage === 'two') return applyDecision(store, guildId, update, hot.config, knownUserIds, options, nowMs);
+        const result = applyMemoryUpdate(store, guildId, update, cfg, knownUserIds, options);
 
         if (typeof onPortraitRequest === 'function') {
           for (const { userId, reason } of result.portraitRequests) onPortraitRequest(guildId, userId, reason);
@@ -1627,12 +1929,17 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * reason), plus their public profile as read-only prose and the
    * usual read-only guild/lore context; only `users[userId]` of the answer is
    * applied, to the private layer (`applyPrivateUpdate`). A success stamps the
-   * private layer's `lastSeen` (and `firstSeen` the first time).
+   * private layer's `lastSeen` (and `firstSeen` the first time). With
+   * `features.memoryTwoStage` on, the same split as `analyze()`'s
+   * (`applyPrivateDecision`): the neutral part lands in the private layer
+   * only, the briefs are queued as that member's private items, and the
+   * outcome carries `stage` and `result` the queue counts, as `analyze()`'s.
    * @param {string} guildId
    * @param {string} userId  The DM partner.
    * @param {object[]} messages  Slim buffered direct messages, oldest first.
    * @returns {Promise<{ ok: boolean, usage: object|null, estimated: number, result: object|null, shown?: number, trimmed?: number,
-   *   roster?: number, rosterCandidates?: number, rosterTokens?: number, staleRelationships?: number, error?: Error }>}
+   *   roster?: number, rosterCandidates?: number, rosterTokens?: number, staleRelationships?: number, error?: Error,
+   *   stage?: 'single'|'two' }>}
    *   The `roster*` counts are always 0 here: a private batch carries no `<known_members>`.
    *   `staleRelationships` is 0 or 1: the partner's private text went with a marker or not.
    */
@@ -1652,21 +1959,18 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         const view = { ...privateProfile, affinity };
         return { profiles: { [id]: view }, channels: {}, privateChat: { publicProfile, now: now() } };
       },
-      (update, { relationships, episodes }) => {
-        const result = applyPrivateUpdate(
-          store,
-          guildId,
-          id,
-          update,
-          hot.config.memory,
-          {
-            relationships,
-            episodes,
-            timing: computeSeenAt(messages),
-            batchAuthorNames: batchAuthorNamesMap(messages),
-            relationshipChars: voiceLimits(hot.config).relationship,
-          },
-        );
+      (update, { relationships, episodes }, { stage, nowMs }) => {
+        const options = {
+          relationships,
+          episodes,
+          timing: computeSeenAt(messages),
+          batchAuthorNames: batchAuthorNamesMap(messages),
+          relationshipChars: voiceLimits(hot.config).relationship,
+        };
+        const result =
+          stage === 'two'
+            ? applyPrivateDecision(store, guildId, id, update, hot.config, options, nowMs)
+            : applyPrivateUpdate(store, guildId, id, update, hot.config.memory, options);
         store.touchPrivateSeen(guildId, id, now());
         return result;
       },
@@ -1760,18 +2064,26 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * Build, send, parse, apply: the body shared by `analyze()` and
    * `analyzePrivate()`. `requestInput()` (called only once a memory prompt is
    * configured) returns the mode-specific `buildMemoryRequest` fields;
-   * `applyUpdate(update, switches, { rosterIds })` stores the parsed answer and
+   * `applyUpdate(update, switches, { rosterIds, stage, nowMs })` stores the parsed answer and
    * returns the result to report (`rosterIds`: the roster members the request
-   * carried, see `buildMemoryRequest`). A failure's `reason`: 'no-prompt', 'token-limit',
+   * carried, see `buildMemoryRequest`; `stage`: `analyzerMode`'s; `nowMs`: in the
+   * `two` stage only, the one clock value the switches carry as `now`, for the split
+   * and the neutral write alike). A failure's `reason`: 'no-prompt', 'token-limit',
    * 'llm-error' (nothing billed), 'truncated', 'bad-json' (the answer did not
-   * parse) or 'apply-error' (it parsed, the store refused it).
+   * parse) or 'apply-error' (it parsed, the store refused it) -- the same in both
+   * stages, so a failed stage A batch is halved or backed off exactly as today.
+   * With `features.memoryTwoStage` on, every outcome carries `stage`, and the request goes out
+   * on the model `batchRequestOptions` names: stage A on `memory.model`, the single-stage
+   * fallback (a two-stage prompt missing) on the voice model.
    */
   async function analyzeBatch(guildId, messages, requestInput, applyUpdate) {
-    const cfg = hot.config.memory;
-    const promptText = hot.prompts.memory;
+    const stage = stageOfBatch();
+    // Said only while the switch is on: with it off, outcomes and log lines are as before.
+    const marker = hot.config.features?.memoryTwoStage === true ? { stage } : {};
+    const promptText = stage === 'two' ? hot.prompts['memory-decide'] : hot.prompts.memory;
     if (!promptText) {
       log.warn('memory: no memory prompt configured, skipping', { guildId });
-      return { ok: false, usage: null, estimated: 0, result: null, reason: 'no-prompt' };
+      return { ok: false, usage: null, estimated: 0, result: null, reason: 'no-prompt', ...marker };
     }
 
     const input = requestInput();
@@ -1794,20 +2106,12 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         reads,
         nameOf: storeNameOf(store, guildId),
         ...input,
+        stage: stage === 'two' ? 'decide' : 'single',
       });
       fit = { shown, trimmed, roster: sentRoster.length, rosterCandidates, rosterTokens, staleRelationships };
       rosterIds = sentRoster;
 
-      completion = await llm.complete(llmMessages, {
-        model: cfg.model || undefined,
-        role: 'analyzer',
-        maxOutputTokens: cfg.maxOutputTokens,
-        temperature: analyzerTemperature(hot.config),
-        // A 150-message batch with an 8000-token answer on a large model can
-        // take longer than the chat timeout -- the analyzer gets its own,
-        // much larger budget (see docs/prompt-contract.md, "The analyzer").
-        timeoutMs: cfg.timeoutMs ?? hot.config.llm.timeoutMs,
-      });
+      completion = await llm.complete(llmMessages, batchRequestOptions(hot.config, stage));
     } catch (err) {
       // Nothing was billed: the request never left this process, or the
       // provider never returned a completion. `status` (the HTTP status when
@@ -1820,7 +2124,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       // token cap, full stop. Both surface as 'token-limit' so a caller can
       // split the batch instead of retrying it unchanged.
       const reason = err instanceof TokenLimitError || err instanceof SectionsTooLargeError ? 'token-limit' : 'llm-error';
-      return { ok: false, usage: null, estimated: 0, result: null, error: err, reason, detail: detailOf(err), status: err?.statusCode };
+      return { ok: false, usage: null, estimated: 0, result: null, error: err, reason, detail: detailOf(err), status: err?.statusCode, ...marker };
     }
 
     const usage = completion.usage ?? null;
@@ -1834,17 +2138,25 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       // charges it. `reason` tells a cut-off completion (never going to
       // parse, no matter how many times it is retried) from plain bad JSON.
       const reason = looksTruncated(completion.text, completion.finishReason) ? 'truncated' : 'bad-json';
-      return { ok: false, usage, estimated, result: null, error: err, reason, detail: errorNameOf(err) };
+      return { ok: false, usage, estimated, result: null, error: err, reason, detail: errorNameOf(err), ...marker };
     }
 
     try {
-      const result = applyUpdate(update, applySwitches(), { rosterIds });
-      return { ok: true, usage, estimated, result, ...fit };
+      let result;
+      if (stage === 'two') {
+        // One clock read for the whole stage A apply: the split addresses the attitude move and
+        // the episodes it stores by this instant, so the switches stamp them with it too.
+        const nowMs = now();
+        result = applyUpdate(update, memorySwitches(hot.config, () => nowMs), { rosterIds, stage, nowMs });
+      } else {
+        result = applyUpdate(update, applySwitches(), { rosterIds, stage });
+      }
+      return { ok: true, usage, estimated, result, ...fit, ...marker };
     } catch (err) {
       // A parsed answer the store failed to take: not the answer's size, so the batch is not
       // halved (see recordFailure). Logged by the error's name only.
-      log.warn('memory: the analyzer answer could not be applied', { guildId, reason: 'apply-error', error: errorNameOf(err) });
-      return { ok: false, usage, estimated, result: null, error: err, reason: 'apply-error', detail: errorNameOf(err) };
+      log.warn('memory: the analyzer answer could not be applied', { guildId, reason: 'apply-error', error: errorNameOf(err), ...marker });
+      return { ok: false, usage, estimated, result: null, error: err, reason: 'apply-error', detail: errorNameOf(err), ...marker };
     }
   }
 
@@ -1936,10 +2248,11 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           ...counts,
           portraitRequests: portraitRequests.length,
           emojiUsage,
+          ...stageLogFields(outcome),
         });
         return;
       }
-      recordFailure(guildId, outcome, 'memory: update', { guildId });
+      recordFailure(guildId, outcome, 'memory: update', { guildId, ...stageField(outcome) });
     } finally {
       settle(guildId);
     }
@@ -1977,10 +2290,11 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           trimmed: outcome.trimmed,
           staleRelationships: outcome.staleRelationships,
           ...outcome.result,
+          ...stageLogFields(outcome),
         });
         return;
       }
-      recordFailure(key, outcome, 'memory: private update', { guildId });
+      recordFailure(key, outcome, 'memory: private update', { guildId, ...stageField(outcome) });
     } finally {
       settle(key);
     }

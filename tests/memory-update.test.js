@@ -8,8 +8,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createStore } from '../src/memory/store.js';
-import { isDue, buildMemoryRequest, applyMemoryUpdate, applyPrivateUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap, characterText, analyzerTemperature } from '../src/memory/update.js';
-import { voiceLimits } from '../src/memory/voice.js';
+import { isDue, buildMemoryRequest, applyMemoryUpdate, applyPrivateUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap, characterText, analyzerTemperature, analyzerMode, feedsCalibration } from '../src/memory/update.js';
+import { voiceLimits, mergeIntoQueue } from '../src/memory/voice.js';
 import { createCalibrator, estimateTokens } from '../src/llm/tokens.js';
 import { formatTranscript } from '../src/discord/format.js';
 import { TokenLimitError } from '../src/llm/openrouter.js';
@@ -6199,5 +6199,757 @@ test('runPrivate: "memory: private update applied" logs staleRelationships', asy
     const applied = logs.find((entry) => entry.msg === 'memory: private update applied');
     assert.equal(applied.staleRelationships, 1);
     assert.equal(applied.relationships, 0);
+  });
+});
+
+// ---- two-stage analyzer, stage A (features.memoryTwoStage) -----------------
+
+const DECIDE_PROMPT = 'decide prompt for {{name}}, relationship limit {{relationshipChars}}';
+const STAGE_A_AT = Date.UTC(2026, 0, 9, 12);
+
+/** A live view with the two-stage switch on and all three analyzer prompts present. */
+function twoStageHot(memoryOverrides = {}, configOverrides = {}) {
+  return {
+    config: makeConfig({ features: { memoryTwoStage: true }, memory: { ...makeConfig().memory, ...memoryOverrides }, ...configOverrides }),
+    prompts: { memory: 'memory system prompt', 'memory-decide': DECIDE_PROMPT, 'memory-voice': 'voice system prompt', labels },
+  };
+}
+
+/** An llm whose every answer is `answer` (an object goes out as JSON); `calls` records each request. */
+function recordingLlm(answer) {
+  const calls = [];
+  return {
+    calls,
+    complete: async (messages, options) => {
+      calls.push({ messages, options });
+      return { text: typeof answer === 'string' ? answer : JSON.stringify(answer) };
+    },
+  };
+}
+
+/** The kinds of a guild's queued voice items, sorted. */
+function queuedKinds(store, guildId) {
+  return store.getVoiceQueue(guildId).map((item) => item.kind).sort();
+}
+
+test('analyzerMode: two only with the switch on and both prompts present', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(shipped.features.memoryTwoStage, false, 'off in the tracked config');
+  const prompts = { memory: 'm', 'memory-decide': 'd', 'memory-voice': 'v' };
+  const on = { features: { memoryTwoStage: true } };
+  assert.equal(analyzerMode(on, prompts), 'two');
+  assert.equal(analyzerMode({ features: { memoryTwoStage: false } }, prompts), 'single');
+  assert.equal(analyzerMode({ features: {} }, prompts), 'single', 'a missing key counts as off');
+  assert.equal(analyzerMode({ features: { memoryTwoStage: 'true' } }, prompts), 'single', 'read === true');
+  assert.equal(analyzerMode(on, { ...prompts, 'memory-decide': '  \n' }), 'single', 'a blank stage A prompt');
+  assert.equal(analyzerMode(on, { memory: 'm', 'memory-voice': 'v' }), 'single', 'no stage A prompt');
+  assert.equal(analyzerMode(on, { memory: 'm', 'memory-decide': 'd' }), 'single', 'no voice prompt');
+  assert.equal(analyzerMode(undefined, prompts), 'single');
+  assert.equal(analyzerMode(on, undefined), 'single');
+});
+
+test('feedsCalibration: only a request on llm.model feeds the shared ratio', () => {
+  const config = { llm: { model: 'anthropic/claude-x' } };
+  assert.equal(feedsCalibration(config, 'anthropic/claude-x'), true);
+  for (const unset of [null, undefined, '']) {
+    assert.equal(feedsCalibration(config, unset), true, 'no model named: the request goes out on llm.model');
+  }
+  assert.equal(feedsCalibration(config, 'openai/gpt-y'), false);
+  assert.equal(feedsCalibration({ llm: { model: 'openai/gpt-y' } }, 'openai/gpt-y'), true);
+});
+
+test('buildMemoryRequest: the decide stage uses memory-decide and leaves style out of the profile view', () => {
+  const input = {
+    prompts: { memory: 'single prompt for {{name}}', 'memory-decide': DECIDE_PROMPT, labels },
+    config: makeConfig({ relationships: { textChars: 450 } }),
+    calibrator: createCalibrator(),
+    profiles: { 1: { names: ['Aria'], character: 'μιλάει πολύ', style: 'σύντομες φράσεις', relationship: 'φίλοι', interests: [], details: [] } },
+    guildMemory: {},
+    messages: [slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: STAGE_A_AT })],
+    selfName: 'Nept',
+    rosterProfiles: [poolProfile(ZOE, ['Zoé'], '2026-01-08T00:00:00.000Z')],
+  };
+  const single = buildMemoryRequest(input);
+  const decide = buildMemoryRequest({ ...input, stage: 'decide' });
+
+  assert.equal(single.messages[0].content, 'single prompt for Nept');
+  assert.equal(decide.messages[0].content, 'decide prompt for Nept, relationship limit 450');
+  const view = JSON.parse(blockBody(decide.messages[1].content, 'existing_profiles'))['1'];
+  assert.equal(view.style, undefined, 'stage A writes no portrait');
+  assert.equal(view.character, 'μιλάει πολύ');
+  assert.equal(view.relationship, 'φίλοι');
+  assert.equal(JSON.parse(blockBody(single.messages[1].content, 'existing_profiles'))['1'].style, 'σύντομες φράσεις');
+  assert.equal(
+    decide.messages[1].content,
+    single.messages[1].content.replace(',"style":"σύντομες φράσεις"', ''),
+    'the rest of the user message is the single-stage one',
+  );
+  const { messages: singleMessages, ...singleFit } = single;
+  const { messages: decideMessages, ...decideFit } = decide;
+  assert.equal(singleMessages.length, decideMessages.length);
+  assert.deepEqual(decideFit, singleFit, 'roster, markers, fit and counts as in a single-stage request');
+  assert.deepEqual(decideFit.rosterIds, [ZOE]);
+});
+
+test('analyze (two-stage): neutral parts are stored at once and voice items queued; nothing waits for the voice model', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', STAGE_A_AT - 60_000);
+    store.touchUser(guildId, ZOE, 'Zoé', STAGE_A_AT - DAY_MS); // a stored member: a lesson's known teacher
+    store.adjustAffinity(guildId, '1', 10, 'παλιός λόγος', { maxDelta: 15, historySize: 10, damping: false, now: STAGE_A_AT - DAY_MS });
+    store.updateGuild(guildId, { patterns: 'παλιά μοτίβα', starters: 'παλιές αρχές', self: ['λατρεύει τον καφέ', 'φοβάται τις αράχνες'] });
+    const llm = recordingLlm({
+      users: {
+        1: {
+          relationship: 'έγιναν φίλοι μετά το παιχνίδι',
+          character: 'νέο πορτρέτο',
+          style: 'νέο ύφος',
+          portrait: 'ξαναδές το πορτρέτο',
+          interests: { add: [{ topic: 'σκάκι', note: 'παίζει' }] },
+          details: { add: [{ text: 'μένει κοντά στη θάλασσα' }] },
+          aliases: { add: ['Αρι'] },
+          affinity: { delta: 4, event: 'τη βοήθησε με το παζλ' },
+          episodes: [{ date: '2026-01-09', what: 'έλυσαν μαζί ένα παζλ', quote: 'το βρήκα!', weight: 3, tone: 'χαρούμενη στιγμή' }],
+        },
+      },
+      guild: {
+        patterns: 'περισσότερα αστεία το βράδυ',
+        starters: 'ερωτήσεις για παιχνίδια',
+        injokes: ['η πάπια'],
+        learned: { add: [{ brief: 'γκγκ σημαίνει καληνύχτα', from: `Zoé (id:${ZOE})` }] },
+      },
+      channels: { c1: { purpose: 'γενική κουβέντα' } },
+      lore: [{ title: 'Η μεγάλη πάπια', keys: ['πάπια'], text: 'Ένα παλιό αστείο του σέρβερ.' }],
+      self: { add: ['της αρέσουν τα παζλ'], remove: ['Φοβάται  τις αράχνες'] },
+    });
+    // Every read of the clock moves it: the split and the neutral write must share one value.
+    let clock = STAGE_A_AT;
+    const cues = [];
+    const updater = createMemoryUpdater({
+      hot: twoStageHot({}, { relationships: { damping: false } }),
+      store,
+      llm,
+      calibrator: createCalibrator(),
+      getSelfName: () => 'Nept',
+      now: () => (clock += 1000),
+      onPortraitRequest: (...args) => cues.push(args),
+    });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1', channelId: 'c1', authorId: '1', authorName: 'Aria', content: 'το βρήκα!', ts: STAGE_A_AT })]);
+
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.stage, 'two');
+    assert.equal(llm.calls.length, 1, 'one stage A request per batch, no voice request');
+    assert.equal(llm.calls[0].messages[0].content, 'decide prompt for Nept, relationship limit 600');
+
+    const aria = store.getUser(guildId, '1');
+    assert.deepEqual(aria.interests.map((item) => item.topic), ['σκάκι']);
+    assert.deepEqual(aria.details.map((item) => item.text), ['μένει κοντά στη θάλασσα']);
+    assert.deepEqual(aria.aliases.map((item) => item.name), ['Αρι']);
+    assert.equal(aria.character, '', 'a portrait is never written from a stream batch');
+    assert.equal(aria.style, '');
+    assert.equal(aria.relationship, '', 'the relationship waits for the voice model');
+    assert.equal(aria.affinity.score, 14, 'the delta lands at once');
+    assert.equal(aria.affinity.reason, 'παλιός λόγος', 'the stored reason stays until the worded one arrives');
+    const move = aria.affinity.history.at(-1);
+    assert.equal(move.delta, 4);
+    assert.equal(aria.episodes.length, 1);
+    const [episode] = aria.episodes;
+    assert.equal(episode.what, 'έλυσαν μαζί ένα παζλ');
+    assert.equal(episode.quote, 'το βρήκα!');
+    assert.equal(episode.weight, 3);
+    assert.equal(episode.feeling, '', 'stored at once with an empty feeling');
+
+    const guild = store.getGuild(guildId);
+    assert.equal(guild.patterns, 'παλιά μοτίβα', 'server notes wait for the voice model');
+    assert.equal(guild.starters, 'παλιές αρχές');
+    assert.deepEqual(guild.injokes, ['η πάπια']);
+    assert.deepEqual(guild.learned, [], 'a lesson waits for the voice model');
+    assert.deepEqual(guild.self, ['λατρεύει τον καφέ'], 'a removal applies at once, an addition waits');
+    assert.equal(store.getChannel(guildId, 'c1').purpose, 'γενική κουβέντα');
+    assert.deepEqual(store.getLore(guildId).map((entry) => entry.title), ['Η μεγάλη πάπια']);
+
+    const queue = store.getVoiceQueue(guildId);
+    assert.deepEqual(queuedKinds(store, guildId), ['feeling', 'learned', 'patterns', 'reason', 'relationship', 'self', 'starters']);
+    const byKind = Object.fromEntries(queue.map((item) => [item.kind, item]));
+    assert.equal(byKind.relationship.userId, '1');
+    assert.deepEqual(byKind.relationship.brief, ['έγιναν φίλοι μετά το παιχνίδι']);
+    assert.deepEqual(byKind.reason.brief, ['τη βοήθησε με το παζλ']);
+    assert.deepEqual(byKind.reason.payload, { delta: 4, at: move.ts });
+    assert.deepEqual(byKind.feeling.brief, ['χαρούμενη στιγμή']);
+    assert.deepEqual(byKind.feeling.payload, { at: episode.addedAt, date: '2026-01-09', what: episode.what, quote: 'το βρήκα!' });
+    assert.equal(move.ts, episode.addedAt, 'the split and the neutral write share one clock value');
+    assert.equal(byKind.learned.payload.from, `<@${ZOE}>`, 'the teacher reference turned into the token');
+    assert.deepEqual(byKind.self.brief, ['της αρέσουν τα παζλ']);
+    assert.ok(queue.every((item) => item.layer === undefined), 'public items');
+
+    assert.equal(outcome.result.voiceQueued, 7);
+    assert.equal(outcome.result.portraitDropped, 3, 'character, style and the portrait cue, counted');
+    assert.deepEqual(cues, [], 'no portrait cue from stage A');
+    assert.equal(outcome.result.self, true);
+    assert.equal(outcome.result.affinity, 1);
+    assert.equal(outcome.result.episodes, 1);
+    assert.equal(outcome.result.relationships, 0);
+
+    // The address a queued item carries is one the store's fill functions (the voice run's writes) find.
+    assert.equal(store.fillAffinityReason(guildId, '1', byKind.reason.payload.at, 'τη βοήθησε'), true);
+    assert.equal(store.fillEpisodeFeeling(guildId, '1', byKind.feeling.payload, 'χάρηκε'), true);
+    assert.equal(store.getUser(guildId, '1').affinity.reason, 'τη βοήθησε');
+    assert.equal(store.getUser(guildId, '1').episodes[0].feeling, 'χάρηκε');
+  });
+});
+
+test('analyze (two-stage): stage A goes to memory.model with role analyzer and skips calibration when that model is not llm.model', async () => {
+  const cases = [
+    { model: 'openai/gpt-z', sent: 'openai/gpt-z', skip: true },
+    { model: null, sent: undefined, skip: false },
+    { model: 'x/y', sent: 'x/y', skip: false },
+  ];
+  for (const { model, sent, skip } of cases) {
+    await withStoreAsync(async (store) => {
+      const llm = recordingLlm({});
+      const hot = twoStageHot({ model, maxOutputTokens: 5555, timeoutMs: 4321, temperature: 0.2 });
+      const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+      const outcome = await updater.analyze('g1', [slimMessage({ id: 'm1' })]);
+
+      assert.equal(outcome.ok, true);
+      const [{ options }] = llm.calls;
+      assert.equal(options.model, sent, `memory.model ${model}`);
+      assert.equal(options.role, 'analyzer');
+      assert.equal(options.skipCalibration, skip, `memory.model ${model}`);
+      assert.equal(options.maxOutputTokens, 5555);
+      assert.equal(options.timeoutMs, 4321);
+      assert.equal(options.temperature, 0.2);
+    });
+  }
+});
+
+test('analyze (two-stage): an alias for a known_members member is stored by stage A alone', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', STAGE_A_AT);
+    store.touchUser(guildId, ZOE, 'Zoé-42%', STAGE_A_AT - DAY_MS);
+    const llm = recordingLlm({
+      users: {
+        [ZOE]: {
+          aliases: { add: ['Ζωή'] },
+          relationship: 'δεν έγραψε τίποτα',
+          affinity: { delta: 3, event: 'την ανέφεραν' },
+          episodes: [{ what: 'την ανέφεραν', tone: 'ουδέτερο' }],
+          interests: { add: [{ topic: 'ποίηση', note: '' }] },
+        },
+      },
+    });
+    const updater = createMemoryUpdater({ hot: twoStageHot(), store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => STAGE_A_AT });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', content: 'η Ζωή είναι η zoé 42', ts: STAGE_A_AT })]);
+
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(Object.keys(JSON.parse(blockBody(llm.calls[0].messages[1].content, 'known_members'))), [ZOE]);
+    const zoe = store.getUser(guildId, ZOE);
+    assert.deepEqual(zoe.aliases.map((item) => item.name), ['Ζωή']);
+    assert.equal(zoe.affinity.score, 0, 'no attitude move for a member who wrote nothing');
+    assert.deepEqual(zoe.episodes, []);
+    assert.deepEqual(zoe.interests, []);
+    assert.deepEqual(store.getVoiceQueue(guildId), [], 'no voice item for a roster member');
+    assert.equal(outcome.result.aliasOnly, 1);
+    assert.equal(outcome.result.droppedFields, 3, 'affinity, episodes and interests');
+    assert.equal(outcome.result.voiceDropped, 3, 'the relationship, reason and feeling briefs');
+  });
+});
+
+test('analyze (two-stage): a reason whose score did not move and a feeling whose moment is already stored are not queued', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', STAGE_A_AT);
+    store.adjustAffinity(guildId, '1', 100, 'λατρεία', { maxDelta: 100, historySize: 10, damping: false, now: STAGE_A_AT - DAY_MS });
+    store.addEpisodes(guildId, '1', [{ date: '2026-01-08', what: 'μοιράστηκαν ένα τραγούδι', weight: 2 }], { maxEpisodes: 20, now: STAGE_A_AT - DAY_MS });
+    const llm = recordingLlm({
+      users: {
+        1: {
+          affinity: { delta: 5, event: 'πάλι καλή' },
+          episodes: [
+            { date: '2026-01-08', what: 'Μοιράστηκαν  ένα τραγούδι', tone: 'ζεστό' },
+            { date: '2026-01-09', what: 'της έφερε λουλούδια', tone: 'έκπληξη' },
+          ],
+        },
+      },
+    });
+    const updater = createMemoryUpdater({ hot: twoStageHot(), store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => STAGE_A_AT });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: STAGE_A_AT })]);
+
+    assert.equal(outcome.ok, true);
+    assert.equal(store.getUser(guildId, '1').affinity.score, 100, 'at its bound: the score did not move');
+    const queue = store.getVoiceQueue(guildId);
+    assert.deepEqual(queue.map((item) => item.kind), ['feeling'], 'nothing to fill for the other two');
+    assert.equal(queue[0].payload.what, 'της έφερε λουλούδια');
+    assert.equal(outcome.result.voiceQueued, 1);
+    assert.equal(outcome.result.voiceDropped, 2);
+  });
+});
+
+test('analyze (two-stage): items pushed past memory.voice.queueMax take the degraded path at once', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const earlier = STAGE_A_AT - 3_600_000;
+    const hot = twoStageHot({ voice: { queueMax: 2 } });
+    store.touchUser(guildId, '1', 'Aria', earlier);
+    store.addEpisodes(guildId, '1', [{ date: '2026-01-09', what: 'γέλασαν με την πάπια', feeling: '' }], { maxEpisodes: 20, now: earlier });
+    store.updateVoiceQueue(guildId, (queue) =>
+      mergeIntoQueue(
+        queue,
+        [
+          { kind: 'feeling', userId: '1', brief: ['ήσυχη χαρά'], payload: { at: new Date(earlier).toISOString(), date: '2026-01-09', what: 'γέλασαν με την πάπια', quote: '' } },
+          { kind: 'self', brief: ['λατρεύει τα μήλα'] },
+        ],
+        earlier,
+        hot.config,
+      ),
+    );
+    const llm = recordingLlm({ users: { 1: { relationship: 'καλή παρέα' } }, guild: { patterns: 'πολλά αστεία' } });
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => STAGE_A_AT });
+
+    const { result: outcome, logs } = await withCapturedLogs(() =>
+      updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: STAGE_A_AT })]),
+    );
+
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(queuedKinds(store, guildId), ['patterns', 'relationship'], 'the two oldest overflowed');
+    assert.equal(store.getUser(guildId, '1').episodes[0].feeling, 'ήσυχη χαρά', 'an overflowing feeling keeps the stage A tone');
+    assert.deepEqual(store.getGuild(guildId).self, ['λατρεύει τα μήλα'], 'an overflowing self fact is stored from its brief');
+    assert.equal(outcome.result.voiceQueued, 2);
+    assert.equal(outcome.result.voiceOverflow, 2);
+    assert.equal(outcome.result.voiceDegraded, 2);
+    const dropped = logs.find((entry) => entry.msg === 'memory: voice dropped');
+    assert.deepEqual(
+      { guildId: dropped.guildId, expired: dropped.expired, overflow: dropped.overflow, degraded: dropped.degraded },
+      { guildId, expired: 0, overflow: 2, degraded: 2 },
+    );
+    assert.ok(!JSON.stringify(logs).includes('ήσυχη'), 'counts only');
+  });
+});
+
+test('analyze (two-stage): an item queued while the stage A request is in flight is kept', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', STAGE_A_AT);
+    const hot = twoStageHot();
+    const llm = {
+      complete: async () => {
+        // A portrait refresh queues a character item meanwhile.
+        store.updateVoiceQueue(guildId, (queue) => mergeIntoQueue(queue, [{ kind: 'character', userId: '1', brief: { add: ['γράφει σύντομα'] } }], STAGE_A_AT, hot.config));
+        return { text: JSON.stringify({ users: { 1: { relationship: 'φιλικά' } } }) };
+      },
+    };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => STAGE_A_AT });
+
+    const outcome = await updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: STAGE_A_AT })]);
+
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(queuedKinds(store, guildId), ['character', 'relationship']);
+  });
+});
+
+test('analyze (two-stage): a missing memory-decide prompt runs the single-stage request on memory.voiceModel and warns once per change', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', STAGE_A_AT);
+    const hot = twoStageHot({ model: 'openai/gpt-z', voiceModel: 'anthropic/voice-v' });
+    delete hot.prompts['memory-decide'];
+    const llm = recordingLlm({ users: { 1: { relationship: 'φίλοι από παλιά' } } });
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => STAGE_A_AT });
+    const batch = (id) => [slimMessage({ id, authorId: '1', authorName: 'Aria', ts: STAGE_A_AT })];
+
+    const { result: outcomes, logs } = await withCapturedLogs(async () => {
+      const seen = [await updater.analyze(guildId, batch('m1')), await updater.analyze(guildId, batch('m2'))];
+      hot.prompts['memory-decide'] = DECIDE_PROMPT;
+      seen.push(await updater.analyze(guildId, batch('m3')));
+      delete hot.prompts['memory-decide'];
+      seen.push(await updater.analyze(guildId, batch('m4')));
+      return seen;
+    });
+
+    assert.deepEqual(outcomes.map((outcome) => outcome.stage), ['single', 'single', 'two', 'single']);
+    assert.deepEqual(
+      llm.calls.map((call) => call.messages[0].content),
+      ['memory system prompt', 'memory system prompt', 'decide prompt for Nept, relationship limit 600', 'memory system prompt'],
+    );
+    assert.deepEqual(
+      llm.calls.map((call) => call.options.model),
+      ['anthropic/voice-v', 'anthropic/voice-v', 'openai/gpt-z', 'anthropic/voice-v'],
+      'the fallback words every voice text, so it goes out on the voice model, never on memory.model',
+    );
+    assert.deepEqual(
+      llm.calls.map((call) => call.options.skipCalibration),
+      [true, true, true, true],
+      'neither model is llm.model',
+    );
+    assert.equal(store.getUser(guildId, '1').relationship, 'φίλοι από παλιά', 'the single-stage answer is applied as today');
+    const warnings = logs.filter((entry) => entry.msg === 'memory: two-stage unavailable');
+    assert.equal(warnings.length, 2, 'once when it became unavailable, once more after it came back and went again');
+    for (const warning of warnings) {
+      assert.equal(warning.level, 'warn');
+      assert.equal(warning.reason, 'no-prompt');
+      assert.deepEqual(warning.missing, ['memory-decide']);
+    }
+  });
+});
+
+test('analyze (two-stage): the single-stage fallback goes out on memory.voiceModel (null = llm.model), never on memory.model; with the switch off as before', async () => {
+  const optionsOf = (hot) =>
+    withStoreAsync(async (store) => {
+      const llm = recordingLlm({});
+      const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+      const { result: outcome } = await withCapturedLogs(() => updater.analyze('g1', [slimMessage({ id: 'm1' })]));
+      assert.equal(outcome.ok, true);
+      return llm.calls[0].options;
+    });
+  const fallback = (memory) => {
+    const hot = twoStageHot({ model: 'openai/gpt-z', reasoning: { effort: 'low' }, ...memory });
+    delete hot.prompts['memory-voice'];
+    return hot;
+  };
+
+  const talk = await optionsOf(fallback({ voiceModel: null }));
+  assert.equal(talk.model, undefined, 'voiceModel null: the talk model');
+  assert.equal(talk.skipCalibration, false);
+  const named = await optionsOf(fallback({ voiceModel: 'x/y' }));
+  assert.equal(named.model, 'x/y');
+  assert.equal(named.skipCalibration, false, 'llm.model feeds the shared ratio');
+  const other = await optionsOf(fallback({ voiceModel: 'anthropic/voice-v' }));
+  assert.equal(other.model, 'anthropic/voice-v');
+  assert.equal(other.skipCalibration, true);
+  for (const options of [talk, named, other]) {
+    assert.equal(options.role, 'analyzer', 'no voice role exists yet: an @analyzer provider pin keeps covering the fallback');
+    assert.equal('reasoning' in options, false, 'the stage A reasoning setting stays with stage A');
+  }
+
+  const off = twoStageHot({ model: 'openai/gpt-z', voiceModel: 'anthropic/voice-v', reasoning: { effort: 'low' } });
+  off.config.features.memoryTwoStage = false;
+  const today = await optionsOf(off);
+  assert.equal(today.model, 'openai/gpt-z', 'with the switch off the request goes out on memory.model, as before');
+  assert.equal('skipCalibration' in today, false);
+  assert.equal('reasoning' in today, false);
+});
+
+test('analyze (two-stage): memory.reasoning, a plain object, goes with every stage A request and no other', async () => {
+  const reasoning = { effort: 'low' };
+  const optionsOf = (hot, { privately = false } = {}) =>
+    withStoreAsync(async (store) => {
+      const llm = recordingLlm({});
+      if (privately) seedPrivate(store, 'g1');
+      const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+      const { result: outcome } = await withCapturedLogs(() =>
+        privately
+          ? updater.analyzePrivate('g1', 'u1', [dmMessage({ id: 'm1', direct: true })])
+          : updater.analyze('g1', [slimMessage({ id: 'm1' })]),
+      );
+      assert.equal(outcome.ok, true);
+      return llm.calls[0].options;
+    });
+
+  assert.deepEqual((await optionsOf(twoStageHot({ model: 'openai/gpt-z', reasoning }))).reasoning, reasoning, 'a guild stage A');
+  assert.deepEqual((await optionsOf(twoStageHot({ model: 'openai/gpt-z', reasoning }), { privately: true })).reasoning, reasoning, 'a private stage A');
+  for (const odd of ['low', ['effort'], null]) {
+    assert.equal('reasoning' in (await optionsOf(twoStageHot({ model: 'openai/gpt-z', reasoning: odd }))), false, `not sent: ${JSON.stringify(odd)}`);
+  }
+  assert.equal('reasoning' in (await optionsOf(twoStageHot({ model: 'openai/gpt-z' }))), false, 'no key, nothing sent');
+});
+
+test('run (two-stage): a failed stage A request backs off, an answer the store refuses is apply-error; every line says stage two', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now() - 2000);
+    store.pushBuffer(guildId, slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: Date.now() - 1000 }), 100);
+    let call = 0;
+    const llm = {
+      complete: async () => {
+        call += 1;
+        if (call === 1) throw new Error('provider unavailable');
+        return { text: JSON.stringify({ users: { 1: { relationship: 'ήρεμα' } } }) };
+      },
+    };
+    const updater = createMemoryUpdater({ hot: twoStageHot({ batchMessages: 1, minBatchMessages: 1 }), store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const { logs: failedLogs } = await withCapturedLogs(() => updater.run(guildId));
+    const backedOff = failedLogs.find((entry) => entry.msg === 'memory: update failed, backing off');
+    assert.equal(backedOff.reason, 'llm-error');
+    assert.equal(backedOff.stage, 'two');
+
+    store.updateVoiceQueue = () => {
+      throw new TypeError('the queue is refused');
+    };
+    const { logs: refusedLogs } = await withCapturedLogs(() => updater.run(guildId));
+    const warned = refusedLogs.find((entry) => entry.msg === 'memory: the analyzer answer could not be applied');
+    assert.equal(warned.reason, 'apply-error');
+    assert.equal(warned.stage, 'two');
+    const refused = refusedLogs.find((entry) => entry.msg === 'memory: update failed, backing off');
+    assert.equal(refused.reason, 'apply-error');
+    assert.equal(refused.stage, 'two');
+    assert.equal(store.getBuffer(guildId).length, 1, 'neither batch is consumed');
+  });
+});
+
+test('analyze (two-stage): an overflowing lesson is stored from its brief with its teacher, sure:false and its seenAt', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const taughtAt = STAGE_A_AT - DAY_MS; // the first batch's newest message
+    store.touchUser(guildId, '1', 'Aria', taughtAt - 60_000);
+    store.touchUser(guildId, ZOE, 'Zoé', taughtAt - DAY_MS); // a stored member: a known teacher
+    const hot = twoStageHot();
+    const answers = [
+      { guild: { learned: { add: [{ brief: 'γκγκ σημαίνει καληνύχτα', from: `Zoé (id:${ZOE})`, sure: false }] } } },
+      { users: { 1: { relationship: 'καλή παρέα' } } },
+    ];
+    const llm = { complete: async () => ({ text: JSON.stringify(answers.shift()) }) };
+    let clock = taughtAt + 60_000;
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => clock });
+    const batch = (id, ts) => [slimMessage({ id, authorId: '1', authorName: 'Aria', ts })];
+
+    assert.equal((await updater.analyze(guildId, batch('m1', taughtAt))).ok, true);
+    assert.deepEqual(queuedKinds(store, guildId), ['learned']);
+    assert.deepEqual(store.getGuild(guildId).learned, [], 'queued, not stored');
+
+    hot.config.memory.voice = { queueMax: 1 }; // a live edit: the next batch pushes the lesson out
+    clock = STAGE_A_AT;
+    const { result: outcome } = await withCapturedLogs(() => updater.analyze(guildId, batch('m2', STAGE_A_AT)));
+
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(queuedKinds(store, guildId), ['relationship']);
+    assert.equal(outcome.result.voiceOverflow, 1);
+    assert.equal(outcome.result.voiceDegraded, 1);
+    const [lesson, ...rest] = store.getGuild(guildId).learned;
+    assert.deepEqual(rest, []);
+    assert.equal(lesson.text, 'γκγκ σημαίνει καληνύχτα', 'stored from its brief');
+    assert.equal(lesson.from, `<@${ZOE}>`, 'with its teacher');
+    assert.equal(lesson.weight, 0, 'sure: false');
+    assert.equal(lesson.firstSeen, new Date(taughtAt).toISOString(), 'dated when it was taught, not when it overflowed');
+  });
+});
+
+test('analyzePrivate (two-stage): an overflowing private feeling lands in the private layer only', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    seedPrivate(store, guildId);
+    const first = Date.UTC(2026, 0, 2, 11);
+    const moment = { date: '2026-01-02', what: 'της είπε ένα μυστικό' };
+    // The same moment in the public profile under the same address: a write that lost its layer would fill it.
+    store.addEpisodes(guildId, 'u1', [{ ...moment, feeling: '' }], { maxEpisodes: 20, now: first });
+    const hot = twoStageHot();
+    const answers = [
+      { users: { u1: { episodes: [{ ...moment, weight: 4, tone: 'εμπιστοσύνη' }] } } },
+      { users: { u1: { relationship: 'μιλούν κάθε βράδυ' } } },
+    ];
+    const llm = { complete: async () => ({ text: JSON.stringify(answers.shift()) }) };
+    let clock = first;
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => clock });
+    const dm = (id, ts) => [dmMessage({ id, content: 'γεια σου', direct: true, ts })];
+
+    assert.equal((await updater.analyzePrivate(guildId, 'u1', dm('m1', first - 60_000))).ok, true);
+    assert.deepEqual(queuedKinds(store, guildId), ['feeling']);
+    assert.equal(store.getPrivate(guildId, 'u1').episodes.at(-1).addedAt, store.getUser(guildId, 'u1').episodes[0].addedAt, 'one address in both layers');
+    const publicBefore = JSON.stringify(store.getUser(guildId, 'u1'));
+
+    hot.config.memory.voice = { queueMax: 1 }; // a live edit: the next batch pushes the feeling out
+    clock = first + 3_600_000;
+    const { result: outcome } = await withCapturedLogs(() => updater.analyzePrivate(guildId, 'u1', dm('m2', clock - 60_000)));
+
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(queuedKinds(store, guildId), ['relationship']);
+    assert.equal(outcome.result.voiceOverflow, 1);
+    assert.equal(outcome.result.voiceDegraded, 1);
+    const stored = store.getPrivate(guildId, 'u1').episodes.find((ep) => ep.what === moment.what);
+    assert.equal(stored.feeling, 'εμπιστοσύνη', 'the stage A tone, in the private layer');
+    assert.equal(JSON.stringify(store.getUser(guildId, 'u1')), publicBefore, 'the public profile is untouched');
+    assert.equal(store.getUser(guildId, 'u1').episodes[0].feeling, '');
+  });
+});
+
+test('analyze (two-stage): a memory.maxSelfFacts that is not a number falls back to 20, and a self.remove still applies', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', STAGE_A_AT);
+    store.updateGuild(guildId, { self: Array.from({ length: 20 }, (_, i) => `γεγονός ${i}`) });
+    // Three claims, room for one in the queue: the two oldest overflow and are stored from their briefs.
+    const hot = twoStageHot({ maxSelfFacts: 'είκοσι', voice: { queueMax: 1 } });
+    const llm = recordingLlm({ self: { remove: ['γεγονός 0'], add: ['νέο α', 'νέο β', 'νέο γ'] } });
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => STAGE_A_AT });
+
+    const { result: outcome } = await withCapturedLogs(() =>
+      updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: STAGE_A_AT })]),
+    );
+
+    assert.equal(outcome.ok, true, 'never an apply-error');
+    assert.equal(outcome.result.self, true, 'the removal applied');
+    assert.equal(outcome.result.voiceOverflow, 2);
+    assert.equal(outcome.result.voiceDegraded, 2);
+    const { self } = store.getGuild(guildId);
+    assert.equal(self.length, 20, "capped at config.json's 20");
+    assert.ok(!self.includes('γεγονός 0'), 'removed by stage A');
+    assert.ok(!self.includes('γεγονός 1'), 'the oldest left to make room');
+    assert.deepEqual(self.slice(-2), ['νέο α', 'νέο β']);
+    assert.deepEqual(store.getVoiceQueue(guildId).map((item) => item.brief), [['νέο γ']]);
+  });
+});
+
+test('run (two-stage): a stage A answer that does not parse is bad-json: the buffer stays, nothing is queued, the next batch is halved', async () => {
+  await withStoreAsync(async (store, dir) => {
+    const guildId = 'g1';
+    const base = Date.now();
+    store.touchUser(guildId, '1', 'nick', base);
+    for (let i = 0; i < 90; i += 1) {
+      store.pushBuffer(guildId, slimMessage({ id: `m${i}`, content: `hi ${i}`, ts: base + i * 1000 }), 200);
+    }
+    const hot = twoStageHot({ batchMessages: 15, minBatchMessages: 1 });
+    let call = 0;
+    const llm = {
+      complete: async () => {
+        call += 1;
+        if (call === 1) return { text: 'κανένα αντικείμενο εδώ', usage: { prompt_tokens: 10, completion_tokens: 5 } };
+        return { text: JSON.stringify({ users: { 1: { relationship: 'ήρεμα' } } }) };
+      },
+    };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+    assert.equal(store.getBuffer(guildId).length, 90, 'a failed batch is never consumed');
+    assert.deepEqual(store.getVoiceQueue(guildId), [], 'nothing queued');
+    assert.equal(store.getUser(guildId, '1').relationship, '');
+    const failed = logs.find((entry) => entry.msg === 'memory: update failed, halving the batch size for next time');
+    assert.ok(failed, 'halved as today');
+    assert.equal(failed.reason, 'bad-json');
+    assert.equal(failed.stage, 'two');
+    assert.ok(!JSON.stringify(logs).includes('αντικείμενο'), 'never the answer');
+
+    await updater.run(guildId);
+    assert.equal(store.getBuffer(guildId).length, 70, '20 consumed (half of 30, floored at 20), not 30');
+    assert.deepEqual(queuedKinds(store, guildId), ['relationship']);
+    assert.ok(fs.existsSync(path.join(dir, 'guilds', guildId, 'voice.json')), 'the queue is flushed with the batch');
+  });
+});
+
+test('analyzePrivate (two-stage): the same split; the neutral part lands in the private layer only and the items are queued as private', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    seedPrivate(store, guildId);
+    const publicBefore = JSON.stringify(store.getUser(guildId, 'u1'));
+    const guildBefore = JSON.stringify(store.getGuild(guildId));
+    const llm = recordingLlm({
+      users: {
+        u1: {
+          relationship: 'μιλούν κάθε βράδυ',
+          interests: { add: [{ topic: 'ποίηση', note: 'γράφει' }] },
+          aliases: { add: ['Ζω'] },
+          character: 'νέο πορτρέτο',
+          affinity: { delta: 2, event: 'της είπε ένα μυστικό' },
+          episodes: [{ date: '2026-01-02', what: 'της είπε ένα μυστικό', weight: 4, tone: 'εμπιστοσύνη' }],
+        },
+      },
+      guild: { patterns: 'μοτίβο από ιδιωτική κουβέντα', injokes: ['ιδιωτικό αστείο'] },
+      self: { add: ['ιδιωτικός ισχυρισμός'], remove: ['παλιό γεγονός'] },
+    });
+    const hot = twoStageHot({}, { relationships: { damping: false } });
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => Date.UTC(2026, 0, 2, 11) });
+
+    const outcome = await updater.analyzePrivate(guildId, 'u1', [dmMessage({ id: 'm1', content: 'γεια σου', direct: true, ts: Date.UTC(2026, 0, 2, 10) })]);
+
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.stage, 'two');
+    assert.equal(llm.calls.length, 1);
+    const [{ messages, options }] = llm.calls;
+    assert.equal(messages[0].content, 'decide prompt for Nept, relationship limit 600');
+    assert.equal(blockBody(messages[1].content, 'private'), labels.memory.privateNote);
+    assert.equal(options.role, 'analyzer');
+
+    assert.equal(JSON.stringify(store.getUser(guildId, 'u1')), publicBefore, 'nothing public is written');
+    assert.equal(JSON.stringify(store.getGuild(guildId)), guildBefore, 'nor anything of the server');
+    const priv = store.getPrivate(guildId, 'u1');
+    assert.ok(priv.interests.some((item) => item.topic === 'ποίηση'));
+    assert.equal(priv.affinity.score, 6, 'private 4 + 2, at once');
+    assert.equal(priv.affinity.reason, 'private reason', 'kept until the worded one arrives');
+    assert.equal(priv.relationship, '', 'waits for the voice model');
+    const episode = priv.episodes.at(-1);
+    assert.equal(episode.what, 'της είπε ένα μυστικό');
+    assert.equal(episode.feeling, '');
+
+    const queue = store.getVoiceQueue(guildId);
+    assert.deepEqual(queuedKinds(store, guildId), ['feeling', 'reason', 'relationship']);
+    assert.ok(queue.every((item) => item.layer === 'private' && item.userId === 'u1'), 'private items of the partner only');
+    assert.equal(queue.find((item) => item.kind === 'reason').payload.at, priv.affinity.history.at(-1).ts);
+    assert.equal(queue.find((item) => item.kind === 'feeling').payload.at, episode.addedAt);
+    assert.equal(outcome.result.dropped.guild, true);
+    assert.equal(outcome.result.dropped.portrait, 1);
+    assert.equal(outcome.result.dropped.self, 2, 'the self claims of a private batch, added or removed, are dropped and counted');
+    assert.equal(outcome.result.voiceQueued, 3);
+
+    // The private addresses are the ones the store's fill functions find in the private layer.
+    const reason = queue.find((item) => item.kind === 'reason');
+    const feeling = queue.find((item) => item.kind === 'feeling');
+    assert.equal(store.fillAffinityReason(guildId, 'u1', reason.payload.at, 'της εμπιστεύτηκε κάτι', { layer: 'private' }), true);
+    assert.equal(store.fillEpisodeFeeling(guildId, 'u1', feeling.payload, 'συγκινήθηκε', { layer: 'private' }), true);
+    assert.equal(store.getPrivate(guildId, 'u1').affinity.reason, 'της εμπιστεύτηκε κάτι');
+    assert.equal(JSON.stringify(store.getUser(guildId, 'u1')), publicBefore, 'still nothing public');
+  });
+});
+
+test('run (two-stage): "memory: update applied" says which stage ran and how many voice items were queued, counts only', async () => {
+  const answer = { users: { 1: { relationship: 'ήσυχα μαζί', affinity: { delta: 2, event: 'ήσυχα καλή' } } } };
+  const appliedLog = (hot) =>
+    withStoreAsync(async (store) => {
+      const guildId = 'g1';
+      store.touchUser(guildId, '1', 'Aria', Date.now() - 2000);
+      store.pushBuffer(guildId, slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: Date.now() - 1000 }), 100);
+      const updater = createMemoryUpdater({ hot, store, llm: recordingLlm(answer), calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+      const { logs } = await withCapturedLogs(() => updater.run(guildId));
+      assert.ok(!JSON.stringify(logs).includes('ήσυχα'), 'never a brief or a text');
+      return logs;
+    });
+  const applied = (logs) => logs.find((entry) => entry.msg === 'memory: update applied');
+
+  const twoLogs = await appliedLog(twoStageHot({ batchMessages: 1, minBatchMessages: 1 }));
+  const two = applied(twoLogs);
+  assert.equal(two.stage, 'two');
+  assert.equal(two.voiceQueued, 2, 'the relationship and the reason');
+  assert.equal(twoLogs.some((entry) => entry.msg === 'memory: two-stage unavailable'), false);
+
+  const fallback = twoStageHot({ batchMessages: 1, minBatchMessages: 1 });
+  delete fallback.prompts['memory-voice'];
+  const singleLogs = await appliedLog(fallback);
+  const single = applied(singleLogs);
+  assert.equal(single.stage, 'single', 'the switch is on, the single-stage path ran');
+  assert.equal(single.voiceQueued, 0);
+  const unavailable = singleLogs.filter((entry) => entry.msg === 'memory: two-stage unavailable');
+  assert.equal(unavailable.length, 1);
+  assert.equal(unavailable[0].reason, 'no-prompt');
+  assert.deepEqual(unavailable[0].missing, ['memory-voice'], 'the missing prompt is named');
+
+  const off = twoStageHot({ batchMessages: 1, minBatchMessages: 1 });
+  off.config.features.memoryTwoStage = false;
+  const offLogs = await appliedLog(off);
+  const today = applied(offLogs);
+  assert.equal('stage' in today, false, 'with the switch off the line is the same as before');
+  assert.equal('voiceQueued' in today, false);
+  assert.equal(offLogs.some((entry) => entry.msg === 'memory: two-stage unavailable'), false);
+});
+
+test('runPrivate (two-stage): "memory: private update applied" says which stage ran and how many voice items were queued', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    seedPrivate(store, guildId);
+    const hot = twoStageHot({ batchMessages: 1, minBatchMessages: 1 });
+    const llm = recordingLlm({ users: { u1: { relationship: 'κρυφή φιλία' } } });
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+    updater.observe(guildId, dmMessage({ id: 'a1', ts: Date.now() - 1000 }), { private: 'u1' });
+
+    const { logs } = await withCapturedLogs(() => updater.runPrivate(guildId, 'u1'));
+
+    const applied = logs.find((entry) => entry.msg === 'memory: private update applied');
+    assert.equal(applied.stage, 'two');
+    assert.equal(applied.voiceQueued, 1);
+    assert.ok(!JSON.stringify(logs).includes('κρυφή'), 'counts only');
+    assert.deepEqual(queuedKinds(store, guildId), ['relationship']);
   });
 });
