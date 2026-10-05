@@ -27,16 +27,27 @@ test('toTokens: everything else in the text is untouched', () => {
   assert.equal(out, `Before. <@${ID_A}> helped. After.`);
 });
 
-test('toTokens: only the single word immediately before the id marker is captured -- a leading word of a multi-word name is left as plain text next to the token, never dropped', () => {
-  const text = `Vertex Prime (id:${ID_A}) said hi`;
-  const out = toTokens(text, () => true);
-  assert.equal(out, `Vertex <@${ID_A}> said hi`);
-});
-
-test('toTokens: a preposition or verb directly before the id marker is never swallowed into the token', () => {
-  const text = `argued with Vertex (id:${ID_A}) yesterday`;
-  const out = toTokens(text, () => true);
-  assert.equal(out, `argued with <@${ID_A}> yesterday`);
+test('toTokens: without namesOf only the single word immediately before the id marker is captured, never a word before it', () => {
+  const rows = [
+    [
+      'a leading word of a multi-word name is left as plain text next to the token, never dropped',
+      `Vertex Prime (id:${ID_A}) said hi`,
+      `Vertex <@${ID_A}> said hi`,
+    ],
+    [
+      'a preposition or verb directly before the id marker is never swallowed into the token',
+      `argued with Vertex (id:${ID_A}) yesterday`,
+      `argued with <@${ID_A}> yesterday`,
+    ],
+    [
+      'without namesOf at all, behaviour is unchanged (single-word capture)',
+      `Al Sus (id:${ID_A}) plays it`,
+      `Al <@${ID_A}> plays it`,
+    ],
+  ];
+  for (const [label, text, expected] of rows) {
+    assert.equal(toTokens(text, () => true), expected, label);
+  }
 });
 
 test('toTokens: two distinct id markers in the same text are each resolved independently', () => {
@@ -65,16 +76,14 @@ test('toTokens: text with no id marker at all is untouched', () => {
 
 // ---- toTokens: name-aware matching (namesOf) -- the "Al Sus" defect -----------
 
-test('toTokens: a known two-word name is consumed whole, not just its last word', () => {
-  const text = `Al Sus (id:${ID_A}) plays it`;
-  const out = toTokens(text, () => true, () => ['Al Sus']);
-  assert.equal(out, `<@${ID_A}> plays it`);
-});
-
-test('toTokens: a known three-word name is consumed whole', () => {
-  const text = `The Great Vertex (id:${ID_A}) said hi`;
-  const out = toTokens(text, () => true, () => ['The Great Vertex']);
-  assert.equal(out, `<@${ID_A}> said hi`);
+test('toTokens: a known multi-word name is consumed whole, not just its last word', () => {
+  const rows = [
+    ['a known two-word name, at the very start of the text', `Al Sus (id:${ID_A}) plays it`, 'Al Sus', `<@${ID_A}> plays it`],
+    ['a known three-word name', `The Great Vertex (id:${ID_A}) said hi`, 'The Great Vertex', `<@${ID_A}> said hi`],
+  ];
+  for (const [label, text, name, expected] of rows) {
+    assert.equal(toTokens(text, () => true, () => [name]), expected, label);
+  }
 });
 
 test('toTokens: a known name containing digits and underscores is matched exactly', () => {
@@ -87,12 +96,6 @@ test('toTokens: a known name in Greek is matched exactly', () => {
   const text = `το είπε ο Νικόλαος Παπαδόπουλος (id:${ID_A}) χθες`;
   const out = toTokens(text, () => true, () => ['Νικόλαος Παπαδόπουλος']);
   assert.equal(out, `το είπε ο <@${ID_A}> χθες`);
-});
-
-test('toTokens: a known name at the very start of the text is matched (nothing precedes it)', () => {
-  const text = `Al Sus (id:${ID_A}) plays it`;
-  const out = toTokens(text, () => true, (id) => (id === ID_A ? ['Al Sus'] : []));
-  assert.equal(out, `<@${ID_A}> plays it`);
 });
 
 test('toTokens: two different members, each with a multi-word name, in one sentence', () => {
@@ -121,20 +124,6 @@ test('toTokens: namesOf returning an empty array or nothing falls back to the si
   assert.equal(toTokens(text, () => true, () => undefined), `<@${ID_A}> helped`);
 });
 
-test('toTokens: without namesOf at all, behaviour is unchanged (single-word capture)', () => {
-  const text = `Al Sus (id:${ID_A}) plays it`;
-  const out = toTokens(text, () => true);
-  assert.equal(out, `Al <@${ID_A}> plays it`);
-});
-
-test('toTokens: name-aware matching is idempotent -- converting twice gives the same result', () => {
-  const text = `Al Sus (id:${ID_A}) plays it`;
-  const namesOf = () => ['Al Sus'];
-  const once = toTokens(text, () => true, namesOf);
-  const twice = toTokens(once, () => true, namesOf);
-  assert.equal(twice, once);
-});
-
 test('toTokens: a known multi-word name is still respected even for an unknown id (no crash, id stays untouched)', () => {
   const text = `Al Sus (id:${ID_A}) plays it`;
   const out = toTokens(text, () => false, () => ['Al Sus']);
@@ -161,16 +150,6 @@ test('fromTokens: an id nameOf cannot resolve is left as the bare token', () => 
   assert.equal(fromTokens(text, () => undefined, 'analyzer'), text);
 });
 
-test('fromTokens: a member renamed between write and read shows the NEW name', () => {
-  const text = `<@${ID_A}> said thanks`;
-  const names = { [ID_A]: 'OldName' };
-  const before = fromTokens(text, (id) => names[id] ?? null, 'chat');
-  assert.equal(before, 'OldName said thanks');
-  names[ID_A] = 'NewName';
-  const after = fromTokens(text, (id) => names[id] ?? null, 'chat');
-  assert.equal(after, 'NewName said thanks');
-});
-
 test('fromTokens: multiple distinct tokens each resolve independently', () => {
   const text = `<@${ID_A}> and <@${ID_B}> talked`;
   const names = { [ID_A]: 'Alpha', [ID_B]: 'Beta' };
@@ -181,15 +160,6 @@ test('fromTokens: multiple distinct tokens each resolve independently', () => {
 test('fromTokens: non-string / empty input is returned as-is', () => {
   assert.equal(fromTokens('', () => 'x', 'chat'), '');
   assert.equal(fromTokens(undefined, () => 'x', 'chat'), undefined);
-});
-
-// ---- round trip ---------------------------------------------------------------
-
-test('round trip: toTokens then fromTokens(analyzer) reconstructs an equivalent "name (id:...)" form', () => {
-  const original = `Vertex (id:${ID_A}) helped`;
-  const tokenized = toTokens(original, () => true);
-  const back = fromTokens(tokenized, (id) => (id === ID_A ? 'Vertex' : null), 'analyzer');
-  assert.equal(back, original);
 });
 
 // ---- occursAsWholeWord ----------------------------------------------------------

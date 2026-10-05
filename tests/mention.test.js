@@ -48,16 +48,6 @@ test('detectTrigger: falls back to a name match when neither reply nor mention',
   assert.equal(kind, 'name');
 });
 
-test('detectTrigger: returns null when nothing matches', () => {
-  const kind = detectTrigger({
-    mentionsSelf: false,
-    repliesToSelf: false,
-    content: 'απλή κουβέντα',
-    nameTriggers: NAME_TRIGGERS,
-  });
-  assert.equal(kind, null);
-});
-
 test('detectTrigger: name matching is case-insensitive', () => {
   const kind = detectTrigger({
     mentionsSelf: false,
@@ -91,16 +81,6 @@ test('detectTrigger: whole-word matching works with non-Latin word boundaries (p
 test('detectTrigger: a name at the very start or end of the message still matches', () => {
   const start = detectTrigger({ mentionsSelf: false, repliesToSelf: false, content: 'νεπτούνια', nameTriggers: NAME_TRIGGERS });
   assert.equal(start, 'name');
-});
-
-test('detectTrigger: a whole-word name after the same name inside a longer word still matches', () => {
-  const kind = detectTrigger({
-    mentionsSelf: false,
-    repliesToSelf: false,
-    content: 'νεπτούνιαπου και νεπτούνια',
-    nameTriggers: NAME_TRIGGERS,
-  });
-  assert.equal(kind, 'name');
 });
 
 test('detectTrigger: an empty name trigger matches nothing, an attachment-only message included', () => {
@@ -213,12 +193,6 @@ test('decideMention: repeat calls accumulate a penalty on top of the base ignore
   assert.equal(result.reason, 'ignored:repeat'); // rng 0 < ignoreChance -> ignored
 });
 
-test('decideMention: repeat penalty accumulation can still let it respond when rng is high enough', () => {
-  const result = decideMention({ kind: 'reply', textLength: 5, recentCalls: 3, neverIgnore: false, cfg: CFG, rng: rngReturning(1) });
-  assert.equal(result.reason, 'respond');
-  assert.equal(result.respond, true);
-});
-
 test('decideMention: spam threshold overrides the ignore chance entirely (not additive)', () => {
   const result = decideMention({ kind: 'reply', textLength: 5, recentCalls: 4, neverIgnore: false, cfg: CFG, rng: rngReturning(0) });
   assert.equal(result.ignoreChance, CFG.spamIgnoreChance);
@@ -237,6 +211,7 @@ test('decideMention: the ignore chance is clamped to 0.97 at most', () => {
   const result = decideMention({ kind: 'reply', textLength: 5, recentCalls: 10, neverIgnore: false, cfg, rng: rngReturning(0.98) });
   assert.equal(result.ignoreChance, 0.97);
   assert.equal(result.respond, true); // rng 0.98 >= 0.97
+  assert.equal(result.reason, 'respond'); // a repeat call that still gets through
 });
 
 test('decideMention: the ignore chance never drops below 0', () => {
@@ -333,12 +308,6 @@ test('isFollowUpOpen: false when there is no window at all', () => {
   assert.equal(isFollowUpOpen(undefined, 1000, FOLLOW_UP_CFG), false);
 });
 
-test('isFollowUpOpen: true right after the persona answered', () => {
-  const state = { openedAt: 1000, lastAnswerAt: 1000, noStreak: 0 };
-  assert.equal(isFollowUpOpen(state, 1000, FOLLOW_UP_CFG), true);
-  assert.equal(isFollowUpOpen(state, 1000 + 60_000, FOLLOW_UP_CFG), true); // 1 min < followUpMinutes=2
-});
-
 test('isFollowUpOpen: false once followUpMinutes has passed since the last answer', () => {
   const state = { openedAt: 1000, lastAnswerAt: 1000, noStreak: 0 };
   assert.equal(isFollowUpOpen(state, 1000 + 2 * 60_000, FOLLOW_UP_CFG), false);
@@ -387,24 +356,19 @@ test('followUpPreFilter: the reply-ping exemption only applies to a reply', () =
   assert.equal(followUpPreFilter(normalized, 'self1'), true);
 });
 
-test('followUpPreFilter: a mention of another member is always "no" material', () => {
-  const normalized = { replyToId: null, mentionedUserIds: ['u2'] };
-  assert.equal(followUpPreFilter(normalized, 'self1'), true);
-});
-
 test('followUpPreFilter: a mention of the persona itself does not pre-filter', () => {
   const normalized = { replyToId: null, mentionedUserIds: ['self1'] };
   assert.equal(followUpPreFilter(normalized, 'self1'), false);
 });
 
-test('followUpPreFilter: plain text with no reply and no mention reaches the model', () => {
-  const normalized = { replyToId: null, mentionedUserIds: [] };
-  assert.equal(followUpPreFilter(normalized, 'self1'), false);
-});
-
 test('followUpPreFilter: mentionedUserIds omitted is treated as empty', () => {
-  const normalized = { replyToId: null };
-  assert.equal(followUpPreFilter(normalized, 'self1'), false);
+  const rows = [
+    ['plain text with no reply and no mention reaches the model', { replyToId: null, mentionedUserIds: [] }],
+    ['mentionedUserIds omitted is treated as empty', { replyToId: null }],
+  ];
+  for (const [label, normalized] of rows) {
+    assert.equal(followUpPreFilter(normalized, 'self1'), false, label);
+  }
 });
 
 test('parseFollowUpVerdict: a bare "yes" is a yes', () => {

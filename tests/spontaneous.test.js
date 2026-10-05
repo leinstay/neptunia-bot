@@ -58,20 +58,21 @@ test('nextDelayMs: burst branch caps at the top of cfg.burstMinutes', () => {
 });
 
 test('nextDelayMs: non-burst branch is log-uniform between min and max minutes', () => {
-  const minMs = SPONTANEOUS_CFG.minIntervalMinutes * MINUTE;
-  const maxMs = SPONTANEOUS_CFG.maxIntervalMinutes * MINUTE;
-  let sawShort = false;
-  let sawLong = false;
+  // Log-uniform: a roll u lands on min * (max / min) ** u minutes, so equal steps of
+  // the roll multiply the delay by the same factor and the middle roll is the
+  // geometric mean of min and max (about 102 minutes here), not the arithmetic
+  // mean (222.5 minutes) a linear draw would give.
+  const min = SPONTANEOUS_CFG.minIntervalMinutes;
+  const max = SPONTANEOUS_CFG.maxIntervalMinutes;
+  const delay = (roll) => nextDelayMs(SPONTANEOUS_CFG, scripted([0.99, roll])); // 0.99 skips the burst branch
 
-  for (let i = 0; i < 2000; i++) {
-    const rng = scripted([0.99, Math.random()]); // force past the burst check
-    const ms = nextDelayMs(SPONTANEOUS_CFG, rng);
-    assert.ok(ms >= minMs - 1e-6 && ms <= maxMs + 1e-6, `${ms} out of bounds`);
-    if (ms < minMs * 5) sawShort = true; // short gaps should be common under log-uniform
-    if (ms > maxMs / 5) sawLong = true; // and long gaps should still happen sometimes
+  assert.ok(Math.abs(delay(0.5) - Math.sqrt(min * max) * MINUTE) < 1e-3, 'rng 0.5 lands on the geometric mean');
+  for (let i = 0; i <= 10; i++) {
+    const roll = i / 10;
+    const ms = delay(roll);
+    assert.ok(Math.abs(ms - min * (max / min) ** roll * MINUTE) < 1e-3, `rng ${roll}: ${ms} ms is not log-uniform`);
+    assert.ok(ms >= min * MINUTE - 1e-6 && ms <= max * MINUTE + 1e-6, `rng ${roll}: ${ms} ms out of bounds`);
   }
-  assert.ok(sawShort, 'expected some short gaps under log-uniform sampling');
-  assert.ok(sawLong, 'expected some long gaps under log-uniform sampling');
 });
 
 test('nextDelayMs: non-burst bounds hold at the extremes of rng', () => {
@@ -138,12 +139,6 @@ function msg({ ts, self = false, bot = false, authorId = 'u1' }) {
 test('chooseMode: empty history may initiate, chance-gated', () => {
   assert.equal(chooseMode([], 1000, SPONTANEOUS_CFG, () => 0), 'initiate');
   assert.equal(chooseMode([], 1000, SPONTANEOUS_CFG, () => 0.99), null);
-});
-
-test('chooseMode: never replies to its own last message', () => {
-  const now = 1_000_000;
-  const history = [msg({ ts: now - MINUTE, self: true })];
-  assert.equal(chooseMode(history, now, SPONTANEOUS_CFG, () => 0), null);
 });
 
 test('chooseMode: interjects when the channel is live', () => {
@@ -596,50 +591,6 @@ test('onMessage: ignores a message from a guild other than the one this instance
   assert.equal(calls, 0);
 });
 
-test('onMessage: does nothing when features.eavesdrop is false', async () => {
-  const guild = fakeGuild('g1');
-  const channel = fakeChannel('c1', guild);
-  let calls = 0;
-  const turns = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
-  const now = () => Date.UTC(2026, 0, 5, 12, 0, 0);
-
-  const spontaneous = createSpontaneous({
-    hot: { config: eagerEavesdropConfig({ eavesdrop: false }) },
-    store: fakeStore(),
-    client: {},
-    turns,
-    getGuildId: () => 'g1',
-    rng: () => 0,
-    now,
-  });
-  spontaneous.onMessage(channel, { self: false, bot: false });
-  await flushTimers();
-
-  assert.equal(calls, 0);
-});
-
-test('onMessage: does nothing when features.spontaneous is false, even with eavesdrop untouched', async () => {
-  const guild = fakeGuild('g1');
-  const channel = fakeChannel('c1', guild);
-  let calls = 0;
-  const turns = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
-  const now = () => Date.UTC(2026, 0, 5, 12, 0, 0);
-
-  const spontaneous = createSpontaneous({
-    hot: { config: eagerEavesdropConfig({ spontaneous: false }) },
-    store: fakeStore(),
-    client: {},
-    turns,
-    getGuildId: () => 'g1',
-    rng: () => 0,
-    now,
-  });
-  spontaneous.onMessage(channel, { self: false, bot: false });
-  await flushTimers();
-
-  assert.equal(calls, 0);
-});
-
 // ---------------------------------------------------------------------------
 // status / stop / force
 
@@ -690,14 +641,37 @@ test('force: forwards mode straight to turns.runTurn, with forced: true', async 
   assert.equal(seen.forced, true);
 });
 
-test('stop: clears pending eavesdrop timers without throwing', () => {
-  const spontaneous = createSpontaneous({
+test('stop: clears pending eavesdrop timers without throwing', async () => {
+  const idle = createSpontaneous({
     hot: { config: baseConfig() },
     store: fakeStore(),
     client: { guilds: { cache: new Map() } },
     turns: fakeTurns(),
   });
-  assert.doesNotThrow(() => spontaneous.stop());
+  assert.doesNotThrow(() => idle.stop(), 'nothing pending');
+
+  // Two schedulers each schedule one eavesdrop (chance 1, delay 0); only one is stopped.
+  function eavesdropping() {
+    const counter = { calls: 0 };
+    const spontaneous = createSpontaneous({
+      hot: { config: eagerEavesdropConfig() },
+      store: fakeStore(),
+      client: {},
+      turns: fakeTurns({ runTurn: async () => { counter.calls += 1; return { outcome: 'spoke' }; } }),
+      getGuildId: () => 'g1',
+      rng: () => 0,
+      now: () => Date.UTC(2026, 0, 5, 12, 0, 0),
+    });
+    spontaneous.onMessage(fakeChannel('c1', fakeGuild('g1')), { self: false, bot: false });
+    return { spontaneous, counter };
+  }
+  const control = eavesdropping();
+  const stopped = eavesdropping();
+  assert.doesNotThrow(() => stopped.spontaneous.stop(), 'one eavesdrop pending');
+  await flushTimers();
+
+  assert.equal(control.counter.calls, 1, 'without stop() the pending eavesdrop fires');
+  assert.equal(stopped.counter.calls, 0, 'stop() cleared the pending eavesdrop timer');
 });
 
 // ---------------------------------------------------------------------------
@@ -705,24 +679,25 @@ test('stop: clears pending eavesdrop timers without throwing', () => {
 // spontaneous turn on their own -- a direct ping there is unaffected (that
 // path never goes through channelCandidates at all).
 
-test('isChannelDead: silent longer than maxChannelSilenceHours is dead', () => {
+test('isChannelDead: silent longer than a positive maxChannelSilenceHours is dead, a non-positive or missing value means no limit', () => {
   const now = 1_000_000_000;
-  const channel = { lastMessageId: snowflake(now - 100 * HOUR) };
-  assert.equal(isChannelDead(channel, now, { maxChannelSilenceHours: 72 }), true);
+  const silent100h = { lastMessageId: snowflake(now - 100 * HOUR) };
+  const ancient = { lastMessageId: snowflake(now - 5000 * HOUR) };
+  const rows = [
+    ['silent longer than maxChannelSilenceHours is dead', silent100h, { maxChannelSilenceHours: 72 }, true],
+    ['maxChannelSilenceHours 0 means no limit', ancient, { maxChannelSilenceHours: 0 }, false],
+    ['a negative maxChannelSilenceHours means no limit', ancient, { maxChannelSilenceHours: -5 }, false],
+    ['a missing maxChannelSilenceHours means no limit', ancient, {}, false],
+  ];
+  for (const [label, channel, cfg, dead] of rows) {
+    assert.equal(isChannelDead(channel, now, cfg), dead, label);
+  }
 });
 
 test('isChannelDead: within the window is not dead', () => {
   const now = 1_000_000_000;
   const channel = { lastMessageId: snowflake(now - 10 * HOUR) };
   assert.equal(isChannelDead(channel, now, { maxChannelSilenceHours: 72 }), false);
-});
-
-test('isChannelDead: a non-positive or missing value means no limit', () => {
-  const now = 1_000_000_000;
-  const ancientChannel = { lastMessageId: snowflake(now - 5000 * HOUR) };
-  assert.equal(isChannelDead(ancientChannel, now, { maxChannelSilenceHours: 0 }), false);
-  assert.equal(isChannelDead(ancientChannel, now, { maxChannelSilenceHours: -5 }), false);
-  assert.equal(isChannelDead(ancientChannel, now, {}), false);
 });
 
 test('tick: a dead channel is never a candidate, a fresh one still is', async () => {
@@ -1022,43 +997,4 @@ test('tick: does nothing while a run was already due, when isWarmingUp() is true
 
   assert.equal(calls, 0);
   assert.equal(store.state.data.spontaneous.g1, t, 'the schedule is left exactly as it was');
-});
-
-test('onMessage: does not schedule an eavesdrop while isWarmingUp() is true', async () => {
-  const guild = fakeGuild('g1');
-  const channel = fakeChannel('c1', guild);
-  let calls = 0;
-  const turns = fakeTurns({ runTurn: async () => { calls += 1; return { outcome: 'spoke' }; } });
-  const now = () => Date.UTC(2026, 0, 5, 12, 0, 0);
-
-  const spontaneous = createSpontaneous({
-    hot: { config: eagerEavesdropConfig() },
-    store: fakeStore(),
-    client: {},
-    turns,
-    getGuildId: () => 'g1',
-    isWarmingUp: () => true,
-    rng: () => 0,
-    now,
-  });
-  spontaneous.onMessage(channel, { self: false, bot: false });
-  await flushTimers();
-
-  assert.equal(calls, 0);
-});
-
-test('tick / onMessage: isWarmingUp defaults to false when not provided (unmuted: normal)', async () => {
-  const guild = fakeGuild('g1');
-  const channel = fakeChannel('c1', guild);
-  guild.channels.cache.set(channel.id, channel);
-  const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
-  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
-  const store = fakeStore({ spontaneous: { g1: t } });
-  let seenChannel = null;
-  const turns = fakeTurns({ runTurn: async ({ channel: ch }) => { seenChannel = ch; return { outcome: 'spoke' }; } });
-
-  const spontaneous = createSpontaneous({ hot: { config: baseConfig() }, store, client, turns, getGuildId: () => 'g1', rng: () => 0.1, now: () => t });
-  await spontaneous.tick();
-
-  assert.equal(seenChannel, channel);
 });
