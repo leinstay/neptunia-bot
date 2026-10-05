@@ -61,10 +61,19 @@ function makeId(title, nowMs, salt) {
   return hash.toString(36);
 }
 
+/** When an entry was last written: its `updatedAt`, or its `createdAt` when it has none. */
+function lastWrittenAt(entry) {
+  return String(entry.updatedAt || entry.createdAt || '');
+}
+
 /**
- * Evict the oldest `source: 'analyzer'` entries that are not `always`, until
+ * Evict the stalest `source: 'analyzer'` entries that are not `always`, until
  * `entries` is back at `maxEntries` or no more evictable entries remain
  * (an `owner` entry, or one marked `always`, is never evicted implicitly).
+ * Stalest = written longest ago (`lastWrittenAt`), so an entry the analyzer
+ * keeps rewriting outlives one nothing has touched since it was created;
+ * entries written at the same moment leave in the order they were created,
+ * then in stored order.
  */
 function evictOverflow(entries, maxEntries) {
   if (!Number.isFinite(maxEntries) || entries.length <= maxEntries) return entries;
@@ -73,8 +82,9 @@ function evictOverflow(entries, maxEntries) {
     .map((entry, index) => ({ entry, index }))
     .filter(({ entry }) => entry.source === 'analyzer' && !entry.always)
     .sort((a, b) => {
+      const byWritten = lastWrittenAt(a.entry).localeCompare(lastWrittenAt(b.entry));
       const byCreated = String(a.entry.createdAt ?? '').localeCompare(String(b.entry.createdAt ?? ''));
-      return byCreated || a.index - b.index;
+      return byWritten || byCreated || a.index - b.index;
     });
   const drop = new Set(candidates.slice(0, overflow).map((c) => c.index));
   return entries.filter((_, index) => !drop.has(index));
@@ -90,7 +100,9 @@ function evictOverflow(entries, maxEntries) {
  * (analyzer or owner alike) and the entry becomes/stays an owner entry, the
  * one way a title becomes protected from the analyzer. An analyzer update
  * that would leave an entry exactly as stored (title, keys, text compared
- * after normalising and clamping) is skipped: not stamped, not counted.
+ * after normalising and clamping) is skipped: not stamped, not counted. Past
+ * `maxEntries` the stalest analyzer entries leave (see `evictOverflow`): the
+ * ones written longest ago, not the ones created first.
  *
  * @param {object[]|undefined} entries  Stored entries.
  * @param {unknown} incoming            Untrusted `{ title, keys, text, always? }[]`.

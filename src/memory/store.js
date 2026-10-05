@@ -1,15 +1,22 @@
 // Persistent memory on plain JSON files under data/ — survives restarts, hot
 // reloads and prompt edits; nothing in the codebase ever wipes it implicitly.
 //
-//   data/state.json                          scheduler times, token calibration, daily LLM counter
+//   data/state.json                          the pause flag, the spontaneous schedule, token calibration, the
+//                                            daily counters (LLM requests, portrait refreshes, voice requests,
+//                                            mentor tokens, videos and re-watches, pictures drawn, web lookups,
+//                                            GIFs posted and watched), the warmup progress, the open follow-up
+//                                            windows, the ring of calls from other channels and the seen marks
+//                                            of the channels a turn pulled in
 //   data/guilds/<guildId>/guild.json         how this server talks, in-jokes, what the persona said about itself,
 //                                            what people taught it (`learned`), the persona's own recent lines and
-//                                            the variety pass's latest list and history (src/behavior/variety.js)
+//                                            the variety pass's latest list and history (src/behavior/variety.js),
+//                                            and when the server notes last changed and were last re-checked
 //   data/guilds/<guildId>/buffer.json        messages observed since the last memory update
 //   data/guilds/<guildId>/users/<userId>.json  one profile per active member
 //   data/guilds/<guildId>/private/<userId>.json  what the persona learned from one member in direct
 //                                            messages: never shown anywhere but that member's DM
-//   data/guilds/<guildId>/channels/<channelId>.json  one entry per channel the persona has seen (the server map)
+//   data/guilds/<guildId>/channels/<channelId>.json  one entry per channel the persona has seen (the server map),
+//                                            with the tally of who writes there
 //   data/guilds/<guildId>/lore.json           the guild's lorebook
 //   data/guilds/<guildId>/media.json          the media description cache
 //   data/guilds/<guildId>/gifs.json           the GIF library the persona posts from (src/memory/gifs.js)
@@ -59,6 +66,7 @@ import { applyInterestOps, normalizeInterests, normalizeTopic } from './interest
 import { applyDetailOps, normalizeDetails } from './details.js';
 import { applyAliasOps } from './aliases.js';
 import { clampText } from './clamp.js';
+import { sortByRank } from './ranking.js';
 import { mergeEmojiUsage, normalizeEmojiUsage } from './emoji-usage.js';
 import { emptyGifs, findGif, mergeGifs, normalizeBackfillStamp, normalizeGifs, resetGifCounts } from './gifs.js';
 import { FEELING_CHARS, REASON_CHARS, SELF_CHARS, forgetMember, normalizeQueue } from './voice.js';
@@ -176,13 +184,23 @@ function emptyGuild() {
     worn: null, // { at, key, channelId, lines, patterns } -- the variety pass's latest list, see setWorn
     wornHistory: [], // { at, channelId, lines, patterns: [{ shape, count }] } per pass -- see appendWornHistory
     updatedAt: null,
+    notesUpdatedAt: null, // when patterns, starters or injokes last changed -- see updateGuild
+    notesCheckedAt: null, // when the analyzer was last asked to look at them again -- see markNotesChecked
   };
 }
+
+/** The server notes among the guild's fields: a change of one of them moves `notesUpdatedAt`. */
+const NOTES_FIELDS = ['patterns', 'starters', 'injokes'];
 
 /** Whether merging `patch` over `target` would change anything stored, compared as it lands on
  * disk (JSON): a write that changes nothing must not be stamped, so `updatedAt` stays honest. */
 function changesStored(target, patch) {
   return Object.entries(patch).some(([key, value]) => JSON.stringify(target[key]) !== JSON.stringify(value));
+}
+
+/** A stored ISO stamp as it is when it reads as a time, else null (missing, cleared, hand-broken). */
+function isoStampOrNull(value) {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : null;
 }
 
 export function emptyChannel(id) {
@@ -198,8 +216,10 @@ export function emptyChannel(id) {
     messageCount: 0,
     firstMessageAt: null,
     lastMessageAt: null,
-    topWriters: [],
-    updatedAt: null,
+    topWriters: [], // the five best of `writers`, `{ id, count }`, best first -- what readers show
+    writers: {}, // { [id]: { count, last } } -- who writes here, see countWriter
+    updatedAt: null, // when purpose, topics or tone last changed -- only updateChannel stamps it
+    notesCheckedAt: null, // when the analyzer was last asked to look at them again -- see markNotesChecked
   };
 }
 
@@ -283,7 +303,10 @@ function normalizePrivate(priv) {
 /** Normalize a guild's `learned`/`learnedNextId`/`emojiUsage`/`emojiBackfill`/`ownLines`/`worn`/`wornHistory` fields in place: a
  * guild.json written before this list existed loads it as empty, a
  * hand-edited one is validated via src/memory/details.js#normalizeDetails
- * (fresh ids off `learnedNextId` when needed). Every other field is left
+ * (fresh ids off `learnedNextId` when needed). The two notes stamps
+ * (`notesUpdatedAt`, `notesCheckedAt`) are kept when they read as a time and
+ * are null otherwise: a guild.json written before them has never been
+ * stamped, which readers take as stale notes. Every other field is left
  * exactly as stored; a non-object value is left alone entirely. Never marks
  * anything dirty -- same contract as `normalizeProfile`. */
 function normalizeGuild(guild) {
@@ -300,6 +323,9 @@ function normalizeGuild(guild) {
   guild.ownLines = normalizeOwnLines(guild.ownLines);
   guild.worn = normalizeWorn(guild.worn);
   guild.wornHistory = normalizeWornHistory(guild.wornHistory);
+  // Missing or hand-broken -> null: never stamped.
+  guild.notesUpdatedAt = isoStampOrNull(guild.notesUpdatedAt);
+  guild.notesCheckedAt = isoStampOrNull(guild.notesCheckedAt);
 }
 
 /** The `relationshipScore` stamped next to a freshly written `relationship` text: the affinity
@@ -406,19 +432,138 @@ function dropConsumed(buffer, consumed) {
   buffer.splice(0, buffer.length, ...kept);
 }
 
-/** Bump one author's count in a channel's `topWriters` list (`{ id, count }[]`), keeping only the
- * top 5 by count -- used by `touchChannel` (live traffic, one message at a time); ids compared as
- * strings. A writer who falls out of the top 5 loses their tally (this is a best-effort ranking,
- * not an exact per-author ledger -- `setChannelFacts` below computes an exact top 5 from a fetched
- * window instead). */
-function bumpTopWriters(topWriters, authorId) {
+// ---- who writes in a channel: the `writers` tally behind `topWriters` ----
+//
+// A channel entry keeps `writers: { [id]: { count, last } }` for more writers than it shows, and
+// `topWriters` is the best five of it. Rank is the shared one of src/memory/ranking.js: `count` is
+// the weight, `last` (the ts of the writer's latest message) drives the decay, so a newcomer
+// gathers a count below the five shown and passes a writer who went silent. A list of five that
+// drops whoever is sixth can never change again.
+
+const TOP_WRITERS = 5; // how many writers `topWriters` shows
+const WRITERS_STORED = 20; // config.json's memory.channelWritersStored
+const WRITERS_HALF_LIFE_DAYS = 30; // config.json's memory.channelWritersHalfLifeDays
+const MAX_DATE_MS = 8.64e15; // the last instant a Date can hold
+
+/** `value` as the time of a message: a positive epoch ms a Date can hold, else 0 (unknown). */
+function writerTs(value) {
+  return Number.isFinite(value) && value > 0 && value <= MAX_DATE_MS ? value : 0;
+}
+
+/** `value` as a count of messages: a whole number of at least 1, else 0. */
+function writerCount(value) {
+  return Number.isFinite(value) && value >= 1 ? Math.floor(value) : 0;
+}
+
+/**
+ * The tally settings of one `touchChannel` call, from the `config.memory` keys of the same name
+ * (the caller reads them at the moment of use): `stored` = `channelWritersStored`, never fewer
+ * than the five shown, and `halfLifeDays` = `channelWritersHalfLifeDays` (0 or less = no decay,
+ * the count alone ranks). A missing key, or one that is not a number, is config.json's value.
+ * @param {{ channelWritersStored?: number, channelWritersHalfLifeDays?: number }} [opts]
+ * @returns {{ stored: number, halfLifeDays: number }}
+ */
+function writersSettings(opts) {
+  const stored = opts?.channelWritersStored ?? WRITERS_STORED;
+  const halfLifeDays = opts?.channelWritersHalfLifeDays ?? WRITERS_HALF_LIFE_DAYS;
+  return {
+    stored: Math.max(TOP_WRITERS, Number.isFinite(stored) ? Math.floor(stored) : WRITERS_STORED),
+    halfLifeDays: Number.isFinite(halfLifeDays) ? halfLifeDays : WRITERS_HALF_LIFE_DAYS,
+  };
+}
+
+/**
+ * A stored `writers` tally made safe to read: an entry without a count of at least 1 is dropped,
+ * a `last` that is no time becomes 0. Never mutates `value`.
+ * @param {object} value  A plain object.
+ * @returns {Record<string, { count: number, last: number }>}
+ */
+function normalizeWriters(value) {
+  const out = {};
+  for (const [id, entry] of Object.entries(value)) {
+    const count = isPlainObject(entry) ? writerCount(entry.count) : 0;
+    if (!id || count < 1) continue;
+    out[id] = { count, last: writerTs(entry.last) };
+  }
+  return out;
+}
+
+/**
+ * The tally a `topWriters` list (`{ id, count }[]`, best first) stands for, every writer dated
+ * `last` -- the newest message of the window the list was counted from (`setChannelFacts`), or
+ * the channel's `lastMessageAt` for an entry stored before the tally existed. Items without an id
+ * or a count of at least 1 are skipped. The first listed is inserted last, so writers of an equal
+ * count keep their listed order at the next ranking (see `sortByRank`'s tie rule).
+ * @param {unknown} topWriters
+ * @param {unknown} last
+ * @returns {Record<string, { count: number, last: number }>}
+ */
+function writersFromTop(topWriters, last) {
+  const out = {};
+  for (const writer of [...(Array.isArray(topWriters) ? topWriters : [])].reverse()) {
+    const id = writer?.id === undefined || writer?.id === null ? '' : String(writer.id);
+    const count = writerCount(writer?.count);
+    if (!id || count < 1) continue;
+    out[id] = { count, last: writerTs(last) };
+  }
+  return out;
+}
+
+/**
+ * `writers` as `[{ id, count, last }]`, best first (src/memory/ranking.js#sortByRank: `count` is
+ * the weight, `last` the date; ties go to the later message, then to the writer counted last).
+ * @param {Record<string, { count: number, last: number }>} writers  A normalised tally.
+ * @param {number} halfLifeDays
+ * @returns {{ id: string, count: number, last: number }[]}
+ */
+function rankWriters(writers, halfLifeDays) {
+  const items = Object.entries(writers).map(([id, entry]) => ({
+    id,
+    ...entry,
+    weight: entry.count,
+    lastSeen: entry.last > 0 ? new Date(entry.last).toISOString() : null,
+  }));
+  return sortByRank(items, halfLifeDays).map(({ id, count, last }) => ({ id, count, last }));
+}
+
+/**
+ * Count one message of `authorId` at `ts` into a channel's tally -- used by `touchChannel` (live
+ * traffic, one message at a time); ids compared as strings. `last` only moves forward (a message
+ * that arrives late is counted and dates nothing). Past `stored` writers the lowest-ranked leave
+ * and lose their count. Never mutates `writers`.
+ * @param {Record<string, { count: number, last: number }>} writers  A normalised tally.
+ * @param {string} authorId
+ * @param {number} ts
+ * @param {{ stored: number, halfLifeDays: number }} settings  See `writersSettings`.
+ * @returns {{ writers: Record<string, { count: number, last: number }>,
+ *   topWriters: { id: string, count: number }[] }}  The new tally and its best five, best first.
+ */
+function countWriter(writers, authorId, ts, { stored, halfLifeDays }) {
   const id = String(authorId);
-  const list = (Array.isArray(topWriters) ? topWriters : []).map((w) => ({ ...w }));
-  const existing = list.find((w) => w.id === id);
-  if (existing) existing.count += 1;
-  else list.push({ id, count: 1 });
-  list.sort((a, b) => b.count - a.count);
-  return list.slice(0, 5);
+  const next = { ...writers };
+  const before = next[id];
+  // Re-inserted so the writer just counted sits last: an exact rank tie keeps them (see sortByRank).
+  delete next[id];
+  next[id] = { count: (before?.count ?? 0) + 1, last: Math.max(before?.last ?? 0, writerTs(ts)) };
+  const ranked = rankWriters(next, halfLifeDays);
+  for (const evicted of ranked.slice(stored)) delete next[evicted.id];
+  return { writers: next, topWriters: ranked.slice(0, TOP_WRITERS).map((writer) => ({ id: writer.id, count: writer.count })) };
+}
+
+/**
+ * Normalize a channel entry in place: stored JSON is untrusted (possibly hand-edited while
+ * paused, or written before a field existed). `writers` is validated (`normalizeWriters`); an
+ * entry without a tally gets one seeded from its stored `topWriters`, dated its `lastMessageAt`
+ * (`writersFromTop`), so the five it already shows keep their counts. `notesCheckedAt` is kept
+ * when it reads as a time and is null otherwise (never re-checked, which readers take as stale
+ * notes). Every other field, `topWriters` included, is left exactly as stored; a non-object
+ * value is left alone entirely. Never marks anything dirty -- same contract as
+ * `normalizeProfile`.
+ */
+function normalizeChannel(channel) {
+  if (!isPlainObject(channel)) return;
+  channel.writers = isPlainObject(channel.writers) ? normalizeWriters(channel.writers) : writersFromTop(channel.topWriters, channel.lastMessageAt);
+  channel.notesCheckedAt = isoStampOrNull(channel.notesCheckedAt);
 }
 
 export function createStore({ dataDir }) {
@@ -495,6 +640,21 @@ export function createStore({ dataDir }) {
     }
     normalizePrivate(item.value);
     return item;
+  }
+
+  /** The cache entry of one channel of the server map, created empty when missing, normalised in
+   * place (`normalizeChannel`); never marked dirty by reading, so a tally seeded for an old file
+   * is written only by the next change. */
+  function channelEntry(guildId, channelId) {
+    const item = entry(channelFile(guildId, channelId), () => emptyChannel(String(channelId)));
+    normalizeChannel(item.value);
+    return item;
+  }
+
+  /** Whether a channel has an entry, cached or on disk (no side effects on the cache). */
+  function hasChannel(guildId, channelId) {
+    const file = channelFile(guildId, channelId);
+    return entries.has(file) || fs.existsSync(file);
   }
 
   /** The cache entry of a guild's GIF library, created empty when missing, normalised in place of
@@ -1177,16 +1337,72 @@ export function createStore({ dataDir }) {
      * overwriting wholesale (mirrors `updateUser`); `emojiUsage` likewise
      * only through `recordEmojiUsage`/`clearEmojiUsage`, `emojiBackfill` only
      * through `setEmojiBackfill`, `ownLines`/`worn`/`wornHistory` only through
-     * `pushOwnLine`/`setWorn`/`appendWornHistory`.
+     * `pushOwnLine`/`setWorn`/`appendWornHistory`, and the notes stamps only
+     * through this write and `markNotesChecked`. `notesUpdatedAt` gets the
+     * same stamp when one of the server notes (`patterns`, `starters`,
+     * `injokes`) really changes; `self` alone never moves it, and neither do
+     * `applySelfOps` or `applyLearnedOps`, so it tells how old the notes are
+     * (src/memory/update.js#notesStale).
      */
     updateGuild(guildId, fields) {
       const item = entry(guildFile(guildId), emptyGuild);
       normalizeGuild(item.value);
-      const { learned, learnedNextId, emojiUsage, emojiBackfill, ownLines, worn, wornHistory, ...safeFields } = fields ?? {};
+      const { learned, learnedNextId, emojiUsage, emojiBackfill, ownLines, worn, wornHistory, notesUpdatedAt, notesCheckedAt, ...safeFields } =
+        fields ?? {};
       if (!changesStored(item.value, safeFields)) return item.value;
-      Object.assign(item.value, safeFields, { updatedAt: new Date().toISOString() });
+      const notes = Object.fromEntries(Object.entries(safeFields).filter(([key]) => NOTES_FIELDS.includes(key)));
+      const stamp = new Date().toISOString();
+      const stamps = changesStored(item.value, notes) ? { updatedAt: stamp, notesUpdatedAt: stamp } : { updatedAt: stamp };
+      Object.assign(item.value, safeFields, stamps);
       item.dirty = true;
       return item.value;
+    },
+
+    /**
+     * Record that the analyzer was asked to look at notes again (a batch that carried their
+     * stale marker was applied): `notesCheckedAt` = the ISO time of `nowMs` on each listed
+     * channel entry, and on the guild when `guild` is true. Nothing else is touched -- never
+     * `updatedAt` or `notesUpdatedAt`, which only a real change of the text moves -- so notes
+     * answered with the same text are not asked about again until they are stale once more
+     * (src/memory/update.js#notesStale reads the later of the two stamps). A listed channel
+     * without an entry is skipped, never created; the guild file is created when it has to hold
+     * the stamp. Marked dirty only where the stamp changes. Targets that name nothing change
+     * nothing and never throw.
+     * @param {string} guildId
+     * @param {{ channels?: string[], guild?: boolean }} targets  The targets a request flagged
+     *   (src/memory/update.js#buildMemoryRequest's `staleNotes`).
+     * @param {number} nowMs  Epoch milliseconds; not a finite number -> the wall clock.
+     * @returns {{ channels: number, guild: boolean }}  How many channel entries hold the stamp
+     *   now, and whether the guild does.
+     */
+    markNotesChecked(guildId, targets, nowMs) {
+      const at = new Date(Number.isFinite(nowMs) ? nowMs : Date.now()).toISOString();
+      const marked = { channels: 0, guild: false };
+      const stamp = (item) => {
+        if (item.value.notesCheckedAt === at) return;
+        item.value.notesCheckedAt = at;
+        item.dirty = true;
+      };
+
+      const listed = Array.isArray(targets?.channels) ? targets.channels : [];
+      const channelIds = new Set(listed.filter((id) => typeof id === 'string' || typeof id === 'number').map(String));
+      for (const channelId of channelIds) {
+        if (!channelId || !hasChannel(guildId, channelId)) continue;
+        const item = channelEntry(guildId, channelId);
+        if (!isPlainObject(item.value)) continue;
+        stamp(item);
+        marked.channels += 1;
+      }
+
+      if (targets?.guild === true) {
+        const item = entry(guildFile(guildId), emptyGuild);
+        normalizeGuild(item.value);
+        if (isPlainObject(item.value)) {
+          stamp(item);
+          marked.guild = true;
+        }
+      }
+      return marked;
     },
 
     /**
@@ -1402,28 +1618,44 @@ export function createStore({ dataDir }) {
       return counts;
     },
 
-    /** One channel's stored entry (the server map), or null when never seen. */
+    /**
+     * One channel's stored entry (the server map), or null when never seen.
+     * Normalised on read (see `normalizeChannel` above: the writers tally and
+     * the notes check stamp) -- persisted the next time anything writes the
+     * entry, never wiped implicitly.
+     */
     getChannel(guildId, channelId) {
-      const file = channelFile(guildId, channelId);
-      if (!entries.has(file) && !fs.existsSync(file)) return null;
-      return entry(file, () => emptyChannel(String(channelId))).value;
+      if (!hasChannel(guildId, channelId)) return null;
+      return channelEntry(guildId, channelId).value;
     },
 
-    /** Every channel entry stored for a guild, cached or on disk. */
+    /** Every channel entry stored for a guild, cached or on disk; normalised on read like `getChannel`. */
     listChannels(guildId) {
-      return idsUnder(channelsDir(guildId)).map((id) => entry(channelFile(guildId, id), () => emptyChannel(String(id))).value);
+      return idsUnder(channelsDir(guildId)).map((id) => channelEntry(guildId, id).value);
     },
 
     /**
      * Record one observed message in a channel: Discord facts (name, category,
      * topic), counters and the per-day activity histogram. Creates the entry.
      * `authorId` (the message's author, omitted for the persona's own
-     * messages and other bots -- see src/memory/update.js#touchMemory) bumps
-     * that author's tally in `topWriters` (see `bumpTopWriters` above); `null`
-     * (the default) leaves `topWriters` untouched.
+     * messages and other bots -- see src/memory/update.js#touchMemory) is
+     * counted into the channel's `writers` tally (see `countWriter` above),
+     * and `topWriters` is written again as the best five of it, best first;
+     * `null` (the default) leaves both untouched. Never stamps `updatedAt`
+     * (counters are not notes).
+     * @param {string} guildId
+     * @param {string} channelId
+     * @param {{ name?: string, category?: string|null, topic?: string|null }} facts
+     * @param {number} [ts]  The message's time, epoch milliseconds.
+     * @param {string|null} [authorId]
+     * @param {{ channelWritersStored?: number, channelWritersHalfLifeDays?: number }} [opts]  The
+     *   `config.memory` keys of the same name, so a caller can pass `config.memory` as-is, read
+     *   at the moment of use: how many writers the tally keeps (20; never fewer than the five
+     *   shown) and the half-life of a writer's rank in days (30; 0 or less = the count alone).
+     * @returns {object} The channel entry.
      */
-    touchChannel(guildId, channelId, facts, ts = Date.now(), authorId = null) {
-      const item = entry(channelFile(guildId, channelId), () => emptyChannel(String(channelId)));
+    touchChannel(guildId, channelId, facts, ts = Date.now(), authorId = null, opts = {}) {
+      const item = channelEntry(guildId, channelId);
       const channel = item.value;
       const { name, category = null, topic = null } = facts ?? {};
       if (name) channel.name = name;
@@ -1435,7 +1667,11 @@ export function createStore({ dataDir }) {
       const dateKey = utcDay(ts);
       channel.days[dateKey] = (channel.days[dateKey] ?? 0) + 1;
       trimDays(channel.days, 30);
-      if (authorId !== null && authorId !== undefined) channel.topWriters = bumpTopWriters(channel.topWriters, authorId);
+      if (authorId !== null && authorId !== undefined) {
+        const counted = countWriter(channel.writers, authorId, ts, writersSettings(opts));
+        channel.writers = counted.writers;
+        channel.topWriters = counted.topWriters;
+      }
       item.dirty = true;
       return channel;
     },
@@ -1448,7 +1684,10 @@ export function createStore({ dataDir }) {
      * instead of doubling them -- mirrors `touchUserFromWindows`' SET-not-ADD
      * pattern for user profiles. `topWriters` (`{ id, count }[]`, already
      * computed by the caller from the same window) is stored as-is, ids
-     * coerced to strings and capped to 5. Creates the entry.
+     * coerced to strings and capped to 5, and the `writers` tally starts over
+     * from it like every other counter here (`writersFromTop`, each writer
+     * dated the window's `lastMessageAt`), so the live messages that follow
+     * add to the window's counts. Never stamps `updatedAt`. Creates the entry.
      * @param {string} guildId
      * @param {string} channelId
      * @param {{ name?: string, category?: string|null, topic?: string|null, messageCount?: number,
@@ -1456,7 +1695,7 @@ export function createStore({ dataDir }) {
      *   topWriters?: {id: string, count: number}[] }} facts
      */
     setChannelFacts(guildId, channelId, facts) {
-      const item = entry(channelFile(guildId, channelId), () => emptyChannel(String(channelId)));
+      const item = channelEntry(guildId, channelId);
       const channel = item.value;
       const {
         name,
@@ -1476,8 +1715,9 @@ export function createStore({ dataDir }) {
       channel.lastMessageAt = lastMessageAt;
       channel.days = { ...days };
       channel.topWriters = Array.isArray(topWriters)
-        ? topWriters.slice(0, 5).map(({ id, count }) => ({ id: String(id), count }))
+        ? topWriters.slice(0, TOP_WRITERS).map(({ id, count }) => ({ id: String(id), count }))
         : [];
+      channel.writers = writersFromTop(channel.topWriters, lastMessageAt);
       item.dirty = true;
       return channel;
     },
@@ -1486,10 +1726,13 @@ export function createStore({ dataDir }) {
      * Merge analyzer-extracted fields into a channel entry. Only `purpose`,
      * `topics`, `tone` travel through here — everything else (counters,
      * Discord facts) is stripped, mirroring `updateUser`. Stamps `updatedAt`
-     * only when one of them actually changes: an identical re-send is left alone.
+     * only when one of them actually changes: an identical re-send is left
+     * alone. Nothing else stamps a channel's `updatedAt`, so it is the notes'
+     * own stamp (src/memory/update.js#notesStale reads it beside
+     * `notesCheckedAt`, see `markNotesChecked`).
      */
     updateChannel(guildId, channelId, fields) {
-      const item = entry(channelFile(guildId, channelId), () => emptyChannel(String(channelId)));
+      const item = channelEntry(guildId, channelId);
       const patch = {};
       for (const key of ['purpose', 'topics', 'tone']) {
         if (typeof fields?.[key] === 'string') patch[key] = fields[key];
@@ -1751,8 +1994,9 @@ export function createStore({ dataDir }) {
      * (affinity and episodes included), the whole `private/` directory (every
      * member's private layer), `guild.json` -- and with it everything it holds:
      * patterns, starters, in-jokes, self facts, `learned`, `emojiUsage`, the
-     * `emojiBackfill` stamp, `ownLines` and the variety pass's `worn` /
-     * `wornHistory` -- every channel entry, the live observation buffer, the
+     * `emojiBackfill` stamp, `ownLines`, the variety pass's `worn` /
+     * `wornHistory` and the notes stamps -- every channel entry (its writers
+     * tally included), the live observation buffer, the
      * voice queue (`voice.json`), the recent store (`recent.json`), and
      * lorebook entries whose `source` is `'analyzer'` (every entry, owner
      * included, when `keepOwnerLore` is false). Keeps, by default, owner lore

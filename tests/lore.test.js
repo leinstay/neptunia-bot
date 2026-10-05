@@ -222,7 +222,7 @@ test('upsertLore: garbage incoming entries are skipped, never throw', () => {
   assert.equal(result.entries.length, 1);
 });
 
-// ---- eviction: never owner/always, oldest analyzer first --------------------
+// ---- eviction: never owner/always, the stalest analyzer entry first ---------
 
 test('upsertLore: evicts the oldest analyzer entry once over maxEntries', () => {
   const existing = [
@@ -271,6 +271,50 @@ test('upsertLore: no eviction when under/at maxEntries', () => {
     maxEntries: 500,
   });
   assert.equal(result.entries.length, 2);
+});
+
+test('upsertLore: the entry created first and updated last survives the overflow', () => {
+  const existing = [
+    entry({ id: 'a', title: 'Η πλημμύρα', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-09-20T00:00:00.000Z' }),
+    entry({ id: 'b', title: 'Το πανηγύρι', createdAt: '2026-01-02T00:00:00.000Z', updatedAt: '2026-01-02T00:00:00.000Z' }),
+    entry({ id: 'c', title: 'Ο σεισμός', createdAt: '2026-01-03T00:00:00.000Z', updatedAt: '2026-03-01T00:00:00.000Z' }),
+  ];
+  const incoming = [{ title: 'Το καφενείο', keys: ['καφενείο'], text: 'Άνοιξε ξανά.' }];
+
+  const one = upsertLore(existing, incoming, { source: 'analyzer', now: NOW, maxEntries: 3 });
+  assert.deepEqual(one.entries.map((e) => e.title), ['Η πλημμύρα', 'Ο σεισμός', 'Το καφενείο'], 'the stalest goes, not the first created');
+  const two = upsertLore(existing, incoming, { source: 'analyzer', now: NOW, maxEntries: 2 });
+  assert.deepEqual(two.entries.map((e) => e.title), ['Η πλημμύρα', 'Το καφενείο'], 'then the next stalest');
+});
+
+test('upsertLore: an entry the same batch rewrote is not the one evicted', () => {
+  const existing = [
+    entry({ id: 'a', title: 'A', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }),
+    entry({ id: 'b', title: 'B', createdAt: '2026-01-02T00:00:00.000Z', updatedAt: '2026-01-02T00:00:00.000Z' }),
+  ];
+  const result = upsertLore(
+    existing,
+    [
+      { title: 'A', keys: ['a-key'], text: 'a new text' },
+      { title: 'C', keys: ['c-key'], text: 'c text' },
+    ],
+    { source: 'analyzer', now: NOW, maxEntries: 2 },
+  );
+  assert.deepEqual(result.entries.map((e) => [e.title, e.text]), [['A', 'a new text'], ['C', 'c text']]);
+  assert.equal(result.upserted, 2);
+});
+
+test('upsertLore: an entry without updatedAt is aged by its createdAt', () => {
+  const stamped = entry({ id: 'b', title: 'B', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' });
+  const evictedOf = (createdAt, updatedAt) => {
+    const bare = entry({ id: 'a', title: 'A', createdAt, updatedAt });
+    const result = upsertLore([bare, stamped], [{ title: 'C', keys: ['c-key'], text: 'c text' }], { source: 'analyzer', now: NOW, maxEntries: 2 });
+    return ['A', 'B'].filter((title) => !result.entries.some((e) => e.title === title));
+  };
+
+  assert.deepEqual(evictedOf('2026-03-01T00:00:00.000Z', undefined), ['B'], 'created after the other was last updated');
+  assert.deepEqual(evictedOf('2026-01-15T00:00:00.000Z', null), ['A'], 'created before the other was last updated');
+  assert.deepEqual(evictedOf('2026-01-15T00:00:00.000Z', ''), ['A'], 'an empty stamp is no stamp');
 });
 
 // ---- matchLore / keywordMatches ----------------------------------------------
