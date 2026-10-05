@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { parseEnv, applyEnv, deepMerge, readConfig, need, isPlainObject } from '../src/config.js';
 import { roomQuestionChance } from '../src/behavior/spontaneous.js';
 import { RECALL_DEFAULTS, recallSettings } from '../src/behavior/recall.js';
+import { paceSettings } from '../src/behavior/turn.js';
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-'));
@@ -161,4 +162,26 @@ test('config.json: the code fallbacks of the recall group are the shipped values
   const shipped = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
   assert.deepEqual(recallSettings({}), shipped.recall);
   assert.deepEqual({ ...RECALL_DEFAULTS }, shipped.recall);
+});
+
+test('config.json: the code fallbacks of the pace group are the shipped values', () => {
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const shipped = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
+  assert.deepEqual(paceSettings({}), shipped.pace);
+});
+
+test('config.json: the pause notice fallbacks are the shipped values', async () => {
+  const { pauseNoticeMinutes } = await import('../src/behavior/limits.js');
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const shipped = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
+  assert.equal(pauseNoticeMinutes({}), shipped.mention.pauseNoticeMinutes);
+  assert.equal(shipped.features.pauseNotice, true, 'a missing features.pauseNotice counts as on, like the shipped value');
+});
+
+test('config.json: the recall budget fallbacks (forms, clusters, run limit, summary minimum) are the shipped values', () => {
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const shipped = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
+  for (const key of ['maxForms', 'maxClusters', 'timeoutMs', 'minSummaryMs']) {
+    assert.equal(recallSettings({ recall: {} })[key], shipped.recall[key], key);
+  }
 });

@@ -13,6 +13,7 @@ import {
   llmCountToday,
   railReason,
   helperRequestOptions,
+  hedgeSettings,
   resolveProvider,
   matchRoute,
   openRouterHeaders,
@@ -334,6 +335,7 @@ test('helperRequestOptions: counted, never calibrated, on llm.helperTimeoutMs un
     timeoutMs: 12000, // never the turn-length llm.timeoutMs
     purpose: 'lookup',
     signal: undefined,
+    helper: true, // the mark a hedge looks for; never sent
   });
 
   config.llm.helperTimeoutMs = 7000; // a hot edit between two calls: nothing is remembered
@@ -2003,4 +2005,382 @@ test('complete: a classifier.text request carries no marker even with promptCach
     assert.deepEqual(JSON.parse(body).messages, replyMessages());
     assert.ok(!body.includes('cache_control'));
   }
+});
+
+// --- hedged helper requests (llm.hedge): a second attempt after a short wait, the first answer wins ---
+// The clock and the hedge's timers are injected; the transport answers when a test says so.
+// Each test sets the hedge it needs in its own config.
+
+const HEDGE = { roles: ['classifier.text'], afterMs: 2500, timeoutMs: 8000, longTimeoutMs: 20000 };
+
+/** Lets every settled promise run its handlers (no wall-clock wait). */
+const drain = () => new Promise((resolve) => setImmediate(resolve));
+
+/** A clock with timers that fire only when the test advances it. */
+function fakeClock(start = Date.UTC(2026, 9, 5, 12, 0, 0)) {
+  let nowMs = start;
+  let seq = 0;
+  const timers = [];
+  return {
+    now: () => nowMs,
+    setTimer: (fn, ms) => {
+      const timer = { at: nowMs + ms, fn, seq: seq++ };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimer: (timer) => {
+      const at = timers.indexOf(timer);
+      if (at !== -1) timers.splice(at, 1);
+    },
+    pending: () => timers.length,
+    async advance(ms) {
+      const target = nowMs + ms;
+      for (;;) {
+        timers.sort((a, b) => a.at - b.at || a.seq - b.seq);
+        if (!timers.length || timers[0].at > target) break;
+        const timer = timers.shift();
+        nowMs = timer.at;
+        timer.fn();
+        await drain();
+      }
+      nowMs = target;
+      await drain();
+    },
+  };
+}
+
+/**
+ * A transport whose every request waits for the test: `calls[i].answer(response)` or
+ * `calls[i].fail(err)`. An aborted request rejects with its signal's reason, unless
+ * `honourAbort` is false (a provider that answers anyway).
+ */
+function deferredTransport({ honourAbort = true } = {}) {
+  const calls = [];
+  const fetchImpl = (url, init) => new Promise((resolve, reject) => {
+    calls.push({ body: init.body, signal: init.signal, answer: resolve, fail: reject });
+    if (!honourAbort) return;
+    if (init.signal.aborted) reject(init.signal.reason);
+    init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+  });
+  return { calls, fetchImpl };
+}
+
+/** A client on a fake clock and a deferred transport; `hedge: 'none'` leaves the llm.hedge group out. */
+function hedgedLlm({ hedge = HEDGE, llm = {}, transport = deferredTransport(), state = fakeState() } = {}) {
+  const clock = fakeClock();
+  const config = baseConfig({ helperTimeoutMs: 600000, ...llm });
+  if (hedge !== 'none') config.llm.hedge = hedge;
+  const client = createLlm({
+    apiKey: 'k',
+    getConfig: () => config,
+    calibrator: fakeCalibrator(),
+    state,
+    fetchImpl: transport.fetchImpl,
+    now: clock.now,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+  // A helper's request, as every in-turn helper spells it.
+  const ask = ({ role = 'classifier.text', signal, long, extra = {} } = {}) =>
+    client.complete([{ role: 'user', content: 'Ναι ή όχι;' }], {
+      model: 'small/model',
+      ...helperRequestOptions(config, { role, maxOutputTokens: 5, purpose: 'address', signal, long }),
+      ...extra,
+    });
+  return { ask, clock, state, calls: transport.calls };
+}
+
+/** Watches a promise without awaiting it: `status` is pending, resolved or rejected. */
+function watch(promise) {
+  const seen = { status: 'pending', value: undefined };
+  promise.then(
+    (value) => Object.assign(seen, { status: 'resolved', value }),
+    (value) => Object.assign(seen, { status: 'rejected', value }),
+  );
+  return seen;
+}
+
+/** The fields of the log lines named `msg`, level and time dropped. */
+function linesOf(logs, msg) {
+  return logs.filter((l) => l.msg === msg).map(({ level, time, msg: _msg, ...fields }) => fields);
+}
+
+test('hedge: an attempt answering before afterMs is the only one sent', async () => {
+  const { ask, clock, calls, state } = hedgedLlm();
+  const { result, logs } = await withCapturedLogs(async () => {
+    const pending = ask();
+    await drain();
+    assert.equal(calls.length, 1);
+    await clock.advance(HEDGE.afterMs - 1);
+    calls[0].answer(okResponse('ναι'));
+    const answered = await pending;
+    await clock.advance(HEDGE.timeoutMs);
+    return answered;
+  });
+  assert.equal(result.text, 'ναι');
+  assert.equal(calls.length, 1, 'no second attempt');
+  assert.equal(state.data.llmCount, 1);
+  assert.equal(clock.pending(), 0, 'the hedge leaves no timer behind');
+  assert.deepEqual(linesOf(logs, 'llm: hedge'), []);
+  const [usage] = linesOf(logs, 'llm: usage');
+  assert.deepEqual([usage.hedged, usage.attempt, usage.ms], [false, 1, HEDGE.afterMs - 1]);
+});
+
+test('hedge: a slow first attempt gets a second at afterMs with the same body; the faster wins, the other is aborted', async () => {
+  for (const winner of [1, 2]) {
+    const { ask, clock, calls, state } = hedgedLlm();
+    const { result, logs } = await withCapturedLogs(async () => {
+      const pending = ask();
+      await clock.advance(HEDGE.afterMs - 1);
+      assert.equal(calls.length, 1);
+      await clock.advance(1);
+      assert.equal(calls.length, 2, 'the second attempt goes out at afterMs');
+      await clock.advance(300);
+      calls[winner - 1].answer(okResponse(`attempt ${winner}`, { prompt_tokens: 12 }));
+      return pending;
+    });
+    assert.equal(result.text, `attempt ${winner}`);
+    assert.equal(calls[1].body, calls[0].body, 'the same request twice');
+    assert.equal(calls[winner - 1].signal.aborted, false, 'the winner is left alone');
+    assert.equal(calls[2 - winner].signal.aborted, true, 'the loser is aborted');
+    assert.equal(state.data.llmCount, 2, 'both attempts were sent and counted');
+    assert.deepEqual(linesOf(logs, 'llm: hedge'), [{ role: 'classifier.text', purpose: 'address', model: 'small/model', afterMs: HEDGE.afterMs }]);
+    const usage = linesOf(logs, 'llm: usage');
+    assert.equal(usage.length, 1, 'one answer, one usage line');
+    assert.deepEqual([usage[0].hedged, usage[0].attempt, usage[0].ms], [true, winner, HEDGE.afterMs + 300], 'ms from the first attempt\'s start');
+    assert.equal(clock.pending(), 0);
+  }
+});
+
+test('hedge: the loser\'s late answer or failure is swallowed -- no rejection, no log line', async () => {
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const lateOutcomes = [
+      (call) => call.fail(new TypeError('fetch failed')),
+      (call) => call.answer(errorResponse(503)),
+      (call) => call.answer(okResponse('trop tard')),
+    ];
+    for (const late of lateOutcomes) {
+      const { ask, clock, calls } = hedgedLlm({ transport: deferredTransport({ honourAbort: false }) });
+      const { result, logs } = await withCapturedLogs(async () => {
+        const pending = ask();
+        await clock.advance(HEDGE.afterMs);
+        calls[0].answer(okResponse('premier'));
+        const answered = await pending;
+        late(calls[1]);
+        await clock.advance(HEDGE.timeoutMs);
+        return answered;
+      });
+      assert.equal(result.text, 'premier');
+      assert.equal(linesOf(logs, 'llm: usage').length, 1);
+      assert.deepEqual(linesOf(logs, 'llm: retry'), []);
+    }
+    await drain();
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+  assert.deepEqual(unhandled, []);
+});
+
+test('hedge: a retryable failure waits for the other attempt; both failing throw once, the answered error over a network one', async () => {
+  const { ask, clock, calls } = hedgedLlm();
+  const { logs } = await withCapturedLogs(async () => {
+    const seen = watch(ask());
+    await clock.advance(HEDGE.afterMs);
+    calls[0].fail(new TypeError('fetch failed'));
+    await drain();
+    assert.equal(seen.status, 'pending', 'the second attempt is still out');
+    calls[1].answer(errorResponse(503, 'unavailable'));
+    await drain();
+    assert.equal(seen.status, 'rejected');
+    assert.equal(seen.value.statusCode, 503);
+    await clock.advance(HEDGE.timeoutMs);
+  });
+  assert.equal(calls.length, 2, 'never retried past the two attempts');
+  assert.deepEqual(linesOf(logs, 'llm: retry'), []);
+  assert.deepEqual(linesOf(logs, 'llm: usage'), []);
+});
+
+test('hedge: a retryable failure of the first attempt sends the second at once; a non-retryable one is thrown alone', async () => {
+  const early = hedgedLlm();
+  const seen = watch(early.ask());
+  await early.clock.advance(300);
+  early.calls[0].answer(errorResponse(502));
+  await drain();
+  assert.equal(early.calls.length, 2, 'the hedge is the call\'s retry');
+  early.calls[1].answer(okResponse('ok'));
+  await drain();
+  assert.equal(seen.value.text, 'ok');
+
+  const final = hedgedLlm();
+  const refused = watch(final.ask());
+  await drain();
+  final.calls[0].answer(errorResponse(400, 'bad request'));
+  await drain();
+  assert.equal(refused.status, 'rejected');
+  assert.equal(refused.value.statusCode, 400);
+  await final.clock.advance(HEDGE.timeoutMs);
+  assert.equal(final.calls.length, 1);
+});
+
+test('hedge: at timeoutMs both attempts are aborted and a timeout is thrown, without a retry', async () => {
+  const { ask, clock, calls } = hedgedLlm();
+  const seen = watch(ask());
+  await clock.advance(HEDGE.timeoutMs - 1);
+  assert.equal(seen.status, 'pending');
+  await clock.advance(1);
+  assert.equal(seen.status, 'rejected');
+  assert.equal(seen.value.name, 'TimeoutError');
+  assert.deepEqual(calls.map((call) => call.signal.aborted), [true, true]);
+  await clock.advance(HEDGE.timeoutMs * 2);
+  assert.equal(calls.length, 2);
+  assert.equal(clock.pending(), 0);
+});
+
+test('hedge: the daily counter counts the second attempt only when it is sent, and never sends it without room', async () => {
+  const roomy = hedgedLlm({ llm: { maxRequestsPerDay: 2 } });
+  const both = watch(roomy.ask());
+  await drain();
+  assert.equal(roomy.state.data.llmCount, 1, 'the first attempt is counted when it is sent');
+  await roomy.clock.advance(HEDGE.afterMs);
+  assert.equal(roomy.calls.length, 2);
+  assert.equal(roomy.state.data.llmCount, 2, 'and the second when it is sent');
+  roomy.calls[1].answer(okResponse('ok'));
+  await drain();
+  assert.equal(both.value.text, 'ok');
+
+  // One slot left: the first attempt takes it, the second is never sent.
+  const tight = hedgedLlm({ llm: { maxRequestsPerDay: 1 } });
+  const { result, logs } = await withCapturedLogs(async () => {
+    const pending = tight.ask();
+    await tight.clock.advance(HEDGE.afterMs + 1000);
+    assert.equal(tight.calls.length, 1);
+    tight.calls[0].answer(okResponse('ok'));
+    return pending;
+  });
+  assert.equal(result.text, 'ok');
+  assert.equal(tight.state.data.llmCount, 1);
+  assert.deepEqual(linesOf(logs, 'llm: hedge'), []);
+  const [usage] = linesOf(logs, 'llm: usage');
+  assert.deepEqual([usage.hedged, usage.attempt], [false, 1]);
+
+  // ... and when that first attempt then fails, the refusal is what the caller sees.
+  const refused = hedgedLlm({ llm: { maxRequestsPerDay: 1 } });
+  const seen = watch(refused.ask());
+  await refused.clock.advance(HEDGE.afterMs);
+  refused.calls[0].fail(new TypeError('fetch failed'));
+  await drain();
+  assert.ok(seen.value instanceof DailyCapError);
+  assert.equal(railReason(seen.value), 'daily-cap');
+  assert.equal(refused.calls.length, 1);
+});
+
+test('hedge: a provider\'s quota of the day is thrown at once, never hedged around', async () => {
+  const { ask, clock, calls } = hedgedLlm();
+  const body = upstreamLimitBody(DAILY_RAW);
+  const { logs } = await withCapturedLogs(async () => {
+    const seen = watch(ask());
+    await drain();
+    calls[0].answer(errorResponse(429, body));
+    await drain();
+    assert.equal(seen.value.statusCode, 429);
+    assert.equal(seen.value.body, body);
+    await clock.advance(HEDGE.timeoutMs);
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(linesOf(logs, 'llm: provider limit').length, 1);
+});
+
+test('hedge: the caller\'s signal aborts both attempts', async () => {
+  const { ask, clock, calls } = hedgedLlm();
+  const controller = new AbortController();
+  const seen = watch(ask({ signal: controller.signal }));
+  await clock.advance(HEDGE.afterMs);
+  assert.equal(calls.length, 2);
+  controller.abort();
+  await drain();
+  assert.equal(seen.status, 'rejected');
+  assert.deepEqual(calls.map((call) => call.signal.aborted), [true, true]);
+  await clock.advance(HEDGE.timeoutMs);
+  assert.equal(calls.length, 2);
+  assert.equal(clock.pending(), 0);
+});
+
+test('hedge: no helper mark, a role not listed, afterMs 0 or no llm.hedge object -- one attempt, today\'s usage line', async () => {
+  const cases = [
+    { name: 'no helper mark', extra: { helper: undefined } },
+    { name: 'role not listed', role: 'classifier.media' },
+    { name: 'afterMs 0', hedge: { ...HEDGE, afterMs: 0 } },
+    { name: 'no group', hedge: 'none' },
+    { name: 'group not an object', hedge: true },
+  ];
+  for (const { name, role, extra, hedge } of cases) {
+    const { ask, clock, calls } = hedgedLlm({ hedge });
+    const { result, logs } = await withCapturedLogs(async () => {
+      const pending = ask({ role, extra });
+      await clock.advance(HEDGE.timeoutMs * 2);
+      assert.equal(calls.length, 1, name);
+      calls[0].answer(okResponse('ok'));
+      return pending;
+    });
+    assert.equal(result.text, 'ok', name);
+    const [usage] = linesOf(logs, 'llm: usage');
+    assert.equal('hedged' in usage || 'attempt' in usage, false, name);
+    assert.deepEqual(linesOf(logs, 'llm: hedge'), [], name);
+  }
+});
+
+test('hedgeSettings: null without an llm.hedge object; inside the group a missing or invalid key reads as config.json', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  for (const config of [undefined, null, {}, { llm: {} }, { llm: { hedge: null } }, { llm: { hedge: [] } }]) {
+    assert.equal(hedgeSettings(config), null, JSON.stringify(config));
+  }
+  for (const hedge of [{}, { roles: 'classifier.text', afterMs: -1, timeoutMs: 0 }, { afterMs: '1', timeoutMs: Infinity, longTimeoutMs: -5 }]) {
+    assert.deepEqual(hedgeSettings({ llm: { hedge } }), shipped.llm.hedge, JSON.stringify(hedge));
+  }
+  assert.deepEqual(hedgeSettings({ llm: { hedge: { roles: [], afterMs: 0 } } }), { ...shipped.llm.hedge, roles: [], afterMs: 0 });
+});
+
+test('helperRequestOptions: long true marks the set, anything else leaves the key out', () => {
+  const config = { llm: { helperTimeoutMs: 12000 } };
+  assert.equal(helperRequestOptions(config, { role: 'classifier.text', long: true }).long, true);
+  for (const long of [undefined, false, 1, 'yes']) {
+    assert.equal('long' in helperRequestOptions(config, { role: 'classifier.text', long }), false, String(long));
+  }
+});
+
+test('hedge: a set marked long is limited by longTimeoutMs, still hedged at afterMs; neither mark is sent', async () => {
+  const hedge = { ...HEDGE, timeoutMs: 4000, longTimeoutMs: 9000 };
+  const { ask, clock, calls } = hedgedLlm({ hedge });
+  const { logs } = await withCapturedLogs(async () => {
+    const seen = watch(ask({ long: true }));
+    await clock.advance(hedge.afterMs);
+    assert.equal(calls.length, 2, 'hedged at afterMs as ever');
+    await clock.advance(hedge.timeoutMs);
+    assert.equal(seen.status, 'pending', 'not cut at timeoutMs');
+    await clock.advance(hedge.longTimeoutMs - hedge.timeoutMs - hedge.afterMs - 1);
+    assert.equal(seen.status, 'pending');
+    await clock.advance(1);
+    assert.equal(seen.status, 'rejected');
+    assert.equal(seen.value.name, 'TimeoutError');
+  });
+  assert.equal(calls.length, 2, 'no retry past the two attempts');
+  assert.deepEqual(calls.map((call) => call.signal.aborted), [true, true]);
+  assert.deepEqual(linesOf(logs, 'llm: retry'), []);
+  for (const call of calls) {
+    assert.deepEqual(Object.keys(JSON.parse(call.body)).sort(), ['max_tokens', 'messages', 'model', 'temperature']);
+  }
+
+  // The caller's own signal still aborts both attempts of a long call.
+  const own = hedgedLlm({ hedge });
+  const controller = new AbortController();
+  const aborted = watch(own.ask({ long: true, signal: controller.signal }));
+  await own.clock.advance(hedge.afterMs);
+  controller.abort();
+  await drain();
+  assert.equal(aborted.status, 'rejected');
+  assert.deepEqual(own.calls.map((call) => call.signal.aborted), [true, true]);
+  assert.equal(own.clock.pending(), 0);
 });

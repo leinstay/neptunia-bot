@@ -36,6 +36,7 @@
     "channelRoute": true,
     "elsewhere": true,
     "typingSimulation": true,
+    "pauseNotice": true,
     "adminCommands": true
   },
   "bot": {
@@ -62,7 +63,8 @@
     "maxRequestsPerDay": 300,
     "provider": null,
     "providerByModel": {},
-    "cache": { "ttl": "1h", "roles": ["talk"], "models": ["anthropic/"], "promptIncludesCached": true }
+    "cache": { "ttl": "1h", "roles": ["talk"], "models": ["anthropic/"], "promptIncludesCached": true },
+    "hedge": { "roles": ["classifier.text"], "afterMs": 2500, "timeoutMs": 8000, "longTimeoutMs": 20000 }
   },
   "classifier": {
     "text": "anthropic/claude-sonnet-4.6",
@@ -110,7 +112,8 @@
     "followUpContext": 15,
     "followUpMaxOutputTokens": 8,
     "followUpNoStreak": 3,
-    "followUpAliases": 5
+    "followUpAliases": 5,
+    "pauseNoticeMinutes": 10
   },
   "typing": {
     "reactionDelayMs": [800, 4000],
@@ -119,6 +122,7 @@
     "maxMs": 12000,
     "betweenMessagesMs": [700, 3500]
   },
+  "pace": { "prepareMs": 6000, "prepareSearchMs": 12000, "dropAfterMs": 60000, "typingWhilePreparing": false },
   "route": { "contextMessages": 20, "maxChannels": 40, "purposeChars": 80, "maxOutputTokens": 120 },
   "elsewhere": { "settleSeconds": 90, "settleMaxSeconds": 300, "rememberPings": 20, "pingMaxAgeDays": 7 },
   "spontaneous": {
@@ -257,7 +261,7 @@
     "links": { "enabled": true, "prefill": true, "prefillPerUserPerDay": 10, "maxPerTurn": 2, "maxBytes": 1500000, "textChars": 6000, "summaryChars": 700, "maxOutputTokens": 300, "fetchTimeoutMs": 10000, "skipSites": ["cdn.discordapp.com", "media.discordapp.net", "tenor.com", "giphy.com", "klipy.com", "imgur.com", "i.redd.it", "v.redd.it", "pbs.twimg.com"] },
     "search": { "enabled": true, "maxPerTurn": 1, "results": 5, "summaryChars": 900, "maxOutputTokens": 400, "classifierMaxOutputTokens": 200, "cacheHours": 24, "contextMessages": 50, "timeoutMs": 10000 }
   },
-  "recall": { "maxForms": 8, "maxPeople": 2, "dateSamples": 4, "clusterGapMinutes": 30, "maxClusters": 8, "windowMessages": 16, "answerChars": 1200, "stretchChars": 1500, "maxPerDay": 100, "timeoutMs": 30000, "maxOutputTokens": 500 },
+  "recall": { "maxForms": 5, "maxPeople": 2, "dateSamples": 4, "clusterGapMinutes": 30, "maxClusters": 5, "windowMessages": 16, "answerChars": 1200, "stretchChars": 1500, "maxPerDay": 100, "timeoutMs": 10000, "minSummaryMs": 2500, "maxOutputTokens": 500 },
   "image": {
     "model": "openai/gpt-image-2.5-flare",
     "maxPerDay": 50,

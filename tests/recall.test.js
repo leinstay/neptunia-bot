@@ -9,6 +9,7 @@ import {
   buildRecallRequest,
   clusterHits,
   cutStretch,
+  fallbackWindow,
   mergeWindows,
   parseLookupAnswer,
   parseRecallAnswer,
@@ -40,6 +41,8 @@ test('recallSettings: a missing switch counts as on, false turns it off, unusabl
   assert.equal(s.windowMessages, 100, 'one page at most');
   assert.equal(s.timeoutMs, RECALL_DEFAULTS.timeoutMs);
   assert.equal(s.stretchChars, RECALL_DEFAULTS.stretchChars);
+  assert.equal(recallSettings({ recall: { minSummaryMs: -1 } }).minSummaryMs, RECALL_DEFAULTS.minSummaryMs);
+  assert.equal(recallSettings({ recall: { minSummaryMs: 0 } }).minSummaryMs, 0, 'the summary asked whatever is left');
 });
 
 // ---- the lookup answer -----------------------------------------------------------------------
@@ -201,6 +204,22 @@ test('mergeWindows: windows of one channel sharing a message become one', () => 
   assert.equal(merged.length, 2);
   assert.deepEqual(merged[0].messages.map((m) => m.id), ['m1', 'm2', 'm3']);
   assert.deepEqual([...merged[0].hitIds].sort(), ['m1', 'm3']);
+});
+
+test('fallbackWindow: the newest window with the most matched lines among the newest three', () => {
+  const t = Date.UTC(2026, 9, 1, 15);
+  const win = (name, ids, hitIds) => ({ channelId: name, channelName: name, messages: ids.map((id, i) => msg(id, t + i)), hitIds: new Set(hitIds) });
+  const newest = win('a', ['a1', 'a2'], ['a1']);
+  const second = win('b', ['b1', 'b2', 'b3'], ['b1', 'b3']);
+  const third = win('c', ['c1', 'c2'], ['c1', 'c2']);
+  const fourth = win('d', ['d1', 'd2', 'd3', 'd4'], ['d1', 'd2', 'd3', 'd4']);
+  assert.equal(fallbackWindow([newest, second, third, fourth]), second, 'most matched lines, the newer on a tie; the fourth is out of reach');
+  assert.equal(fallbackWindow([newest, second, third, fourth], 4), fourth);
+  const outside = win('e', ['e1'], ['e1', 'gone1', 'gone2']);
+  assert.equal(fallbackWindow([newest, outside]), newest, 'a hit id outside the window\'s messages does not count');
+  assert.equal(fallbackWindow([newest]), newest);
+  assert.equal(fallbackWindow([]), null);
+  assert.equal(fallbackWindow(null), null);
 });
 
 test('renderRecallWindows: hit lines carry the mark; captions render; unindexed lines drop the index and reply markers', () => {

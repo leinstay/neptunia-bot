@@ -61,7 +61,9 @@ import { anchorMax, checkCaseText } from './mentor/cases.js';
 import { renderCard, renderFile, renderLastRun } from './mentor/report.js';
 import { log } from './log.js';
 import { clampChars } from './memory/clamp.js';
-import { countToday, utcDay } from './time.js';
+import { countToday, utcDay, zonedDay } from './time.js';
+import { formatClock } from './discord/format.js';
+import { liveRecent, recentSettings } from './memory/recent.js';
 import { VOICE_DAILY } from './memory/update.js';
 import { PORTRAIT_SLOTS, portraitSettings } from './memory/portrait.js';
 
@@ -77,6 +79,7 @@ const READ_ONLY_ACCESS_KEYS = new Set([
   'memory.show',
   'memory.channel',
   'memory.server',
+  'memory.recent',
   'rule.list',
   'lore.list',
   'lore.show',
@@ -1643,6 +1646,36 @@ export function createAdmin({
   }
 
   /**
+   * `/nep memory recent`: the guild's live recent lines (src/memory/recent.js#liveRecent over
+   * `memory.recentHours`), newest moment first, one per line: date and time in `bot.timezone`, the
+   * source channel (`#name` when a channel note stores one, else its id), the weight and the text
+   * with `<@id>` tokens resolved like the other memory views. Expired lines are not shown. Read
+   * only, so it works while paused (`freshenIfPaused`); the reply is chunked by
+   * src/discord/commands.js#respond like every long view.
+   */
+  function cmdMemoryRecent(_args, context) {
+    freshenIfPaused();
+    const guildId = requireGuildId(context);
+
+    const settings = recentSettings(hot.config);
+    if (!settings) return 'recent memory is off';
+
+    const live = liveRecent(store.getRecent(guildId).lines, { now: Date.now(), hours: settings.hours });
+    if (live.length === 0) return 'no live recent lines';
+
+    const timezone = hot.config?.bot?.timezone || 'UTC';
+    const { resolve } = tokenResolver(guildId);
+    const channelText = (channelId) => {
+      const name = store.getChannel(guildId, channelId)?.name;
+      return name ? `#${name}` : String(channelId);
+    };
+    const lines = [...live]
+      .sort((a, b) => b.at - a.at || (Number(b.id) || 0) - (Number(a.id) || 0))
+      .map((line) => `${zonedDay(line.at, timezone)} ${formatClock(line.at, timezone)}  ${channelText(line.channelId)}  w${line.weight}  ${resolve(line.text)}`);
+    return [`recent lines: ${live.length} live, window ${settings.hours} h`, ...lines].join('\n');
+  }
+
+  /**
    * `/nep alias add`: confirms the alias at once instead of
    * waiting for it to be sighted `memory.confirmAfter` times naturally —
    * store.applyProfileOps/src/memory/aliases.js has no option to set a
@@ -3046,6 +3079,7 @@ export function createAdmin({
     'memory.show': (args, context) => cmdMemoryShow(args, context),
     'memory.channel': (args, context) => cmdMemoryChannel(args, context),
     'memory.server': (args, context) => cmdMemoryServer(args, context),
+    'memory.recent': (args, context) => cmdMemoryRecent(args, context),
     'memory.forget': (args, context) => cmdMemoryForget(args, context),
     'memory.wipe': (args, context) => cmdMemoryWipe(args, context),
     'memory.affinity': (args, context) => cmdMemoryAffinity(args, context),

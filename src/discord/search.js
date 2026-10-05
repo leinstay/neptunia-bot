@@ -4,8 +4,13 @@
 // searches go through `guild.client.rest.get` (discord.js has no manager for
 // them), the window through the channel's message manager and
 // normalizeMessage. discord.js runs every request of one guild's route one
-// after another, so a caller sends its searches sequentially and gives each
-// an abort signal for its deadline. Each function returns a result or null
+// after another (@discordjs/rest: REST#queueRequest keys a SequentialHandler
+// by the route's bucket and the guild id, whose queueRequest lets the next
+// request start only when the previous one has finished), so a caller sends
+// its searches sequentially -- sending them together would only queue them
+// inside discord.js -- and gives each an abort signal for its deadline. The
+// windows are channel routes (one queue per channel), so windows of different
+// channels may be fetched together. Each function returns a result or null
 // and never throws; a failure is logged with its status and error name,
 // never a query or a message text.
 

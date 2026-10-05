@@ -476,6 +476,7 @@ test('forTurn: runs the pass on the classifier.text model with the rails, stores
   assert.equal(options.timeoutMs, 30000, 'each attempt is cut at variety.requestTimeoutMs');
   assert.ok(options.signal instanceof AbortSignal);
   assert.equal(options.purpose, 'variety', 'named on the usage line');
+  assert.equal(options.long, true, 'a list of patterns: the long hedge limit');
   const guild = store.getGuild('g1');
   assert.equal(guild.worn.lines, 3);
   assert.deepEqual(guild.worn.patterns, patterns);

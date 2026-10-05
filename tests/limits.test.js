@@ -3,10 +3,18 @@
 // the shared posting side (the notice and the dry-run mirror).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { limitNotice, limitOf, isLimitNotice, mirrorDryRun, postLimitNotice } from '../src/behavior/limits.js';
+import {
+  limitNotice,
+  limitOf,
+  isLimitNotice,
+  mirrorDryRun,
+  pauseNotice,
+  postLimitNotice,
+  postPauseNotice,
+} from '../src/behavior/limits.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
-const labels = { limits: { notice: 'limit hit: {limit} {used}/{cap}' } };
+const labels = { limits: { notice: 'limit hit: {limit} {used}/{cap}', paused: 'on a break (back soon) [*]' } };
 
 // --- limitNotice ---------------------------------------------------------------
 
@@ -74,6 +82,29 @@ test('isLimitNotice: regex metacharacters in the label are matched literally', (
   assert.equal(isLimitNotice(custom, 'abcbut nobody came (llm.maxRequestsPerDay, 800/800) [*+?^$|\\]'), false, 'dots are literal');
   assert.equal(isLimitNotice(custom, '...but nobody came llm.maxRequestsPerDay, 800/800 [*+?^$|\\]'), false, 'parentheses are literal');
   assert.equal(isLimitNotice(custom, '...but nobody came (llm.maxRequestsPerDay, 800/800) [*+?^$|]'), false, 'the backslash is literal');
+});
+
+// --- the pause notice --------------------------------------------------------------
+
+test('pauseNotice: the label as is; an empty string when it is missing, empty or not a string', () => {
+  assert.equal(pauseNotice(labels), labels.limits.paused);
+  assert.equal(pauseNotice({}), '');
+  assert.equal(pauseNotice(undefined), '');
+  assert.equal(pauseNotice({ limits: { paused: '' } }), '');
+  assert.equal(pauseNotice({ limits: { paused: '   ' } }), '');
+  assert.equal(pauseNotice({ limits: { paused: 42 } }), '');
+});
+
+test('isLimitNotice: recognises the pause notice literally, alone or without the limit label', () => {
+  assert.equal(isLimitNotice(labels, pauseNotice(labels)), true);
+  assert.equal(isLimitNotice(labels, `  ${pauseNotice(labels)}\n`), true, 'surrounding whitespace ignored');
+  assert.equal(isLimitNotice(labels, `${pauseNotice(labels)} and more`), false);
+  assert.equal(isLimitNotice(labels, 'on a break (back soon) [x]'), false, 'metacharacters are literal');
+  const pauseOnly = { limits: { paused: labels.limits.paused } };
+  assert.equal(isLimitNotice(pauseOnly, labels.limits.paused), true);
+  assert.equal(isLimitNotice(pauseOnly, 'limit hit: image.maxPerDay 50/50'), false);
+  assert.equal(isLimitNotice({ limits: { notice: labels.limits.notice } }, labels.limits.paused), false);
+  assert.equal(isLimitNotice({ limits: { paused: '' } }, ''), false);
 });
 
 // --- the posting side ------------------------------------------------------------
@@ -164,6 +195,47 @@ test('postLimitNotice: a failing send is logged, never thrown', async () => {
   );
   assert.equal(result, 'failed');
   assert.ok(logs.some((l) => l.msg === 'limits: notice failed' && l.channel === 'c1'));
+});
+
+test('postPauseNotice: the pause label as a reply to the trigger, no mentions, logged with its kind', async () => {
+  const channel = sendingChannel();
+  const { result, logs } = await withCapturedLogs(() =>
+    postPauseNotice({ channel, trigger: { id: 'm1' }, kind: 'mention', asReply: true, labels, config: LIVE, client: mirrorClient() }),
+  );
+  assert.equal(result, 'sent');
+  assert.deepEqual(channel.sent, [
+    { content: labels.limits.paused, reply: { messageReference: 'm1', failIfNotExists: false }, allowedMentions: { parse: [] } },
+  ]);
+  const line = logs.find((l) => l.msg === 'limits: pause notice');
+  assert.deepEqual([line.channel, line.kind], ['c1', 'mention']);
+});
+
+test('postPauseNotice: a missing label posts nothing', async () => {
+  const channel = sendingChannel();
+  const result = await postPauseNotice({ channel, trigger: { id: 'm1' }, kind: 'mention', asReply: true, labels: { limits: {} }, config: LIVE, client: mirrorClient() });
+  assert.equal(result, 'none');
+  assert.equal(channel.sent.length, 0);
+});
+
+test('postPauseNotice: in dry-run it is mirrored, never sent', async () => {
+  const channel = sendingChannel();
+  const client = mirrorClient();
+  const config = { features: { dryRun: true }, bot: { dryRunChannelId: 'mirror1' } };
+  const { result, logs } = await withCapturedLogs(() =>
+    postPauseNotice({ channel, trigger: { id: 'm1' }, kind: 'name', asReply: true, labels, config, client }),
+  );
+  assert.equal(result, 'dry-run');
+  assert.equal(channel.sent.length, 0);
+  assert.equal(client.mirrored.length, 1);
+  assert.ok(client.mirrored[0].content.endsWith(`\n${labels.limits.paused}`));
+  assert.deepEqual(client.mirrored[0].allowedMentions, { parse: [] });
+  assert.ok(!logs.some((l) => l.msg === 'limits: pause notice'), 'nothing was sent');
+});
+
+test('postPauseNotice: a failing send is logged, never thrown', async () => {
+  const channel = sendingChannel({ fail: true });
+  const result = await postPauseNotice({ channel, trigger: { id: 'm1' }, kind: 'reply', asReply: true, labels, config: LIVE, client: mirrorClient() });
+  assert.equal(result, 'failed');
 });
 
 test('mirrorDryRun: no id posts nothing; a fetch failure is logged and swallowed', async () => {

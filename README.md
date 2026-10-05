@@ -50,6 +50,47 @@ npm start
 
 When `bot.guildId` is empty and the bot is in exactly one server, it locks to that server automatically. If the bot is in several servers, it refuses to start. Set `bot.guildId` in `config.local.json`.
 
+## Features and changes
+
+**05.10.2026**  
+It distinguishes between someone talking to it and people talking about it in the third person. When a conversation mentions another channel, it opens that channel and reads the latest messages with pictures, even when the channel was named in words without a link. If someone calls it in a channel where it cannot write, it answers in the main channel with a link to that message. On its own it can comment in the main channel on something it read in a channel where it cannot write. It is more likely to respond to a question asked to everyone than to someone specific. It remembers what mattered over the last few days: what someone gave it or asked it to do, what it promised, what happened between members. When someone asks about a person, it recalls moments connected to them. It searches old server messages the same way it searches the web: for questions like "what did we do on New Year's" or "who is ..." it finds the right conversation and answers from it.
+
+**04.10.2026**  
+It knows what is in the pictures that were recently posted in other channels.
+
+**03.10.2026**  
+When it has not talked to someone in a while, its attitude toward that person gradually returns to neutral.
+
+**01.10.2026**  
+It notices which phrases and devices it has been repeating too often and stops using them.
+
+**30.09.2026**  
+It uses the server's custom emoji in its messages on its own. It posts GIFs from the ones people share on the server. It sees what is happening in a GIF. It knows today's date.
+
+**29.09.2026**  
+It replies in direct messages. What someone tells it in a DM does not appear in the server channels. It sees which reactions people put on messages.
+
+**28.09.2026**  
+It draws pictures on request or on its own. It can draw itself: it has a consistent appearance.
+
+**26.09.2026**  
+It sees pictures and videos inside forwarded messages. It watches long videos from YouTube.
+
+**24.09.2026**  
+It remembers what people teach it in the chat: facts, rules, "that's how we do things here."
+
+**23.09.2026**  
+It watches videos: both attached files and links from YouTube, TikTok, VK, X (Twitter), Reddit, Twitch. If someone asks about a detail in a video it already watched, it re-watches the video with that question. It opens links from messages and reads what is on the page. It searches the web when a question needs fresh facts or when someone directly asks it to look something up.
+
+**22.09.2026**  
+It understands when someone is talking to it without a mention or a tag, from the context of the conversation.
+
+**21.09.2026**  
+It sees pictures posted in the chat. It sees stickers, the server's custom emoji, and link previews with the site title and description. If a message has an attachment it cannot open, such as a file or a voice message, it knows the attachment is there and does not pretend it looked. It understands forwarded messages: who sent the original and what it says. It remembers individual moments with people: who said or did what, and what it thought about it. It keeps track of local jokes and server stories. It remembers a person's hobbies and facts about them, but only what has come up more than once. It also remembers nicknames: what members call each other.
+
+**20.09.2026**  
+The persona answers when called: by a mention, a reply to its message, or just its name in the text. It can write in a channel on its own when nobody called it. It can join someone else's conversation when it has something to say on the topic. It can also ignore a message, like someone who reads it and stays quiet. Replies are not instant: a typing indicator shows, the answer may come as several short messages, and sometimes instead of words it places a reaction. It remembers every member: who they are and how they talk. Its attitude toward each person is different and changes depending on how they talk to it. It can tell whether a channel has a live conversation or is quiet. It knows which channels the server has and what each one is about. On the first launch it reads older messages from the server and builds a first picture of the people and channels, so it does not start from zero.
+
 ## Prompt layers
 
 Prompts load from two directories:

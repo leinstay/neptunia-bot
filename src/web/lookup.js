@@ -280,7 +280,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
         ],
         {
           model: classifierTextModel(config),
-          ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: linksCfg.maxOutputTokens, purpose: 'read-link' }),
+          ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: linksCfg.maxOutputTokens, purpose: 'read-link', long: true }),
         },
       );
     } catch (err) {
@@ -357,6 +357,31 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
   }
 
   /**
+   * What the link cache already holds for `links`, read the way readLinks
+   * reads its cache (the same readable() rules; an excerpt is LRU-touched),
+   * synchronously and with nothing else: no fetch, no model request, no
+   * daily web slot, no miss recorded, no wait for a read in flight. A link
+   * that is not readable, not cached or cached as a miss is left out; a link
+   * listed twice is looked up once. For a caller that cannot wait for the
+   * link stage (the turn's search classifier).
+   * @param {string} guildId
+   * @param {{ id: string, url: string, site?: string, title?: string, kind?: string }[]} links
+   * @returns {Map<string, string>}  link id -> excerpt.
+   */
+  function cachedReads(guildId, links) {
+    const reads = new Map();
+    const seen = new Set();
+    for (const link of links ?? []) {
+      if (!link?.id || seen.has(link.id)) continue;
+      seen.add(link.id);
+      if (!readable(link)) continue;
+      const cached = cachedRead(guildId, `read:${link.id}`);
+      if (cached && cached !== 'miss') reads.set(link.id, cached.text);
+    }
+    return reads;
+  }
+
+  /**
    * One web search on `query`, condensed with its sources, through the shared
    * cache. Needs the feature, `web.search.enabled`, the search-summary prompt,
    * a key and a non-blank query. No results -> an empty `text` (the caller
@@ -421,7 +446,7 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
           ],
           {
             model: classifierTextModel(config),
-            ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: searchCfg.maxOutputTokens, purpose: 'search-summary' }),
+            ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: searchCfg.maxOutputTokens, purpose: 'search-summary', long: true }),
           },
         );
       } catch (err) {
@@ -447,5 +472,5 @@ export function createLookup({ hot, store, llm, state = memoryState(), pageFetch
     return typeof braveApiKey === 'string' && braveApiKey.trim().length > 0;
   }
 
-  return { readLinks, search, hasSearch, webCapLeft };
+  return { readLinks, cachedReads, search, hasSearch, webCapLeft };
 }

@@ -15,6 +15,7 @@ import {
   audienceOf,
   canAttach,
   canReact,
+  canSend,
   fetchHistory,
   fetchNeighbors,
   isWritableChannel,
@@ -50,13 +51,15 @@ import { gifPostsToday } from '../memory/gif-watch.js';
 import { liveRecent, recentSettings } from '../memory/recent.js';
 import { isVideoVisionOn } from '../memory/youtube-check.js';
 import { bumpDaily, utcDay } from '../time.js';
+import { isPlainObject } from '../config.js';
 
 /**
  * How a turn ended. `spoke` and `skip` reached the model (a skip chose
  * silence); `busy` (another turn blocks this one), `paused` (`/nep pause`),
  * `not-now` (a spontaneous chooser found nothing to do) never did; `refused`
  * is a rail (request or token cap) and carries its `limit`; `error` is any
- * other failure, logged.
+ * other failure, logged -- a turn dropped unposted at its bar
+ * (pace.dropAfterMs, `turn: dropped`) included.
  * @typedef {'spoke'|'skip'|'busy'|'refused'|'paused'|'not-now'|'error'} TurnOutcome
  */
 
@@ -113,6 +116,144 @@ export function appendPostLedger(ledger, entry, size) {
   if (!(size > 0)) return [];
   const list = Array.isArray(ledger) ? ledger : [];
   return [...list, entry].slice(-size);
+}
+
+/** `pace` when a key is missing: config.json's values. */
+const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, dropAfterMs: 60000, typingWhilePreparing: false });
+
+/**
+ * The pace of a turn's preparation, read from `config` (the live config):
+ * `prepareMs`, how long everything before the talk request may take, counted
+ * from the turn's start; `prepareSearchMs`, the longer limit once the search
+ * classifier asked for a web or server search (never shorter than
+ * `prepareMs`); `dropAfterMs`, the bar a turn's answer must be in hand by,
+ * counted from the turn's start, past which the turn is dropped unposted;
+ * each a positive number of milliseconds, or null -- no deadline, wait for
+ * everything; no bar -- for 0, a negative value or a non-number. A missing
+ * key takes config.json's value. `typingWhilePreparing` (only exactly true
+ * turns it on; off as shipped): the typing indicator from the start of a turn
+ * answering a direct call until its answer is in hand. Off, the indicator
+ * shows only while the finished answer is being typed out, as before.
+ * @param {object} config
+ * @returns {{ prepareMs: number|null, prepareSearchMs: number|null, dropAfterMs: number|null,
+ *   typingWhilePreparing: boolean }}
+ */
+export function paceSettings(config) {
+  const pace = isPlainObject(config?.pace) ? config.pace : {};
+  const limit = (value, fallback) => {
+    if (value === undefined) return fallback;
+    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+  };
+  return {
+    prepareMs: limit(pace.prepareMs, PACE_FALLBACK.prepareMs),
+    prepareSearchMs: limit(pace.prepareSearchMs, PACE_FALLBACK.prepareSearchMs),
+    dropAfterMs: limit(pace.dropAfterMs, PACE_FALLBACK.dropAfterMs),
+    typingWhilePreparing: pace.typingWhilePreparing === true,
+  };
+}
+
+/** The stages of a turn's preparation, in the order `turn: timings` names them. */
+const PREPARE_STAGES = Object.freeze(['history', 'previews', 'captions', 'videos', 'rewatch', 'links', 'lookup', 'neighbors', 'pulled', 'variety']);
+
+/**
+ * The trigger kinds that are a direct call (a private chat message included): the typing
+ * indicator may show while such a turn prepares and waits for its answer.
+ */
+const DIRECT_CALLS = new Set(['mention', 'reply', 'name', 'followUp', 'private']);
+
+/** What a turn throws to itself once its bar (pace.dropAfterMs) has passed: caught by runTurnOnce. */
+const TOO_SLOW = Symbol('too-slow');
+
+// Discord shows a typing indicator for about ten seconds: it is sent again before it fades.
+const PREPARE_TYPING_REFRESH_MS = 8000;
+
+/** The real timer behind createTurnRunner's `schedule`: `fn` once after `ms`; resolves a cancel function. */
+function scheduleTimer(fn, ms) {
+  const timer = setTimeout(fn, ms);
+  return () => clearTimeout(timer);
+}
+
+/**
+ * One stage of a turn's preparation: `work()` started now, its outcome kept
+ * on the returned record once it settles -- `value` (undefined after a
+ * failure, which `onError` hears of), `ms` since `startedAt` on `clock`, and
+ * `done`. `settled` never rejects, so a stage the turn no longer waits for
+ * can never surface as an unhandled rejection.
+ * @param {() => unknown} work
+ * @param {{ clock: () => number, startedAt: number, onError: (err: unknown) => void }} options
+ * @returns {{ done: boolean, value: unknown, ms: number|null, settled: Promise<void> }}
+ */
+function trackStage(work, { clock, startedAt, onError }) {
+  const stage = { done: false, value: undefined, ms: null, settled: null };
+  stage.settled = new Promise((resolve) => resolve(work()))
+    .then(
+      (value) => {
+        stage.value = value;
+      },
+      (err) => {
+        try {
+          onError(err);
+        } catch {
+          // A failing log line never fails the stage.
+        }
+      },
+    )
+    .then(() => {
+      stage.ms = clock() - startedAt;
+      stage.done = true;
+    });
+  return stage;
+}
+
+/**
+ * The deadline of a turn's preparation: `reached` resolves once `limitMs`
+ * (counted from `startedAt` on `clock`; null = no deadline, never) has
+ * passed. `extend(ms)` moves it to a later limit (null lifts it) while it has
+ * not passed; `close()` ends it -- `passed` turns true and the timer is
+ * cleared -- once the turn goes on. `leftMs()`: the time left to it now (0
+ * once passed), null without a limit. Also the turn's bar (pace.dropAfterMs).
+ * @param {{ clock: () => number, startedAt: number, schedule: (fn: () => void, ms: number) => () => void,
+ *   limitMs: number|null }} options
+ */
+function createDeadline({ clock, startedAt, schedule, limitMs }) {
+  let passed = false;
+  let limit = null;
+  let cancel = null;
+  let release;
+  const reached = new Promise((resolve) => {
+    release = resolve;
+  });
+  const arm = (ms) => {
+    cancel?.();
+    cancel = null;
+    limit = ms;
+    if (ms === null) return;
+    cancel = schedule(() => {
+      cancel = null;
+      passed = true;
+      release();
+    }, Math.max(0, ms - (clock() - startedAt)));
+  };
+  arm(limitMs);
+  return {
+    reached,
+    get passed() {
+      return passed;
+    },
+    leftMs() {
+      if (limit === null) return null;
+      return passed ? 0 : Math.max(0, limit - (clock() - startedAt));
+    },
+    extend(ms) {
+      if (passed || limit === null) return;
+      if (ms === null || ms > limit) arm(ms);
+    },
+    close() {
+      passed = true;
+      cancel?.();
+      cancel = null;
+    },
+  };
 }
 
 /**
@@ -494,6 +635,18 @@ export function usableDestination(guild, config, { exceptId = null } = {}) {
  * (src/behavior/pull.js#pullTargets). On a routed turn `history` is the source
  * channel's lines, not this chat. A throw or an answer that is not an array
  * counts as no id (a throw logs `pull: route failed`).
+ *
+ * Everything a turn prepares before its talk request (the file previews, the
+ * captions, the videos and their re-watch, the link reads, the search
+ * classifier with its searches, the neighbours, the pulled channels, the
+ * variety pass) starts as soon as its inputs exist and runs alongside the
+ * rest, under one deadline (paceSettings: `pace.prepareMs` from the turn's
+ * start, `pace.prepareSearchMs` once the search classifier asked for a
+ * search). A helper still running then contributes nothing to this turn --
+ * its block is absent, as when it fails -- and keeps running for its cache.
+ * Every turn that reaches the talk request logs `turn: timings`.
+ * `schedule(fn, ms)` (default: setTimeout) runs that deadline and the typing
+ * indicator's refresh; it resolves a function that cancels it.
  */
 export function createTurnRunner({
   hot,
@@ -513,6 +666,7 @@ export function createTurnRunner({
   getSelfName = (guildId) => client.guilds?.cache?.get(guildId)?.members?.me?.displayName ?? client.user?.username ?? 'bot',
   routeChannels,
   now: clock = Date.now,
+  schedule = scheduleTimer,
 }) {
   const busy = new Set();
   const lastPostAt = new Map(); // channelId -> ts of the persona's last message
@@ -532,6 +686,46 @@ export function createTurnRunner({
   /** One dry-run mirror message (src/behavior/limits.js#mirrorDryRun), `bot.dryRunChannelId` read now. */
   function mirror(header, body) {
     return mirrorDryRun({ client, dryRunChannelId: hot.config.bot?.dryRunChannelId || '', header, body });
+  }
+
+  /**
+   * The typing indicator while a turn prepares and waits for its answer:
+   * sent once now and again every few seconds until the returned function
+   * stops it (the answer is in hand, the turn is dropped or failed). Only for a turn
+   * answering a direct call (DIRECT_CALLS: no unprompted turn, no overheard
+   * line), with features.typingSimulation and pace.typingWhilePreparing on
+   * (`config`, the turn's live config), never in a dry run (read now), never
+   * where the bot cannot send. A failed send logs `turn: typing failed` and
+   * changes nothing else.
+   * @returns {() => void}  Stops the indicator's refresh.
+   */
+  function typingWhilePreparing(channel, triggerKind, config) {
+    const off = () => {};
+    if (!DIRECT_CALLS.has(triggerKind) || config.features?.typingSimulation === false) return off;
+    if (!paceSettings(config).typingWhilePreparing || hot.config.features?.dryRun === true) return off;
+    let sendable = false;
+    try {
+      sendable = typeof channel.sendTyping === 'function' && canSend(channel);
+    } catch {
+      sendable = false;
+    }
+    if (!sendable) return off;
+    let stopped = false;
+    let cancel = null;
+    const send = () => {
+      cancel = null;
+      if (stopped) return;
+      Promise.resolve()
+        .then(() => channel.sendTyping())
+        .catch((err) => log.warn('turn: typing failed', { channel: channel.id, preparing: true, error: err }));
+      cancel = schedule(send, PREPARE_TYPING_REFRESH_MS);
+    };
+    send();
+    return () => {
+      stopped = true;
+      cancel?.();
+      cancel = null;
+    };
   }
 
   /**
@@ -1245,9 +1439,11 @@ export function createTurnRunner({
    * query, the forms and the transcript are data: never logged (`lookup:
    * classified` carries codes and counts only); an empty or blank answer is
    * a failed call (`lookup: classifier failed`, `reason: 'empty'`), no
-   * search. Its request is a helper's (helperRequestOptions).
+   * search. Its request is a helper's (helperRequestOptions). `onSearch()`
+   * is called once the answer asks for a search that runs, before it starts
+   * (the turn's deadline grows to pace.prepareSearchMs).
    */
-  async function maybeLookup({ config, guildId, channel, selfId, selfName, history, chatHistory, trigger, descriptions, videos, reads, webOn, serverOn }) {
+  async function maybeLookup({ config, guildId, channel, selfId, selfName, history, chatHistory, trigger, descriptions, videos, reads, webOn, serverOn, onSearch }) {
     const channelId = channel.id;
     const prompt = hot.prompts?.lookup;
     const searchCfg = config.web?.search ?? {};
@@ -1316,6 +1512,7 @@ export function createTurnRunner({
     const runWeb = webCan && Boolean(parsed.web);
     const runServer = serverOn && Boolean(server);
     if (!runWeb && !runServer) return null;
+    onSearch?.();
     const [webResult, found] = await Promise.all([
       runWeb ? settleLookupPart(() => lookup.search(guildId, parsed.web), channelId, 'web') : null,
       runServer
@@ -1728,27 +1925,72 @@ export function createTurnRunner({
     const oneAtATime = hot.config.mention?.oneAtATime !== false;
     if (oneAtATime && busy.size > 0) return { outcome: 'busy' };
     busy.add(channel.id);
+    // The typing indicator, the preparation's deadline and the turn's bar, ended in `finally`
+    // whatever the outcome; the start and the mode a dropped turn logs.
+    let stopTyping = () => {};
+    let deadline = null;
+    let bar = null;
+    const turnStartedAt = clock();
+    let turnMode = mode;
     try {
       const config = hot.config;
       const features = config.features ?? {};
       const memoryOn = features.memory !== false;
       const selfId = client.user.id;
       const selfName = getSelfName(guildId);
-      const now = clock();
+      const now = turnStartedAt;
       const startedAt = now;
+      // The bar (pace.dropAfterMs, from the turn's start; a drawFailed turn has its own): the
+      // answer must be in hand by then, or the turn is dropped unposted. At the bar every wait
+      // below gives up (beforeBar throws TOO_SLOW), the typing indicator stops, and the talk
+      // request is aborted -- its client sends no retry once its signal is aborted.
+      bar = createDeadline({ clock, startedAt, schedule, limitMs: paceSettings(config).dropAfterMs });
+      const barAbort = new AbortController();
+      bar.reached.then(() => {
+        stopTyping();
+        barAbort.abort();
+      });
+      const beforeBar = (promise) =>
+        bar.leftMs() === null
+          ? promise
+          : Promise.race([
+              promise,
+              bar.reached.then(() => {
+                throw TOO_SLOW;
+              }),
+            ]);
+      // The talk request's options: with a bar, each attempt's timeout is the smaller of
+      // llm.timeoutMs (read now) and the time left, and the bar's signal aborts it; nothing is
+      // asked once no time is left.
+      const talkOptions = () => {
+        const left = bar.leftMs();
+        if (left === null) return { role: 'talk' };
+        if (left <= 0) throw TOO_SLOW;
+        const configured = hot.config.llm?.timeoutMs;
+        const timeoutMs = Number.isFinite(configured) && configured > 0 ? Math.min(configured, left) : left;
+        return { role: 'talk', timeoutMs, signal: barAbort.signal };
+      };
       // A drawFailed turn only says the picture failed: no classifier or
       // at-turn variety pass is paid for a second time (once it posts, its
       // pass ahead for the next turn starts like any turn's).
       const answersDrawFailure = triggerKind === 'drawFailed';
       // Someone asked for this turn (askedFor): not a spontaneous or an overheard one.
       const asked = askedFor(trigger, triggerKind);
+      // A direct call sees the persona typing while the turn prepares.
+      stopTyping = typingWhilePreparing(channel, triggerKind, config);
 
-      let history = await fetchHistory(channel, {
-        limit: config.context.channelMessages,
-        selfId,
-        embedTextChars: config.media?.embedTextChars,
-        videoSites: config.media?.video?.sites,
-      });
+      const historyStartedAt = clock();
+      const rawHistory = await beforeBar(
+        fetchHistory(channel, {
+          limit: config.context.channelMessages,
+          selfId,
+          embedTextChars: config.media?.embedTextChars,
+          videoSites: config.media?.video?.sites,
+        }),
+      );
+      const historyMs = clock() - historyStartedAt;
+      // The history the request is built from: with its file previews once they are ready (below).
+      let history = rawHistory;
 
       // The other channels this turn shows (`<channel_view>`, pullChannels), found and fetched
       // before the mode is chosen so a chooser sees them. Fresh captions only for a turn certain
@@ -1761,6 +2003,7 @@ export function createTurnRunner({
       // classifier read it).
       const certain = mode !== 'auto';
       const pullLabelled = Boolean(hot.prompts?.labels?.pull?.header);
+      const pullStartedAt = clock();
       const pullsPending = isPrivate
         ? Promise.resolve({ pulled: [], sourceSkip: null })
         : pullChannels({ channel, guildId, history, trigger, triggerKind, source, selfId, selfName, config, now, certain, drawFailure: answersDrawFailure, labelled: pullLabelled })
@@ -1769,7 +2012,7 @@ export function createTurnRunner({
               log.warn('pull: failed', { channel: channel.id, error: err });
               return { pulled: [], sourceSkip: source ? 'error' : null };
             });
-      const early = source || !certain ? await pullsPending : null;
+      const early = source || !certain ? await beforeBar(pullsPending) : null;
       if (early?.sourceSkip) {
         // Nothing to answer, or nothing to comment on: the source is gone or refused.
         if (source.reason !== 'routed') return { outcome: 'not-now' };
@@ -1782,6 +2025,7 @@ export function createTurnRunner({
         finalMode = chooseMode(history, now, { pulled: early.pulled });
         if (!finalMode) return { outcome: 'not-now' };
       }
+      turnMode = finalMode;
       // Ready before the request is built; pulled ahead of a chooser, they get their fresh
       // captions now (only when the block can render).
       const pulledPending = !early
@@ -1797,14 +2041,38 @@ export function createTurnRunner({
       // asked) and runs alongside everything below (descriptions, re-watch, lookup, neighbours); it
       // never rejects and the turn waits for it at most variety.timeoutMs, so it can never fail the
       // turn. A request still running then keeps going and its answer serves the next turn.
+      const varietyStartedAt = clock();
       const wornPending =
         variety && typeof variety.forTurn === 'function' && !answersDrawFailure
           ? variety.forTurn({ guildId, channelId: channel.id, history, selfName, privateChat: isPrivate }).catch(() => null)
-          : Promise.resolve(null);
+          : null;
+
+      // Everything below starts as soon as its inputs exist and runs alongside the rest; the turn
+      // waits for all of it together, at most until the deadline (paceSettings, counted from the
+      // turn's start; longer once the search classifier asked for a search). A stage still running
+      // then contributes nothing -- its block is absent, as when it fails -- and keeps running for
+      // its cache; nothing it settles later reaches this turn. A stage whose inputs were not ready
+      // by then is never started.
+      const pace = paceSettings(config);
+      deadline = createDeadline({ clock, startedAt, schedule, limitMs: pace.prepareMs });
+      const stages = new Map();
+      const track = (name, work, from = clock()) => {
+        const stage = trackStage(work, {
+          clock,
+          startedAt: from,
+          onError: (err) => log.warn('turn: stage failed', { channel: channel.id, stage: name, error: err }),
+        });
+        stages.set(name, stage);
+        return stage;
+      };
+      // A chain that starts a stage once another settled: never rejects, never fails the turn.
+      const chainFailed = (name) => (err) => log.warn('turn: stage failed', { channel: channel.id, stage: name, error: err });
 
       // Lazy, request-time only (see fetchTextPreview's header comment):
-      // never fetched during plain normalization or while just buffered.
-      history = await withTextPreviews(history, config.media?.filePreviewChars ?? 500, fetchImpl);
+      // never fetched during plain normalization or while just buffered. Read by the
+      // transcripts alone: the request's and the two classifiers'.
+      const previews = track('previews', () => withTextPreviews(rawHistory, config.media?.filePreviewChars ?? 500, fetchImpl));
+      const previewed = () => (previews.done && Array.isArray(previews.value) ? previews.value : rawHistory);
 
       // Pictures NOT selected to be attached as image_url may still get a
       // helper's caption, newest first, capped at media.maxPerTurn; cached
@@ -1814,104 +2082,170 @@ export function createTurnRunner({
       // attachment marker. Only this channel's pictures are attached, as
       // buildRequest picks them: a routed call's own pictures are captioned
       // with its pulled channel instead.
-      let descriptions;
+      let captions = null;
+      let captionCandidates = [];
       if (features.mediaDescriptions === true && describer) {
         const visionCfg = config.context.vision ?? {};
-        const picked = features.vision !== false ? selectPictures({ trigger, history, visionCfg, now, channelId: channel.id }) : [];
+        const picked = features.vision !== false ? selectPictures({ trigger, history: rawHistory, visionCfg, now, channelId: channel.id }) : [];
         const includePicked = features.attachedDescriptions !== false;
-        const candidates = describableCandidates(history, picked, { includePicked });
-        const described = await describer.describeMany(guildId, candidates, { maxNew: config.media?.maxPerTurn ?? 6 });
-        descriptions = described.descriptions;
+        captionCandidates = describableCandidates(rawHistory, picked, { includePicked });
+        captions = track('captions', () => describer.describeMany(guildId, captionCandidates, { maxNew: config.media?.maxPerTurn ?? 6 }));
       }
-      // What the search classifier reads around the trigger (routedPull above).
-      const searchHistory = routedPull ? routedPull.messages : history;
-      const searchDescriptions = routedPull ? new Map([...(descriptions ?? []), ...routedPull.descriptions]) : descriptions;
+      // The captions a classifier's transcript shows: this turn's once they are done, else what
+      // the describer's cache holds at the classifier's start (a fresh caption lands there).
+      const captionsSoFar = () => {
+        if (!captions) return undefined;
+        if (captions.done) return captions.value?.descriptions;
+        try {
+          return typeof describer.cachedDescriptions === 'function' ? describer.cachedDescriptions(guildId, captionCandidates) : undefined;
+        } catch {
+          return undefined;
+        }
+      };
 
       // Videos (attached, or linked from a known video site) may be watched
       // by the video describer, newest first, at most media.video.maxPerTurn
       // NEW ones per turn; cached results and limit/error states are free.
-      let videos;
+      let videoStage = null;
+      let rewatchStage = null;
+      let rewatchChain = null;
+      let videoCandidates = [];
       // Both switches (isVideoVisionOn), like the senses line; a missing videoDescriptions counts as on.
       if (isVideoVisionOn(config) && typeof describer?.describeVideos === 'function') {
         const videoCfg = config.media?.video ?? {};
-        const candidates = [];
-        for (let i = history.length - 1; i >= 0; i -= 1) {
-          candidates.push(...collectVideos(history[i], { videoSites: videoCfg.sites }));
+        for (let i = rawHistory.length - 1; i >= 0; i -= 1) {
+          videoCandidates.push(...collectVideos(rawHistory[i], { videoSites: videoCfg.sites }));
         }
-        const watched = await describer.describeVideos(guildId, candidates, { maxNew: videoCfg.maxPerTurn ?? 1 });
-        videos = watched.videos;
+        const candidates = videoCandidates;
+        videoStage = track('videos', () => describer.describeVideos(guildId, candidates, { maxNew: videoCfg.maxPerTurn ?? 1 }));
 
         // A second look when the trigger asks about a watched video: a
         // direct address only (never a spontaneous or an overheard turn, never
         // the drawFailed turn), switch features.videoRewatch (a missing key counts as on).
         // A routed call asks about its source, whose videos no turn watches: the videos
         // here belong to another conversation, so nothing is offered or retried.
+        // It needs the videos' states and its transcript the file previews; it works on a
+        // copy of the states, so a late re-watch never touches what the request was built from.
         if (asked && !answersDrawFailure && features.videoRewatch !== false && typeof describer.rewatchVideo === 'function') {
           if (routedPull) {
             log.info('rewatch: skipped', { channel: channel.id, reason: 'routed' });
           } else {
-            try {
-              await maybeRewatch({
-                config,
-                guildId,
-                channelId: channel.id,
-                selfName,
-                history,
-                trigger,
-                videos,
-                descriptions,
-                candidates,
-              });
-            } catch (err) {
-              log.warn('rewatch: failed', { channel: channel.id, error: err });
-            }
+            rewatchChain = Promise.all([videoStage.settled, previews.settled])
+              .then(() => {
+                const watched = videoStage.value?.videos;
+                if (deadline.passed || !watched) return undefined;
+                rewatchStage = track('rewatch', async () => {
+                  const own = new Map(watched);
+                  try {
+                    await maybeRewatch({
+                      config,
+                      guildId,
+                      channelId: channel.id,
+                      selfName,
+                      history: previewed(),
+                      trigger,
+                      videos: own,
+                      descriptions: captionsSoFar(),
+                      candidates,
+                    });
+                  } catch (err) {
+                    log.warn('rewatch: failed', { channel: channel.id, error: err });
+                  }
+                  return own;
+                });
+                return rewatchStage.settled;
+              })
+              .catch(chainFailed('rewatch'));
           }
         }
       }
+      // The video states a classifier's transcript shows: this turn's once they are done (with the
+      // re-watch's answer when it is done too), else what the describer's cache holds.
+      const videosSoFar = async () => {
+        if (!videoStage) return undefined;
+        if (rewatchStage?.done && rewatchStage.value) return rewatchStage.value;
+        if (videoStage.done) return videoStage.value?.videos;
+        try {
+          return typeof describer.cachedVideos === 'function' ? await describer.cachedVideos(guildId, videoCandidates) : undefined;
+        } catch {
+          return undefined;
+        }
+      };
 
       // The web lookup (features.webLookup -- unlike the other switches a
       // missing key counts as OFF: it costs money and the search needs a
-      // key). Links first: the newest readable links of the history, at most
-      // web.links.maxPerTurn NEW reads (cached excerpts are free). Then, on a
+      // key). The links: the newest readable links of the history, at most
+      // web.links.maxPerTurn NEW reads (cached excerpts are free). Beside them, on a
       // direct address only (not an overheard line), the search classifier
       // when the web search or the server search (recall, never in a private
       // chat) can run, and what its answer asks for of the two, in parallel.
-      let reads;
-      let lookupResult = null;
+      let linksStage = null;
       const webCfg = config.web ?? {};
-      const webLookupOn = features.webLookup === true && Boolean(lookup);
-      if (webLookupOn && webCfg.links?.enabled !== false && typeof lookup.readLinks === 'function') {
+      // Cache only: no fetch, no model request, no daily slot (src/web/lookup.js#cachedReads).
+      const cachedLinkReads = () => {
+        if (!linksStage || typeof lookup?.cachedReads !== 'function') return undefined;
         try {
-          const candidates = readableLinkCandidates(history, config.media?.video?.sites);
-          const read = await lookup.readLinks(guildId, candidates, { maxNew: webCfg.links?.maxPerTurn ?? 2 });
-          reads = read.reads;
+          return lookup.cachedReads(guildId, readableLinkCandidates(rawHistory, config.media?.video?.sites));
         } catch (err) {
           log.warn('lookup: links failed', { channel: channel.id, error: err });
+          return undefined;
         }
+      };
+      const webLookupOn = features.webLookup === true && Boolean(lookup);
+      if (webLookupOn && webCfg.links?.enabled !== false && typeof lookup.readLinks === 'function') {
+        linksStage = track('links', async () => {
+          try {
+            const candidates = readableLinkCandidates(rawHistory, config.media?.video?.sites);
+            const read = await lookup.readLinks(guildId, candidates, { maxNew: webCfg.links?.maxPerTurn ?? 2 });
+            return read.reads;
+          } catch (err) {
+            log.warn('lookup: links failed', { channel: channel.id, error: err });
+            return undefined;
+          }
+        });
       }
+      // The search classifier's transcript needs the file previews; the captions, video states and
+      // page reads it shows are what this turn has at its start (captionsSoFar, videosSoFar, the
+      // reads once done). A routed call is read in its source (routedPull), with its captions.
+      let lookupStage = null;
+      let lookupChain = null;
       if (asked && !answersDrawFailure) {
         const webOn = webLookupOn && webCfg.search?.enabled !== false && typeof lookup.search === 'function';
         const serverOn = !isPrivate && recallAvailable();
         if (webOn || serverOn) {
-          try {
-            lookupResult = await maybeLookup({
-              config,
-              guildId,
-              channel,
-              selfId,
-              selfName,
-              history: searchHistory,
-              chatHistory: history,
-              trigger,
-              descriptions: searchDescriptions,
-              videos,
-              reads,
-              webOn,
-              serverOn,
-            });
-          } catch (err) {
-            log.warn('lookup: failed', { channel: channel.id, error: err });
-          }
+          lookupChain = previews.settled
+            .then(() => {
+              if (deadline.passed) return undefined;
+              lookupStage = track('lookup', async () => {
+                try {
+                  const chat = previewed();
+                  const shown = captionsSoFar();
+                  const videosShown = await videosSoFar();
+                  return await maybeLookup({
+                    config,
+                    guildId,
+                    channel,
+                    selfId,
+                    selfName,
+                    history: routedPull ? routedPull.messages : chat,
+                    chatHistory: chat,
+                    trigger,
+                    descriptions: routedPull ? new Map([...(shown ?? []), ...routedPull.descriptions]) : shown,
+                    videos: videosShown,
+                    // Link reads of this turn when they are in, else what the link cache already holds.
+                    reads: linksStage?.done ? linksStage.value : cachedLinkReads(),
+                    webOn,
+                    serverOn,
+                    onSearch: () => deadline.extend(pace.prepareSearchMs),
+                  });
+                } catch (err) {
+                  log.warn('lookup: failed', { channel: channel.id, error: err });
+                  return null;
+                }
+              });
+              return lookupStage.settled;
+            })
+            .catch(chainFailed('lookup'));
         }
       }
 
@@ -1919,13 +2253,60 @@ export function createTurnRunner({
       // pulls pass (audienceAllows, context.pull.sameAudience): everyone who can read this channel
       // can read it. One refused takes no slot, costs no fetch, and never reaches `<server>`
       // either (buildRequest maps only the neighbours it is given); counted on the answer's log.
-      let neighborsHidden = 0;
-      const acceptNeighbor = (other) => {
-        const allowed = audienceAllows(channel, other, config);
-        if (!allowed) neighborsHidden += 1;
-        return allowed;
-      };
-      const neighbors = isPrivate ? [] : await fetchNeighbors(channel, config, selfId, now, { accept: acceptNeighbor });
+      const neighborsStage = isPrivate
+        ? null
+        : track('neighbors', async () => {
+            let hidden = 0;
+            const accept = (other) => {
+              const allowed = audienceAllows(channel, other, config);
+              if (!allowed) hidden += 1;
+              return allowed;
+            };
+            const found = await fetchNeighbors(channel, config, selfId, now, { accept });
+            return { neighbors: found, hidden };
+          });
+      // The pulled channels and the variety pass started earlier: timed from their own start.
+      const pulledStage = isPrivate ? null : track('pulled', () => pulledPending, pullStartedAt);
+      const varietyStage = wornPending ? track('variety', () => wornPending, varietyStartedAt) : null;
+
+      await beforeBar(
+        Promise.race([
+          Promise.all([
+            previews.settled,
+            captions?.settled,
+            videoStage?.settled,
+            rewatchChain,
+            linksStage?.settled,
+            lookupChain,
+            neighborsStage?.settled,
+            pulledStage?.settled,
+            varietyStage?.settled,
+          ]),
+          deadline.reached,
+        ]),
+      );
+      deadline.close();
+      const prepareMs = clock() - startedAt;
+      // What this turn has: a stage still running is left out (named in `late`).
+      const late = PREPARE_STAGES.filter((name) => stages.has(name) && !stages.get(name).done);
+      for (const name of late) {
+        const stage = stages.get(name);
+        stage.settled.then(() => log.info('turn: stage late', { channel: channel.id, stage: name, ms: stage.ms }));
+      }
+      const timings = { history: historyMs };
+      for (const name of PREPARE_STAGES.slice(1)) timings[name] = stages.get(name)?.done ? stages.get(name).ms : null;
+      history = previewed();
+      const descriptions = captions?.done ? captions.value?.descriptions : undefined;
+      const videos = rewatchStage?.done && rewatchStage.value ? rewatchStage.value : videoStage?.done ? videoStage.value?.videos : undefined;
+      const reads = linksStage?.done ? linksStage.value : undefined;
+      const lookupResult = lookupStage?.done ? (lookupStage.value ?? null) : null;
+      const neighborsFound = neighborsStage?.done ? neighborsStage.value : null;
+      const neighbors = Array.isArray(neighborsFound?.neighbors) ? neighborsFound.neighbors : [];
+      const neighborsHidden = neighborsFound?.hidden ?? 0;
+      // Pulled ahead of a chooser, the channels keep their cached captions when the fresh ones are late.
+      const pulled = pulledStage?.done && Array.isArray(pulledStage.value) ? pulledStage.value : (early?.pulled ?? []);
+      const worn = varietyStage?.done ? varietyStage.value : null;
+
       // A neighbour's pictures get only the captions the cache already holds, under the
       // chat captions' switch: cachedDescriptions never sends a request or counts a day.
       const neighborDescriptions =
@@ -1937,14 +2318,12 @@ export function createTurnRunner({
       // An unasked turn reads the quota for no member, like draw() charges none.
       const drawOn = Boolean(images) && features.imageGeneration !== false && triggerKind !== 'drawFailed' && canAttach(channel);
       const drawQuota = drawOn ? images.quota({ userId: asked ? (trigger.authorId ?? null) : null }) : undefined;
-      const pulled = await pulledPending;
       // Neighbours the bot can read but not write in, marked in `<server>` (a pulled channel's
       // record carries its own mark). A pulled channel whose block is shown is left out of the
       // neighbours by buildRequest itself.
       const readOnlyIds = new Set(neighbors.filter((neighbor) => neighbor.readOnly === true).map((neighbor) => neighbor.channelId));
       // Where a call from a read-only channel is answered, for `<senses>`.
       const destination = isPrivate ? null : usableDestination(channel.guild, config).channel;
-      const worn = await wornPending;
       // `<recent>`: the guild's live recent lines (none: an empty list) and the channels this turn may show them from.
       const recent = memoryOn ? recentInput({ channel, guildId, isPrivate, config, now }) : NO_RECENT;
       // Every input named (turnRequestInput throws on one left undefined); null marks an absent one.
@@ -2019,27 +2398,32 @@ export function createTurnRunner({
       if (Array.isArray(userMessage?.content)) {
         const visionCfg = config.context.vision ?? {};
         let allDownloaded = true;
-        const resolvedContent = await Promise.all(
-          userMessage.content.map(async (part) => {
-            if (part.type !== 'image_url') return part;
-            const downloaded = await imageFetcher.fetchAsDataUrl(part.image_url.url, {
-              maxBytes: visionCfg.maxBytes,
-              timeoutMs: visionCfg.fetchTimeoutMs,
-            });
-            if (!downloaded) {
-              allDownloaded = false;
-              return part;
-            }
-            return { type: 'image_url', image_url: { url: downloaded.dataUrl } };
-          }),
+        const resolvedContent = await beforeBar(
+          Promise.all(
+            userMessage.content.map(async (part) => {
+              if (part.type !== 'image_url') return part;
+              const downloaded = await imageFetcher.fetchAsDataUrl(part.image_url.url, {
+                maxBytes: visionCfg.maxBytes,
+                timeoutMs: visionCfg.fetchTimeoutMs,
+              });
+              if (!downloaded) {
+                allDownloaded = false;
+                return part;
+              }
+              return { type: 'image_url', image_url: { url: downloaded.dataUrl } };
+            }),
+          ),
         );
         messages = [messages[0], { ...userMessage, content: allDownloaded ? resolvedContent : request.textFallback }];
       }
 
       let completion;
+      const talkStartedAt = clock();
       try {
-        completion = await llm.complete(messages, { role: 'talk' });
+        completion = await beforeBar(llm.complete(messages, talkOptions()));
       } catch (err) {
+        // The bar passed (or no time was left to ask): the turn is dropped, nothing is resent.
+        if (err === TOO_SLOW || bar.passed) throw TOO_SLOW;
         // Second line of defence: the picture downloaded fine on our end but
         // the provider still rejects the request for some 4xx reason.
         // request.textFallback is a full re-render of the same user message
@@ -2054,11 +2438,27 @@ export function createTurnRunner({
         const aboutThePictures = err.statusCode >= 400 && err.statusCode < 500 && !RETRY_STATUS.has(err.statusCode);
         if (Array.isArray(messages[1]?.content) && aboutThePictures) {
           const textOnly = messages.map((m) => (Array.isArray(m.content) ? { ...m, content: request.textFallback } : m));
-          completion = await llm.complete(textOnly, { role: 'talk' });
+          completion = await beforeBar(llm.complete(textOnly, talkOptions()));
         } else {
           throw err;
         }
+      } finally {
+        // Where this turn's time went, answered or not: numbers and codes only.
+        const end = clock();
+        log.info('turn: timings', {
+          channel: channel.id,
+          mode: finalMode,
+          triggerKind: triggerKind ?? null,
+          prepareMs,
+          late,
+          stages: timings,
+          talkMs: end - talkStartedAt,
+          totalMs: end - startedAt,
+        });
       }
+      // The answer is in hand: the bar is met, and the typing imitation below (never shortened) takes over.
+      bar.close();
+      stopTyping();
 
       const parsed = parseOutput(completion.text);
       // Feature switches drop parts of the model's output before it is acted on.
@@ -2165,6 +2565,17 @@ export function createTurnRunner({
       handOff = asked;
       return { ...spoke, drawFailed: acted.drawFailed };
     } catch (err) {
+      if (err === TOO_SLOW) {
+        // Past the bar: nothing is posted; `error`, like a failed request (a routed call stays unanswered).
+        log.warn('turn: dropped', {
+          channel: channel.id,
+          mode: turnMode,
+          triggerKind: triggerKind ?? null,
+          reason: 'too-slow',
+          seconds: Math.round((clock() - turnStartedAt) / 100) / 10,
+        });
+        return { outcome: 'error' };
+      }
       if (err instanceof DailyCapError || err instanceof TokenLimitError) {
         log.warn('turn: refused by a safety rail', { channel: channel.id, error: err });
         return { outcome: 'refused', limit: limitOf(err) };
@@ -2172,6 +2583,9 @@ export function createTurnRunner({
       log.error('turn: failed', { channel: channel.id, error: err });
       return { outcome: 'error' };
     } finally {
+      stopTyping();
+      deadline?.close();
+      bar?.close();
       busy.delete(channel.id);
       // A hand-off to the drawFailed turn (or that turn itself) leaves the
       // notifications to runTurn, which fires them once both are done.
