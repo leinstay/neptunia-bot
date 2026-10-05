@@ -24,7 +24,6 @@ import { ID_DIGITS } from '../memory/mentions.js';
 import {
   PAGE,
   audienceOf,
-  canReact,
   canSend,
   channelAllowed,
   fetchHistoryWindow,
@@ -42,14 +41,15 @@ const DEFAULT_TIMERS = Object.freeze({
 
 /**
  * One channel shown to the persona beside the chat it answers. Consumed by
- * src/behavior/prompt.js (rendering) and src/behavior/turn.js (reactions,
- * seen marks); the discord.js channel object is never inside it.
+ * src/behavior/prompt.js (rendering; it finds the newest line shown itself)
+ * and src/behavior/turn.js (reactions, which ask canReact of the live
+ * channel; seen marks); the discord.js channel object is never inside it.
  * @typedef {object} PulledChannel
  * @property {string} channelId
  * @property {string|null} channelName
  * @property {boolean} readOnly       the bot cannot send there (canSend)
- * @property {boolean} canReact       the bot may react there (canReact)
- * @property {'routed'|'noticed'|'mention'|'route'|'recall'|null} reason  why it was pulled
+ * @property {'routed'|'noticed'|'mention'|'route'|'recall'|null} reason  why it was pulled ('recall': no
+ *                                    production caller yet, see fetchPull's `anchorId`)
  * @property {object[]} messages      normalized messages shown, oldest first: the window, the routed trigger when
  *                                    it was outside the window, and the earlier calls (`earlierPingIds`)
  * @property {Set<string>} earlierPingIds  ids among `messages` shown before the window: the routed trigger when it is
@@ -59,8 +59,6 @@ const DEFAULT_TIMERS = Object.freeze({
  * @property {number} picturesNotSeen  pictures of `messages` left without a caption
  * @property {Map<string, 'answered'|'skipped'|'unanswered'>} pingState  message id -> state of its ring call,
  *                                    for every shown line that is a call in the ring except the trigger itself
- * @property {string} newestId        the newest message of `messages`
- * @property {number} newestTs
  */
 
 /** A refusal: nothing of the channel. */
@@ -205,7 +203,7 @@ async function freshCaptions({ describer, guildId, items, timeoutMs, timers, log
   let settled = 0;
   const requests = items.map(async (item) => {
     try {
-      const result = await describer.describeMany(guildId, [item], { maxNew: 1, countAgainstDailyCap: true });
+      const result = await describer.describeMany(guildId, [item], { maxNew: 1 });
       const text = result?.descriptions?.get?.(item.itemId);
       if (open && typeof text === 'string' && text) got.set(item.itemId, text);
     } catch (err) {
@@ -367,7 +365,8 @@ export async function captionPulled(pulled, { describer = null, guildId = null, 
  * @param {string} args.channelId        The channel to pull.
  * @param {object|null} args.destination The discord.js channel the turn speaks in (the audience rail; the log).
  * @param {'routed'|'noticed'|'mention'|'route'|'recall'} args.reason
- * @param {string|null} [args.anchorId]  The window ends at this message instead of the newest one.
+ * @param {string|null} [args.anchorId]  The window ends at this message instead of the newest one. No
+ *   production caller yet: the seam a recall (reason `recall`) will use; only tests pass it today.
  * @param {object|null} [args.trigger]   A routed call (normalized), always shown (the channel's copy), see above.
  * @param {object[]} [args.pings]        The stored ring of calls (`state.json` `elsewherePings`, any channel):
  *   `{ messageId, channelId, ts, answeredAt, skippedAt }`; only this channel's unexpired entries count
@@ -381,8 +380,7 @@ export async function captionPulled(pulled, { describer = null, guildId = null, 
  *   `not-now`): only then are fresh captions requested. Default false: cached captions only (captionPulled
  *   adds the fresh ones once the turn is certain).
  * @param {{ set: Function, clear: Function }} [args.timers]  setTimeout / clearTimeout (tests inject fakes).
- * @returns {Promise<{ pulled: PulledChannel|null, channel: object|null, skip: string|null }>}
- *   `channel` is the discord.js channel beside the record (for reactions there); both null on a skip.
+ * @returns {Promise<{ pulled: PulledChannel|null, skip: string|null }>}  `pulled` null on a skip.
  */
 export async function fetchPull({
   guild,
@@ -405,7 +403,7 @@ export async function fetchPull({
   const logIds = { channel: destination?.id ?? null, source: typeof channelId === 'string' ? channelId : null };
   const skipWith = (skip) => {
     log.info('pull: skipped', { ...logIds, reason: skip, pullReason: reason });
-    return { pulled: null, channel: null, skip };
+    return { pulled: null, skip };
   };
 
   const checked = checkPull({ guild, channelId, destination, config, now: nowMs });
@@ -494,12 +492,10 @@ export async function fetchPull({
     logIds,
   });
 
-  const newest = shown.at(-1);
   const pulled = {
     channelId: channel.id,
     channelName: channel.name ?? null,
     readOnly: !canSend(channel),
-    canReact: canReact(channel),
     reason,
     messages: shown,
     earlierPingIds: beforeWindow,
@@ -507,8 +503,6 @@ export async function fetchPull({
     descriptions: captions.descriptions,
     picturesNotSeen: captions.notSeen,
     pingState,
-    newestId: newest.id,
-    newestTs: newest.ts,
   };
   log.info('pull: channel', {
     ...logIds,
@@ -521,5 +515,5 @@ export async function fetchPull({
     pings: pingState.size,
     ms: Date.now() - started,
   });
-  return { pulled, channel, skip: null };
+  return { pulled, skip: null };
 }

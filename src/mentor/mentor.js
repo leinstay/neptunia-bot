@@ -49,18 +49,22 @@
 // system prompt: it travels as the `<signs>` block of every mentor request,
 // right after `<samples>`, and is simply left out when missing or empty.
 
+import { resolveDestination } from '../behavior/elsewhere.js';
 import { block, fillPromptTemplate, learnedConfig, learnedText } from '../behavior/prompt.js';
 import { isLimitNotice } from '../behavior/limits.js';
 import { classifierTextModel } from '../behavior/mention.js';
+import { usableDestination } from '../behavior/turn.js';
 import { buildVarietyRequest, parseVariety, selectOwnLines, varietyOn, varietySettings } from '../behavior/variety.js';
 import { fill, formatTranscript, renderTranscript } from '../discord/format.js';
+import { requestTokenLimit } from '../llm/budget.js';
 import { TokenLimitError } from '../llm/openrouter.js';
 import { estimateMessages, estimateTokens } from '../llm/tokens.js';
 import { log } from '../log.js';
+import { findGif, gifHandleMap, normalizeGifs } from '../memory/gifs.js';
 import { DAY_MS } from '../time.js';
 import { anchorSituations, replayMedia, resolveAnchor } from './anchor.js';
 import { MentorBudgetError, outputTokenWeight } from './budget.js';
-import { parseDiagnosis, parseScores, parseSituations, verdict } from './judge.js';
+import { parseScores, parseSituations, readDiagnosis, verdict } from './judge.js';
 import { hiddenLater, momentCutoff, momentView } from './moment.js';
 import { answerFacts, repeatedPhrases, sampleLines, styleProfile } from './reference.js';
 import { clip, isAnchor, renderCard, renderCheckCard, renderCheckFile, renderFile, stopPhrase } from './report.js';
@@ -100,6 +104,43 @@ function situationSettings(cfg) {
   const lines = Array.isArray(cfg?.situationLines) ? cfg.situationLines : [6, 15];
   return { count: positive(cfg?.situations, 5), lines };
 }
+
+/**
+ * The values of the `{{name}}`, `{{count}}`, `{{minLines}}` and
+ * `{{maxLines}}` placeholders of every mentor prompt (`mentor-situations`,
+ * `mentor-score`, `mentor-diagnose`, `mentor-signs`), resolved as the
+ * situations parser resolves them (`mentor.situations`,
+ * `mentor.situationLines`). Pure; `config` is the live config read now.
+ * @param {object} config
+ * @param {string} selfName  The persona's display name.
+ * @returns {{ name: string, count: number, minLines: number, maxLines: number }}
+ */
+export function mentorTemplateValues(config, selfName) {
+  const { count, lines } = situationSettings(config?.mentor);
+  const [minLines, maxLines] = lines;
+  return { name: selfName, count, minLines, maxLines };
+}
+
+/**
+ * Every memory store method the mentor calls (src/mentor/sandbox.js#liveView,
+ * the GIF library and the describer cache of a sandbox turn). A store handed
+ * to `createMentor` needs these and no other; a read-only store (a tool's)
+ * allows exactly these. `getRecent`, `getGifs` and `getMediaCache` may be
+ * missing: the mentor then goes on without the recent lines, the GIF library
+ * or the captions. A run and a check read nothing else; reading a moment
+ * (`readAnchor`) also reads the post ledger in `store.state` (not a method;
+ * without it the moment's trigger is guessed).
+ */
+export const MENTOR_STORE_READS = Object.freeze([
+  'getGuild',
+  'getUser',
+  'listUserProfiles',
+  'listChannels',
+  'getLore',
+  'getRecent',
+  'getGifs',
+  'getMediaCache',
+]);
 
 /**
  * How a run ended early: `kind` 'stopped' ('budget' | 'owner' | 'disabled':
@@ -163,9 +204,21 @@ export function worstSituation(situationMedians, anchorNs = new Set()) {
   return worst;
 }
 
+/**
+ * One stored answer as the judge and the diagnosis see it: its messages,
+ * reactions and silence, then its GIF (`{ handle, caption }`) and its
+ * drawing's text only when it has them.
+ */
+function shownAnswer(answer) {
+  const shown = { id: answer.id, messages: answer.messages, reactions: answer.reactions, silent: answer.silent };
+  if (answer.gif) shown.gif = answer.gif;
+  if (answer.draw) shown.draw = answer.draw;
+  return shown;
+}
+
 /** A stored situation as the diagnosis request shows it. */
 function worstRecord(record) {
-  const answers = record.answers.map((a) => ({ id: a.id, messages: a.messages, reactions: a.reactions, silent: a.silent, facts: a.facts, score: a.score }));
+  const answers = record.answers.map((a) => ({ ...shownAnswer(a), facts: a.facts, score: a.score }));
   return { n: record.n, title: record.title, transcript: record.transcript, answers };
 }
 
@@ -188,9 +241,12 @@ function emptyMedians() {
  * optional: without it a run that needs a diagnosis is saved without one).
  * @param {object} deps
  * @param {{ config: object, prompts: object }} deps.hot
- * @param {object} deps.store             The memory store (read only, through `liveView`).
+ * @param {object} deps.store             The memory store, read only: `MENTOR_STORE_READS` and no other method.
  * @param {{ complete: Function }} deps.llm
- * @param {{ channels: { fetch: (id: string) => Promise<object|null> } }} deps.client
+ * @param {{ channels: { fetch: (id: string) => Promise<object|null> },
+ *   guilds?: { cache?: { get: (id: string) => object|undefined } } }} deps.client  `guilds` (optional)
+ *   resolves where a call from a read-only channel is answered, as a live turn does
+ *   (src/behavior/turn.js#usableDestination); without the guild, the stored name of that channel.
  * @param {object} deps.cases             From `createCaseStore`.
  * @param {object} deps.budget            From `createMentorBudget`.
  * @param {() => (string|null)} deps.getGuildId
@@ -205,6 +261,10 @@ function emptyMedians() {
  *   guild's custom emoji (src/discord/emoji.js#createEmojiIndex), the one a live turn uses: the reply
  *   sandbox renders `<emoji>` from it as a turn does. Without it, no `<emoji>`. The guild's GIF library
  *   and the describer cache come from `store` (`getGifs`, `getMediaCache`), read at the moment of use.
+ * @param {{ hasSearch?: () => boolean }} [deps.lookup]  The web lookup a live turn uses
+ *   (src/web/lookup.js#createLookup), only asked whether a search key is configured: the sandbox's
+ *   `<senses>` gets the search line a live turn gets (`features.webLookup` applied by the request
+ *   builder). No search or read is ever run. Without it, no search line.
  * @param {() => number} [deps.now]
  * @param {() => number} [deps.rng]
  * @returns {{ run: (caseId: number) => Promise<{ started: true, done: Promise<object> }>,
@@ -219,7 +279,7 @@ function emptyMedians() {
  *   off, has no model, the case or a required prompt is missing, a run is in flight or the budget is spent.
  *   `done` never rejects: a failure ends the run with `error`, which is saved and reported.
  */
-export function createMentor({ hot, store, llm, client, cases, budget, getGuildId, getSelf, fetchHistoryWindow, fetchMoment, calibrator, emoji, now = Date.now, rng = Math.random }) {
+export function createMentor({ hot, store, llm, client, cases, budget, getGuildId, getSelf, fetchHistoryWindow, fetchMoment, calibrator, emoji, lookup, now = Date.now, rng = Math.random }) {
   let current = null;
 
   // ---- guards ----------------------------------------------------------------
@@ -272,8 +332,10 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
    * the answer may cost, `maxOutputTokens` at `outputTokenWeight`), charged
    * after; an abort ends the run. `as` sends
    * the request for another role through the same rails and budget (the
-   * variety pass: its model, role, output cap and timeout); omitted, the
-   * mentor's own.
+   * variety pass: its model, role, output cap, timeout, `purpose` and a
+   * `signal` of its own that cuts it without ending the run); omitted, the
+   * mentor's own. Every request carries `origin: 'mentor'` (the `llm: usage`
+   * line tells it from live chat traffic).
    */
   async function askMentor(ctx, system, user, as = {}) {
     const config = hot.config;
@@ -297,7 +359,9 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
         timeoutMs: as.timeoutMs ?? cfg.timeoutMs,
         countAgainstDailyCap: false,
         skipCalibration: true,
-        signal: ctx.signal,
+        origin: 'mentor',
+        ...(as.purpose ? { purpose: as.purpose } : {}),
+        signal: as.signal ? AbortSignal.any([ctx.signal, as.signal]) : ctx.signal,
       });
     } catch (err) {
       if (ctx.signal.aborted) throw new RunEnd('stopped', 'owner');
@@ -401,23 +465,20 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     };
   }
 
-  /** The `{{name}}`, `{{count}}`, `{{minLines}}`, `{{maxLines}}` of the mentor prompts, resolved as the parser resolves them. */
+  /** The placeholders of the mentor prompts, read now (`mentorTemplateValues`). */
   function templateValues(selfName) {
-    const { count, lines } = situationSettings(hot.config.mentor);
-    const [minLines, maxLines] = lines;
-    return { name: selfName, count, minLines, maxLines };
+    return mentorTemplateValues(hot.config, selfName);
   }
 
   // ---- the request budget ----------------------------------------------------
 
   /**
    * What a mentor request may hold: the per-request token cap the llm client
-   * enforces (`llm.maxRequestTokens`) with the talk path's `llm.safetyMargin`.
+   * enforces (`llm.maxRequestTokens`) with the talk path's `llm.safetyMargin`
+   * (src/llm/budget.js#requestTokenLimit, read now).
    */
   function requestLimit() {
-    const cfg = hot.config.llm ?? {};
-    const margin = Number.isFinite(cfg.safetyMargin) && cfg.safetyMargin > 0 && cfg.safetyMargin <= 1 ? cfg.safetyMargin : 0.9;
-    return Math.floor(positive(cfg.maxRequestTokens, 50000) * margin);
+    return requestTokenLimit(hot.config);
   }
 
   /** A raw token estimate as the llm client's rail measures it (the live calibrator, read now). */
@@ -528,7 +589,10 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
 
   /**
    * The transcript items of `history` as the persona's chat renders them (see `fittedTranscript`);
-   * `media` (a real moment's, see `momentMedia`) renders its media as she saw them.
+   * `media` (a real moment's, see `momentMedia`) renders its media as she saw them, and the
+   * links it read when it carries them (`reads`, a Map). A GIF of the guild's library carries
+   * its handle, as in her request (src/behavior/prompt.js#buildRequest: `features.gifs` on and a
+   * library with an entry).
    */
   function transcriptItems(history, selfName, media = null) {
     const config = hot.config;
@@ -543,6 +607,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       reactionsPerMessage: config.context?.reactionsPerMessage,
       descriptions: media?.descriptions,
       videos: media?.videos,
+      reads: media?.reads instanceof Map ? media.reads : undefined,
+      gifHandles: gifHandlesNow(),
     });
   }
 
@@ -550,6 +616,21 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
   function mediaCacheOf(guildId) {
     if (!guildId || typeof store?.getMediaCache !== 'function') return null;
     return store.getMediaCache(guildId) ?? null;
+  }
+
+  /** The guild's GIF library, read now; null with `features.gifs` off or a store that keeps none. */
+  function gifLibraryNow() {
+    const guildId = getGuildId();
+    if (hot.config.features?.gifs === false || typeof store?.getGifs !== 'function' || !guildId) return null;
+    return store.getGifs(guildId) ?? null;
+  }
+
+  /** The library's handles for a transcript (src/memory/gifs.js#gifHandleMap); undefined when it has no entry. */
+  function gifHandlesNow() {
+    const library = gifLibraryNow();
+    if (!library) return undefined;
+    const normalized = normalizeGifs(library);
+    return Object.keys(normalized.entries).length > 0 ? gifHandleMap(normalized) : undefined;
   }
 
   /**
@@ -564,8 +645,45 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     const gifsOn = hot.config.features?.gifs !== false && typeof store?.getGifs === 'function';
     return {
       customEmoji: typeof emoji?.list === 'function' ? emoji.list() : [],
-      gifs: gifsOn && guildId ? store.getGifs(guildId) : null,
+      gifs: gifsOn ? gifLibraryNow() : null,
       mediaCache: emoji || gifsOn ? mediaCacheOf(guildId) : null,
+    };
+  }
+
+  /**
+   * The name of the channel where a call from a read-only channel is
+   * answered, as a live turn's `<senses>` names it: the guild of this
+   * instance through `client.guilds` and src/behavior/turn.js#usableDestination
+   * (`features.elsewhere`, `memory.mainChannelIds`, `bot.channels` and the
+   * bot's permissions, read now). Without that guild (a client that holds
+   * none), the first id of `memory.mainChannelIds` the view's channel map
+   * names (src/behavior/elsewhere.js#resolveDestination), by its stored name.
+   * A usable channel without a name takes its stored one. Null: no such line.
+   */
+  function destinationName(view) {
+    const config = hot.config;
+    const guildId = getGuildId();
+    const stored = new Map(view.memory.listChannels().map((c) => [String(c?.id), c?.name || null]));
+    const guild = guildId ? (client?.guilds?.cache?.get?.(guildId) ?? null) : null;
+    if (guild) {
+      const channel = usableDestination(guild, config).channel;
+      return channel ? channel.name || stored.get(String(channel.id)) || null : null;
+    }
+    const { destinationId } = resolveDestination(config, (id) => Boolean(stored.get(String(id))));
+    return destinationId ? stored.get(String(destinationId)) : null;
+  }
+
+  /**
+   * The `<senses>` inputs of a sandbox turn a live turn resolves itself
+   * (src/behavior/turn.js), read now: where a call from a read-only channel
+   * is answered (`destinationName`) and whether the web lookup has a search
+   * key (`lookup.hasSearch()`; the request builder applies `features.webLookup`).
+   */
+  function sensesInputs(view) {
+    const name = destinationName(view);
+    return {
+      elsewhereDestination: name ? { name } : null,
+      searchAvailable: typeof lookup?.hasSearch === 'function' && lookup.hasSearch() === true,
     };
   }
 
@@ -598,10 +716,28 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     };
   }
 
-  /** One sandbox answer as the run stores it, with its facts. */
-  function answerRecord(answer, id, profile) {
+  /**
+   * The GIF of a sandbox answer as the run stores it: its library handle and
+   * the describer's caption of it (`lists.mediaCache`, read only; null without
+   * one), or null when the answer posts none or the handle is not the library's.
+   */
+  function gifRecord(gif, lists) {
+    if (!gif) return null;
+    const entry = findGif(lists.gifs, gif.id);
+    if (!entry) return null;
+    const cached = lists.mediaCache?.[entry.itemId];
+    const caption = cached && !cached.miss && typeof cached.text === 'string' && cached.text.trim() ? cached.text.trim() : null;
+    return { handle: entry.id, caption };
+  }
+
+  /**
+   * One sandbox answer as the run stores it, with its facts: its messages,
+   * reactions and whether it was silent; `gif` (`gifRecord`) and `draw` (the
+   * drawing's text) only when the answer has them.
+   */
+  function answerRecord(answer, id, profile, lists) {
     const facts = answerFacts({ messages: answer.messages ?? [] }, profile);
-    return {
+    const record = {
       id,
       messages: (answer.messages ?? []).map((m) => m.text),
       reactions: (answer.reactions ?? []).map((r) => r.emoji),
@@ -609,6 +745,10 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       facts,
       score: null,
     };
+    const gif = gifRecord(answer.gif, lists);
+    if (gif) record.gif = gif;
+    if (typeof answer.draw?.text === 'string' && answer.draw.text.trim()) record.draw = answer.draw.text;
+    return record;
   }
 
   /**
@@ -617,13 +757,14 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
    * history (`variety.window` of them, newest kept, no age limit: the
    * situation's own timeline is what counts), at least `variety.minLines`,
    * sent through `askMentor` on the `classifier.text` model (charged to the
-   * mentor's budget, never to the chat's daily cap). Unlike a live turn, the
-   * request is cut at `variety.timeoutMs` (a live turn's wait), on purpose: a
-   * sandbox situation has no later turn a late answer could serve. As the live pass
-   * (src/behavior/variety-pass.js), the bot's limit notices (`labels.limits.notice`,
+   * mentor's budget, never to the chat's daily cap). As the live pass
+   * (src/behavior/variety-pass.js#ask), the whole pass -- every retry of the
+   * llm client included -- is cut at `variety.requestTimeoutMs` by one
+   * AbortController, so a stalled classifier costs one request, not one per
+   * attempt. As the live pass, the bot's limit notices (`labels.limits.notice`,
    * read from `view`) are not the persona's lines and are left out. Null -- no pass, no
    * block, nothing saved -- with `features.variety` off, no `variety` prompt,
-   * too few own lines, a failed request or an answer that is not the expected
+   * too few own lines, a failed or cut request or an answer that is not the expected
    * JSON; a stop or a spent budget ends the run as usual. Logs counts only.
    */
   async function wornFor(ctx, { history, view, record, self, caseId }) {
@@ -636,18 +777,33 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     const lines = selectOwnLines({ history: spoken, window: settings.window });
     if (lines.length < settings.minLines) return null;
     const request = buildVarietyRequest({ prompt, selfName: self.name, lines, config });
+    const controller = new AbortController();
+    // Cleared as soon as the pass settles. Unref'd: it only bounds a request and never keeps a process alive.
+    const timer = setTimeout(() => controller.abort(), settings.requestTimeoutMs);
+    timer.unref?.();
     let text;
     try {
       text = await askMentor(ctx, request.messages[0].content, request.messages[1].content, {
         model: classifierTextModel(config),
         role: 'classifier.text',
+        purpose: 'variety',
         maxOutputTokens: settings.maxOutputTokens,
-        timeoutMs: settings.timeoutMs,
+        timeoutMs: settings.requestTimeoutMs,
+        signal: controller.signal,
       });
     } catch (err) {
       if (err instanceof RunEnd) throw err;
-      log.warn('mentor: variety pass failed', { caseId, n: record.n, lines: lines.length, name: err?.name, status: err?.statusCode ?? null });
+      log.warn('mentor: variety pass failed', {
+        caseId,
+        n: record.n,
+        lines: lines.length,
+        name: err?.name,
+        status: err?.statusCode ?? null,
+        timedOut: controller.signal.aborted,
+      });
       return null;
+    } finally {
+      clearTimeout(timer);
     }
     const parsed = parseVariety(text, request.texts, view.config);
     log.info('mentor: variety pass', { caseId, n: record.n, lines: lines.length, parse: parsed.ok ? 'ok' : 'error', kept: parsed.patterns.length, dropped: parsed.dropped });
@@ -670,6 +826,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       // One variety pass per situation, its block shared by every sample; the patterns go on the record.
       const worn = await wornFor(ctx, { history, view, record, self, caseId });
       if (worn) record.worn = worn;
+      // Read once per situation: its samples see the same lists, and its answers' GIFs are found in them.
+      const lists = turnLists();
       const result = await answerReply({
         view,
         situation,
@@ -684,9 +842,10 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
         descriptions: media?.descriptions,
         videos: media?.videos,
         worn,
-        ...turnLists(),
+        ...lists,
+        ...sensesInputs(view),
       });
-      record.answers = result.answers.map((answer, i) => answerRecord(answer, `s${record.n}a${i + 1}`, reference.profile));
+      record.answers = result.answers.map((answer, i) => answerRecord(answer, `s${record.n}a${i + 1}`, reference.profile, lists));
       // What the persona was given, for the diagnosis; kept off the run: it is large.
       entry.request = result.request;
       if (result.stopped || ctx.signal.aborted) throw new RunEnd('stopped', 'owner');
@@ -720,7 +879,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       for (let attempt = 0; attempt < 2 && pending.length > 0; attempt += 1) {
         ctx.phase = `scores ${situation.n}/${records.length}`;
         const asked = situation.answers.filter((a) => pending.includes(a.id));
-        const shown = asked.map((a) => ({ id: a.id, messages: a.messages, reactions: a.reactions, silent: a.silent }));
+        const shown = asked.map(shownAnswer);
         const facts = Object.fromEntries(asked.map((a) => [a.id, a.facts]));
         facts.repeated = repeated;
         // The common blocks are built per request, the re-ask included, so an edit to the
@@ -886,13 +1045,14 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       fail(diagnosisFailure(err));
       return;
     }
-    const diagnosis = parseDiagnosis(text);
+    const { diagnosis, unknownLayer } = readDiagnosis(text);
     if (!diagnosis) {
       fail('invalid answer');
       return;
     }
     record.diagnosis = diagnosis;
-    log.info('mentor: diagnosis', { caseId: item.id, causes: diagnosis.causes.length, changes: diagnosis.changes.length });
+    // `unknownLayer`: causes and changes the parser dropped for a layer it does not know.
+    log.info('mentor: diagnosis', { caseId: item.id, causes: diagnosis.causes.length, changes: diagnosis.changes.length, unknownLayer });
   }
 
   // ---- one case --------------------------------------------------------------
@@ -917,8 +1077,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       models: {
         mentor: config.mentor?.model ?? null,
         talk: config.llm?.model ?? null,
-        // An empty `memory.model` means unset, as in `/nep model show`.
-        analyzer: config.memory?.model || config.llm?.model || null,
+        // The variety pass's model: the one other model a run calls.
+        classifierText: classifierTextModel(config) || null,
       },
       reference: { profile: null, samples: 0 },
       situations: [],
@@ -1160,7 +1320,11 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
    * `mentor.anchor.contextMessages` and the media settings are read now.
    * Each message keeps what the persona saw of its media: the describer's
    * captions and watched summaries cached by the time she answered, read
-   * from the store's media cache and never written. Spends no tokens and
+   * from the store's media cache and never written. The turn the message
+   * was posted in is looked up in the post ledger (`store.state.data.postLedger`,
+   * read only; none, and the anchor's trigger is guessed), and the other
+   * channels that turn was shown are read with `fetchHistoryWindow` under
+   * the live config and labels. Spends no tokens and
    * needs no switch; rejects with an operator-facing Error when the moment
    * is refused. Logs counts only.
    * @param {string} ref
@@ -1186,6 +1350,10 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       embedTextChars: config.media?.embedTextChars,
       videoSites: config.media?.video?.sites,
       mediaCache: mediaCacheOf(guildId),
+      ledger: Array.isArray(store?.state?.data?.postLedger) ? store.state.data.postLedger : null,
+      fetchHistoryWindow: typeof fetchHistoryWindow === 'function' ? fetchHistoryWindow : null,
+      config,
+      labels: hot.prompts?.labels ?? null,
     });
     log.info('mentor: moment read', {
       messages: anchor.history.length,

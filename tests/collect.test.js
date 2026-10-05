@@ -19,6 +19,8 @@ import {
   fetchNeighbors,
   readableChannels,
   isReadableChannel,
+  isWritableChannel,
+  fetchMoment,
   audienceOf,
 } from '../src/discord/collect.js';
 import { MessageReferenceType, OverwriteType, PermissionFlagsBits, PermissionsBitField, SnowflakeUtil } from 'discord.js';
@@ -1163,4 +1165,133 @@ test('normalizeMessage: a Discord CDN picture link stays a link', () => {
   assert.deepEqual(m.attachments, []);
   assert.equal(m.links.length, 1);
   assert.equal(m.links[0].site, 'cdn.discordapp.com');
+});
+
+// --- fetchMessage without an id, isWritableChannel, the neighbours' accept rail --------------
+
+test('fetchMessage: a missing or empty id is null without a request', async () => {
+  const fetches = [];
+  const channel = { messages: { cache: new Map(), fetch: async (id) => (fetches.push(id), rawMessage({ id: 'x' })) } };
+  for (const id of [undefined, null, '']) assert.equal(await fetchMessage(channel, id), null, String(id));
+  assert.deepEqual(fetches, []);
+});
+
+test('isWritableChannel: readable and sendable; never the dry-run mirror, an unreadable or a denied channel', () => {
+  const guild = fakeGuild([
+    { id: 'open', granted: [READ, SEND] },
+    { id: 'diary', granted: [READ] },
+    { id: 'blind', granted: [SEND] },
+    { id: 'thread', granted: [READ, SEND], thread: true },
+    { id: 'denied', granted: [READ, SEND] },
+    { id: MIRROR_ID, granted: [READ, SEND] },
+  ]);
+  const bot = { channels: { deny: ['denied'] }, dryRunChannelId: MIRROR_ID };
+  const writable = [...guild.channels.cache.values()].filter((channel) => isWritableChannel(channel, bot)).map((channel) => channel.id);
+  assert.deepEqual(writable, ['open']);
+  assert.equal(isWritableChannel(guild.channels.cache.get(MIRROR_ID), { channels: {}, dryRunChannelId: '' }), true, 'only the configured mirror is refused');
+});
+
+test('fetchNeighbors: accept is judged before the channel cap; a refused channel takes no slot and is never fetched', async () => {
+  const guild = fakeGuild([
+    neighbourSpec('here', [READ, SEND], 1),
+    neighbourSpec('staff', [READ, SEND], 2),
+    neighbourSpec('talk', [READ, SEND], 4),
+    neighbourSpec('quiet', [READ, SEND], 90),
+  ]);
+  const fetched = [];
+  for (const channel of guild.channels.cache.values()) {
+    const fetch = channel.messages.fetch;
+    channel.messages.fetch = async (query) => (fetched.push(channel.id), fetch(query));
+  }
+  const judged = [];
+  const accept = (other) => (judged.push(other.id), other.id !== 'staff');
+  const config = { ...NEIGHBOUR_CONFIG(), context: { neighborMessages: 5, neighborMaxAgeMinutes: 60, neighborMaxChannels: 1 } };
+  const neighbours = await fetchNeighbors(guild.channels.cache.get('here'), config, 'self-id', NOW, { accept });
+  assert.deepEqual(neighbours.map((n) => n.channelId), ['talk'], 'the slot goes to the next accepted channel');
+  assert.deepEqual(fetched, ['talk']);
+  assert.deepEqual(judged.sort(), ['staff', 'talk'], 'only active channels are judged');
+  const all = await fetchNeighbors(guild.channels.cache.get('here'), config, 'self-id', NOW);
+  assert.deepEqual(all.map((n) => n.channelId), ['staff'], 'no accept: every readable channel');
+});
+
+// --- fetchMoment: a post ledger entry names the turn ------------------------------------------
+
+const MOMENT_START = Date.UTC(2026, 9, 5, 9, 0, 0);
+const MOMENT_BASE = 700000000000000000n;
+const msf = (n) => (MOMENT_BASE + BigInt(n)).toString();
+
+/** A readable guild channel holding one raw message per `[n, authorId, text, extra]`, a minute apart. */
+function momentChannel(lines) {
+  const raws = lines.map(([n, authorId, text, extra = {}]) =>
+    rawMessage({ id: msf(n), author: { id: authorId, bot: false, globalName: authorId, username: authorId }, member: { displayName: authorId }, cleanContent: text, createdTimestamp: MOMENT_START + n * 60_000, ...extra }),
+  );
+  const byId = new Map(raws.map((m) => [m.id, m]));
+  return {
+    id: 'c1',
+    guild: { id: 'g1', members: { me: { id: 'self-id' } } },
+    viewable: true,
+    permissionsFor: () => ({ has: () => true }),
+    messages: {
+      cache: new Map(),
+      async fetch(arg) {
+        if (typeof arg === 'string') {
+          if (!byId.has(arg)) throw new Error('Unknown Message');
+          return byId.get(arg);
+        }
+        let list = [...raws];
+        if (arg.before) list = list.filter((m) => BigInt(m.id) < BigInt(arg.before)).slice(-arg.limit);
+        else if (arg.after) list = list.filter((m) => BigInt(m.id) > BigInt(arg.after)).slice(0, arg.limit);
+        else list = list.slice(-arg.limit);
+        return new Map(list.map((m) => [m.id, m]));
+      },
+    },
+  };
+}
+
+/** Alice asks, Bruno talks to someone else, Chloé chimes in, the persona answers Alice, Bruno goes on. */
+function momentLines() {
+  return [
+    [1, 'alice', 'καλημέρα σε όλους'],
+    [2, 'alice', 'τι ώρα ανοίγει το καφέ;'],
+    [3, 'bruno', 'άσχετο, είδες τον αγώνα;'],
+    [4, 'chloe', 'ναι'],
+    [5, 'self-id', 'στις εννιά'],
+    [6, 'bruno', 'ωραία'],
+  ];
+}
+
+test('fetchMoment: a ledger entry gives the trigger and ends the window at the newest line the turn saw', async () => {
+  const entry = { messageId: msf(5), channelId: 'c1', mode: 'reply', triggerKind: 'overheard', triggerId: msf(2), newestHistoryId: msf(3), sourceChannelId: null, at: 1 };
+  const moment = await fetchMoment(momentChannel(momentLines()), msf(5), { selfId: 'self-id', limit: 30, ledgerEntry: entry });
+  assert.equal(moment.triggerId, msf(2), 'the entry names the trigger, not the newest earlier line');
+  assert.deepEqual(moment.history.map((m) => m.id), [msf(1), msf(2), msf(3)], 'the window ends at newestHistoryId');
+  assert.equal(moment.ledgerEntry, entry);
+  assert.equal('triggerGuessed' in moment, false);
+  assert.deepEqual(moment.burst.map((m) => m.id), [msf(5)]);
+});
+
+test('fetchMoment: an entry of a turn without a trigger keeps none', async () => {
+  const entry = { messageId: msf(5), channelId: 'c1', mode: 'interject', triggerKind: null, triggerId: null, newestHistoryId: msf(4), sourceChannelId: null, at: 1 };
+  const moment = await fetchMoment(momentChannel(momentLines()), msf(5), { selfId: 'self-id', limit: 30, ledgerEntry: entry });
+  assert.equal(moment.triggerId, null);
+  assert.equal(moment.history.at(-1).id, msf(4));
+});
+
+test('fetchMoment: without an entry the trigger is guessed; an entry it cannot follow says so', async () => {
+  const plain = await fetchMoment(momentChannel(momentLines()), msf(5), { selfId: 'self-id', limit: 30 });
+  assert.equal(plain.triggerId, msf(4), 'the newest earlier line of someone else');
+  assert.equal(plain.history.at(-1).id, msf(4));
+  assert.equal('ledgerEntry' in plain, false);
+  assert.equal('triggerGuessed' in plain, false, 'no entry: the caller knows it guessed');
+  for (const newestHistoryId of [undefined, null, '', 'not-an-id']) {
+    const entry = { messageId: msf(5), triggerId: msf(2), newestHistoryId };
+    const moment = await fetchMoment(momentChannel(momentLines()), msf(5), { selfId: 'self-id', limit: 30, ledgerEntry: entry });
+    assert.equal(moment.triggerId, msf(4), String(newestHistoryId));
+    assert.equal(moment.triggerGuessed, true, String(newestHistoryId));
+  }
+});
+
+test('fetchMoment: an entry whose window holds nothing is refused', async () => {
+  const entry = { messageId: msf(5), triggerId: msf(2), newestHistoryId: msf(0) };
+  await assert.rejects(fetchMoment(momentChannel(momentLines()), msf(5), { selfId: 'self-id', limit: 30, ledgerEntry: entry }), /cannot be read/);
 });

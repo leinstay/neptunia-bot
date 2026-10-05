@@ -183,6 +183,8 @@ const mentor = createMentor({
   store,
   llm,
   client,
+  // Read only: whether a search is available, for the sandbox's senses line.
+  lookup,
   cases: mentorCases,
   budget: mentorBudget,
   getGuildId,

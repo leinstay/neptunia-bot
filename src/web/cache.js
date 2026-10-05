@@ -1,8 +1,8 @@
 // Helpers over the shared media cache (data/guilds/<id>/media.json, a plain
 // object whose key order is its recency): the web lookup's link reads and
-// searches live in it next to the media describer's entries. Pure: they only
-// touch the object handed in. src/memory/describe.js still carries its own
-// copies of `touchKey` / `trimCache` and builds its question keys the same way.
+// searches live in it next to the media describer's entries, and the
+// describer (src/memory/describe.js) keeps its entries and question keys
+// with the same helpers. Pure: they only touch the object handed in.
 
 import { createHash } from 'node:crypto';
 

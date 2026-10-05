@@ -7,11 +7,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createMentor, worstSituation } from '../src/mentor/mentor.js';
+import { createMentor, MENTOR_STORE_READS, mentorTemplateValues, worstSituation } from '../src/mentor/mentor.js';
 import { createCaseStore } from '../src/mentor/cases.js';
 import { createMentorBudget } from '../src/mentor/budget.js';
 import { TokenLimitError } from '../src/llm/openrouter.js';
 import { estimateMessages } from '../src/llm/tokens.js';
+import { fill } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
@@ -212,7 +213,7 @@ function reference() {
   ];
 }
 
-function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, fetchChannel, windowFor, fetchMoment, store = fakeMemoryStore(), calibrator, emoji } = {}) {
+function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, fetchChannel, windowFor, fetchMoment, store = fakeMemoryStore(), calibrator, emoji, guilds, lookup } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nep-mentor-run-'));
   let clock = NOW;
   const now = () => (clock += 1000);
@@ -239,6 +240,8 @@ function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, 
         return null;
       },
     },
+    // A client that holds guilds (the bot's gateway client) resolves the <senses> destination live.
+    ...(guilds ? { guilds } : {}),
   };
   const windows = [];
   const fetchHistoryWindow = async (channel, options) => {
@@ -258,6 +261,7 @@ function setup({ config = {}, prompts = {}, llm = fakeLlm(), sendFails = false, 
     fetchMoment,
     calibrator,
     emoji,
+    lookup,
     now,
     rng: () => 0,
   });
@@ -351,7 +355,8 @@ test('run: the run object carries situations, answers, scores and the verdict', 
     assert.equal(run.caseText, CASE_TEXT);
     assert.equal(run.target, 'reply');
     assert.equal(run.kind, 'run');
-    assert.deepEqual(run.models, { mentor: 'x/mentor', talk: 'x/talk', analyzer: 'x/memory' });
+    // No classifier.text model is configured here: the run names none for its variety pass.
+    assert.deepEqual(run.models, { mentor: 'x/mentor', talk: 'x/talk', classifierText: null });
     assert.equal(run.dropped, 1);
     assert.equal(run.situations.length, 2);
     assert.equal(run.reference.profile.messages, 2);
@@ -437,6 +442,8 @@ test('run: mentor requests use mentor.model and are not counted against the dail
       assert.equal(options.skipCalibration, true);
       assert.ok(options.signal instanceof AbortSignal);
       assert.equal('maxRequestTokens' in options, false);
+      // Logged only: the usage line tells mentor traffic from live chat.
+      assert.equal(options.origin, 'mentor');
     }
     for (const { options } of mentorCalls) {
       assert.equal(options.model, 'x/mentor');
@@ -2080,11 +2087,17 @@ test('run: features.gifs off and no emoji index -> no <gifs>, no <emoji>, and a 
 
 // ---- small rules -----------------------------------------------------------------
 
-test('run: an empty memory.model names the talk model as the analyzer', () =>
-  withSetup({ config: { memory: { model: '' } } }, async ({ mentor, cases }) => {
+test('run: the run names the classifier.text model its variety pass uses, never an analyzer model', () =>
+  withSetup({}, async ({ mentor, cases, hot }) => {
     const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
-    const run = await (await mentor.run(item.id)).done;
-    assert.equal(run.models.analyzer, 'x/talk');
+    hot.config.classifier = { text: 'x/classifier', media: 'x/media' };
+    const named = await (await mentor.run(item.id)).done;
+    assert.equal(named.models.classifierText, 'x/classifier');
+    assert.equal('analyzer' in named.models, false);
+    // An empty classifier.text falls back to classifier.media, as the variety pass does.
+    hot.config.classifier = { text: '', media: 'x/media' };
+    const fallback = await (await mentor.run(item.id)).done;
+    assert.equal(fallback.models.classifierText, 'x/media');
   }));
 
 test('run: the budget pre-check measures a request as the llm rail does, calibrated', () =>
@@ -2135,3 +2148,207 @@ test('run: a diagnosis the budget cannot pay for is named as the report names th
       assert.equal(run.diagnosisError, 'stopped: the mentor daily token budget ran out');
     },
   ));
+
+// ---- the store reads, GIFs and drawings, <senses>, the layers ------------------
+
+/**
+ * A store that has the mentor's reads and nothing else: any other name throws,
+ * as a tool's read-only store refuses it.
+ */
+function onlyMentorReads(base) {
+  const allowed = new Set(MENTOR_STORE_READS);
+  const methods = Object.fromEntries(MENTOR_STORE_READS.filter((name) => typeof base[name] === 'function').map((name) => [name, base[name]]));
+  return new Proxy(methods, {
+    get(target, name) {
+      if (typeof name === 'string' && !allowed.has(name)) throw new Error(`the memory store is read-only here (${name} refused)`);
+      return target[name];
+    },
+  });
+}
+
+test('MENTOR_STORE_READS: a run over a store with only those methods completes with GIFs on', () => {
+  const base = storeWithLists();
+  const store = onlyMentorReads({ ...base, getRecent: () => null });
+  return withSetup({ store, llm: fakeLlm({ talk: '<gif>g1</gif>' }) }, async ({ mentor, cases }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await mentor.run(item.id)).done;
+    assert.equal(run.error, undefined);
+    assert.equal(run.passed, true);
+    assert.ok(base.reads.some(([name]) => name === 'getGifs'), 'GIFs are on: the library is read');
+    assert.ok(run.situations.every((s) => s.answers.every((a) => a.gif?.handle === 'g1')));
+  });
+});
+
+test('run: a GIF-only answer reaches the judge, the record and the report with its handle and caption', () =>
+  withSetup({ store: storeWithLists(), llm: fakeLlm({ talk: '<gif reply="#2">g1</gif>' }) }, async ({ mentor, cases, llm, sent }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const run = await (await mentor.run(item.id)).done;
+    const answer = run.situations[0].answers[0];
+    assert.deepEqual(answer.messages, []);
+    assert.equal(answer.silent, false);
+    assert.deepEqual(answer.gif, { handle: 'g1', caption: 'a dancing cat' });
+    const shown = JSON.parse(blockBody(llm.calls.find((c) => c.kind === 'score').user, 'answers'));
+    assert.deepEqual(shown[0], { id: 's1a1', messages: [], reactions: [], silent: false, gif: { handle: 'g1', caption: 'a dancing cat' } });
+    assert.match(sent[0].files[0].attachment.toString('utf8'), /^gif: g1 \(a dancing cat\)$/m);
+  }));
+
+test('run: a drawing reaches the judge as its text; an answer without GIF or drawing shows neither key', () =>
+  withSetup(
+    { config: { features: { mentor: true, imageGeneration: true } }, llm: fakeLlm({ talk: '<msg>look</msg><draw>a café at night</draw>' }) },
+    async ({ mentor, cases, llm, sent }) => {
+      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+      const run = await (await mentor.run(item.id)).done;
+      assert.equal(run.situations[0].answers[0].draw, 'a café at night');
+      assert.equal('gif' in run.situations[0].answers[0], false);
+      const shown = JSON.parse(blockBody(llm.calls.find((c) => c.kind === 'score').user, 'answers'));
+      assert.deepEqual(shown[0], { id: 's1a1', messages: ['look'], reactions: [], silent: false, draw: 'a café at night' });
+      assert.match(sent[0].files[0].attachment.toString('utf8'), /^draw: a café at night$/m);
+    },
+  ));
+
+test('run: a library GIF in a real moment carries its handle in the judge <situation>; with GIFs off it does not', async () => {
+  const gifLink = { id: 'k1', kind: 'gif', url: 'https://tenor.com/view/dance-1', site: 'Tenor', title: 'Danse' };
+  const withGif = (cases) => {
+    const stored = moment('G1');
+    stored.history[0] = { ...stored.history[0], links: [gifLink] };
+    return cases.add(GUILD, { text: CASE_TEXT, target: 'reply', anchor: stored });
+  };
+  for (const gifs of [true, false]) {
+    await withSetup({ store: storeWithLists(), config: { features: { mentor: true, gifs } } }, async ({ mentor, cases, llm }) => {
+      const item = withGif(cases);
+      await (await mentor.run(item.id)).done;
+      const situation = blockBody(scoreCallOf(llm, 1).user, 'situation');
+      assert.equal(/\[gif g1: /.test(situation), gifs, situation);
+    });
+  }
+});
+
+test('run: the sandbox request of a configured main channel names it in <senses>, from the stored channel without a guild', () =>
+  withSetup({}, async ({ mentor, cases, llm }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    await (await mentor.run(item.id)).done;
+    const line = fill(labels.senses.elsewhere, { destination: CHANNEL.name });
+    const talks = llm.calls.filter((c) => c.kind === 'talk');
+    assert.ok(talks.length > 0);
+    for (const talk of talks) assert.ok(talk.user.includes(line), talk.user);
+  }));
+
+/** The guild of this instance as the gateway client holds it, its main channel usable or not. */
+function liveGuild({ canSend = true } = {}) {
+  const channel = {
+    id: CHANNEL.id,
+    name: 'live-general',
+    viewable: true,
+    isTextBased: () => true,
+    isThread: () => false,
+    permissionsFor: () => ({ has: () => canSend }),
+  };
+  const guild = { id: GUILD, members: { me: { id: SELF_ID } }, channels: { cache: new Map([[CHANNEL.id, channel]]) } };
+  channel.guild = guild;
+  return { cache: new Map([[GUILD, guild]]) };
+}
+
+test('run: with the guild at hand, <senses> names the destination a live turn resolves; none when it is not usable or elsewhere is off', async () => {
+  const variants = [
+    { guilds: liveGuild(), features: { mentor: true }, expected: 'live-general' },
+    { guilds: liveGuild({ canSend: false }), features: { mentor: true }, expected: null },
+    { guilds: undefined, features: { mentor: true, elsewhere: false }, expected: null },
+  ];
+  for (const { guilds, features, expected } of variants) {
+    await withSetup({ guilds, config: { features } }, async ({ mentor, cases, llm }) => {
+      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+      await (await mentor.run(item.id)).done;
+      const talk = llm.calls.find((c) => c.kind === 'talk');
+      const prefix = labels.senses.elsewhere.split('{destination}')[0];
+      if (expected) assert.ok(talk.user.includes(fill(labels.senses.elsewhere, { destination: expected })), talk.user);
+      else assert.ok(!talk.user.includes(prefix), talk.user);
+    });
+  }
+});
+
+test('run: a wired lookup with a search key gives the sandbox the search line of <senses>; never a search', async () => {
+  for (const { lookup, expected } of [
+    { lookup: { hasSearch: () => true, search: () => assert.fail('no search in a sandbox') }, expected: true },
+    { lookup: { hasSearch: () => false }, expected: false },
+    { lookup: undefined, expected: false },
+  ]) {
+    await withSetup({ lookup, config: { features: { mentor: true, webLookup: true } } }, async ({ mentor, cases, llm }) => {
+      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+      await (await mentor.run(item.id)).done;
+      const talk = llm.calls.find((c) => c.kind === 'talk');
+      assert.equal(talk.user.includes(labels.senses.search), expected);
+    });
+  }
+});
+
+test('run: a stalled variety pass is cut once at variety.requestTimeoutMs, one request per situation, and the run goes on', () => {
+  const llm = fakeLlm({
+    situations: WORN_SITUATIONS,
+    hook: (call) => {
+      if (call.options.role !== 'classifier.text') return undefined;
+      return new Promise((resolve, reject) => {
+        call.options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+      });
+    },
+  });
+  return withSetup({ config: { mentor: { situationLines: [2, 6] } }, prompts: { variety: VARIETY_PROMPT }, llm }, async ({ mentor, cases, hot }) => {
+    hot.config.variety = { requestTimeoutMs: 20 };
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    // The cut's timer is unref'd (a live request holds the process); this fake holds nothing, so the test does.
+    const keepAlive = setInterval(() => {}, 1000);
+    let result;
+    try {
+      result = await withCapturedLogs(async () => (await mentor.run(item.id)).done);
+    } finally {
+      clearInterval(keepAlive);
+    }
+    const { result: run, logs } = result;
+    const passes = llm.calls.filter((c) => c.options.role === 'classifier.text');
+    assert.equal(passes.length, 1, 'one situation has enough own lines: one request');
+    assert.equal(passes[0].options.timeoutMs, 20);
+    assert.equal(passes[0].options.origin, 'mentor');
+    assert.equal(passes[0].options.purpose, 'variety');
+    assert.equal(run.error, undefined);
+    assert.equal(run.stopped, undefined);
+    assert.ok(run.situations.every((s) => !('worn' in s)));
+    const failed = logs.filter((l) => l.msg === 'mentor: variety pass failed');
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0].timedOut, true);
+  });
+});
+
+test('run: a diagnosis item on labels, variety, lore, channel or recent is kept; one on an unknown layer is counted in the log', () => {
+  const diagnosis = {
+    summary: 'The trigger label reads as an order.',
+    causes: [
+      { layer: 'labels', excerpt: 'mentioned you', why: 'The label reads as an order.' },
+      { layer: 'weather', excerpt: 'x', why: 'no such layer' },
+    ],
+    changes: [
+      { layer: 'variety', target: 'variety.md', from: '', to: 'name fewer devices', why: 'Too many.' },
+      { layer: 'lore', target: 'entry 3', from: '', to: 'shorter', why: 'Long.' },
+      { layer: 'channel', target: 'general', from: '', to: 'calmer', why: 'Tone.' },
+      { layer: 'recent', target: 'recent lines', from: '', to: 'fewer', why: 'Noise.' },
+    ],
+  };
+  const llm = fakeLlm({ scoreFor: overallBySituation(9, 3), diagnosis: JSON.stringify(diagnosis) });
+  return withSetup({ llm }, async ({ mentor, cases, sent }) => {
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    const { result: run, logs } = await withCapturedLogs(async () => (await mentor.run(item.id)).done);
+    assert.deepEqual(run.diagnosis.causes.map((c) => c.layer), ['labels']);
+    assert.deepEqual(run.diagnosis.changes.map((c) => c.layer), ['variety', 'lore', 'channel', 'recent']);
+    const logged = logs.find((l) => l.msg === 'mentor: diagnosis');
+    assert.equal(logged.unknownLayer, 1);
+    assert.match(sent[0].files[0].attachment.toString('utf8'), /^- labels: "mentioned you"$/m);
+  });
+});
+
+test('mentorTemplateValues: the placeholders of the mentor prompts, as a run fills them', () =>
+  withSetup({}, async ({ mentor, cases, llm, hot }) => {
+    const values = mentorTemplateValues(hot.config, 'Zoë');
+    const [minLines, maxLines] = hot.config.mentor.situationLines;
+    assert.deepEqual(values, { name: 'Zoë', count: hot.config.mentor.situations, minLines, maxLines });
+    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
+    await (await mentor.run(item.id)).done;
+    assert.equal(llm.calls[0].system, `SITUATIONS for ${values.name}: ${values.count} of ${values.minLines}-${values.maxLines} lines. {{unknown}}`);
+  }));

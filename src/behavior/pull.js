@@ -126,7 +126,8 @@ export function explicitChannelIds(messages) {
  *    bot's line or the persona's own in that span never pulls but still uses
  *    up its place in the span; the trigger is scanned once, as the newest,
  *    and not counted among them -- newest mention first;
- * 3. `extra` ids (a route hook's), reason `route`.
+ * 3. `extra` ids (the route hook's: src/behavior/route-channel.js, wired in
+ *    src/index.js), reason `route`.
  * Mentions and route ids fill the slots the source leaves, up to
  * `maxChannels`, skipping the current channel, duplicates and ids for which
  * `isPullable(id)` is false. `isPullable` carries the caller's checks: same
@@ -215,7 +216,8 @@ function skipped(skip) {
 /**
  * The messages of a pulled channel the persona is shown: a window that ENDS
  * at the anchor, not at now. The anchor is `anchorTs` when given (an explicit
- * anchor), else the newest message of `messages`. Messages after the anchor
+ * anchor: src/discord/pull-fetch.js#fetchPull's `anchorId`, which has no
+ * production caller yet), else the newest message of `messages`. Messages after the anchor
  * are left out; every message with `ts >= anchor - windowMinutes` is kept;
  * when fewer than `minMessages` fall inside, the last `minMessages` up to the
  * anchor are taken regardless of time; then only the newest `maxMessages`

@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createLookup, normalizeQuery, cleanQuery } from '../src/web/lookup.js';
-import { DailyCapError, TokenLimitError } from '../src/llm/openrouter.js';
+import { DailyCapError, helperRequestOptions, TokenLimitError } from '../src/llm/openrouter.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 const NOW = Date.UTC(2026, 8, 20, 12, 0, 0);
@@ -325,14 +325,18 @@ test('readLinks: feature off (false or missing), links.enabled off or no read-li
   }
 });
 
-test('readLinks: an LLM failure is a miss; a safety-rail refusal is a miss too, with its own reason', async () => {
+test('readLinks: an LLM failure is a miss; the token rail\'s refusal is a miss too, with its own reason; the daily cap\'s is none', async () => {
   const failing = setup({ llmText: Object.assign(new Error('boom'), { statusCode: 500 }) });
   assert.equal(await readOne(failing.lookup, LINK), null);
   assert.equal(failing.store.getMediaCache('g1')['read:m1#e0'].reason, 'llm');
 
   const capped = setup({ llmText: new DailyCapError('cap') });
-  assert.equal(await readOne(capped.lookup, LINK), null);
-  assert.deepEqual(capped.store.getMediaCache('g1')['read:m1#e0'], { miss: true, ts: NOW, reason: 'daily-cap' });
+  const { result, logs } = await withCapturedLogs(() => readOne(capped.lookup, LINK));
+  assert.equal(result, null);
+  assert.equal(capped.store.getMediaCache('g1')['read:m1#e0'], undefined, 'read after the reset');
+  const line = logs.find((l) => l.msg === 'lookup: link');
+  assert.equal(line.state, 'limit');
+  assert.equal(line.reason, 'daily-cap');
 
   const tooBig = setup({ llmText: new TokenLimitError('too big') });
   assert.equal(await readOne(tooBig.lookup, LINK), null);
@@ -577,4 +581,66 @@ test('search: logs counts and codes, never the query, the summary or the key', a
   assert.ok(!all.includes('mystérieuse'));
   assert.ok(!all.includes('Résumé'));
   assert.ok(!all.includes('test-key'));
+});
+
+// --- the daily request cap, the helper options, the read-only web cap ------------
+
+/** setup() with a read-only capLeft on the fake llm reporting `left`. */
+function cappedSetup(left, overrides = {}) {
+  const run = setup(overrides);
+  run.llm.capLeft = () => left;
+  return run;
+}
+
+test('readLinks: with the daily request cap spent no page is fetched, no web slot is taken, no miss is cached', async () => {
+  const { lookup, pageFetcher, llm, state, store } = cappedSetup(0);
+  const { result, logs } = await withCapturedLogs(() => lookup.readLinks('g1', [LINK], { maxNew: 1 }));
+  assert.deepEqual(result, { reads: new Map(), newCount: 0 });
+  assert.equal(pageFetcher.calls.length, 0);
+  assert.equal(llm.calls.length, 0);
+  assert.equal(state.data.webCount ?? 0, 0);
+  assert.deepEqual(Object.keys(store.getMediaCache('g1')), []);
+  const line = logs.find((l) => l.msg === 'lookup: link');
+  assert.equal(line.state, 'limit');
+  assert.equal(line.reason, 'daily-cap');
+
+  const open = cappedSetup(1);
+  assert.ok(await readOne(open.lookup, LINK), 'a slot left: read as before');
+});
+
+test('search: with the daily request cap spent no search is sent and no web slot is taken', async () => {
+  const { lookup, braveSearch, llm, state } = cappedSetup(0);
+  assert.equal(await lookup.search('g1', 'ποιος κέρδισε'), null);
+  assert.equal(braveSearch.calls.length, 0);
+  assert.equal(llm.calls.length, 0);
+  assert.equal(state.data.webCount ?? 0, 0);
+});
+
+test('lookup: the link read and the search summary are helper requests (llm.helperTimeoutMs, purpose)', async () => {
+  const tuned = setup({ hotOptions: { config: { llm: { timeoutMs: 300_000, helperTimeoutMs: 4321 } } } });
+  await readOne(tuned.lookup, LINK);
+  await tuned.lookup.search('g1', 'x y');
+  assert.deepEqual(tuned.llm.calls.map((c) => [c.options.timeoutMs, c.options.purpose]), [[4321, 'read-link'], [4321, 'search-summary']]);
+  for (const { options } of tuned.llm.calls) {
+    assert.equal(options.countAgainstDailyCap, true);
+    assert.equal(options.skipCalibration, true);
+  }
+
+  const unset = setup();
+  await readOne(unset.lookup, LINK);
+  assert.equal(unset.llm.calls[0].options.timeoutMs, helperRequestOptions({}).timeoutMs, 'the helper fallback, never llm.timeoutMs');
+});
+
+test('webCapLeft: the web slots left today, read only; the whole cap is back after 00:00 UTC', async () => {
+  let now = NOW;
+  const run = setup({ now: () => now, hotOptions: { web: { maxPerDay: 3 } } });
+  await readOne(run.lookup, LINK);
+  const before = structuredClone(run.state.data);
+  assert.equal(run.lookup.webCapLeft(), 2);
+  now = NOW + 24 * HOUR;
+  assert.equal(run.lookup.webCapLeft(), 3);
+  assert.deepEqual(run.state.data, before, 'never rolled over or written');
+
+  const broken = setup({ hotOptions: { web: { maxPerDay: 'many' } } });
+  assert.equal(broken.lookup.webCapLeft(), 0, 'a cap that is not a number counts as 0, as the reservation reads it');
 });

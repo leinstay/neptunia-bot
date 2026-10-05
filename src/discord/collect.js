@@ -7,6 +7,7 @@
 import { PermissionFlagsBits, SnowflakeUtil, MessageReferenceType, OverwriteType } from 'discord.js';
 import { log } from '../log.js';
 import { ID_DIGITS } from '../memory/mentions.js';
+import { MINUTE_MS } from '../time.js';
 import {
   classifyAttachment,
   classifyEmbed,
@@ -29,6 +30,8 @@ const CUSTOM_EMOJI_RE = new RegExp(CUSTOM_EMOJI_MARKUP, 'g');
 const MAX_CHANNEL_MENTIONS = 5;
 // A raw channel mention `<#id>`; the group is the id.
 const CHANNEL_MENTION_RE = new RegExp(`<#(${ID_DIGITS})>`, 'g');
+// A whole message id (a snowflake), as a post ledger entry names one.
+const MESSAGE_ID_RE = new RegExp(`^${ID_DIGITS}$`);
 
 /**
  * Custom emoji markup `<:name:id>` / `<a:name:id>` reads better as `:name:`.
@@ -556,12 +559,14 @@ async function pageOf(channel, query) {
 
 /**
  * One message of `channel` by id: discord.js's message cache first, else one
- * fetch; null when it cannot be fetched (deleted, no access, any error).
+ * fetch; null when it cannot be fetched (deleted, no access, any error) and,
+ * without a request, for a missing or empty id.
  * @param {import('discord.js').TextBasedChannel} channel
- * @param {string} id
+ * @param {string|null|undefined} id
  * @returns {Promise<import('discord.js').Message|null>}
  */
 export async function fetchMessage(channel, id) {
+  if (!id) return null;
   try {
     const cached = channel.messages.cache?.get?.(id);
     if (cached) return cached;
@@ -572,24 +577,47 @@ export async function fetchMessage(channel, id) {
 }
 
 /**
+ * Whether `entry` is a post ledger entry fetchMoment can follow: an object
+ * whose `newestHistoryId` is a message id.
+ */
+function followableEntry(entry) {
+  return Boolean(entry) && typeof entry === 'object' && typeof entry.newestHistoryId === 'string' && MESSAGE_ID_RE.test(entry.newestHistoryId);
+}
+
+/**
  * A moment of a guild channel around one message of the persona, for the
- * mentor: the message that called for it (the TRIGGER: the message it
- * replies to, else the newest earlier message that is not the persona's; a
- * reply to one of her own messages counts as no reply), her whole burst (her
- * consecutive messages starting at that one, oldest first) and the `limit`
- * messages of the channel up to and including the trigger, normalized like
- * any history (names and reactions as they are now; media labelled, nothing
- * downloaded). Throws an Error with an operator-facing reason: a channel
- * without a guild (a private chat), a channel the bot cannot read (no bot
- * member, not viewable, no Read Message History), a message that cannot be
- * fetched or is not the persona's, a reply target that is gone, no earlier
- * message of anyone else, or a history window that does not end at the trigger.
+ * mentor: the message that called for it (its TRIGGER), her whole burst (her
+ * consecutive messages starting at that one, oldest first) and `limit`
+ * messages of the channel's history, normalized like any history (names and
+ * reactions as they are now; media labelled, nothing downloaded).
+ *
+ * With a `ledgerEntry` (the post ledger's record of that message,
+ * `state.json` `postLedger`, written by src/behavior/turn.js) that names the
+ * newest line the turn saw (`newestHistoryId`), the moment is the turn's own:
+ * the history window ends at that line (inclusive; one deleted since leaves
+ * the window ending before it), the trigger is the entry's `triggerId` (null
+ * for a turn without one; a routed call's lives in another channel and is not
+ * looked up here), and the entry comes back as `ledgerEntry`. Otherwise the
+ * trigger is guessed -- the message it replies to, else the newest earlier
+ * message that is not the persona's (a reply to one of her own messages
+ * counts as no reply) -- and the window ends at it. A guess made although an
+ * entry was handed in (one without a usable `newestHistoryId`) says so with
+ * `triggerGuessed: true`; without an entry the caller knows it is a guess.
+ *
+ * Throws an Error with an operator-facing reason: a channel without a guild
+ * (a private chat), a channel the bot cannot read (no bot member, not
+ * viewable, no Read Message History), a message that cannot be fetched or is
+ * not the persona's, a reply target that is gone, no earlier message of
+ * anyone else, a guessed window that does not end at the trigger, or an empty
+ * window at the entry's line.
  * @param {import('discord.js').TextBasedChannel} channel
  * @param {string} messageId
- * @param {{ selfId: string, limit: number, embedTextChars?: number, videoSites?: string[] }} options
- * @returns {Promise<{ messageId: string, triggerId: string, history: object[], burst: object[] }>}
+ * @param {{ selfId: string, limit: number, embedTextChars?: number, videoSites?: string[],
+ *   ledgerEntry?: { triggerId?: string|null, newestHistoryId?: string|null }|null }} options
+ * @returns {Promise<{ messageId: string, triggerId: string|null, history: object[], burst: object[],
+ *   ledgerEntry?: object, triggerGuessed?: true }>}
  */
-export async function fetchMoment(channel, messageId, { selfId, limit, embedTextChars, videoSites }) {
+export async function fetchMoment(channel, messageId, { selfId, limit, embedTextChars, videoSites, ledgerEntry = null }) {
   if (!channel?.guild) throw new Error('a direct message cannot be used');
   if (!canRead(channel)) throw new Error('the bot cannot read that channel');
   const own = await fetchMessage(channel, messageId);
@@ -603,6 +631,13 @@ export async function fetchMoment(channel, messageId, { selfId, limit, embedText
     if (message.createdTimestamp < own.createdTimestamp) continue;
     if (message.author?.id !== selfId) break;
     burst.push(message);
+  }
+
+  if (followableEntry(ledgerEntry)) {
+    const history = await fetchHistoryWindow(channel, { anchorId: ledgerEntry.newestHistoryId, limit, selfId, embedTextChars, videoSites });
+    if (history.length === 0) throw new Error('the chat before it cannot be read');
+    const triggerId = typeof ledgerEntry.triggerId === 'string' && ledgerEntry.triggerId ? ledgerEntry.triggerId : null;
+    return { messageId: own.id, triggerId, history, burst: burst.map(normalize), ledgerEntry };
   }
 
   const isForward = own.reference?.type === MessageReferenceType.Forward;
@@ -620,7 +655,7 @@ export async function fetchMoment(channel, messageId, { selfId, limit, embedText
 
   const history = await fetchHistoryWindow(channel, { anchorId: trigger.id, limit, selfId, embedTextChars, videoSites });
   if (history.length === 0 || history[history.length - 1].id !== trigger.id) throw new Error('the chat before it cannot be read');
-  return { messageId: own.id, triggerId: trigger.id, history, burst: burst.map(normalize) };
+  return { messageId: own.id, triggerId: trigger.id, history, burst: burst.map(normalize), ...(ledgerEntry ? { triggerGuessed: true } : {}) };
 }
 
 /**
@@ -643,6 +678,21 @@ export function isReadableChannel(channel, botConfig) {
   );
 }
 
+/**
+ * Whether the persona may speak in `channel`: one it may read
+ * (isReadableChannel: a text channel, not a thread, allowed by `bot.channels`,
+ * not the dry-run mirror, its history readable) where the bot can send
+ * (canSend). The one rule for a channel words go to unasked or on someone's
+ * behalf: a routed call's or a noticed comment's destination
+ * (src/behavior/turn.js#usableDestination), a spontaneous turn's channel.
+ * @param {object} channel  A discord.js guild channel.
+ * @param {object} botConfig  The live `config.bot`.
+ * @returns {boolean}
+ */
+export function isWritableChannel(channel, botConfig) {
+  return isReadableChannel(channel, botConfig) && canSend(channel);
+}
+
 /** The channels of a guild the persona may read (isReadableChannel), excluding `exceptId`. */
 export function readableChannels(guild, botConfig, exceptId = null) {
   return [...guild.channels.cache.values()].filter(
@@ -660,17 +710,27 @@ export function lastActivity(channel) {
  * saw activity within `neighborMaxAgeMinutes`. Channels are pre-filtered by the
  * snowflake of their last message, so quiet channels cost no API calls. Only
  * channels the persona may read are neighbours (readableChannels: never the
- * dry-run mirror). `readOnly` marks a neighbour the bot cannot send in
- * (canSend). A channel without a guild (a private chat) has no neighbours.
+ * dry-run mirror), and only those `accept` takes (the caller's rail: a turn
+ * passes the audience rail, src/discord/pull-fetch.js#audienceAllows), judged
+ * among the active ones BEFORE the `neighborMaxChannels` cut, so a refused
+ * channel takes no slot and costs no fetch; no `accept` takes every one.
+ * `readOnly` marks a neighbour the bot cannot send in (canSend). A channel
+ * without a guild (a private chat) has no neighbours.
+ * @param {object} channel  The discord.js channel the turn speaks in.
+ * @param {object} config   The live config.
+ * @param {string} selfId
+ * @param {number} [now]
+ * @param {{ accept?: (other: object) => boolean }} [options]
  * @returns {Promise<{ channelId: string, channelName: string, readOnly: boolean, messages: object[] }[]>}
  */
-export async function fetchNeighbors(channel, config, selfId, now = Date.now()) {
+export async function fetchNeighbors(channel, config, selfId, now = Date.now(), { accept } = {}) {
   if (!channel.guild) return [];
   const { neighborMessages, neighborMaxAgeMinutes, neighborMaxChannels } = config.context;
-  const minTs = now - neighborMaxAgeMinutes * 60_000;
+  const minTs = now - neighborMaxAgeMinutes * MINUTE_MS;
 
   const candidates = readableChannels(channel.guild, config.bot, channel.id)
     .filter((other) => lastActivity(other) >= minTs)
+    .filter((other) => typeof accept !== 'function' || accept(other))
     .sort((a, b) => lastActivity(b) - lastActivity(a))
     .slice(0, neighborMaxChannels);
 

@@ -199,7 +199,7 @@ test('gif recache: drops one-frame captions at once, then watches at most recach
     const [first] = describer.calls;
     assert.equal(first.item.kind, 'gif');
     assert.equal(first.item.animationUrl, `${TENOR(3)}/loop.mp4`, 'the animation comes from the message read again');
-    assert.deepEqual(first.opts, { countAgainstDailyCap: true });
+    assert.equal(first.opts, undefined, 'every describer request counts: no option to say so');
     assert.equal(store.getMediaCache('g1')['m1#e0'].text, 'a still', 'past the cap: left for the next run');
   });
 });

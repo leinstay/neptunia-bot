@@ -64,7 +64,8 @@ export function createGifBackfill({ hot, store, client, describer = null, log = 
       items.push({ ...picture, itemId: entry.itemId, kind: 'gif', name: entry.name ?? '' });
     }
     if (items.length === 0) return 0;
-    const { descriptions } = await describer.describeMany(guildId, items, { countAgainstDailyCap: true });
+    // One at a time, as a background job should: a GIF watch converts with ffmpeg.
+    const { descriptions } = await describer.describeMany(guildId, items, { concurrency: 1 });
     return descriptions.size;
   }
 

@@ -21,7 +21,7 @@ import net from 'node:net';
 import { pipeline } from 'node:stream';
 import zlib from 'node:zlib';
 import { log } from '../log.js';
-import { safeLocation } from '../discord/video-sites.js';
+import { bareContentType, safeLocation } from '../discord/video-sites.js';
 import { htmlToText, pageTitle, truncateText } from './readable.js';
 
 const REQUEST_HEADERS = Object.freeze({
@@ -38,11 +38,6 @@ const PLAIN_TYPE = 'text/plain';
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const CHARSET_SNIFF_BYTES = 2048;
-
-/** `type/subtype` in lowercase, parameters dropped. */
-function bareContentType(value) {
-  return String(value ?? '').split(';')[0].trim().toLowerCase();
-}
 
 /** The four octets of a dotted IPv4 address, or null. */
 function ipv4Octets(ip) {

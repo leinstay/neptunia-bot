@@ -41,7 +41,7 @@ function fakeRun(overrides = {}) {
     kind: 'run',
     startedAt: '2026-09-30T10:00:00.000Z',
     finishedAt: '2026-09-30T10:05:00.000Z',
-    models: { mentor: 'x/mentor', talk: 'x/talk', analyzer: 'x/memory' },
+    models: { mentor: 'x/mentor', talk: 'x/talk', classifierText: 'x/classifier' },
     reference: { profile: { messages: 100 }, samples: 40 },
     situations,
     dropped: 1,
@@ -390,4 +390,33 @@ test('renderFile: a situation with a variety pass shows the named devices on one
   assert.match(text, /^worn: mock promise ending in \(no\) x3 \("fix it \(no\)", "behave \(no\)"\); names what was said x2 \("what a surprise"\)$/m);
   assert.match(text, /^worn: nothing named$/m);
   assert.equal(text.match(/^worn: /gm).length, 2, 'the other situations carry no line');
+});
+
+test('renderFile: names the classifier.text model of the run; a run stored with an analyzer model names none', () => {
+  assert.match(renderFile(fakeRun()).text, /^models: mentor x\/mentor, talk x\/talk, classifier\.text x\/classifier$/m);
+  const old = renderFile(fakeRun({ models: { mentor: 'x/mentor', talk: 'x/talk', analyzer: 'x/memory' } })).text;
+  assert.match(old, /^models: mentor x\/mentor, talk x\/talk, classifier\.text -$/m);
+  assert.doesNotMatch(old, /x\/memory/);
+});
+
+test('renderFile: an answer shows its GIF with the caption and its drawing; one without them shows neither', () => {
+  const run = fakeRun();
+  run.situations[0].answers[0] = replyAnswer(1, 1, { messages: [], gif: { handle: 'g7', caption: 'a cat\nwaving' }, draw: 'a café\nat night' });
+  run.situations[0].answers[1] = replyAnswer(1, 2, { gif: { handle: 'g8', caption: null } });
+  const text = renderFile(run).text;
+  assert.match(text, /--- s1a1 ---\ngif: g7 \(a cat waving\)\ndraw: a café\n {4}at night\nfacts: /);
+  assert.match(text, /^gif: g8$/m);
+  const plain = text.slice(text.indexOf('--- s1a3 ---'), text.indexOf('--- s2a1 ---'));
+  assert.doesNotMatch(plain, /^(gif|draw):/m);
+});
+
+test('renderFile: a cause or change on any diagnosis layer is printed with it', () => {
+  const diagnosis = {
+    summary: 'A label reads as an order.',
+    causes: [{ layer: 'labels', excerpt: 'mentioned you', why: 'The label reads as an order.' }],
+    changes: [{ layer: 'recent', target: 'recent lines', from: '', to: 'fewer', why: 'Noise.' }],
+  };
+  const text = renderFile(fakeRun({ passed: false, diagnosis })).text;
+  assert.match(text, /^- labels: "mentioned you"$/m);
+  assert.match(text, /^- recent, recent lines$/m);
 });

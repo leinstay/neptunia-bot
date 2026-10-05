@@ -8,7 +8,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { PermissionFlagsBits, SnowflakeUtil } from 'discord.js';
-import { resolveMentions, createTurnRunner, parseRewatchPickDetailed, parseLookupQuery, usableDestination } from '../src/behavior/turn.js';
+import {
+  resolveMentions,
+  createTurnRunner,
+  parseRewatchPickDetailed,
+  parseLookupQuery,
+  usableDestination,
+  pickOtherProfiles,
+  postLedgerSize,
+  appendPostLedger,
+} from '../src/behavior/turn.js';
 import { between, typingMs } from '../src/behavior/random.js';
 import { fill, formatClock, formatDate } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
@@ -17,7 +26,8 @@ import { ImageCapError, ImageGenError } from '../src/llm/images.js';
 import { DailyCapError, TokenLimitError } from '../src/llm/openrouter.js';
 import { createVarietyPass } from '../src/behavior/variety-pass.js';
 import { pingStatus } from '../src/behavior/elsewhere.js';
-import { PAGE } from '../src/discord/collect.js';
+import { PAGE, fetchHistory, fetchNeighbors } from '../src/discord/collect.js';
+import { buildRequest } from '../src/behavior/prompt.js';
 
 function rngReturning(value) {
   return () => value;
@@ -604,8 +614,7 @@ test('createTurnRunner: features.videoDescriptions on -- videos newest first, ca
     'the newest message first; the typed video link is found because fetchHistory got media.video.sites',
   );
   assert.equal(items[1].itemId, 'va');
-  assert.equal(options.maxNew, 1);
-  assert.equal(options.countAgainstDailyCap, true);
+  assert.deepEqual(options, { maxNew: 1 }, 'every describer request counts: no daily-cap option is passed');
   const userMessage = llm.calls[0][1].content;
   const watched = labels.transcript.videoWatched
     .replace('{name}', 'older.mp4')
@@ -1296,7 +1305,7 @@ test('createTurnRunner: features.dryRun=true mirrors each action into bot.dryRun
   assert.equal(mirrorSent.length, 1);
   assert.deepEqual(mirrorSent[0].allowedMentions, { parse: [] });
   const [header, ...bodyLines] = mirrorSent[0].content.split('\n');
-  assert.equal(header, '[dry-run] #general · reply · mention · reply to Alice');
+  assert.equal(header, '[dry-run] #general · reply · mention · to Alice');
   assert.equal(bodyLines.join('\n'), 'hi @Alice');
   assert.ok(!mirrorSent[0].content.includes('<@'), 'a mirrored @name must never resolve to a real mention');
 });
@@ -1531,6 +1540,7 @@ function rewatchHot(features = {}, video = {}, config = {}) {
     },
   );
   hot.config.llm.timeoutMs = 300_000;
+  hot.config.llm.helperTimeoutMs = 25_000;
   hot.prompts.rewatch = REWATCH_SYSTEM;
   return hot;
 }
@@ -1563,9 +1573,10 @@ test('createTurnRunner: rewatch -- the classifier gets the watched videos and th
   );
   assert.equal(options.model, 'x/haiku', 'no text classifier model -> the media model');
   assert.equal(options.maxOutputTokens, 120);
-  assert.equal(options.timeoutMs, 300_000);
+  assert.equal(options.timeoutMs, 25_000, 'a helper: llm.helperTimeoutMs, not the talk timeout');
   assert.equal(options.countAgainstDailyCap, true);
   assert.equal(options.skipCalibration, true);
+  assert.equal(options.purpose, 'rewatch');
 
   assert.equal(describer.rewatchCalls.length, 1);
   assert.equal(describer.rewatchCalls[0].item.itemId, 'va');
@@ -2066,6 +2077,7 @@ function lookupHot(features = {}, web = {}, config = {}) {
     },
   );
   hot.config.llm.timeoutMs = 300_000;
+  hot.config.llm.helperTimeoutMs = 25_000;
   hot.prompts.lookup = LOOKUP_SYSTEM;
   return hot;
 }
@@ -2129,9 +2141,10 @@ test('createTurnRunner: lookup -- the classifier gets the transcript and the can
   assert.ok(!user.split('<candidate>')[0].includes('ποιος κέρδισε'), 'the trigger only in <candidate>');
   assert.equal(options.model, 'x/text');
   assert.equal(options.maxOutputTokens, 60);
-  assert.equal(options.timeoutMs, 300_000);
+  assert.equal(options.timeoutMs, 25_000, 'a helper: llm.helperTimeoutMs, not the talk timeout');
   assert.equal(options.skipCalibration, true);
   assert.equal(options.countAgainstDailyCap, true);
+  assert.equal(options.purpose, 'lookup');
 
   assert.deepEqual(lookup.searchCalls, [{ guildId: 'g1', query: 'champions final winner 2026' }]);
   const turnUser = llm.turnCalls[0].messages[1].content;
@@ -2868,7 +2881,7 @@ test('runTurn: a dry-run private turn mirrors under "private", never "#null"', a
   const { channel } = await runPrivateTurn({ hot, client });
   assert.equal(channel.sent.length, 0);
   assert.equal(mirrored.length, 1);
-  assert.ok(mirrored[0].content.startsWith('[dry-run] private · reply · private · reply to '), mirrored[0].content);
+  assert.ok(mirrored[0].content.split('\n')[0].startsWith('[dry-run] private · reply · private'), mirrored[0].content);
 });
 
 test('runTurn: a private turn may draw (no Attach Files check in a DM), counted for the DM partner', async () => {
@@ -3689,7 +3702,7 @@ test('runTurn: a dry-run overheard or follow-up turn logs no reply target, carri
     assert.equal(line.replyTo, null, triggerKind);
     assert.equal(line.trigger, triggerKind);
     assert.equal(mirrorSent.length, 1, triggerKind);
-    assert.equal(mirrorSent[0].content.split('\n')[0], `[dry-run] #general · reply · ${triggerKind} · reply to —`);
+    assert.equal(mirrorSent[0].content.split('\n')[0], `[dry-run] #general · reply · ${triggerKind}`);
   }
 });
 
@@ -3706,9 +3719,9 @@ test('runTurn: dry-run: would send carries the trigger kind of a call, null on a
 
 test('runTurn: the dry-run mirror header names the trigger kind of every triggered turn, none on a spontaneous turn', async () => {
   for (const [triggerKind, header] of [
-    ['name', '[dry-run] #general · reply · name · reply to —'],
-    ['reply', '[dry-run] #general · reply · reply · reply to —'],
-    [undefined, '[dry-run] #general · interject · reply to —'],
+    ['name', '[dry-run] #general · reply · name'],
+    ['reply', '[dry-run] #general · reply · reply'],
+    [undefined, '[dry-run] #general · interject'],
   ]) {
     const raw = rawMessage({ id: 'm1' });
     const channel = fakeTurnChannel({ id: 'c1', name: 'general', historyMessages: [raw] });
@@ -4215,7 +4228,7 @@ test('runTurn: fresh captions for a pulled channel are asked only once the turn 
       },
     }),
   );
-  assert.deepEqual(callsFor(chosen, 'dp1').map((call) => call.options), [{ maxNew: 1, countAgainstDailyCap: true }]);
+  assert.deepEqual(callsFor(chosen, 'dp1').map((call) => call.options), [{ maxNew: 1 }]);
   assert.ok(events.indexOf('chooser') < events.indexOf('describe:dp1'), events.join(' '));
   assert.ok(channelViewOf(live.llm).includes('caption of dp1'));
 
@@ -4395,7 +4408,7 @@ test("runTurn: a routed call's pictures are captioned through the pull, never as
 
   await withCapturedLogs(() => scene.turns.runTurn(scene.params));
 
-  assert.deepEqual(callsFor(describer, 'cp1').map((call) => call.options), [{ maxNew: 1, countAgainstDailyCap: true }]);
+  assert.deepEqual(callsFor(describer, 'cp1').map((call) => call.options), [{ maxNew: 1 }]);
   assert.equal(Array.isArray(scene.llm.calls[0][1].content), false, 'nothing is attached for vision');
   assert.ok(channelViewOf(scene.llm).includes('caption of cp1'));
 });
@@ -5480,4 +5493,336 @@ test('turn: features.recent false, memory off or a store without the recent stor
   assert.equal(failed.result.outcome, 'skip');
   assert.deepEqual(failed.sent, before.sent);
   assert.ok(failed.logs.some((entry) => entry.msg === 'recent: failed' && entry.channel === 'c1'));
+});
+
+// --- the request input, named in full (src/behavior/turn-input.js) ----------------------------
+
+/** Makes #open and #staff of audienceGuild active neighbours (a fresh line each), recording their fetches. */
+function activeRooms(guild) {
+  const fetched = [];
+  for (const [id, text] of [[OPEN_ROOM, 'στην αυλή τώρα'], [STAFF_ROOM, 'στο γραφείο τώρα']]) {
+    const room = guild.channels.cache.get(id);
+    const line = lineIn(id, { id: `${id}-1`, authorId: 'u5', authorName: 'Inès', ts: NOW - 2 * MINUTE, content: text });
+    Object.assign(room, {
+      viewable: true,
+      lastMessageId: SnowflakeUtil.generate({ timestamp: NOW - 2 * MINUTE }).toString(),
+      messages: {
+        cache: new Map(),
+        fetch: async () => {
+          fetched.push(id);
+          return new Map([[line.id, line]]);
+        },
+      },
+    });
+  }
+  return fetched;
+}
+
+test('runTurn: the request is the one buildRequest makes from the turn input, absent inputs as before', async () => {
+  const raw = rawMessage({ id: 'm1', content: 'γεια σου' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  audienceGuild(channel.guild);
+  activeRooms(channel.guild);
+  const store = fakeStore({
+    guildMemory: { patterns: 'πολλά emoji' },
+    userProfiles: { u1: { id: 'u1', names: ['Alice'], character: 'φιλική' } },
+    channels: [{ id: 'c1', name: 'general', days: {} }],
+  });
+  const hot = fakeHot({}, {}, { context: { ...fakeHot().config.context, pull: { sameAudience: false } } });
+  const llm = fakeLlm('<skip/>');
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW });
+  const trigger = normalizedTrigger(raw);
+
+  await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger, triggerKind: 'mention' }));
+
+  const history = await fetchHistory(channel, { limit: 100, selfId: 'self-id' });
+  const neighbors = await fetchNeighbors(channel, hot.config, 'self-id', NOW);
+  assert.equal(neighbors.length, 2, 'both rooms are neighbours with the rail off');
+  const expected = buildRequest({
+    config: hot.config,
+    prompts: hot.prompts,
+    calibrator: identityCalibrator(),
+    mode: 'reply',
+    forced: false,
+    now: NOW,
+    selfName: 'Bot',
+    history,
+    neighbors,
+    trigger,
+    triggerKind: 'mention',
+    guildMemory: store.getGuild('g1'),
+    interlocutor: store.getUser('g1', 'u1'),
+    privateChat: null,
+    privateProfile: null,
+    otherProfiles: pickOtherProfiles(store, 'g1', history, 'u1', 6),
+    candidateProfiles: store.listUserProfiles('g1'),
+    nameOf: (id) => store.getUser('g1', id)?.names?.[0] ?? null,
+    channels: store.listChannels('g1'),
+    loreEntries: [],
+    currentChannelId: 'c1',
+    descriptions: undefined,
+    neighborDescriptions: undefined,
+    videos: undefined,
+    reads: undefined,
+    lookup: null,
+    searchAvailable: false,
+    drawQuota: undefined,
+    drawReason: null,
+    customEmoji: [],
+    gifs: null,
+    mediaCache: null,
+    worn: null,
+    pulled: [],
+    source: null,
+    focus: null,
+    elsewhereDestination: null,
+    readOnlyIds: new Set(),
+    recentLines: undefined,
+    recentAudience: undefined,
+  });
+  assert.deepEqual(llm.calls[0], expected.messages);
+});
+
+test('runTurn: a neighbour whose audience the channel does not cover is left out of <other_channels> and <server>, unfetched', async () => {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  audienceGuild(channel.guild);
+  const fetched = activeRooms(channel.guild);
+  const store = fakeStore({
+    channels: [
+      { id: 'c1', name: 'general', days: {} },
+      { id: OPEN_ROOM, name: 'open', note: 'η αυλή του σπιτιού', days: {} },
+      { id: STAFF_ROOM, name: 'staff', note: 'το γραφείο της ομάδας', days: {} },
+    ],
+  });
+  const llm = fakeLlm('<skip/>');
+  const turns = createTurnRunner({ hot: fakeHot(), store, llm, calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW });
+
+  const { logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+
+  const text = userText(llm);
+  assert.ok(text.includes('στην αυλή τώρα'), 'the covered neighbour is shown');
+  assert.ok(!text.includes('στο γραφείο τώρα'), "the staff room's lines stay out");
+  assert.ok(!text.includes('το γραφείο της ομάδας'), "the staff room's note stays out of <server>");
+  assert.deepEqual(fetched, [OPEN_ROOM], 'the refused neighbour costs no history fetch');
+  assert.equal(logs.find((l) => l.msg === 'turn: model answered').neighborsHidden, 1);
+});
+
+// --- I-7: destinations, the post ledger, send failures, the drawFailed turn, dry-run, caps -------
+
+test('usableDestination: the dry-run mirror or a channel the bot cannot read is never the destination', () => {
+  const general = registerTextChannel(fakeTurnChannel());
+  const hall = addChannel(general, { id: 'c6', name: 'hall' });
+  const config = { bot: { dryRunChannelId: 'c1' }, features: {}, memory: { mainChannelIds: ['c1', 'c6'] } };
+  assert.equal(usableDestination(general.guild, config).channel, hall, 'the mirror is passed over');
+  hall.permissionsFor = () => ({ has: (flag) => flag !== PermissionFlagsBits.ReadMessageHistory });
+  assert.deepEqual(usableDestination(general.guild, config), { channel: null, reason: 'no-destination' }, 'unreadable: not usable');
+});
+
+/**
+ * A follow-up turn in #general (c1) answering Alice's line m1 after Bob's m0. `answer` is the
+ * model's text, or a `complete` function; `configure` sees the channel, store and hot first.
+ */
+async function ledgerTurn({ features = {}, answer = '<msg>ένα</msg><msg>δύο</msg>', mentor, configure } = {}) {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [rawMessage({ id: 'm0', ts: NOW - 5000, authorId: 'u2', authorName: 'Bob' }), raw] });
+  const store = fakeStore();
+  const hot = fakeHot({ typingSimulation: false, ...features }, {}, mentor ? { mentor } : {});
+  const llm = typeof answer === 'function' ? { complete: answer } : fakeLlm(answer);
+  const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW });
+  configure?.({ channel, store, hot });
+  const { result, logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'followUp' }));
+  return { result, logs, channel, store, turns };
+}
+
+test('runTurn: with features.mentor on, every posted message leaves a ledger entry naming its turn', async () => {
+  const { result, store } = await ledgerTurn({ features: { mentor: true } });
+  assert.equal(result.outcome, 'spoke');
+  assert.deepEqual(store.state.data.postLedger, [
+    { messageId: 'sent-1', channelId: 'c1', mode: 'reply', triggerKind: 'followUp', triggerId: 'm1', newestHistoryId: 'm1', sourceChannelId: null, at: NOW },
+    { messageId: 'sent-2', channelId: 'c1', mode: 'reply', triggerKind: 'followUp', triggerId: 'm1', newestHistoryId: 'm1', sourceChannelId: null, at: NOW },
+  ]);
+});
+
+test('runTurn: the ledger keeps the newest mentor.anchor.ledgerSize entries', async () => {
+  const older = [{ messageId: 'x1' }, { messageId: 'x2' }];
+  const { store } = await ledgerTurn({
+    features: { mentor: true },
+    mentor: { anchor: { ledgerSize: 3 } },
+    configure: ({ store: s }) => {
+      s.state.data.postLedger = older;
+    },
+  });
+  assert.deepEqual(store.state.data.postLedger.map((entry) => entry.messageId), ['x2', 'sent-1', 'sent-2']);
+  assert.deepEqual(older.map((entry) => entry.messageId), ['x1', 'x2'], 'the stored list is not changed in place');
+});
+
+test('runTurn: no ledger entry with the mentor off, while paused, or in a dry run', async () => {
+  for (const features of [{}, { mentor: false }, { mentor: true, dryRun: true }]) {
+    const { result, store } = await ledgerTurn({ features });
+    assert.equal(result.outcome, 'spoke', JSON.stringify(features));
+    assert.equal('postLedger' in store.state.data, false, JSON.stringify(features));
+  }
+  // Paused while the turn was already running (a pause waits for it): nothing is written.
+  let state;
+  const { result, store } = await ledgerTurn({
+    features: { mentor: true },
+    configure: ({ store: s }) => {
+      state = s.state.data;
+    },
+    answer: async () => {
+      state.paused = true;
+      return { text: '<msg>ένα</msg>', usage: {}, estimated: 1 };
+    },
+  });
+  assert.equal(result.outcome, 'spoke');
+  assert.equal('postLedger' in store.state.data, false);
+});
+
+test("postLedgerSize: the code fallback is config.json's mentor.anchor.ledgerSize", () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+  assert.equal(postLedgerSize({}), shipped.mentor.anchor.ledgerSize);
+  assert.equal(postLedgerSize({ mentor: { anchor: { ledgerSize: 7.9 } } }), 7);
+  assert.equal(postLedgerSize({ mentor: { anchor: { ledgerSize: 0 } } }), 0);
+  assert.equal(postLedgerSize({ mentor: { anchor: { ledgerSize: -1 } } }), postLedgerSize({}));
+});
+
+test('appendPostLedger: appends, keeps the newest size entries, a non-list is empty, 0 keeps none', () => {
+  const entry = (id) => ({ messageId: id });
+  assert.deepEqual(appendPostLedger([entry('a'), entry('b')], entry('c'), 2), [entry('b'), entry('c')]);
+  assert.deepEqual(appendPostLedger(undefined, entry('a'), 5), [entry('a')]);
+  assert.deepEqual(appendPostLedger({ length: 1 }, entry('a'), 5), [entry('a')]);
+  assert.deepEqual(appendPostLedger([entry('a')], entry('b'), 0), []);
+});
+
+test('runTurn: a second message that fails to send ends the turn as spoke with what reached the chat', async () => {
+  const { result, logs, channel, turns } = await ledgerTurn({
+    answer: '<msg>ένα</msg><msg>δύο</msg><msg>τρία</msg>',
+    configure: ({ channel: c }) => {
+      const send = c.send;
+      c.send = async (payload) => {
+        if (payload.content === 'δύο') throw new Error('fixture: Missing Permissions');
+        return send(payload);
+      };
+    },
+  });
+  assert.deepEqual({ outcome: result.outcome, delivered: result.delivered }, { outcome: 'spoke', delivered: true });
+  assert.deepEqual(channel.sent.map((payload) => payload.content), ['ένα'], 'nothing after the failed message');
+  const failed = logs.find((entry) => entry.msg === 'turn: send failed');
+  assert.deepEqual([failed.level, failed.channel, failed.index], ['warn', 'c1', 1]);
+  assert.equal(turns.spokeAfterSeeing('c1', 'm1'), true, 'the turn noted what it had in view');
+});
+
+test('runTurn: a first message that fails to send ends spoke with nothing delivered', async () => {
+  const { result, channel } = await ledgerTurn({
+    configure: ({ channel: c }) => {
+      c.send = async () => {
+        throw new Error('fixture: Missing Permissions');
+      };
+    },
+  });
+  assert.deepEqual({ outcome: result.outcome, delivered: result.delivered }, { outcome: 'spoke', delivered: false });
+  assert.equal(channel.sent.length, 0);
+});
+
+test('runTurn: a post that grew past 2000 characters once its mentions expanded is cut to fit, never inside a mention', async () => {
+  const { channel } = await ledgerTurn({ answer: `<msg>${'α'.repeat(1880)} @Bob @Bob @Bob @Bob</msg>` });
+  const [payload] = channel.sent;
+  assert.ok([...payload.content].length <= 2000, String([...payload.content].length));
+  assert.ok(payload.content.lastIndexOf('<') <= payload.content.lastIndexOf('>'), 'no half mention at the end');
+  assert.ok(payload.content.includes('<@u2>'), 'the mentions that fit stay');
+});
+
+test('runTurn: the drawFailed turn after a follow-up posts plain, after a mention as a reply', async () => {
+  for (const [triggerKind, reply] of [['followUp', undefined], ['mention', { messageReference: 'm1', failIfNotExists: false }]]) {
+    const { channel, llm } = await runDrawTurn({
+      triggerKind,
+      answers: ['<draw>a cat</draw>', '<msg reply="#1">δεν βγήκε</msg>'],
+      images: fakeImages({ error: new ImageGenError('moderation') }),
+    });
+    assert.equal(llm.calls.length, 2, triggerKind);
+    assert.deepEqual(channel.sent.map((payload) => payload.reply), [reply], triggerKind);
+  }
+});
+
+test('runTurn: a dry-run reaction reads "react to <name>" and stamps no lastPostAt, as a real one', async () => {
+  const raw = rawMessage({ id: 'm1', authorName: 'Élodie' });
+  const channel = fakeTurnChannel({ id: 'c1', name: 'general', historyMessages: [raw] });
+  const mirrorSent = [];
+  const client = fakeClient({ channels: { fetch: async () => ({ send: async (payload) => mirrorSent.push(payload) }) } });
+  const hot = fakeHot({ dryRun: true }, { dryRunChannelId: 'mirror1' });
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm: fakeLlm('<react to="#1">👍</react>'), calibrator: identityCalibrator(), client, now: () => NOW });
+  await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+  assert.equal(mirrorSent[0].content.split('\n')[0], '[dry-run] #general · reply · mention · react to Élodie');
+  assert.equal(turns.lastPostAt('c1'), 0);
+
+  const real = fakeTurnChannel({ id: 'c1', name: 'general', historyMessages: [raw] });
+  const live = createTurnRunner({ hot: fakeHot({ typingSimulation: false }), store: fakeStore(), llm: fakeLlm('<react to="#1">👍</react>'), calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW });
+  await withCapturedLogs(() => live.runTurn({ channel: real, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+  assert.equal(real.reactCalls.length, 1);
+  assert.equal(live.lastPostAt('c1'), 0);
+});
+
+test('runTurn: the search classifier is not asked when no web slot is left today', async () => {
+  for (const [left, asked] of [[0, 0], [3, 1]]) {
+    const llm = lookupLlm('champions final winner 2026');
+    const lookup = { ...fakeLookup(), webCapLeft: () => left };
+    const { logs } = await withCapturedLogs(() => runLookupTurn({ llm, lookup }));
+    assert.equal(llm.classifierCalls.length, asked, String(left));
+    assert.equal(lookup.searchCalls.length, asked, String(left));
+    assert.equal(logs.some((entry) => entry.msg === 'lookup: skipped' && entry.reason === 'cap'), !asked, String(left));
+  }
+});
+
+test('runTurn: the re-watch classifier is not asked when no video slot is left; with only re-watches spent, failed videos alone are offered', async () => {
+  const spent = fakeRewatchDescriber({ va: { state: 'watched', text: 'ένα αυτοκίνητο περνά' } });
+  spent.videoCapsLeft = () => ({ video: 0, rewatch: 5 });
+  const capped = await withCapturedLogs(() => runRewatch({ describer: spent }));
+  assert.equal(capped.result.llm.classifierCalls.length, 0);
+  assert.ok(capped.logs.some((entry) => entry.msg === 'rewatch: skipped' && entry.reason === 'cap'));
+
+  const noQuestions = fakeRewatchDescriber({ va: { state: 'watched', text: 'ένα αυτοκίνητο περνά' } });
+  noQuestions.videoCapsLeft = () => ({ video: 5, rewatch: 0 });
+  const quiet = await withCapturedLogs(() => runRewatch({ describer: noQuestions }));
+  assert.equal(quiet.result.llm.classifierCalls.length, 0, 'no retry possible, no question allowed');
+
+  const retry = fakeRewatchDescriber({ va: { state: 'watched', text: 'ένα αυτοκίνητο περνά' }, vb: { state: 'error', reason: 'fetch' } });
+  retry.describeVideo = async () => null;
+  retry.videoCapsLeft = () => ({ video: 5, rewatch: 0 });
+  const scene = rewatchScene();
+  const broken = videoAttachmentRaw('m0', NOW - 9000, 'vb', 'broken.mp4');
+  scene.channel = fakeTurnChannel({ historyMessages: [broken, scene.video, scene.trigger] });
+  const offered = await withCapturedLogs(() => runRewatch({ describer: retry, scene, llm: rewatchLlm('none') }));
+  const [call] = offered.result.llm.classifierCalls;
+  const videos = call.messages[1].content.split('<videos>\n')[1].split('\n</videos>')[0];
+  assert.deepEqual(videos.split('\n').map((line) => line.split(' | ')[1]), ['broken.mp4'], 'only the video that did not load');
+});
+
+test('runTurn: the GIF and the picture a turn posts get their ledger entries too', async () => {
+  const { store } = await ledgerTurn({
+    features: { mentor: true },
+    answer: '<msg>ένα</msg><gif>g1</gif>',
+    configure: ({ store: s }) => {
+      s.findGif = gifStore().findGif;
+    },
+  });
+  assert.deepEqual(store.state.data.postLedger.map((entry) => entry.messageId), ['sent-1', 'sent-2']);
+
+  const hot = drawHot({ mentor: true });
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const drawStore = fakeStore();
+  const turns = createTurnRunner({ hot, store: drawStore, llm: fakeLlm('<draw>a cat</draw>'), calibrator: identityCalibrator(), client: fakeClient(), images: fakeImages(), imageFetcher: fakeImageFetcher(), now: () => NOW });
+  await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+  assert.deepEqual(drawStore.state.data.postLedger, [
+    { messageId: 'sent-1', channelId: 'c1', mode: 'reply', triggerKind: 'mention', triggerId: 'm1', newestHistoryId: 'm1', sourceChannelId: null, at: NOW },
+  ]);
+});
+
+test('runTurn: a routed answer records the call it answered and its source channel', async () => {
+  const scene = asMainChannel(routedScene({ features: { mentor: true } }));
+  await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+  assert.deepEqual(scene.store.state.data.postLedger, [
+    { messageId: 'sent-1', channelId: 'c1', mode: 'reply', triggerKind: 'mention', triggerId: 'd3', newestHistoryId: 'm1', sourceChannelId: DIARY, at: NOW },
+  ]);
 });
