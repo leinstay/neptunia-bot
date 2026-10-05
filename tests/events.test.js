@@ -4649,7 +4649,8 @@ function routeChannel(guild, id, { send = true, viewers = ['g1', 'r1'] } = {}) {
 /**
  * The sources `s1` and `s2` (the bot reads them, cannot write in them) and the main channel
  * `d1` (`memory.mainChannelIds`), a state store, fake timers and a clock at ROUTE_T0. `config`
- * merges over the shipped defaults plus the main channel and a name trigger.
+ * merges over the shipped defaults plus the main channel and a name trigger. `spontaneous`
+ * replaces the default fake scheduler.
  */
 function routeScene({
   config: overrides = {},
@@ -4661,6 +4662,7 @@ function routeScene({
   rng = () => 0.5,
   prompts,
   tagHistory,
+  spontaneous,
 } = {}) {
   const config = baseConfig(deepMerge({ memory: { mainChannelIds: ['d1'] }, bot: { nameTriggers: ['νεπτούνια'] } }, overrides));
   const guild = routeGuild();
@@ -4669,7 +4671,7 @@ function routeScene({
   const main = routeChannel(guild, 'd1', { send: mainCanSend });
   const clock = mutableNow(ROUTE_T0);
   const timers = fakeTimers();
-  const handler = makeHandler({ config, turns, store, now: clock, timers, rng, isWarmingUp, prompts, tagHistory, sleep: async () => {} });
+  const handler = makeHandler({ config, turns, store, now: clock, timers, rng, isWarmingUp, prompts, tagHistory, spontaneous, sleep: async () => {} });
   return { config, guild, source, source2, main, sourceViewers, clock, timers, handler, turns, store };
 }
 
@@ -6071,4 +6073,131 @@ test('events: a call in a writable channel is untouched by routing', async () =>
   assert.equal(scene.timers.all.length, 0);
   assert.equal(scene.store.state.data.elsewherePings, undefined);
   assert.equal(byMsg(logs, 'mention: decided')[0].destination, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Noticed comments: an eavesdrop hit on an untriggered message in a read-only
+// channel (spontaneous.noticeElsewhere) arms a settle wait of kind `noticed`;
+// when it is over, spontaneous.runNoticed runs the comment. events.js is only
+// the glue: the rails and the roll are the scheduler's.
+
+/**
+ * A fake scheduler for the noticed path: `noticeElsewhere` answers `hit` (recording its calls),
+ * `runNoticed` records the source it got and answers `result`.
+ */
+function noticingSpontaneous({ hit = true, result = { outcome: 'spoke' } } = {}) {
+  const fake = fakeSpontaneous();
+  fake.noticeCalls = [];
+  fake.runCalls = [];
+  fake.noticeElsewhere = (channel, normalized) => {
+    fake.noticeCalls.push({ channel, normalized });
+    return hit;
+  };
+  fake.runNoticed = async (channel) => {
+    fake.runCalls.push(channel);
+    return result;
+  };
+  return fake;
+}
+
+/** An untriggered member line in `channel`. */
+const plainLine = (id, extra = {}) => ({ id, mention: false, authorId: 'u2', authorName: 'Ίων', content: 'σημείωση', ...extra });
+
+test('events: an eavesdrop hit in a read-only channel settles, then runs the noticed turn', async () => {
+  const spontaneous = noticingSpontaneous();
+  const scene = routeScene({ spontaneous });
+  const { logs } = await withCapturedLogs(async () => {
+    await routeSend(scene, scene.source, 0, plainLine('m1'));
+    assert.equal(spontaneous.noticeCalls.length, 1);
+    assert.equal(spontaneous.noticeCalls[0].channel, scene.source);
+    assert.equal(spontaneous.noticeCalls[0].normalized.id, 'm1');
+    assert.equal(scene.timers.live().length, 1, 'one settle timer for the source');
+    assert.equal(scene.timers.live()[0].ms, 90 * SECOND);
+
+    await routeSend(scene, scene.source, 30, plainLine('m2', { authorId: 'u3', authorName: 'Χλόη' }));
+    assert.equal(spontaneous.noticeCalls.length, 1, 'a wait already armed in the source asks no second roll');
+    assert.equal(spontaneous.runCalls.length, 0, 'nothing runs before the source settles');
+    await routeFire(scene, 120);
+  });
+
+  assert.deepEqual(spontaneous.runCalls, [scene.source], 'the noticed comment runs on its source');
+  assert.equal(scene.turns.calls.length, 0, 'the turn is the scheduler\'s, not a call\'s');
+  assert.equal(scene.store.state.data.elsewherePings, undefined, 'a noticed message is no call of the ring');
+  assert.deepEqual(
+    byMsg(logs, 'elsewhere: settling').map(({ source, kind, message, destination }) => ({ source, kind, message, destination })),
+    [{ source: 's1', kind: 'noticed', message: 'm1', destination: 'd1' }],
+  );
+  const [settled] = byMsg(logs, 'elsewhere: settled');
+  assert.equal(settled.kind, 'noticed');
+  assert.equal(settled.waitedMs, 120 * SECOND);
+  assert.equal(settled.moved, 1);
+  assert.equal(byMsg(logs, 'elsewhere: dropped').length, 0);
+});
+
+test('events: a call arriving during a noticed settle takes its place', async () => {
+  const spontaneous = noticingSpontaneous();
+  const scene = routeScene({ spontaneous });
+  const { logs } = await withCapturedLogs(async () => {
+    await routeSend(scene, scene.source, 0, plainLine('m1'));
+    await routeSend(scene, scene.source, 30, { id: 'm2' });
+    assert.equal(scene.timers.live().length, 1, 'still one wait for the source');
+    await routeFire(scene, 120);
+  });
+
+  assert.equal(spontaneous.runCalls.length, 0, 'no noticed comment once a call took the wait');
+  assert.equal(scene.turns.calls.length, 1);
+  const [args] = scene.turns.calls;
+  assert.equal(args.channel, scene.main);
+  assert.equal(args.trigger.id, 'm2');
+  assert.deepEqual(args.source, { channelId: 's1', reason: 'routed' });
+  assert.deepEqual(
+    byMsg(logs, 'elsewhere: dropped').map(({ source, kind, message, reason }) => [source, kind, message, reason]),
+    [['s1', 'noticed', 'm1', 'replaced']],
+  );
+  assert.equal(byMsg(logs, 'elsewhere: settled')[0].kind, 'ping');
+  assert.equal(byMsg(logs, 'elsewhere: settled')[0].waitedMs, 120 * SECOND, 'the wait keeps its start');
+  assert.deepEqual(scene.store.state.data.elsewherePings.map((entry) => entry.messageId), ['m2'], 'only the call is in the ring');
+});
+
+test('events: a noticed settle the scheduler refuses at fire time is dropped with its code', async () => {
+  const spontaneous = noticingSpontaneous({ result: { outcome: 'not-now', reason: 'gap' } });
+  const scene = routeScene({ spontaneous });
+  const { logs } = await withCapturedLogs(async () => {
+    await routeSend(scene, scene.source, 0, plainLine('m1'));
+    await routeFire(scene, 90);
+  });
+  assert.equal(spontaneous.runCalls.length, 1);
+  assert.deepEqual(
+    byMsg(logs, 'elsewhere: dropped').map(({ source, kind, message, reason }) => [source, kind, message, reason]),
+    [['s1', 'noticed', 'm1', 'gap']],
+  );
+});
+
+test('events: a noticed settle that ends while warming up runs nothing', async () => {
+  let warming = false;
+  const spontaneous = noticingSpontaneous();
+  const scene = routeScene({ spontaneous, isWarmingUp: () => warming });
+  await routeSend(scene, scene.source, 0, plainLine('m1'));
+  warming = true;
+  const { logs } = await withCapturedLogs(() => routeFire(scene, 90));
+  assert.equal(spontaneous.runCalls.length, 0);
+  assert.deepEqual(
+    byMsg(logs, 'elsewhere: dropped').map(({ kind, reason }) => [kind, reason]),
+    [['noticed', 'warmup']],
+  );
+});
+
+test('events: an eavesdrop miss, or a writable channel, arms no noticed settle', async () => {
+  const miss = noticingSpontaneous({ hit: false });
+  const missScene = routeScene({ spontaneous: miss });
+  await routeSend(missScene, missScene.source, 0, plainLine('m1'));
+  assert.equal(miss.noticeCalls.length, 1);
+  assert.equal(missScene.timers.all.length, 0, 'a miss arms nothing');
+
+  const writable = noticingSpontaneous();
+  const writableScene = routeScene({ spontaneous: writable });
+  await routeSend(writableScene, writableScene.main, 0, plainLine('m1'));
+  assert.equal(writable.noticeCalls.length, 0, 'a channel the bot can send in is never a source');
+  assert.equal(writable.onMessageCalls.length, 1, 'its ordinary eavesdrop is unchanged');
+  assert.equal(writableScene.timers.all.length, 0);
 });

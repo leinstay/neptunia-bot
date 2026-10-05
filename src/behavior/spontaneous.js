@@ -4,6 +4,15 @@
 // quiet ('initiate'). It can also eavesdrop on a single fresh message and
 // jump in a few seconds/minutes later, as if it had just noticed it.
 //
+// A channel the persona can read but not write in (a read-only channel) is a
+// candidate too, with the main channel as its destination
+// (features.elsewhere): with unseen, settled, live messages there, a tick may
+// run a noticed comment about it in the destination, and an eavesdrop hit
+// there (noticeElsewhere) lets src/discord/events.js arm a settle wait that
+// ends in runNoticed. The ordinary rails apply, every one checked on the
+// destination; the per-source seen mark keeps one content from being
+// commented twice. There is no counter of its own.
+//
 // Pure decision functions (delay, active hours, mode, channel pick) take an
 // injected `rng`/`now` and are unit-tested directly. The factory below is the
 // only place that touches discord.js, the schedule on disk and the turn
@@ -11,6 +20,9 @@
 
 import { localHour } from '../discord/format.js';
 import { readableChannels, canSend, lastActivity, channelAllowed } from '../discord/collect.js';
+import { audienceAllows } from '../discord/pull-fetch.js';
+import { usableDestination } from './turn.js';
+import { chooseElsewhereMode, elsewhereSettings, hasUnseen, mayBeLive } from './elsewhere.js';
 import { between } from './random.js';
 import { log } from '../log.js';
 import { MINUTE_MS, HOUR_MS, DAY_MS } from '../time.js';
@@ -138,6 +150,33 @@ export function pickChannel(candidates, now, rng) {
 }
 
 /**
+ * Where the persona's words about `source` (a channel the bot cannot send
+ * in) go, read from `config` (the live config) now: `{ destination, reason:
+ * null }` with the discord.js channel, or `{ destination: null, reason }`
+ * with the code logged as `route`: `off` (features.elsewhere false),
+ * `no-destination` (no usable memory.mainChannelIds entry other than the
+ * source, src/behavior/turn.js#usableDestination) or `audience` (someone who
+ * can view the destination cannot view the source,
+ * src/discord/pull-fetch.js#audienceAllows). The one copy of the route of a
+ * routed call and of a noticed comment.
+ * @param {object} source  A discord.js guild channel.
+ * @param {object} config  The live config.
+ * @returns {{ destination: object, reason: null } | { destination: null, reason: 'off'|'no-destination'|'audience' }}
+ */
+export function routeFor(source, config) {
+  const { channel: destination, reason } = usableDestination(source.guild, config, { exceptId: source.id });
+  if (!destination) return { destination: null, reason };
+  if (!audienceAllows(destination, source, config)) return { destination: null, reason: 'audience' };
+  return { destination, reason: null };
+}
+
+/** Whether `prompts.elsewhere` (the task of a noticed comment) is a non-empty text. */
+function hasElsewherePrompt(prompts) {
+  const text = prompts?.elsewhere;
+  return typeof text === 'string' && text.trim() !== '';
+}
+
+/**
  * Wire the pure decisions above to discord.js, the persisted schedule and the
  * turn runner.
  * @param {object} params
@@ -165,30 +204,116 @@ export function createSpontaneous({
   const running = new Set(); // guildIds with a spontaneous turn in flight
   const eavesdropTimers = new Set();
 
-  function passesFilters(channel, config, cfg, t) {
+  /**
+   * Why the persona may not speak unprompted in `dest` (the channel the words
+   * go to) now, or null when it may: `channel` (not allowed by bot.channels,
+   * or not in a non-empty spontaneous.channels), `cannot-send`, `gap` (its
+   * own last post there is younger than spontaneous.minGapMinutes) or `busy`
+   * (a turn runs there or, with one attention, anywhere). A writable channel
+   * is its own destination; a read-only source speaks in the main channel.
+   */
+  function destinationBlock(dest, config, cfg, t) {
+    if (!channelAllowed(dest, config.bot)) return 'channel';
+    if (!canSend(dest)) return 'cannot-send';
+    if (cfg.channels.length > 0 && !cfg.channels.includes(dest.id)) return 'channel';
+    if (t - turns.lastPostAt(dest.id) < cfg.minGapMinutes * MINUTE_MS) return 'gap';
     // One attention (mention.oneAtATime, default on): while a turn is
     // running anywhere, a spontaneous tick or an eavesdrop must treat every
     // channel as unavailable, not just the one already busy -- runTurn
     // enforces the same rail itself, this just avoids attempting it.
     const oneAtATime = config.mention?.oneAtATime !== false;
-    return (
-      channelAllowed(channel, config.bot) &&
-      canSend(channel) &&
-      (cfg.channels.length === 0 || cfg.channels.includes(channel.id)) &&
-      t - turns.lastPostAt(channel.id) >= cfg.minGapMinutes * MINUTE_MS &&
-      !turns.isBusy(channel.id) &&
-      !(oneAtATime && turns.isAnyBusy())
-    );
+    if (turns.isBusy(dest.id) || (oneAtATime && turns.isAnyBusy())) return 'busy';
+    return null;
   }
 
+  function passesFilters(channel, config, cfg, t) {
+    return destinationBlock(channel, config, cfg, t) === null;
+  }
+
+  /** The seen mark of a source (state.json `elsewhereSeen`), read now; null without one. */
+  function seenOf(sourceId) {
+    const mark = store.state.data.elsewhereSeen?.[sourceId];
+    return Number.isFinite(mark) ? mark : null;
+  }
+
+  /**
+   * Where a noticed comment on `source` would be spoken now, every rail of
+   * the words checked on that destination: `{ destination, reason: null }`,
+   * or `{ destination: null, reason }`: `channel` (the source is not allowed
+   * or the bot can send there), routeFor's codes (`off`, `no-destination`,
+   * `audience`), `no-prompt` (prompts.elsewhere missing or empty) or
+   * destinationBlock's codes for the destination.
+   */
+  function noticedRoute(source, config, cfg, t) {
+    if (!channelAllowed(source, config.bot) || canSend(source)) return { destination: null, reason: 'channel' };
+    const route = routeFor(source, config);
+    if (!route.destination) return route;
+    if (!hasElsewherePrompt(hot.prompts)) return { destination: null, reason: 'no-prompt' };
+    const blocked = destinationBlock(route.destination, config, cfg, t);
+    return blocked ? { destination: null, reason: blocked } : route;
+  }
+
+  /**
+   * A read-only source on the tick path: its destination when it is a
+   * candidate, else null. Its last message must be newer than its seen mark
+   * and, with spontaneous.liveMinMessages above 0, inside the live window
+   * (mayBeLive: the ordinary liveness, the member count is the chooser's),
+   * and at least elsewhere.settleSeconds old (the burst settled); then
+   * noticedRoute.
+   */
+  function sourceDestination(source, config, cfg, t) {
+    const last = lastActivity(source);
+    if (!mayBeLive(last, t, seenOf(source.id), cfg)) return null;
+    if (t - last < elsewhereSettings(config).settleMs) return null;
+    return noticedRoute(source, config, cfg, t).destination;
+  }
+
+  /**
+   * Every channel a tick may pick: `{ channel, lastActivity, destination }`.
+   * A writable channel is its own destination; a read-only source (only
+   * with features.elsewhere on and a non-empty prompts.elsewhere) carries
+   * the main channel and `noticed: true`. A dead channel is never one.
+   */
   function channelCandidates(guild, config, cfg, t) {
-    return readableChannels(guild, config.bot)
-      .filter((channel) => passesFilters(channel, config, cfg, t) && !isChannelDead(channel, t, cfg))
-      .map((channel) => ({ channel, lastActivity: lastActivity(channel) }));
+    const candidates = [];
+    for (const channel of readableChannels(guild, config.bot)) {
+      if (isChannelDead(channel, t, cfg)) continue;
+      if (canSend(channel)) {
+        if (passesFilters(channel, config, cfg, t)) candidates.push({ channel, lastActivity: lastActivity(channel), destination: channel });
+        continue;
+      }
+      const destination = sourceDestination(channel, config, cfg, t);
+      if (destination) candidates.push({ channel, lastActivity: lastActivity(channel), destination, noticed: true });
+    }
+    return candidates;
   }
 
   function makeChooseMode(cfg) {
     return (history, ts) => chooseMode(history, ts, cfg, rng);
+  }
+
+  /**
+   * The chooser of a noticed turn on `sourceId`: the source as runTurn
+   * pulled it, its seen mark read when the chooser runs, chooseElsewhereMode
+   * on `path` (`tick`: the ordinary liveness; `eavesdrop`: the roll was the
+   * gate). A source that was not pulled is `not-now`.
+   */
+  function makeChooseNoticed(sourceId, cfg, path) {
+    return (history, ts, context) => {
+      const pulled = context?.pulled?.find?.((entry) => entry.channelId === sourceId);
+      if (!pulled) return null;
+      return chooseElsewhereMode(pulled.messages, ts, seenOf(sourceId), cfg, { path });
+    };
+  }
+
+  /** runTurn's arguments of a noticed comment on `source`, spoken in `destination`. */
+  function noticedTurn(source, destination, cfg, path) {
+    return {
+      channel: destination,
+      source: { channelId: source.id, reason: 'noticed' },
+      mode: 'auto',
+      chooseMode: makeChooseNoticed(source.id, cfg, path),
+    };
   }
 
   async function tick() {
@@ -226,7 +351,8 @@ export function createSpontaneous({
       return;
     }
 
-    const channel = pickChannel(channelCandidates(guild, config, cfg, t), t, rng);
+    const candidates = channelCandidates(guild, config, cfg, t);
+    const channel = pickChannel(candidates, t, rng);
 
     if (!channel) {
       schedule[guildId] = t + between(REWAKE_MINUTES, rng) * MINUTE_MS;
@@ -239,11 +365,19 @@ export function createSpontaneous({
     schedule[guildId] = t + nextDelayMs(cfg, rng);
     store.state.markDirty();
 
+    // A read-only source speaks in its destination, about itself (a noticed comment).
+    const picked = candidates.find((candidate) => candidate.channel === channel);
+    const noticed = picked?.noticed === true;
+    const turnChannel = noticed ? picked.destination : channel;
+    const source = noticed ? channel.id : null;
+
     running.add(guildId);
-    log.info('spontaneous: firing a turn', { guildId, channel: channel.id });
+    log.info('spontaneous: firing a turn', { guildId, channel: turnChannel.id, source });
     try {
-      const result = await turns.runTurn({ channel, mode: 'auto', chooseMode: makeChooseMode(cfg) });
-      log.info('spontaneous: turn finished', { guildId, channel: channel.id, outcome: result.outcome });
+      const result = await turns.runTurn(
+        noticed ? noticedTurn(channel, turnChannel, cfg, 'tick') : { channel, mode: 'auto', chooseMode: makeChooseMode(cfg) },
+      );
+      log.info('spontaneous: turn finished', { guildId, channel: turnChannel.id, source, outcome: result.outcome });
       if (result.outcome === 'not-now') {
         schedule[guildId] = now() + between(REWAKE_MINUTES, rng) * MINUTE_MS;
         store.state.markDirty();
@@ -261,10 +395,15 @@ export function createSpontaneous({
    * speech) and inside active hours. A pause is checked by runTurn itself.
    */
   function eavesdropAllowed(config, t) {
-    if (isWarmingUp()) return false;
+    return eavesdropBlock(config, t) === null;
+  }
+
+  /** Why eavesdropAllowed says no: `warmup`, `off` (a switch) or `asleep` (outside active hours); null when it says yes. */
+  function eavesdropBlock(config, t) {
+    if (isWarmingUp()) return 'warmup';
     const features = config.features ?? {};
-    if (features.spontaneous === false || features.eavesdrop === false) return false;
-    return isActiveHour(localHour(t, config.bot.timezone), config.spontaneous.activeHours);
+    if (features.spontaneous === false || features.eavesdrop === false) return 'off';
+    return isActiveHour(localHour(t, config.bot.timezone), config.spontaneous.activeHours) ? null : 'asleep';
   }
 
   /** Eavesdrop on a freshly observed message and maybe jump in after a delay. */
@@ -296,6 +435,73 @@ export function createSpontaneous({
     eavesdropTimers.add(timer);
   }
 
+  /**
+   * The eavesdrop roll for a fresh message in a read-only channel: true when
+   * a noticed comment on `channel` may follow, so the caller
+   * (src/discord/events.js) arms a settle wait that ends in runNoticed. The
+   * same rails as any eavesdrop (not paused, eavesdropAllowed, a member's
+   * message of the served guild), the route to a destination that passes
+   * every rail of unprompted words (noticedRoute), then one roll of
+   * spontaneous.eavesdropChance. A hit logs `spontaneous: noticed`.
+   * Schedules nothing itself.
+   * @param {object} channel  The discord.js channel the message was written in.
+   * @param {object} normalized
+   * @returns {boolean}
+   */
+  function noticeElsewhere(channel, normalized) {
+    if (store.state.data.paused) return false;
+    const config = hot.config;
+    const cfg = config.spontaneous;
+    const t = now();
+    if (!eavesdropAllowed(config, t)) return false;
+    if (normalized.self || normalized.bot) return false;
+    if (channel.guild?.id !== getGuildId()) return false;
+    const { destination } = noticedRoute(channel, config, cfg, t);
+    if (!destination) return false;
+    if (rng() >= cfg.eavesdropChance) return false;
+    log.info('spontaneous: noticed', { source: channel.id, destination: destination.id });
+    return true;
+  }
+
+  /**
+   * Run the noticed comment on `source` an eavesdrop hit led to, once its
+   * settle wait is over. Every rail is read again now, as noticeElsewhere
+   * read it (the destination resolved now), and the source must still hold
+   * something newer than its seen mark; then the turn runs in the
+   * destination with `source` (`reason: 'noticed'`) and the eavesdrop
+   * chooser (one new member message after the mark is enough). The tick
+   * schedule is left as it is. Never rejects.
+   * @param {object} source  The discord.js channel the persona read.
+   * @returns {Promise<{ outcome: string, reason?: string }>}  A rail that refused gives `not-now`
+   *   (`paused` while paused) with its code in `reason`: `paused`, `warmup`, `off`, `asleep`, `channel`,
+   *   `no-destination`, `audience`, `no-prompt`, `cannot-send`, `gap`, `busy` or `seen`. Otherwise the
+   *   turn's own result.
+   */
+  async function runNoticed(source) {
+    if (store.state.data.paused) return { outcome: 'paused', reason: 'paused' };
+    const config = hot.config;
+    const cfg = config.spontaneous;
+    const t = now();
+    const refuse = (reason) => ({ outcome: 'not-now', reason });
+    const blocked = eavesdropBlock(config, t);
+    if (blocked) return refuse(blocked);
+    const guildId = getGuildId();
+    if (!guildId || source.guild?.id !== guildId) return refuse('channel');
+    const { destination, reason } = noticedRoute(source, config, cfg, t);
+    if (!destination) return refuse(reason);
+    if (!hasUnseen(lastActivity(source), seenOf(source.id))) return refuse('seen');
+
+    log.info('spontaneous: firing a turn', { guildId, channel: destination.id, source: source.id });
+    try {
+      const result = await turns.runTurn(noticedTurn(source, destination, cfg, 'eavesdrop'));
+      log.info('spontaneous: turn finished', { guildId, channel: destination.id, source: source.id, outcome: result?.outcome });
+      return result ?? { outcome: 'error' };
+    } catch (err) {
+      log.error('spontaneous: turn failed', { guildId, source: source.id, error: err });
+      return { outcome: 'error' };
+    }
+  }
+
   /** Force a turn right now, bypassing the schedule (owner command: `/nep interject`, `/nep initiate`). */
   function force(channel, mode) {
     return turns.runTurn({ channel, mode, forced: true });
@@ -310,5 +516,5 @@ export function createSpontaneous({
     eavesdropTimers.clear();
   }
 
-  return { tick, onMessage, force, status, stop };
+  return { tick, onMessage, noticeElsewhere, runNoticed, force, status, stop };
 }

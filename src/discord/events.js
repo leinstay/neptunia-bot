@@ -5,7 +5,8 @@
 // (features.privateMessages, src/behavior/private.js). A turn someone asked
 // for that a rail refused gets one plain limit notice (src/behavior/limits.js).
 // A call in a channel the persona can read but not write in is answered in
-// the main channel (features.elsewhere) once that channel settles.
+// the main channel (features.elsewhere) once that channel settles; so is a
+// remark the persona chose to make about it (a noticed comment).
 // Owner commands are a separate pipeline entirely (src/discord/commands.js,
 // driven by `interactionCreate`, not `messageCreate`). Kept free of
 // discord.js-specific assumptions beyond the shape already used by
@@ -13,7 +14,6 @@
 // tests.
 
 import { normalizeMessage, channelAllowed, canSend, fetchHistory, fetchMessage } from './collect.js';
-import { audienceAllows } from './pull-fetch.js';
 import { isOwnerId } from './access.js';
 import { collectPictures, collectEmojiItems, collectVideos, collectReadableLinks, isDescribable } from './media.js';
 import {
@@ -32,7 +32,7 @@ import { topByRank } from '../memory/ranking.js';
 import { addPending, isExpired, popOldest, requeuePending } from '../behavior/pending.js';
 import { between } from '../behavior/random.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
-import { usableDestination } from '../behavior/turn.js';
+import { routeFor } from '../behavior/spontaneous.js';
 import { elsewhereSettings, pingsIn, pingStatus, recordPing, settleDueAt, stampPings } from '../behavior/elsewhere.js';
 import { privateGate } from '../behavior/private.js';
 import { isLimitNotice, postLimitNotice } from '../behavior/limits.js';
@@ -1441,7 +1441,8 @@ export function createMessageHandler({
   // can read but not send has nowhere to be answered. When a destination is
   // usable (the first usable id of memory.mainChannelIds,
   // src/behavior/turn.js#usableDestination) and everyone who can view it can
-  // view the source too (the audience rail, context.pull.sameAudience), the
+  // view the source too (the audience rail, context.pull.sameAudience;
+  // src/behavior/spontaneous.js#routeFor), the
   // call is recorded in the ring (state.json `elsewherePings`: ids and a time,
   // no author, no text) and a settle wait is armed for the source: one timer
   // per source, never a busy mark, so the one attention stays free while it
@@ -1463,6 +1464,11 @@ export function createMessageHandler({
   // waits live in memory only: a restart during one loses
   // the call, which stays unanswered in the ring; a pause (clearPending) and
   // shutdown (stop) clear them.
+  // The same wait (kind `noticed`, no call, nothing in the ring) follows an
+  // eavesdrop hit on an untriggered message there (spontaneous.noticeElsewhere)
+  // when no wait is armed in that source; when it is over the persona may
+  // comment on the source in the destination (spontaneous.runNoticed). A call
+  // arriving meanwhile takes its place, as a newer call does.
   // source channel id -> { kind, channel, normalized, triggerKind, superseded, firstAt, lastAt, due, moved, timer }
   const settles = new Map();
 
@@ -1477,23 +1483,6 @@ export function createMessageHandler({
       if (reason) log.info('elsewhere: dropped', { source: sourceId, kind: entry.kind, message: entry.normalized.id, reason });
     }
     settles.clear();
-  }
-
-  /**
-   * Where a call written in `source` (a channel the bot cannot send in) is
-   * answered, read from `config` (the live config) now: `{ destination,
-   * reason: null }` with the discord.js channel, or `{ destination: null,
-   * reason }` with the code logged as `route`: `off` (features.elsewhere
-   * false), `no-destination` (no usable memory.mainChannelIds entry other than
-   * the source) or `audience` (someone who can view the destination cannot
-   * view the source).
-   * @returns {{ destination: object, reason: null } | { destination: null, reason: 'off'|'no-destination'|'audience' }}
-   */
-  function routeFor(source, config) {
-    const { channel: destination, reason } = usableDestination(source.guild, config, { exceptId: source.id });
-    if (!destination) return { destination: null, reason };
-    if (!audienceAllows(destination, source, config)) return { destination: null, reason: 'audience' };
-    return { destination, reason: null };
   }
 
   /**
@@ -1538,7 +1527,9 @@ export function createMessageHandler({
    * one dropped (`outranked`; it stays in the ring too) and the waiting call
    * keeps its place. Either way the call that keeps the wait carries the one
    * dropped, and whatever that one carried, in `superseded`. Waits are per
-   * source: a call elsewhere never touches this one.
+   * source: a call elsewhere never touches this one. A waiting noticed
+   * comment (no call: callRank 0) always gives way to a call, and the call
+   * carries nothing for it (its message is no call of the ring).
    */
   function armSettle(source, normalized, triggerKind, destination) {
     const waiting = settles.get(source.id);
@@ -1549,15 +1540,49 @@ export function createMessageHandler({
         return;
       }
       log.info('elsewhere: dropped', { source: source.id, kind: waiting.kind, message: waiting.normalized.id, reason: 'replaced' });
-      const superseded = [...waiting.superseded, waiting.normalized.id];
+      const superseded = waiting.kind === 'noticed' ? [...waiting.superseded] : [...waiting.superseded, waiting.normalized.id];
       Object.assign(waiting, { kind: 'ping', channel: source, normalized, triggerKind, superseded });
       return;
     }
+    startSettle(source, normalized, 'ping', triggerKind, destination);
+  }
+
+  /**
+   * Arm a new settle wait in `source` (none is armed there) for a routed call
+   * (`ping`, its `triggerKind`) or a noticed comment (`noticed`, no
+   * triggerKind) and log `elsewhere: settling`.
+   * @param {'ping'|'noticed'} kind
+   */
+  function startSettle(source, normalized, kind, triggerKind, destination) {
     const t = now();
-    const entry = { kind: 'ping', channel: source, normalized, triggerKind, superseded: [], firstAt: t, lastAt: t, due: null, moved: 0, timer: null };
+    const entry = { kind, channel: source, normalized, triggerKind, superseded: [], firstAt: t, lastAt: t, due: null, moved: 0, timer: null };
     settles.set(source.id, entry);
     scheduleSettle(source.id, entry, settleDue(entry));
-    log.info('elsewhere: settling', { source: source.id, kind: entry.kind, message: normalized.id, destination: destination.id });
+    log.info('elsewhere: settling', { source: source.id, kind, message: normalized.id, destination: destination.id });
+  }
+
+  /**
+   * An untriggered message in `source`, a channel the bot cannot send in,
+   * after its settle wait was touched: with no wait armed there, an
+   * eavesdrop hit (spontaneous.noticeElsewhere: the rails and the roll)
+   * arms one of kind `noticed` toward the destination resolved now.
+   */
+  function maybeNotice(source, normalized) {
+    if (settles.has(source.id)) return;
+    if (spontaneous.noticeElsewhere?.(source, normalized) !== true) return;
+    const route = routeFor(source, hot.config);
+    if (!route.destination) return;
+    startSettle(source, normalized, 'noticed', null, route.destination);
+  }
+
+  /**
+   * A noticed wait is over: the comment runs through spontaneous.runNoticed,
+   * which reads every rail again; one that refuses is logged as
+   * `elsewhere: dropped` with its code.
+   */
+  async function fireNoticed(sourceId, { channel, normalized }) {
+    const result = await spontaneous.runNoticed?.(channel);
+    if (result?.reason) log.info('elsewhere: dropped', { source: sourceId, kind: 'noticed', message: normalized.id, reason: result.reason });
   }
 
   /**
@@ -1595,8 +1620,9 @@ export function createMessageHandler({
    * ring: skipSeenCalls); when its channel is no longer allowed
    * (bot.channels) or its kind's switch was turned off (`mention: dropped`,
    * `channel` / `off`). The calls it carries (`superseded`) go with it to
-   * answerCall. A timer whose wait already ended (or was removed) does
-   * nothing. Never rejects: it runs from a timer.
+   * answerCall. A noticed wait (no call) goes to fireNoticed instead once
+   * the pause / warmup check passed. A timer whose wait already ended (or
+   * was removed) does nothing. Never rejects: it runs from a timer.
    */
   async function fireSettle(sourceId, entry) {
     if (settles.get(sourceId) !== entry) return;
@@ -1607,6 +1633,10 @@ export function createMessageHandler({
       const muted = followUpMuted();
       if (muted) {
         log.info('elsewhere: dropped', { source: sourceId, kind, message: normalized.id, reason: muted });
+        return;
+      }
+      if (kind === 'noticed') {
+        await fireNoticed(sourceId, entry);
         return;
       }
       const held = await heldCallState(channel, normalized.id, true);
@@ -1803,10 +1833,14 @@ export function createMessageHandler({
       // window the persona itself opened by answering -- fully handled by
       // maybeFollowUp either way (a computed verdict or a deliberate no-op,
       // see its own header comment); otherwise let the spontaneous scheduler
-      // eavesdrop, nothing more.
+      // eavesdrop, nothing more. In a channel the bot cannot send in, an
+      // eavesdrop hit there arms a noticed settle wait (maybeNotice).
       if (!kind) {
         const followedUp = await maybeFollowUp(message, normalized, selfId, ownPrefill);
-        if (!followedUp) spontaneous.onMessage(message.channel, normalized);
+        if (!followedUp) {
+          spontaneous.onMessage(message.channel, normalized);
+          if (!canSend(message.channel)) maybeNotice(message.channel, normalized);
+        }
         return;
       }
 
