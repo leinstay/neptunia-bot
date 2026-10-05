@@ -189,7 +189,7 @@ Settings for answering calls from channels where the bot can read but not send (
 
 ## `pace`
 
-How long each stage of a turn may take. All hot-reloaded. A helper that misses its deadline is dropped; the turn continues without it. A turn whose answer is not in hand by `dropAfterMs` is dropped entirely (logged as `turn: dropped`). Each request logs the time of every stage in `turn: timings`.
+How long each stage of a turn may take when someone is waiting for the answer. All hot-reloaded. A helper that misses its deadline is dropped; the turn continues without it. A turn whose answer is not in hand by `dropAfterMs` is dropped entirely (logged as `turn: dropped`). Each request logs the time of every stage in `turn: timings`.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -197,6 +197,7 @@ How long each stage of a turn may take. All hot-reloaded. A helper that misses i
 | `prepareSearchMs` | `12000` | Extended deadline once the search classifier asked for a web or server search. Never shorter than `prepareMs`. `0` or a non-number removes the limit |
 | `dropAfterMs` | `60000` | Milliseconds from the turn's start. If the finished answer has not arrived by this time, the turn is dropped unposted (`turn: dropped`). `0` or a non-number removes the bar |
 | `typingWhilePreparing` | `false` | Show the typing indicator from the start of a turn answering a direct call (mention, reply, name, follow-up, private), not only while the finished answer is being typed out. Must be exactly `true` to enable |
+| `unpromptedWaits` | `true` | A turn nobody waits for (interjecting, starting a topic, noticed comment, room question, overheard) waits for every stage and posts when ready, ignoring `prepareMs`, `prepareSearchMs` and `dropAfterMs`. `false` applies the same deadlines to every turn. A missing key counts as on |
 
 ## `route`
 
@@ -377,6 +378,7 @@ Follow-up windows are persisted in `data/state.json` under `followUpWindows` and
 |---|---|---|
 | `channels` | `[]` | Allowed channels |
 | `maxChannelSilenceHours` | `72` | Channel silence that blocks spontaneous messages (hours); 0 = no limit |
+| `someoneAroundMinutes` | `120` | No spontaneous turn when every readable channel's last message is older than this (minutes). The persona's own last post in a channel does not count; another bot's does. `0` = no gate |
 | `minIntervalMinutes` | `25` | Min check interval (min) |
 | `maxIntervalMinutes` | `420` | Max check interval (min) |
 | `burstChance` | `0.15` | Burst follow-up chance |
