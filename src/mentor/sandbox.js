@@ -64,6 +64,7 @@ export const SANDBOX_OMITS = Object.freeze({
   drawQuota: 'no drawing is offered: a sandbox never draws, so <senses> has no drawing line',
   drawReason: 'a failed drawing\'s reason is not stored with a moment',
   focus: 'no room question: a live turn has no caller for it either',
+  tasks: 'no part of a split message, no queued or folded call: a stored moment records none',
   recentAudience: 'no guild to compare audiences in: <recent> shows the lines of the turn\'s own channel only',
 });
 
@@ -383,6 +384,7 @@ export function sandboxRequestInput({
     drawQuota: null,
     drawReason: null,
     focus: null,
+    tasks: null,
     recentAudience: null,
   };
 }

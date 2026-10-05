@@ -32,11 +32,12 @@ import {
   roomPreFilter,
 } from '../behavior/mention.js';
 import { helperRequestOptions, railReason } from '../llm/openrouter.js';
+import { clampChars, oneLine } from '../memory/clamp.js';
 import { fill, formatTranscript, renderTranscript } from './format.js';
 import { topByRank } from '../memory/ranking.js';
-import { addPending, isExpired, popOldest, requeuePending } from '../behavior/pending.js';
+import { addPending, authorCalls, foldInto, isExpired, parseMergeAnswer, popOldest, requeuePending } from '../behavior/pending.js';
 import { between } from '../behavior/random.js';
-import { fillPromptTemplate } from '../behavior/prompt.js';
+import { block, fillPromptTemplate } from '../behavior/prompt.js';
 import { roomQuestionChance } from '../behavior/spontaneous.js';
 import { routeFor } from '../behavior/turn.js';
 import { elsewhereSettings, pingsIn, pingStatus, recordPing, settleDueAt, stampPings } from '../behavior/elsewhere.js';
@@ -975,8 +976,8 @@ export function createMessageHandler({
   /**
    * The ignore roll let a routed call pass -- the persona's choice, and one
    * decision for the burst the settle grouped: the call and every call it
-   * took the place of (`superseded`: replaced in the settle wait or the
-   * pending slot, or outranked by it) are stamped skipped (stampRing), so a
+   * took the place of (`superseded`: replaced in the settle wait, or
+   * outranked by it) are stamped skipped (stampRing), so a
    * later pull never presents them as waiting. Safe in a dry run: a skip
    * claims no answer.
    * @param {string} messageId
@@ -1105,22 +1106,45 @@ export function createMessageHandler({
   // A @mention or a reply to the persona that arrives while a turn is running
   // in its own channel (mention.pendingSameChannel) or, with one attention
   // (mention.oneAtATime), in another channel is remembered here instead of
-  // dropped, and answered once the turn frees up -- unless the turn that
-  // spoke there already had it in view (turns.spokeAfterSeeing). A routed
+  // dropped, and answered once the turn frees up -- every one of them, in
+  // arrival order (src/behavior/pending.js), unless the turn that spoke there
+  // already had it in view (turns.spokeAfterSeeing; a turn that named it as
+  // still waiting for its own turn does not count). A routed
   // call (written where the persona cannot write, answered in the main
   // channel) is held the same way once its settle wait is over: under the
   // channel it was written in, carrying the `destination` its turn posts in;
   // one the ring already holds as answered is not answered again.
-  // See src/behavior/pending.js for the plain queue operations. Never persisted.
+  // A call whose author already has items waiting in that channel -- the
+  // parts of their message a chain has not reached yet (turns.waitingParts),
+  // their queued calls -- may be about one of them: the merge classifier
+  // (prompts/merge.md, holdCall) folds it into that item instead of queueing
+  // it, and the item's turn names it (labels.task.added).
+  // Never persisted.
   let pendingList = [];
   let draining = false; // guards against a re-entrant drainPending() call (see below)
 
+  /** How many calls `authorId` has waiting in `channelId` (authorCalls): the `queued` count of the pending logs. */
+  function queuedCount(channelId, authorId) {
+    return authorCalls(pendingList, channelId, authorId).length;
+  }
+
+  /** A waiting item's or a candidate's text as the merge classifier and the task labels show it: one line, cut. */
+  function itemText(text) {
+    return clampChars(oneLine(text), hot.config.context?.maxMessageChars ?? 800);
+  }
+
   /**
-   * Log a ping that left the queue because a newer one of the same channel
-   * took its slot (addPending / requeuePending: `replaced` or `dropped`).
+   * The `queued` input of a turn answering `trigger` (src/behavior/turn.js): a
+   * function giving, when the turn builds its request, the other calls its
+   * author has waiting in `channelId` (`{ id, text }`, arrival order). Null for
+   * a routed call: its turn is about another channel.
    */
-  function logNewer(ping) {
-    log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: 'newer', ...routedFields(ping) });
+  function queuedFor(channelId, trigger, routed = false) {
+    if (routed || !trigger?.authorId) return null;
+    return () =>
+      authorCalls(pendingList, channelId, trigger.authorId)
+        .filter((p) => p.trigger.id !== trigger.id)
+        .map((p) => ({ id: p.trigger.id, text: itemText(p.trigger.content) }));
   }
 
   /**
@@ -1184,59 +1208,179 @@ export function createMessageHandler({
    * Remember a direct ping (mention/reply/private message) that arrived while
    * a turn is running in its own channel or, with one attention, elsewhere --
    * or a routed call (`destination`: the channel its turn posts in) while a
-   * turn runs there or, with one attention, anywhere. At most one per channel
-   * the ping was written in -- a newer ping replaces an older one already
-   * queued for the same channel (logNewer); a routed call never replaces one
-   * of its destination, and one that replaces a call of its source carries it
-   * along (src/behavior/pending.js `superseded`, beside the calls it took the
-   * place of in its settle wait) -- and at most mention.maxPending entries;
-   * the oldest of any channel is evicted when full (logEvicted).
-   * `sameChannel` is logged for the channel the turn would post in.
+   * turn runs there or, with one attention, anywhere. Every call waits, in
+   * arrival order (`arrivedAt`, default now): none replaces another, of its
+   * channel or of its author; a routed call carries the calls its settle wait
+   * took the place of (src/behavior/pending.js `superseded`). At most
+   * mention.maxPending entries; the oldest of any channel is evicted when full
+   * (logEvicted). `sameChannel` is logged for the channel the turn would post
+   * in, `queued` is how many calls the author has waiting in that channel.
    * @param {string[]} [superseded]  A routed call only: see answerCall.
    */
-  function enqueuePending(channel, trigger, kind, destination = null, superseded = []) {
-    const maxPending = hot.config.mention.maxPending ?? 3;
+  function enqueuePending(channel, trigger, kind, destination = null, superseded = [], arrivedAt = now()) {
+    const maxPending = hot.config.mention.maxPending ?? 6;
     const routed = destination ? { destination, ...(superseded.length > 0 ? { superseded: [...superseded] } : {}) } : {};
-    const ping = { channelId: channel.id, channel, trigger, kind, arrivedAt: now(), ...routed };
-    const { list, evicted, replaced } = addPending(pendingList, ping, maxPending);
+    const ping = { channelId: channel.id, channel, trigger, kind, arrivedAt, ...routed };
+    const { list, evicted } = addPending(pendingList, ping, maxPending);
     pendingList = list;
     log.info('mention: deferred', {
       channel: channel.id,
       kind,
       sameChannel: turns.isBusy((destination ?? channel).id),
       pending: pendingList.length,
+      queued: queuedCount(channel.id, trigger.authorId),
       ...routedFields(ping),
     });
-    if (replaced) logNewer(replaced);
     if (evicted) logEvicted(evicted, maxPending);
+  }
+
+  /**
+   * Hold a call that cannot be answered now (the live path and a private
+   * message alike). A routed call, or one whose author has nothing waiting
+   * in that channel (no part of a chain not reached yet, no queued call), is
+   * queued at once (enqueuePending). Otherwise the merge classifier is asked
+   * (classifyMerge; the persona is busy, so this costs no reply time) whether
+   * the call is about one of those items: about one, it is folded into it
+   * (turns.addToPart for a part, foldInto for a queued call) -- no turn of its
+   * own; its item's turn names it -- and a server call still counts toward the
+   * member's repeat and spam counters (tagHistory), as it would at its own
+   * turn; `new`, no verdict, or an item that stopped waiting meanwhile, it is
+   * queued with its arrival time. Paused meanwhile, it is dropped (`mention:
+   * dropped`, `paused`). Once it is queued, a drain starts if nothing blocks
+   * it any more (drainPending). Never throws.
+   * @param {string[]} [superseded]  A routed call only: see answerCall.
+   */
+  function holdCall(channel, trigger, kind, destination = null, superseded = []) {
+    const items = destination ? [] : waitingItems(channel.id, trigger.authorId);
+    if (items.length === 0) {
+      enqueuePending(channel, trigger, kind, destination, superseded);
+      return;
+    }
+    const arrivedAt = now();
+    foldOrQueue({ channel, trigger, kind, items, arrivedAt }).catch((err) => {
+      log.error('merge: failed', { channel: channel.id, reason: 'error', status: null, error: err });
+    });
+  }
+
+  /**
+   * The items `authorId` waits for in `channelId`, in order: the parts of their
+   * message a chain there has not reached yet, then their queued calls.
+   * @returns {({ kind: 'part', index: number, text: string }|{ kind: 'call', id: string, text: string })[]}
+   */
+  function waitingItems(channelId, authorId) {
+    let parts = [];
+    try {
+      const found = turns.waitingParts?.(channelId, authorId);
+      parts = Array.isArray(found) ? found : [];
+    } catch {
+      parts = [];
+    }
+    return [
+      ...parts.map((part) => ({ kind: 'part', index: part.index, text: itemText(part.text) })),
+      ...authorCalls(pendingList, channelId, authorId).map((p) => ({ kind: 'call', id: p.trigger.id, text: itemText(p.trigger.content) })),
+    ];
+  }
+
+  /** holdCall's asynchronous side: the merge verdict, then the fold or the queue. */
+  async function foldOrQueue({ channel, trigger, kind, items, arrivedAt }) {
+    const index = await classifyMerge(channel, trigger, items);
+    if (store?.state?.data?.paused) {
+      log.info('mention: dropped', { channel: channel.id, kind, reason: 'paused' });
+      return;
+    }
+    const item = index ? items[index - 1] : null;
+    if (item) {
+      const message = { id: trigger.id, text: itemText(trigger.content), ts: trigger.ts };
+      let folded = false;
+      if (item.kind === 'part') {
+        folded = turns.addToPart?.(channel.id, trigger.authorId, item.index, message) === true;
+      } else {
+        const result = foldInto(pendingList, item.id, message);
+        pendingList = result.list;
+        folded = result.folded;
+      }
+      if (folded) {
+        if (kind !== 'private') tagHistory.hit(trigger.authorId, now(), repeatWindowMs(hot.config.mention));
+        return;
+      }
+    }
+    enqueuePending(channel, trigger, kind, null, [], arrivedAt);
+    if (!turnBlocked(channel.id, hot.config)) {
+      drainPending().catch((err) => log.error('mention: drain failed', { error: err }));
+    }
+  }
+
+  /**
+   * One merge classifier call: is `trigger` (a call of an author with `items`
+   * waiting) about one of them? System = prompts.merge with `{{name}}`; user
+   * = `<waiting>` (the items as `<n>. <text>` lines from 1) then
+   * `<candidate>` (`<author>: <text>`). A helper's request (classifier.text,
+   * mention.followUpMaxOutputTokens, purpose `merge`). Resolves the item's
+   * 1-based index (`merge: verdict`, `answer: 'item'`), or null for `new`
+   * (`answer: 'new'`) and for every other outcome, logged as `merge: failed`
+   * with its reason: `no-prompt`, the rail's code or `llm-error` (with the
+   * HTTP status), `empty`, `unparsed`, `out-of-range`. Codes and counts only.
+   * @returns {Promise<number|null>}
+   */
+  async function classifyMerge(channel, trigger, items) {
+    const channelId = channel.id;
+    const prompt = hot.prompts?.merge;
+    if (!prompt || !llm) {
+      log.info('merge: failed', { channel: channelId, reason: 'no-prompt', status: null });
+      return null;
+    }
+    const config = hot.config;
+    const startedAt = now();
+    const guildId = channel.guild?.id ?? getGuildId();
+    const waiting = items.map((item, i) => `${i + 1}. ${item.text}`).join('\n');
+    const user = [block('waiting', waiting), block('candidate', `${trigger.authorName}: ${itemText(trigger.content)}`)].join('\n');
+    let completion;
+    try {
+      completion = await llm.complete(
+        [
+          { role: 'system', content: fillPromptTemplate(prompt, { name: getSelfName(guildId) }) },
+          { role: 'user', content: user },
+        ],
+        {
+          model: classifierTextModel(config),
+          ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: config.mention?.followUpMaxOutputTokens, purpose: 'merge' }),
+        },
+      );
+    } catch (err) {
+      log.warn('merge: failed', { channel: channelId, reason: railReason(err), status: err?.statusCode ?? null });
+      return null;
+    }
+    const { index, reason } = parseMergeAnswer(completion?.text, items.length);
+    if (reason !== 'item' && reason !== 'new') {
+      log.warn('merge: failed', { channel: channelId, reason, status: null });
+      return null;
+    }
+    log.info('merge: verdict', { channel: channelId, waiting: items.length, answer: index ? 'item' : 'new', ms: now() - startedAt });
+    return index;
   }
 
   /**
    * The drain's runTurn answered 'busy': another turn started during the
    * switch pause. The ping goes back into the queue with its original
-   * arrivedAt (a newer ping queued for the same channel meanwhile wins and
-   * this one is dropped; mention.maxPending still applies). Synchronous on
+   * arrivedAt, ahead of every call that came after it (mention.maxPending
+   * still applies). Synchronous on
    * purpose -- see drainPending. Returns whether a turn that blocks this ping
    * is still running (its end calls drainPending again through onIdle): for a
    * routed call, one that blocks its destination.
    */
   function requeueBusy(ping) {
     const mentionCfg = hot.config.mention;
-    const maxPending = mentionCfg.maxPending ?? 3;
-    const { list, dropped, evicted, replaced } = requeuePending(pendingList, ping, maxPending);
+    const maxPending = mentionCfg.maxPending ?? 6;
+    const { list, evicted } = requeuePending(pendingList, ping, maxPending);
     pendingList = list;
-    if (dropped) {
-      logNewer(dropped);
-    } else {
-      log.info('mention: deferred again', {
-        channel: ping.channelId,
-        kind: ping.kind,
-        reason: 'busy',
-        pending: pendingList.length,
-        ...routedFields(ping),
-      });
-    }
-    if (replaced) logNewer(replaced);
+    log.info('mention: deferred again', {
+      channel: ping.channelId,
+      kind: ping.kind,
+      reason: 'busy',
+      pending: pendingList.length,
+      queued: queuedCount(ping.channelId, ping.trigger.authorId),
+      ...routedFields(ping),
+    });
     if (evicted) logEvicted(evicted, maxPending);
     return turnBlocked(ping.destination?.id ?? ping.channelId, hot.config);
   }
@@ -1289,7 +1433,11 @@ export function createMessageHandler({
    * ping whose message was deleted meanwhile (`gone`) or cannot be fetched
    * now (`fetch-failed`: messageStillExists), a channel that lost send
    * permission, or a ping the last turn that spoke in its channel already
-   * had in its history (turns.spokeAfterSeeing), is dropped with a log line.
+   * had in its history (turns.spokeAfterSeeing -- unless that turn named it as
+   * a call of its author still waiting for its own turn, labels.task.queued),
+   * is dropped with a log line; the messages folded into a dropped call
+   * (`added`) go with it. Each call's turn gets its author's other waiting
+   * calls (`queued`) and the messages folded into it (`added`).
    * A ping queued in a channel whose own turn was running is picked up the
    * same way once that turn frees the channel. Guarded against re-entrancy:
    * the turn this function itself starts also frees the channel through the very same `onIdle`,
@@ -1343,7 +1491,7 @@ export function createMessageHandler({
           continue;
         }
 
-        log.info('mention: picked up', { channel: ping.channelId, kind: ping.kind, ...routed });
+        log.info('mention: picked up', { channel: ping.channelId, kind: ping.kind, queued: queuedCount(ping.channelId, ping.trigger.authorId), ...routed });
         await sleep(between(mentionCfg.switchDelayMs ?? [2000, 9000], rng));
 
         // Paused meanwhile: nothing may run or mark the store dirty; the
@@ -1404,6 +1552,8 @@ export function createMessageHandler({
               mode: 'reply',
               trigger: ping.trigger,
               triggerKind: 'private',
+              queued: queuedFor(ping.channelId, ping.trigger),
+              added: ping.added ?? null,
             });
             if (result?.outcome === 'busy') stop = requeueBusy(ping);
             else await afterPrivateTurn(ping.channel, privateGuildId, ping.trigger, result);
@@ -1451,6 +1601,8 @@ export function createMessageHandler({
             mode: 'reply',
             trigger: ping.trigger,
             triggerKind: ping.kind,
+            queued: queuedFor(ping.channelId, ping.trigger, Boolean(destination)),
+            added: ping.added ?? null,
             ...(destination ? { source: { channelId: ping.channelId, reason: 'routed' } } : {}),
           });
           if (result?.outcome === 'busy') stop = requeueBusy({ ...ping, decided: true, ...(destination ? { destination } : {}) });
@@ -1478,10 +1630,11 @@ export function createMessageHandler({
    *    fetched its history without this message;
    *  - one attention (mention.oneAtATime, default on): a turn is running in
    *    another channel.
-   * A routed call is held the same way: queued under the channel it was
-   * written in (its source, so it never replaces a ping of its destination),
-   * carrying its destination, which the drain posts in, and the calls it
-   * took the place of. A name trigger is never queued: busy in that channel
+   * A direct call is held through holdCall: queued, or folded into an item
+   * its author already waits for there (the merge classifier).
+   * A routed call is held the same way, never folded: queued under the channel it was
+   * written in (its source), carrying its destination, which the drain posts
+   * in, and the calls its settle wait took the place of. A name trigger is never queued: busy in that channel
    * or elsewhere it is dropped here (`mention: dropped`, `busy`), and so is a
    * direct call in a busy channel with pendingSameChannel off -- before it is
    * counted or rolled, so it neither adds to the spam count (tagHistory) nor
@@ -1506,7 +1659,7 @@ export function createMessageHandler({
     const direct = kind === 'mention' || kind === 'reply';
     const oneAtATime = config.mention.oneAtATime !== false;
     const dropBusy = () => log.info('mention: dropped', { channel: channel.id, kind, reason: 'busy', ...routed });
-    const holdDirect = () => enqueuePending(channel, normalized, kind, destination, superseded);
+    const holdDirect = () => holdCall(channel, normalized, kind, destination, superseded);
     const sameChannelBusy = turns.isBusy(turnChannel.id);
     if (sameChannelBusy && direct && config.mention.pendingSameChannel !== false) {
       holdDirect();
@@ -1532,7 +1685,7 @@ export function createMessageHandler({
     }
     const source = destination ? { source: { channelId: channel.id, reason: 'routed' } } : {};
     turns
-      .runTurn({ channel: turnChannel, mode: 'reply', trigger: normalized, triggerKind: kind, ...source })
+      .runTurn({ channel: turnChannel, mode: 'reply', trigger: normalized, triggerKind: kind, queued: queuedFor(channel.id, normalized, Boolean(destination)), ...source })
       .then((result) => {
         if (result?.outcome === 'busy') dropBusy();
         return afterCallTurn(channel, normalized, result, kind, destination);
@@ -1834,12 +1987,12 @@ export function createMessageHandler({
     // One attention: busy anywhere (or, with oneAtATime off, in this very
     // chat) -> pending, answered by drainPending once the turn frees up.
     if (turnBlocked(channel.id, config)) {
-      enqueuePending(channel, normalized, 'private');
+      holdCall(channel, normalized, 'private');
       return;
     }
 
     turns
-      .runTurn({ channel, guildId, mode: 'reply', trigger: normalized, triggerKind: 'private' })
+      .runTurn({ channel, guildId, mode: 'reply', trigger: normalized, triggerKind: 'private', queued: queuedFor(channel.id, normalized) })
       .then((result) => afterPrivateTurn(channel, guildId, normalized, result))
       .catch((err) => log.error('private: turn failed', { channel: channel.id, error: err }));
   }

@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createMessageHandler } from '../src/discord/events.js';
+import { createTurnRunner } from '../src/behavior/turn.js';
+import { fill } from '../src/discord/format.js';
 import { createTagHistory } from '../src/behavior/mention.js';
 import { pingStatus } from '../src/behavior/elsewhere.js';
 import fs from 'node:fs';
@@ -1288,17 +1290,17 @@ test('events: a deferred ping the last speaking turn already had in view is not 
   assert.ok(logs.some((entry) => entry.msg === 'mention: already answered' && entry.channel === 'c1'));
 });
 
-test('events: a newer direct ping in the same channel replaces the older pending one', async () => {
-  let seenArgs = null;
+test('events: a newer direct ping in the same channel waits beside the older one; both are answered in arrival order', async () => {
+  const seen = [];
   const turns = fakeTurns({
     isBusy: () => false,
     isAnyBusy: () => true,
     runTurn: async (args) => {
-      seenArgs = args;
+      seen.push(args.trigger.content);
       return { outcome: 'spoke' };
     },
   });
-  const handler = makeHandler({ turns, sleep: async () => {}, rng: scripted([0.5, 0.99]) });
+  const handler = makeHandler({ turns, sleep: async () => {}, rng: scripted([0.5, 0.99, 0.5, 0.99]) });
 
   const guild = fakeGuild();
   const channel = fakeChannelWithMessage('c1', guild, 'm2');
@@ -1306,12 +1308,11 @@ test('events: a newer direct ping in the same channel replaces the older pending
 
   await handler(directPingMessage({ id: 'm1', guild, channel, channelId: 'c1', cleanContent: 'first' }));
   await handler(directPingMessage({ id: 'm2', guild, channel, channelId: 'c1', cleanContent: 'second' }));
+  await new Promise((resolve) => setImmediate(resolve));
 
   await handler.drainPending();
 
-  assert.ok(seenArgs);
-  assert.equal(seenArgs.trigger.id, 'm2', 'the newer ping replaces the older one in the same channel');
-  assert.equal(seenArgs.trigger.content, 'second');
+  assert.deepEqual(seen, ['first', 'second'], 'no call takes another one\'s place');
 });
 
 test('events: mention.maxPending caps distinct pending channels, dropping the oldest', async () => {
@@ -1698,7 +1699,7 @@ test('events: a re-queued ping keeps its original arrivedAt and expires mention.
   assert.ok(logs.some((entry) => entry.msg === 'mention: expired' && entry.channel === 'c1'));
 });
 
-test('events: a newer ping queued in the same channel during the switch pause wins over the re-queued one', async () => {
+test('events: a newer ping queued in the same channel during the switch pause waits behind the re-queued one', async () => {
   const turns = pauseRaceTurns();
   const guild = fakeGuild();
   const channel = fakeChannelWithMessage('c1', guild, 'm1');
@@ -1712,20 +1713,21 @@ test('events: a newer ping queued in the same channel during the switch pause wi
     await handler(directPingMessage({ id: 'm2', guild, channel, channelId: 'c1', cleanContent: 'second' }));
   };
   const tagHistory = countingTagHistory();
-  handler = makeHandler({ turns, tagHistory, sleep, rng: scripted([0.5, 0.99, 0.5, 0.99]) });
+  // m1: pause, roll; m1 again: pause (already decided); m2: pause, roll.
+  handler = makeHandler({ turns, tagHistory, sleep, rng: scripted([0.5, 0.99, 0.5, 0.5, 0.99]) });
 
   await handler(directPingMessage({ guild, channel, channelId: 'c1', cleanContent: 'first' }));
   turns.state.busy = false;
   const first = await withCapturedLogs(() => handler.drainPending());
   assert.equal(turns.calls.length, 1);
-  const dropped = first.logs.find((entry) => entry.msg === 'mention: dropped' && entry.reason === 'newer');
-  assert.ok(dropped, 'the old ping is dropped with a log line');
-  assert.equal(dropped.channel, 'c1');
-  assert.equal(first.logs.some((entry) => entry.msg === 'mention: deferred again'), false);
+  assert.equal(first.logs.some((entry) => entry.msg === 'mention: dropped'), false, 'nothing leaves the queue');
+  const again = first.logs.find((entry) => entry.msg === 'mention: deferred again');
+  assert.ok(again, 'the busy ping goes back');
+  assert.equal(again.queued, 2, 'beside the newer call of its author');
 
   turns.state.busy = false;
   await handler.drainPending();
-  assert.deepEqual(turns.calls.map((c) => c.trigger.id), ['m1', 'm2'], 'm1 tried once, then the newer m2 answered');
+  assert.deepEqual(turns.calls.map((c) => c.trigger.id), ['m1', 'm1', 'm2'], 'm1 tried, then answered, then the newer m2');
   assert.equal(tagHistory.hits, 2, 'm2 is a separate call, decided on its own');
 });
 
@@ -5337,13 +5339,13 @@ test('events: a queued routed ping answered while its message is looked up is no
   }
 });
 
-test('events: a queued routed ping dropped as already answered takes the call it replaced in the queue with it', async () => {
+test('events: queued routed pings a speaking turn already showed are each dropped as already answered, the ring stamped skipped', async () => {
   let busy = true;
   const seen = new Set();
   const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
   turns.spokeAfterSeeing = (channelId, messageId) => channelId === 's1' && seen.has(messageId);
   const scene = routeScene({ turns });
-  // m1 waits in the queue; m2, a later call of the same source, takes its slot.
+  // m1 waits in the queue; m2, a later call of the same source, waits beside it.
   await routeSend(scene, scene.source, 0, { id: 'm1' });
   await routeFire(scene, 90);
   await routeSend(scene, scene.source, 100, { id: 'm2', authorId: 'u2', authorName: 'Ίων' });
@@ -5355,7 +5357,7 @@ test('events: a queued routed ping dropped as already answered takes the call it
   const { logs } = await withCapturedLogs(() => scene.handler.drainPending());
 
   assert.equal(turns.calls.length, 0);
-  assert.deepEqual(byMsg(logs, 'mention: already answered').map((line) => line.channel), ['s1']);
+  assert.deepEqual(byMsg(logs, 'mention: already answered').map((line) => line.channel), ['s1', 's1'], 'the seen rule still holds for routed calls');
   assert.deepEqual(ringStates(scene), { m1: 'skipped', m2: 'skipped' });
 });
 
@@ -5487,19 +5489,20 @@ test('events: a routed call the ignore roll lets pass is stamped skipped and run
   }
 });
 
-test('events: a routed call the ignore roll lets pass takes the calls it replaced with it', async () => {
-  // The settle groups a burst into one decision: a call a newer one replaced (in the settle wait
-  // or the pending slot), or a weaker one the waiting call outranked, shares its decline.
+test('events: a routed call the ignore roll lets pass takes the calls its settle replaced with it; queued calls are decided each', async () => {
+  // The settle groups a burst into one decision: a call a newer one replaced in the settle wait,
+  // or a weaker one the waiting call outranked, shares its decline. Calls that each waited in
+  // the pending queue are messages of their own: each meets the ignore roll.
   const mention = (id, authorId = 'u1') => ({ id, authorId, authorName: 'Ίων' });
   const name = (id) => ({ id, mention: false, authorId: 'u3', authorName: 'Χλόη', content: 'η νεπτούνια είναι αστεία' });
   // [label, calls as [seconds, spec], the settle fire after each call (none: one fire after both,
-  // nothing held), the author of the call that was decided]
+  // nothing held), the authors of the calls that were decided]
   const cases = [
-    ['replaced in the settle', [[0, mention('m1')], [20, mention('m2', 'u2')]], [], 'u2'],
-    ['outranked in the settle', [[0, mention('m1')], [20, name('m2')]], [], 'u1'],
-    ['replaced in the pending slot', [[0, mention('m1')], [100, mention('m2', 'u2')]], [90, 190], 'u2'],
+    ['replaced in the settle', [[0, mention('m1')], [20, mention('m2', 'u2')]], [], ['u2']],
+    ['outranked in the settle', [[0, mention('m1')], [20, name('m2')]], [], ['u1']],
+    ['each waiting in the pending queue', [[0, mention('m1')], [100, mention('m2', 'u2')]], [90, 190], ['u1', 'u2']],
   ];
-  for (const [label, calls, fires, decidedAuthor] of cases) {
+  for (const [label, calls, fires, decidedAuthors] of cases) {
     let busy = fires.length > 0;
     const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
     const scene = routeScene({ turns, config: { mention: { ignoreChance: 1 } } });
@@ -5520,8 +5523,8 @@ test('events: a routed call the ignore roll lets pass takes the calls it replace
     const decided = byMsg(logs, 'mention: decided');
     assert.deepEqual(
       decided.map((line) => [line.reason, line.author, line.channel, line.destination]),
-      [['ignored:random', decidedAuthor, 's1', 'd1']],
-      `${label}: one decision for the burst`,
+      decidedAuthors.map((author) => ['ignored:random', author, 's1', 'd1']),
+      `${label}: one decision per message`,
     );
     assert.deepEqual(ringStates(scene), { m0: 'unanswered', m1: 'skipped', m2: 'skipped' }, label);
     assert.deepEqual(
@@ -5532,7 +5535,7 @@ test('events: a routed call the ignore roll lets pass takes the calls it replace
   }
 });
 
-test('events: a routed call that takes the pending slot of an older one from its source logs the drop', async () => {
+test('events: a routed call queued after an older one from its source waits beside it; each gets its own turn', async () => {
   let busy = false;
   const turns = recordingTurns({ outcome: 'spoke', mode: 'reply', delivered: true }, { isAnyBusy: () => busy });
   const scene = routeScene({ turns });
@@ -5547,16 +5550,11 @@ test('events: a routed call that takes the pending slot of an older one from its
   });
 
   assert.deepEqual(byMsg(logs, 'mention: deferred').map(({ channel, destination }) => [channel, destination]), [['s1', 'd1'], ['s1', 'd1']]);
-  const dropped = byMsg(logs, 'mention: dropped');
-  assert.deepEqual(
-    dropped.map(({ channel, kind, reason, destination }) => [channel, kind, reason, destination]),
-    [['s1', 'mention', 'newer', 'd1']],
-    'the older call leaves the queue with a trace',
-  );
-  assert.deepEqual(turns.calls.map((args) => args.trigger.id), ['m2']);
-  // Its turn spoke: the caller stamps that call; the older one is stamped by the turn that
-  // showed it (src/behavior/turn.js), which this fake is not.
-  assert.deepEqual(ringStates(scene), { m1: 'unanswered', m2: 'answered' });
+  assert.deepEqual(byMsg(logs, 'mention: dropped'), [], 'no call leaves the queue');
+  assert.deepEqual(turns.calls.map((args) => args.trigger.id), ['m1', 'm2']);
+  assert.equal(turns.calls.every((args) => args.queued === null), true, 'a routed call names no queued call');
+  // Each turn spoke: the caller stamps each call by its own turn.
+  assert.deepEqual(ringStates(scene), { m1: 'answered', m2: 'answered' });
 });
 
 test('events: a routed turn that ends while paused leaves the ring untouched', async () => {
@@ -6392,4 +6390,352 @@ test('pause notice: a private message the gate refuses gets nothing', async () =
     assert.equal(message.channel.sent.length, 0, label);
     assertPausedQuiet(scene, label);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Several calls, one attention: the real turn runner (src/behavior/turn.js) behind the handler.
+// A message that holds several requests is answered part by part; every waiting call gets its
+// own turn, in arrival order; a call about something still waiting is folded into it.
+
+const LIVE_T0 = Date.UTC(2026, 9, 5, 12, 0, 0);
+const LIVE_SPLIT = 'ποιος είναι ο Νίκος; κοίτα το κανάλι της Ελένης, και πες μου αν το μιμίδιο είναι αστείο.';
+const LIVE_PARTS = ['ποιος είναι ο Νίκος', 'κοίτα το κανάλι της Ελένης', 'το μιμίδιο είναι αστείο;'];
+const LIVE_NAMES = { u1: 'Alice', u2: 'Léa' };
+
+/**
+ * Like withCapturedLogs, but the entries are visible to `fn` while it runs (`fn(logs)`), so a
+ * scene can wait for a log line. Only the logger's own lines are captured.
+ */
+async function withLiveLogs(fn) {
+  const original = process.stdout.write;
+  const logs = [];
+  process.stdout.write = function write(chunk, ...rest) {
+    if (typeof chunk === 'string' && chunk.startsWith('{"level"')) {
+      for (const line of chunk.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          logs.push(JSON.parse(line));
+        } catch {
+          // a truncated line -- ignore
+        }
+      }
+      const callback = rest.find((arg) => typeof arg === 'function');
+      if (callback) callback();
+      return true;
+    }
+    return original.call(process.stdout, chunk, ...rest);
+  };
+  try {
+    await fn(logs);
+  } finally {
+    process.stdout.write = original;
+  }
+  return { logs };
+}
+
+/** Resolves after `check()` holds, or after a bounded number of event-loop turns (no wall clock). */
+async function tickUntil(check, rounds = 500) {
+  for (let i = 0; i < rounds && !check(); i += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * A server channel (or, `dm`, a private chat with u1) whose history is every message sent so far,
+ * a real turn runner, and the handler, wired as src/index.js wires them. `talk(index)` answers the
+ * talk requests (it may return a promise: a gate holding the turn); `split` and `merge` the
+ * splitter and the merge classifier (a string, an Error, or a function of the call's index).
+ * `prompts.split` / `prompts.merge` exist only when their answer is given.
+ */
+function liveScene({ dm = false, talk = () => '<msg>ok</msg>', split, merge, labels: ownLabels = labels, config: overrides = {} } = {}) {
+  const config = baseConfig(
+    deepMerge(
+      {
+        features: { typingSimulation: false, memory: false, privateMessages: true, imageGeneration: false, mediaDescriptions: false, channelPull: false, recent: false },
+        split: { minChars: 20, maxTasks: 4, contextMessages: 2, maxOutputTokens: 50 },
+        mention: { ignoreChance: 0, repeatPenalty: 0, spamThreshold: 50, maxPending: 6, pendingMinutes: 10 },
+      },
+      overrides,
+    ),
+  );
+  const prompts = {
+    'system-prompt': 'SYSTEM',
+    'character-card': 'CARD',
+    rules: 'RULES',
+    format: 'FORMAT',
+    reply: 'Reply to {{author}}.',
+    labels: ownLabels,
+    ...(split !== undefined ? { split: 'Split for {{name}}, at most {{maxTasks}}.' } : {}),
+    ...(merge !== undefined ? { merge: 'Merge for {{name}}.' } : {}),
+  };
+  const hot = { config, prompts };
+  const calls = { talk: [], split: [], merge: [] };
+  const answer = async (spec, index) => {
+    const value = typeof spec === 'function' ? await spec(index) : spec;
+    if (value instanceof Error) throw value;
+    return { text: value, usage: {}, estimated: 10 };
+  };
+  const llm = {
+    complete: async (messages, options) => {
+      const kind = options?.purpose === 'split' ? 'split' : options?.purpose === 'merge' ? 'merge' : 'talk';
+      calls[kind].push({ messages, options });
+      const spec = kind === 'split' ? split : kind === 'merge' ? merge : talk;
+      return answer(spec, calls[kind].length - 1);
+    },
+  };
+  let t = LIVE_T0;
+  const now = () => t;
+  const history = [];
+  const sent = [];
+  const client = fakeDmClient();
+  const store = fakePrivateStore();
+  store.state.markDirty = () => {};
+  const guild = dm ? null : { id: 'g1', members: { me: { displayName: 'Ζωή' } }, channels: { cache: new Map() } };
+  const messages = {
+    cache: new Map(),
+    fetch: async (arg) => (arg && typeof arg === 'object' ? new Map(history.map((m) => [m.id, m])) : (history.find((m) => m.id === arg) ?? null)),
+  };
+  const send = async (payload) => {
+    sent.push(payload);
+    return { id: `sent-${sent.length}` };
+  };
+  const channel = dm
+    ? fakeDmChannel('dm1', 'u1', { messages, sendTyping: async () => {}, send })
+    : fakeChannel('c1', guild, { name: 'general', messages, sendTyping: async () => {}, send });
+  const tagHistory = countingTagHistory();
+  const turns = createTurnRunner({ hot, store, llm, calibrator: { ratio: 1, apply: (n) => n, observe: () => {} }, client, now, schedule: () => () => {} });
+  const handler = createMessageHandler({
+    hot,
+    store,
+    client,
+    turns,
+    spontaneous: fakeSpontaneous(),
+    memory: fakeMemory(),
+    tagHistory,
+    getGuildId: () => 'g1',
+    llm,
+    rng: () => 0.5,
+    now,
+    sleep: async () => {},
+  });
+  turns.setOnIdle(() => handler.drainPending());
+  /** A call of `authorId` (a mention on the server, any DM in private), one second after the last. */
+  const call = async (id, authorId, content) => {
+    t += 1000;
+    const author = { id: authorId, bot: false, globalName: LIVE_NAMES[authorId], username: LIVE_NAMES[authorId] };
+    const message = fakeMessage({
+      id,
+      guild,
+      channel,
+      channelId: channel.id,
+      author,
+      member: dm ? null : { displayName: LIVE_NAMES[authorId] },
+      cleanContent: content,
+      createdTimestamp: t,
+      mentions: { users: new Map(dm ? [] : [['self1', { id: 'self1' }]]) },
+    });
+    history.push(message);
+    await handler(message);
+  };
+  return { calls, call, sent, store, turns, handler, tagHistory };
+}
+
+/** A talk answer that holds the first talk request until `open()`. */
+function heldFirst() {
+  let open;
+  const held = new Promise((resolve) => {
+    open = resolve;
+  });
+  const talk = (index) => (index === 0 ? held.then(() => '<msg>ok</msg>') : '<msg>ok</msg>');
+  return { talk, open: () => open() };
+}
+
+/** The `<task>` block of a talk request. */
+function liveTask(call) {
+  return /<task>\n([\s\S]*?)\n<\/task>/.exec(call.messages[1].content)?.[1] ?? '';
+}
+
+/** Who each talk request answered: the author its task names. */
+function answeredAuthors(calls) {
+  return calls.talk.map((call) => /^Reply to ([^.]+)\./.exec(liveTask(call))?.[1] ?? null);
+}
+
+test('events: a message with several requests is answered part by part; a call arriving mid-chain waits and is answered after the last part', async () => {
+  // The call that arrives meanwhile: the same author's (it has the parts to be folded into; no
+  // merge prompt here, so it is new) or another member's.
+  for (const [authorId, name] of [['u1', 'Alice'], ['u2', 'Léa']]) {
+    const { talk, open } = heldFirst();
+    const scene = liveScene({ talk, split: LIVE_PARTS.map((part) => `- ${part}`).join('\n') });
+    const { logs } = await withLiveLogs(async (logs) => {
+      await scene.call('m1', 'u1', LIVE_SPLIT);
+      await tickUntil(() => scene.calls.talk.length === 1);
+      await scene.call('m2', authorId, 'και κάτι άλλο');
+      await tickUntil(() => logs.some((line) => line.msg === 'mention: deferred'));
+      open();
+      await tickUntil(() => scene.calls.talk.length === 4);
+    });
+
+    assert.equal(scene.calls.split.length, 1, `${name}: the splitter is asked for the long call only`);
+    assert.deepEqual(answeredAuthors(scene.calls), ['Alice', 'Alice', 'Alice', name], `${name}: after the last part`);
+    assert.deepEqual(
+      scene.calls.talk.slice(0, 3).map((call, i) => liveTask(call).includes(fill(labels.task.part, { index: i + 1, total: 3, part: LIVE_PARTS[i], others: '' }).split('\n')[0])),
+      [true, true, true],
+    );
+    assert.deepEqual(logs.filter((line) => line.msg === 'turn: part').map((line) => line.outcome), ['spoke', 'spoke', 'spoke']);
+    // The ignore roll: once for the split message, once for the queued call.
+    assert.deepEqual(logs.filter((line) => line.msg === 'mention: decided').map((line) => line.author), ['u1', authorId]);
+    assert.equal(scene.tagHistory.hits, 2);
+    assert.equal(logs.filter((line) => line.msg === 'mention: already answered').length, 0, `${name}: not dropped as seen by a later part`);
+  }
+});
+
+test('events: five calls in a row from one author while she is busy get five turns, in arrival order', async () => {
+  const { talk, open } = heldFirst();
+  const scene = liveScene({ talk });
+  const texts = ['ένα', 'δύο', 'τρία', 'τέσσερα', 'πέντε'];
+  const { logs } = await withLiveLogs(async (logs) => {
+    await scene.call('m1', 'u1', texts[0]);
+    await tickUntil(() => scene.calls.talk.length === 1);
+    for (const [i, text] of texts.slice(1).entries()) await scene.call(`m${i + 2}`, 'u1', text);
+    await tickUntil(() => logs.filter((line) => line.msg === 'mention: deferred').length === 4);
+    open();
+    await tickUntil(() => scene.calls.talk.length === 5);
+  });
+
+  assert.equal(scene.calls.talk.length, 5);
+  assert.equal(logs.filter((line) => line.msg === 'mention: already answered').length, 0, 'none dropped as seen');
+  assert.deepEqual(logs.filter((line) => line.msg === 'mention: deferred').map((line) => line.queued), [1, 2, 3, 4]);
+  // The turn of m2 names the author's calls still waiting, so it leaves them to their own turns.
+  assert.ok(liveTask(scene.calls.talk[1]).endsWith(fill(labels.task.queued, { others: '1. τρία; 2. τέσσερα; 3. πέντε' })));
+  assert.ok(liveTask(scene.calls.talk[4]).endsWith('Reply to Alice.'), 'the last one has nothing left to name');
+  assert.deepEqual(logs.filter((line) => line.msg === 'merge: failed').map((line) => line.reason), ['no-prompt', 'no-prompt', 'no-prompt'], 'no merge prompt: each call is new');
+});
+
+test('events: with an older labels file, a call the speaking turn had in view is dropped as today', async () => {
+  const { talk, open } = heldFirst();
+  const { queued: _queued, ...noQueued } = labels.task;
+  const scene = liveScene({ talk, labels: { ...labels, task: noQueued } });
+  const { logs } = await withLiveLogs(async (logs) => {
+    await scene.call('m1', 'u1', 'ένα');
+    await tickUntil(() => scene.calls.talk.length === 1);
+    for (const [i, text] of ['δύο', 'τρία', 'τέσσερα'].entries()) await scene.call(`m${i + 2}`, 'u1', text);
+    await tickUntil(() => logs.filter((line) => line.msg === 'mention: deferred').length === 3);
+    open();
+    await tickUntil(() => logs.filter((line) => line.msg === 'mention: already answered').length === 2);
+  });
+  assert.equal(scene.calls.talk.length, 2, 'm1, then m2 whose turn saw m3 and m4');
+});
+
+test('events: another author\'s queued call the speaking turn had in view is still dropped as seen', async () => {
+  const { talk, open } = heldFirst();
+  const scene = liveScene({ talk });
+  const { logs } = await withLiveLogs(async (logs) => {
+    await scene.call('m1', 'u1', 'ένα');
+    await tickUntil(() => scene.calls.talk.length === 1);
+    await scene.call('m2', 'u2', 'δύο');
+    await scene.call('m3', 'u1', 'τρία');
+    await tickUntil(() => logs.filter((line) => line.msg === 'mention: deferred').length === 2);
+    open();
+    await tickUntil(() => logs.some((line) => line.msg === 'mention: already answered'));
+  });
+  assert.deepEqual(answeredAuthors(scene.calls), ['Alice', 'Léa'], 'Léa\'s turn had m3 in view and did not name it');
+});
+
+test('events: a call the merge classifier folds into a waiting call gets no turn; that call\'s turn names it', async () => {
+  const { talk, open } = heldFirst();
+  const scene = liveScene({ talk, merge: '1' });
+  const { logs } = await withLiveLogs(async (logs) => {
+    await scene.call('m1', 'u1', 'ένα');
+    await tickUntil(() => scene.calls.talk.length === 1);
+    await scene.call('m2', 'u1', 'ποιος είναι ο Νίκος;');
+    await scene.call('m3', 'u1', 'λοιπόν, ο Νίκος;');
+    await tickUntil(() => scene.calls.merge.length === 1);
+    await tickUntil(() => logs.some((line) => line.msg === 'merge: verdict'));
+    open();
+    await tickUntil(() => scene.calls.talk.length === 2);
+    await tickUntil(() => false, 50);
+  });
+
+  assert.equal(scene.calls.talk.length, 2, 'm3 has no turn of its own');
+  assert.ok(liveTask(scene.calls.talk[1]).endsWith(fill(labels.task.added, { added: 'λοιπόν, ο Νίκος;' })));
+  const [merge] = scene.calls.merge;
+  assert.equal(merge.messages[0].content, 'Merge for Ζωή.');
+  assert.equal(merge.messages[1].content, '<waiting>\n1. ποιος είναι ο Νίκος;\n</waiting>\n<candidate>\nAlice: λοιπόν, ο Νίκος;\n</candidate>');
+  assert.deepEqual([merge.options.role, merge.options.purpose, merge.options.helper], ['classifier.text', 'merge', true]);
+  const verdict = logs.find((line) => line.msg === 'merge: verdict');
+  assert.deepEqual([verdict.channel, verdict.waiting, verdict.answer, typeof verdict.ms], ['c1', 1, 'item', 'number']);
+  assert.equal(scene.tagHistory.hits, 3, 'the folded call still counts toward the repeat and spam counters');
+  assert.deepEqual(logs.filter((line) => line.msg === 'mention: decided').map((line) => line.author), ['u1', 'u1'], 'one roll per answered call');
+});
+
+test('events: a merge classifier that says new, fails or is missing leaves the call its own turn', async () => {
+  for (const merge of ['new', Object.assign(new Error('down'), { statusCode: 503 }), 'maybe', undefined]) {
+    const { talk, open } = heldFirst();
+    const scene = liveScene({ talk, merge });
+    const { logs } = await withLiveLogs(async (logs) => {
+      await scene.call('m1', 'u1', 'ένα');
+      await tickUntil(() => scene.calls.talk.length === 1);
+      await scene.call('m2', 'u1', 'δύο');
+      await scene.call('m3', 'u1', 'τρία');
+      await tickUntil(() => logs.filter((line) => line.msg === 'mention: deferred').length === 2);
+      open();
+      await tickUntil(() => scene.calls.talk.length === 3);
+    });
+    assert.equal(scene.calls.talk.length, 3, String(merge));
+    if (merge === 'new') assert.equal(logs.find((line) => line.msg === 'merge: verdict').answer, 'new');
+    else assert.ok(logs.some((line) => line.msg === 'merge: failed'), String(merge));
+  }
+});
+
+test('events: a call folded into a part of a running chain reaches that part\'s request', async () => {
+  const { talk, open } = heldFirst();
+  const scene = liveScene({ talk, split: LIVE_PARTS.map((part) => `- ${part}`).join('\n'), merge: '1' });
+  const { logs } = await withLiveLogs(async (logs) => {
+    await scene.call('m1', 'u1', LIVE_SPLIT);
+    await tickUntil(() => scene.calls.talk.length === 1);
+    await scene.call('m2', 'u1', 'και το κανάλι;');
+    await tickUntil(() => logs.some((line) => line.msg === 'merge: verdict'));
+    open();
+    await tickUntil(() => scene.calls.talk.length === 3);
+    await tickUntil(() => false, 50);
+  });
+  assert.equal(scene.calls.talk.length, 3, 'no turn of its own');
+  assert.equal(scene.calls.merge[0].messages[1].content.split('\n</waiting>')[0], `<waiting>\n1. ${LIVE_PARTS[1]}\n2. ${LIVE_PARTS[2]}`);
+  assert.ok(liveTask(scene.calls.talk[1]).endsWith(fill(labels.task.added, { added: 'και το κανάλι;' })));
+  assert.equal(liveTask(scene.calls.talk[2]).includes('και το κανάλι;'), false);
+});
+
+test('events: mention.maxPending evicts the oldest waiting call of an author too', async () => {
+  const { talk, open } = heldFirst();
+  const scene = liveScene({ talk, config: { mention: { maxPending: 2 } } });
+  const { logs } = await withLiveLogs(async (logs) => {
+    await scene.call('m1', 'u1', 'ένα');
+    await tickUntil(() => scene.calls.talk.length === 1);
+    for (const [i, text] of ['δύο', 'τρία', 'τέσσερα'].entries()) await scene.call(`m${i + 2}`, 'u1', text);
+    await tickUntil(() => logs.some((line) => line.msg === 'mention: dropped' && line.reason === 'full'));
+    open();
+    await tickUntil(() => scene.calls.talk.length === 3);
+  });
+  assert.equal(scene.calls.talk.length, 3);
+  assert.ok(liveTask(scene.calls.talk[1]).startsWith('Reply to Alice.'));
+  assert.equal(liveTask(scene.calls.talk[1]).includes('δύο'), false, 'm2, the oldest, was evicted');
+});
+
+test('private: DMs queue and fold the same way; one incoming message counts once toward the daily cap', async () => {
+  const { talk, open } = heldFirst();
+  // The first merge call: `new`; the second folds into item 3 (parts 2 and 3, then the queued DM).
+  const merge = (index) => (index === 0 ? 'new' : '3');
+  const scene = liveScene({ dm: true, talk, split: LIVE_PARTS.map((part) => `- ${part}`).join('\n'), merge });
+  const { logs } = await withLiveLogs(async (logs) => {
+    await scene.call('dm-1', 'u1', LIVE_SPLIT);
+    await tickUntil(() => scene.calls.talk.length === 1);
+    await scene.call('dm-2', 'u1', 'και κάτι άλλο');
+    await tickUntil(() => logs.some((line) => line.msg === 'mention: deferred'));
+    await scene.call('dm-3', 'u1', 'λοιπόν;');
+    await tickUntil(() => scene.calls.merge.length === 2 && logs.filter((line) => line.msg === 'merge: verdict').length === 2);
+    open();
+    await tickUntil(() => scene.calls.talk.length === 4);
+    await tickUntil(() => scene.store.bumps.length === 2);
+  });
+  assert.equal(scene.calls.talk.length, 4, 'three parts, then the queued DM; the folded one has no turn');
+  assert.ok(liveTask(scene.calls.talk[3]).endsWith(fill(labels.task.added, { added: 'λοιπόν;' })));
+  assert.deepEqual(scene.store.bumps.map(([, userId]) => userId), ['u1', 'u1'], 'the split DM once, the queued DM once');
 });

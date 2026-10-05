@@ -243,6 +243,11 @@ export const labels = {
   room: {
     focus: 'message {target} by {author} is put to everyone present',
   },
+  task: {
+    part: 'the message has {total} parts; now answer part {index} only: {part}\nthe other parts get their own turns:\n{others}',
+    queued: 'the same person has more calls waiting, each gets its own turn later:\n{others}',
+    added: 'they asked about this again meanwhile:\n{added}',
+  },
   recent: {
     header: 'what you remember from the last {hours} hours, oldest first:',
     line: '{date} {time}: {text}',

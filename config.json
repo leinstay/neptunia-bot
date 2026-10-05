@@ -5,6 +5,7 @@
     "replies": true,
     "nameTriggers": true,
     "followUp": true,
+    "splitTasks": true,
     "spontaneous": true,
     "eavesdrop": true,
     "memory": true,
@@ -103,7 +104,7 @@
     "affinityLikeBonus": 0.08,
     "oneAtATime": true,
     "pendingMinutes": 10,
-    "maxPending": 3,
+    "maxPending": 6,
     "pendingSameChannel": true,
     "switchDelayMs": [2000, 9000],
     "followUpMinutes": 15,
@@ -123,6 +124,7 @@
     "betweenMessagesMs": [700, 3500]
   },
   "pace": { "prepareMs": 6000, "prepareSearchMs": 12000, "dropAfterMs": 60000, "typingWhilePreparing": false },
+  "split": { "minChars": 80, "maxTasks": 4, "contextMessages": 6, "maxOutputTokens": 300 },
   "route": { "contextMessages": 20, "maxChannels": 40, "purposeChars": 80, "maxOutputTokens": 120 },
   "elsewhere": { "settleSeconds": 90, "settleMaxSeconds": 300, "rememberPings": 20, "pingMaxAgeDays": 7 },
   "spontaneous": {

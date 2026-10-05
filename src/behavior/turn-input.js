@@ -48,6 +48,7 @@ export const TURN_INPUT_KEYS = Object.freeze([
   'pulled',
   'source',
   'focus',
+  'tasks',
   'elsewhereDestination',
   'readOnlyIds',
   'recentLines',

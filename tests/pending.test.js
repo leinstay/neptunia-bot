@@ -1,27 +1,22 @@
-// Tests for src/behavior/pending.js: the pure queue of pending direct pings
+// Tests for src/behavior/pending.js: the pure queue of pending calls
 // (see mention.oneAtATime in src/discord/events.js).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { addPending, isExpired, popOldest, requeuePending } from '../src/behavior/pending.js';
+import { addPending, authorCalls, foldInto, isExpired, parseMergeAnswer, popOldest, requeuePending } from '../src/behavior/pending.js';
 
 function ping(channelId, arrivedAt, overrides = {}) {
-  return { channelId, channel: { id: channelId }, trigger: { id: `m-${channelId}` }, kind: 'mention', arrivedAt, ...overrides };
+  return { channelId, channel: { id: channelId }, trigger: { id: `m-${channelId}-${arrivedAt}`, authorId: 'u1' }, kind: 'mention', arrivedAt, ...overrides };
 }
 
 // --- addPending --------------------------------------------------------------
 
-test('addPending: the entry a newer ping replaced comes back as replaced, null when none was', () => {
-  const older = ping('s1', 100, { trigger: { id: 'call-1' }, destination: { id: 'd1' } });
-  const fresh = addPending([], older, 3);
-  assert.equal(fresh.replaced, null);
-
-  const { list, replaced, evicted } = addPending(fresh.list, ping('s1', 200, { trigger: { id: 'call-2' }, destination: { id: 'd1' } }), 3);
-  assert.equal(replaced, older, 'the caller can log the call that left the queue');
+test('addPending: a newer call of the same channel waits beside the older one, in arrival order', () => {
+  let list = addPending([], ping('c1', 100, { trigger: { id: 'call-1', authorId: 'u1' } }), 6).list;
+  const { list: next, evicted } = addPending(list, ping('c1', 200, { trigger: { id: 'call-2', authorId: 'u1' } }), 6);
   assert.equal(evicted, null);
-  assert.deepEqual(list.map((p) => p.trigger.id), ['call-2']);
-
-  const other = addPending(list, ping('c2', 300), 3);
-  assert.equal(other.replaced, null, 'another channel replaces nothing');
+  assert.deepEqual(next.map((p) => p.trigger.id), ['call-1', 'call-2']);
+  list = addPending(next, ping('c1', 200, { trigger: { id: 'call-3', authorId: 'u1' } }), 6).list;
+  assert.deepEqual(list.map((p) => p.trigger.id), ['call-1', 'call-2', 'call-3'], 'equal arrival times keep the order they came in');
 });
 
 test('addPending: exceeding maxPending evicts the single OLDEST entry across all channels', () => {
@@ -33,26 +28,28 @@ test('addPending: exceeding maxPending evicts the single OLDEST entry across all
   assert.deepEqual(after.map((p) => p.channelId).sort(), ['c2', 'c3']);
 });
 
-test('pending: a routed ping keeps its source slot and its destination', () => {
+test('addPending: calls of one channel count toward the cap like any others', () => {
+  let list = [];
+  ({ list } = addPending(list, ping('c1', 100), 2));
+  ({ list } = addPending(list, ping('c1', 200), 2));
+  const { list: after, evicted } = addPending(list, ping('c1', 300), 2);
+  assert.equal(evicted.arrivedAt, 100, 'the oldest call goes');
+  assert.deepEqual(after.map((p) => p.arrivedAt), [200, 300]);
+});
+
+test('pending: a routed ping keeps its source channel, its destination and what its settle grouped', () => {
   const main = { id: 'd1' };
-  // The main channel's own ping waits; a routed call from the source s1 joins it.
-  let list = addPending([], ping('d1', 100), 3).list;
-  const routed = ping('s1', 200, { trigger: { id: 'call-1' }, destination: main });
-  let evicted;
-  ({ list, evicted } = addPending(list, routed, 3));
-  assert.equal(evicted, null);
-  assert.deepEqual(list.map((p) => [p.channelId, p.trigger.id]), [['d1', 'm-d1'], ['s1', 'call-1']], 'never replaces the destination\'s ping');
+  let list = addPending([], ping('d1', 100), 6).list;
+  const routed = ping('s1', 200, { trigger: { id: 'call-1' }, destination: main, superseded: ['call-0'] });
+  ({ list } = addPending(list, routed, 6));
+  ({ list } = addPending(list, ping('s1', 300, { trigger: { id: 'call-2' }, destination: main }), 6));
+  assert.deepEqual(list.map((p) => [p.channelId, p.trigger.id]), [['d1', 'm-d1-100'], ['s1', 'call-1'], ['s1', 'call-2']], 'no call takes another one\'s place');
   assert.equal(list[1].destination, main);
   assert.equal(list[1].channel.id, 's1', 'the channel stays the source');
+  assert.deepEqual(list[1].superseded, ['call-0']);
+  assert.equal('superseded' in list[2], false, 'a newer arrival carries nothing it did not bring');
 
-  // A newer call from the same source takes its slot and keeps its own destination.
-  ({ list, evicted } = addPending(list, ping('s1', 300, { trigger: { id: 'call-2' }, destination: main }), 3));
-  assert.equal(evicted, null);
-  assert.deepEqual(list.map((p) => [p.channelId, p.trigger.id]), [['d1', 'm-d1'], ['s1', 'call-2']]);
-  assert.equal(list[1].destination, main);
-
-  // Re-queued after a busy turn, it keeps the destination too.
-  const { list: back } = requeuePending([], { ...routed, decided: true }, 3);
+  const { list: back } = requeuePending([], { ...routed, decided: true }, 6);
   assert.equal(back[0].destination, main);
 });
 
@@ -61,18 +58,8 @@ test('addPending: a routed ping past maxPending evicts the oldest entry of any c
   ({ list } = addPending(list, ping('d1', 100), 2));
   ({ list } = addPending(list, ping('c2', 200), 2));
   const { list: after, evicted } = addPending(list, ping('s1', 300, { destination: { id: 'd1' } }), 2);
-  assert.equal(evicted.channelId, 'd1', 'the slot key is the source, the cap counts every channel');
+  assert.equal(evicted.channelId, 'd1');
   assert.deepEqual(after.map((p) => p.channelId), ['c2', 's1']);
-});
-
-test('addPending: replacing a channel never counts as growing the list toward the cap', () => {
-  let list = [];
-  ({ list } = addPending(list, ping('c1', 100), 2));
-  ({ list } = addPending(list, ping('c2', 200), 2));
-  // c1 gets a newer ping -- still only 2 channels total, nothing should be evicted.
-  const { list: after, evicted } = addPending(list, ping('c1', 300), 2);
-  assert.equal(evicted, null);
-  assert.equal(after.length, 2);
 });
 
 // --- isExpired -----------------------------------------------------------------
@@ -100,77 +87,69 @@ test('popOldest: draining one at a time yields arrival order', () => {
 
 // --- requeuePending ----------------------------------------------------------
 
-test('requeuePending: a newer ping already queued for the same channel wins; the re-queued one is dropped', () => {
-  const newer = ping('c1', 500, { trigger: { id: 'newer' } });
-  const old = ping('c1', 100, { trigger: { id: 'old' } });
-  const { list, dropped, evicted } = requeuePending([newer], old, 3);
-  assert.equal(list.length, 1);
-  assert.equal(list[0].trigger.id, 'newer');
-  assert.equal(dropped, old);
+test('requeuePending: a call put back waits in its arrival place, before newer calls of its channel', () => {
+  const newer = ping('c1', 500, { trigger: { id: 'newer', authorId: 'u1' } });
+  const back = ping('c1', 100, { trigger: { id: 'back', authorId: 'u1' } });
+  const { list, evicted } = requeuePending([newer], back, 6);
   assert.equal(evicted, null);
+  assert.deepEqual(list.map((p) => p.trigger.id), ['back', 'newer']);
+  assert.equal(popOldest(list).ping.trigger.id, 'back');
 });
 
-test('requeuePending: an OLDER entry for the same channel is replaced, as addPending would', () => {
-  const older = ping('c1', 50, { trigger: { id: 'older' } });
-  const back = ping('c1', 100, { trigger: { id: 'back' } });
-  const { list, dropped, replaced } = requeuePending([older], back, 3);
-  assert.deepEqual(list.map((p) => p.trigger.id), ['back']);
-  assert.equal(dropped, null);
-  assert.equal(replaced, older, 'reported like addPending reports it');
-  assert.equal(requeuePending([], back, 3).replaced, null);
+test('requeuePending: put back with the same arrival time as later calls, it still goes first', () => {
+  const later = ping('c1', 100, { trigger: { id: 'later', authorId: 'u1' } });
+  const back = ping('c1', 100, { trigger: { id: 'back', authorId: 'u1' } });
+  assert.deepEqual(requeuePending([later], back, 6).list.map((p) => p.trigger.id), ['back', 'later']);
 });
 
 test('requeuePending: mention.maxPending still applies -- the oldest entry overall is evicted', () => {
   const list0 = [ping('c2', 200), ping('c3', 300)];
-  const { list, dropped, evicted } = requeuePending(list0, ping('c1', 100), 2);
-  assert.equal(dropped, null);
+  const { list, evicted } = requeuePending(list0, ping('c1', 100), 2);
   assert.equal(evicted.channelId, 'c1', 'the re-queued ping is the oldest, so it is the one evicted');
   assert.deepEqual(list.map((p) => p.channelId).sort(), ['c2', 'c3']);
 });
 
 test('requeuePending: keeps the extra fields carried on the ping', () => {
-  const { list } = requeuePending([], ping('c1', 100, { decided: true, superseded: ['call-0'] }), 3);
+  const added = [{ id: 'f1', text: 'και;', ts: 150 }];
+  const { list } = requeuePending([], ping('c1', 100, { decided: true, superseded: ['call-0'], added }), 6);
   assert.equal(list[0].decided, true);
   assert.deepEqual(list[0].superseded, ['call-0']);
+  assert.deepEqual(list[0].added, added);
 });
 
-// --- superseded: the calls a routed ping took the place of ---------------------
+// --- the author's waiting calls and folding ------------------------------------
 
-const MAIN = { id: 'd1' };
-
-/** A routed call from the source `s1`, answered in MAIN. */
-function routedPing(arrivedAt, callId, overrides = {}) {
-  return ping('s1', arrivedAt, { trigger: { id: callId }, destination: MAIN, ...overrides });
-}
-
-test('addPending: a routed ping that takes the slot of an older one carries that call and what it carried, each once', () => {
-  let list = addPending([], routedPing(100, 'call-1', { superseded: ['call-0'] }), 3).list;
-  const newer = routedPing(200, 'call-2', { superseded: ['call-0'] });
-  const { list: next, replaced } = addPending(list, newer, 3);
-  assert.equal(replaced.trigger.id, 'call-1');
-  assert.deepEqual(next.map((p) => [p.trigger.id, p.superseded]), [['call-2', ['call-0', 'call-1']]]);
-  assert.equal(next[0].destination, MAIN);
-  assert.equal(newer.superseded.length, 1, 'the ping handed in is not mutated');
-
-  // A slot taken for the first time carries only what the ping brought.
-  list = addPending([], routedPing(300, 'call-3'), 3).list;
-  assert.equal('superseded' in list[0], false);
+test('authorCalls: the author\'s own calls in that channel, in arrival order, never a routed one', () => {
+  const list = [
+    ping('c1', 300, { trigger: { id: 'b', authorId: 'u1' } }),
+    ping('c1', 100, { trigger: { id: 'a', authorId: 'u1' } }),
+    ping('c1', 200, { trigger: { id: 'other', authorId: 'u2' } }),
+    ping('c2', 150, { trigger: { id: 'elsewhere', authorId: 'u1' } }),
+    ping('c1', 250, { trigger: { id: 'routed', authorId: 'u1' }, destination: { id: 'd1' } }),
+  ];
+  assert.deepEqual(authorCalls(list, 'c1', 'u1').map((p) => p.trigger.id), ['a', 'b']);
 });
 
-test('requeuePending: the newer routed ping that wins over a re-queued one carries that call and what it carried', () => {
-  const queued = routedPing(500, 'call-2');
-  const back = routedPing(100, 'call-1', { decided: true, superseded: ['call-0'] });
-  const { list, dropped } = requeuePending([queued], back, 3);
-  assert.equal(dropped, back);
-  assert.deepEqual(list.map((p) => [p.trigger.id, p.superseded, p.arrivedAt]), [['call-2', ['call-0', 'call-1'], 500]]);
-  assert.equal('superseded' in queued, false, 'the queued entry is not mutated');
+test('foldInto: the message joins the call\'s added list; a call no longer waiting folds nothing', () => {
+  const call = ping('c1', 100, { trigger: { id: 'call-1', authorId: 'u1' } });
+  const first = { id: 'f1', text: 'και το δεύτερο;', ts: 200 };
+  const second = { id: 'f2', text: 'λοιπόν;', ts: 300 };
+  let { list, folded } = foldInto([call], 'call-1', first);
+  assert.equal(folded, true);
+  ({ list } = foldInto(list, 'call-1', second));
+  assert.deepEqual(list[0].added, [first, second]);
+  assert.equal('added' in call, false, 'the queued entry is not mutated');
+  const gone = foldInto(list, 'call-9', first);
+  assert.equal(gone.folded, false);
+  assert.equal(gone.list, list);
+});
 
-  // A re-queued routed ping that replaces an older one carries it, as addPending would.
-  const older = routedPing(50, 'call-0');
-  const replacing = requeuePending([older], routedPing(100, 'call-1', { decided: true }), 3);
-  assert.deepEqual(replacing.list.map((p) => [p.trigger.id, p.superseded]), [['call-1', ['call-0']]]);
-
-  // An ordinary ping that loses its slot hands nothing on.
-  const plain = requeuePending([ping('c1', 500, { trigger: { id: 'newer' } })], ping('c1', 100), 3);
-  assert.equal('superseded' in plain.list[0], false);
+test('parseMergeAnswer: a number of a waiting item, or new; anything else means new', () => {
+  assert.deepEqual(parseMergeAnswer('2', 3), { index: 2, reason: 'item' });
+  assert.deepEqual(parseMergeAnswer(' 1.\n', 3), { index: 1, reason: 'item' });
+  assert.deepEqual(parseMergeAnswer('New', 3), { index: null, reason: 'new' });
+  assert.deepEqual(parseMergeAnswer('', 3), { index: null, reason: 'empty' });
+  assert.deepEqual(parseMergeAnswer('4', 3), { index: null, reason: 'out-of-range' });
+  assert.deepEqual(parseMergeAnswer('0', 3), { index: null, reason: 'out-of-range' });
+  for (const text of ['#2', 'item 2', '2\nnew', 'yes']) assert.deepEqual(parseMergeAnswer(text, 3), { index: null, reason: 'unparsed' }, text);
 });

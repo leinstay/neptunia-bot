@@ -2723,6 +2723,47 @@ test('buildRequest: a focus line appends labels.room.focus with its index', () =
   assert.equal(task({ focus: history[1], prompts: fakePrompts({ labels: noRoom }) }), 'INTERJECT_TASK for Nept');
 });
 
+test('buildRequest: a part of a split message appends labels.task.part with the part and the other parts', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice', content: 'ποιος είναι ο Νίκος, κοίτα το κανάλι, και το μιμίδιο' });
+  const parts = ['ποιος είναι ο Νίκος', 'κοίτα το κανάλι', 'και το μιμίδιο'];
+  const task = (overrides) => bodyOf(userText(buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', ...overrides }))), 'task');
+  const plain = task({ tasks: null });
+  const others = ['1. ποιος είναι ο Νίκος', '3. και το μιμίδιο'].join('; ');
+  const second = { part: { index: 2, total: 3, parts }, queued: [], added: [] };
+  assert.equal(task({ tasks: second }), [plain, fill(labels.task.part, { index: 2, total: 3, part: 'κοίτα το κανάλι', others })].join('\n\n'));
+  const { task: _task, ...older } = labels;
+  assert.equal(task({ tasks: second, prompts: fakePrompts({ labels: older }) }), plain, 'an older labels file adds nothing');
+  assert.equal(task({ tasks: { ...second, part: { index: 4, total: 3, parts } } }), plain, 'a part out of range adds nothing');
+});
+
+test('buildRequest: the author\'s queued calls follow a part\'s others, numbered on; without a part they get labels.task.queued', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const parts = ['ένα', 'δύο'];
+  const task = (tasks) => bodyOf(userText(buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', tasks }))), 'task');
+  const plain = task(null);
+  assert.equal(
+    task({ part: { index: 1, total: 2, parts }, queued: ['τρία', 'τέσσερα'], added: [] }),
+    [plain, fill(labels.task.part, { index: 1, total: 2, part: 'ένα', others: '2. δύο; 3. τρία; 4. τέσσερα' })].join('\n\n'),
+  );
+  assert.equal(task({ part: null, queued: ['τρία', 'τέσσερα'], added: [] }), [plain, fill(labels.task.queued, { others: '1. τρία; 2. τέσσερα' })].join('\n\n'));
+  const { queued: _queued, ...noQueued } = labels.task;
+  const older = fakePrompts({ labels: { ...labels, task: noQueued } });
+  assert.equal(bodyOf(userText(buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', prompts: older, tasks: { part: null, queued: ['τρία'], added: [] } }))), 'task'), plain);
+});
+
+test('buildRequest: messages folded into the call append labels.task.added after the other task labels', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Alice' });
+  const task = (tasks, prompts = fakePrompts()) => bodyOf(userText(buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', tasks, prompts }))), 'task');
+  const plain = task(null);
+  const tasks = { part: null, queued: ['τρία'], added: ['και το δεύτερο;', 'λοιπόν;'] };
+  assert.equal(
+    task(tasks),
+    [plain, fill(labels.task.queued, { others: '1. τρία' }), fill(labels.task.added, { added: 'και το δεύτερο;; λοιπόν;' })].join('\n\n'),
+  );
+  const { added: _added, ...noAdded } = labels.task;
+  assert.equal(task({ ...tasks, queued: [] }, fakePrompts({ labels: { ...labels, task: noAdded } })), plain, 'an older labels file adds nothing');
+});
+
 test('buildRequest: server lists the pulled channel and marks read-only channels', () => {
   const channels = [
     fakeChannel(DEST, { name: 'général' }),

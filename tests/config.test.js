@@ -9,6 +9,7 @@ import { parseEnv, applyEnv, deepMerge, readConfig, need, isPlainObject } from '
 import { roomQuestionChance } from '../src/behavior/spontaneous.js';
 import { RECALL_DEFAULTS, recallSettings } from '../src/behavior/recall.js';
 import { paceSettings } from '../src/behavior/turn.js';
+import { SPLIT_DEFAULTS, splitSettings } from '../src/behavior/split.js';
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-'));
@@ -202,4 +203,13 @@ test('config.json: the code fallbacks of the variety group, the long pass includ
   assert.deepEqual(varietySettings({ variety: {} }), shipped.variety);
   assert.deepEqual({ ...VARIETY_DEFAULTS }, shipped.variety);
   for (const key of ['longLines', 'longEveryHours', 'longMinLines', 'longMaxPatterns', 'longModel']) assert.ok(Object.hasOwn(shipped.variety, key), key);
+});
+
+test('config.json: the code fallbacks of the split group are the shipped values, and splitTasks ships on', () => {
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const shipped = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
+  assert.deepEqual(splitSettings({}), shipped.split);
+  assert.deepEqual(splitSettings({ split: {} }), shipped.split);
+  assert.deepEqual({ ...SPLIT_DEFAULTS }, shipped.split);
+  assert.equal(shipped.features.splitTasks, true, 'a missing features.splitTasks counts as on, like the shipped value');
 });

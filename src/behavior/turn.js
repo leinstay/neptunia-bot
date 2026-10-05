@@ -28,9 +28,10 @@ import { channelPullOn, pullSettings, pullTargets } from './pull.js';
 import { audienceCovers, markSeen, messageLink, resolveDestination, stampPings } from './elsewhere.js';
 import { classifierTextModel } from './mention.js';
 import { parseLookupAnswer, recallSettings } from './recall.js';
+import { parseSplitAnswer, splitCandidate, splitSettings } from './split.js';
 import { turnRequestInput } from './turn-input.js';
 import { parseOutput } from '../llm/parse.js';
-import { DailyCapError, TokenLimitError, RETRY_STATUS, helperRequestOptions, sleep } from '../llm/openrouter.js';
+import { DailyCapError, TokenLimitError, RETRY_STATUS, helperRequestOptions, railReason, sleep } from '../llm/openrouter.js';
 import { ImageCapError, ImageGenError } from '../llm/images.js';
 import { limitOf, mirrorChannelLabel, mirrorDryRun, postLimitNotice } from './limits.js';
 import { between, typingMs } from './random.js';
@@ -588,6 +589,34 @@ export function routeFor(source, config) {
 }
 
 /**
+ * The `tasks` input of a turn's request (src/behavior/prompt.js#buildRequest)
+ * and the calls it names as left to their own turns. `part`: the part of a
+ * split message this turn answers; `queued()`: the trigger author's other
+ * calls still waiting (read now; a throw counts as none, logged
+ * `turn: queued failed`); `added`: messages folded into this call. The queued
+ * calls count as named (`deferred`, their ids) when the request can render
+ * them: in `labels.task.part`'s others on a part, else under
+ * `labels.task.queued`. `input` is null when there is nothing to say.
+ * @returns {{ input: { part: object|null, queued: string[], added: string[] }|null, deferred: Set<string> }}
+ */
+function taskInput({ part, queued, added, labels, channelId }) {
+  let waiting = [];
+  if (typeof queued === 'function') {
+    try {
+      const list = queued();
+      waiting = Array.isArray(list) ? list.filter((call) => call && typeof call.text === 'string' && call.text) : [];
+    } catch (err) {
+      log.warn('turn: queued failed', { channel: channelId, error: err });
+    }
+  }
+  const addedTexts = Array.isArray(added) ? added.map((message) => message?.text).filter((text) => typeof text === 'string' && text) : [];
+  const named = waiting.length > 0 && Boolean(part ? labels?.task?.part : labels?.task?.queued);
+  const deferred = new Set(named ? waiting.map((call) => call.id).filter(Boolean) : []);
+  if (!part && waiting.length === 0 && addedTexts.length === 0) return { input: null, deferred };
+  return { input: { part: part ?? null, queued: waiting.map((call) => call.text), added: addedTexts }, deferred };
+}
+
+/**
  * `images` (src/llm/images.js#createImageGen) is optional: absent,
  * `features.imageGeneration` false, a `drawFailed` turn, or a channel where
  * the bot cannot attach files, the persona's `<draw>` is dropped and no
@@ -643,6 +672,17 @@ export function routeFor(source, config) {
  * `getSelfName` (src/index.js) is the persona's display name in a guild;
  * default: the client's cached guild member, else the bot user's name.
  *
+ * `isWarmingUp` (src/memory/warmup.js, wired in src/index.js; default: never)
+ * ends a chain of parts before its next part (runChain): a warmup mutes the
+ * persona, as a pause does.
+ *
+ * A call whose text passes the splitter's pre-filter (src/behavior/split.js)
+ * asks the splitter (prompts/split.md) beside the turn's preparation, under
+ * its deadline. `one`, a late, failed or unparsable answer, a missing prompt
+ * or a labels file without `labels.task.part`: the turn goes on as if it had
+ * never been asked. Parts in time: the turn sets its preparation aside and
+ * runChain answers the parts one after another (see there).
+ *
  * `routeChannels` (the route classifier's hook; src/index.js passes
  * src/behavior/route-channel.js#createChannelRouter's) is optional:
  * `({ guildId, channel, history, trigger, triggerKind, selfName, config }) => Promise<string[]>`,
@@ -688,8 +728,12 @@ export function createTurnRunner({
   routeChannels,
   now: clock = Date.now,
   schedule = scheduleTimer,
+  isWarmingUp = () => false,
 }) {
   const busy = new Set();
+  // channelId -> the chain of parts running there (runChain): its author, its parts, the part
+  // in progress (`next`, 1-based; 0 before the first) and the messages folded into a later part.
+  const chains = new Map();
   const lastPostAt = new Map(); // channelId -> ts of the persona's last message
   let onIdle = null; // set via setOnIdle(); see the finally block of runTurn below
   let idleWaiters = []; // resolvers for waitIdle() (/nep pause), notified once busy.size hits 0
@@ -761,20 +805,23 @@ export function createTurnRunner({
    * The mirror header names the mode, the trigger kind (none on a spontaneous
    * turn), then `react to <name>` for a reaction and `to <name>` for a message
    * that answers a line (a reply or a linked pulled line); nothing more for
-   * one that answers none.
+   * one that answers none. A turn answering one part of a split message
+   * names its part (`part <index>/<total>`) after the trigger kind.
    * @param {{ channel: object, parsed: object, idByIndex: Map<number, string>,
    *   mode: string, triggerKind: TriggerKind|null, plain: boolean, selfName: string, pulledIds: Map<string, string>,
-   *   lines: object[], linkFor: (pulledId: string|null) => string|null }} args
+   *   lines: object[], linkFor: (pulledId: string|null) => string|null,
+   *   part?: { index: number, total: number }|null }} args
    *   `plain`: the turn quotes no chat line (postsPlain); `lines`: the lines shown of the pulled
    *   channels, then this chat's history (names and authors).
    */
-  async function dryAct({ channel, parsed, idByIndex, mode, triggerKind, plain, selfName, pulledIds, lines, linkFor }) {
+  async function dryAct({ channel, parsed, idByIndex, mode, triggerKind, plain, selfName, pulledIds, lines, linkFor, part = null }) {
     const channelName = channel.name ?? null;
     const where = mirrorChannelLabel(channel);
     // Every triggered turn shares the mode `reply`: the header names its
     // trigger kind (a call, a follow-up, an overheard line...); a spontaneous
     // turn has none.
-    const head = `[dry-run] ${where} · ${mode}${triggerKind ? ` · ${triggerKind}` : ''}`;
+    const partMark = part ? ` · part ${part.index}/${part.total}` : '';
+    const head = `[dry-run] ${where} · ${mode}${triggerKind ? ` · ${triggerKind}` : ''}${partMark}`;
     const labels = hot.prompts?.labels;
 
     for (const reaction of parsed.reactions) {
@@ -1543,6 +1590,60 @@ export function createTurnRunner({
   }
 
   /**
+   * The splitter (src/behavior/split.js): whether the call `trigger` holds
+   * several requests. One cheap classifier call (`prompt`, prompts/split.md,
+   * `{{name}}` = the persona's display name, `{{maxTasks}}` = split.maxTasks;
+   * on classifierTextModel, its answer capped at split.maxOutputTokens, a
+   * helper's request: helperRequestOptions, purpose `split`) reads the last
+   * `split.contextMessages` messages of `history` before the trigger (the
+   * captions this turn has at its start) and the trigger itself, and answers
+   * `one` or 2..maxTasks lines `- <part>` (parseSplitAnswer). Resolves the
+   * parts, or null for one request: `one`, a failed call (`split: failed`
+   * with the rail's code or `llm-error` and the HTTP status), an empty or
+   * unparsable answer (`split: failed`, `empty` / `unparsed`). Every answer
+   * that parsed logs `split: verdict` (`parts`: 1 for `one`, `ms`, and `late`
+   * once the turn went on without it, `isLate()`). Codes and counts only,
+   * never a part. Never throws.
+   * @returns {Promise<string[]|null>}
+   */
+  async function maybeSplit({ config, channelId, selfName, history, trigger, descriptions, prompt, isLate }) {
+    const settings = splitSettings(config);
+    const startedAt = clock();
+    let completion;
+    try {
+      const { triggerText, transcriptBlock } = classifierContext({
+        config,
+        selfName,
+        history,
+        trigger,
+        contextMessages: settings.contextMessages,
+        descriptions,
+      });
+      completion = await llm.complete(
+        [
+          { role: 'system', content: fillPromptTemplate(prompt, { name: selfName ?? '', maxTasks: settings.maxTasks }) },
+          { role: 'user', content: `${transcriptBlock}<candidate>\n${trigger.authorName}: ${triggerText}\n</candidate>` },
+        ],
+        {
+          model: classifierTextModel(config),
+          ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: settings.maxOutputTokens, purpose: 'split' }),
+        },
+      );
+    } catch (err) {
+      log.warn('split: failed', { channel: channelId, reason: railReason(err), status: err?.statusCode ?? null });
+      return null;
+    }
+    const { parts, reason } = parseSplitAnswer(completion?.text, settings.maxTasks);
+    const late = isLate() ? { late: true } : {};
+    if (reason === 'empty' || reason === 'unparsed') {
+      log.warn('split: failed', { channel: channelId, reason, status: null, ...late });
+      return null;
+    }
+    log.info('split: verdict', { channel: channelId, parts: parts?.length ?? 1, ms: clock() - startedAt, ...late });
+    return parts;
+  }
+
+  /**
    * fetchPull (src/discord/pull-fetch.js) that never throws: an unexpected
    * failure is logged (`pull: failed`) and counts as a skip with code `error`.
    */
@@ -1625,10 +1726,12 @@ export function createTurnRunner({
    * (`state.json` `elsewherePings`) for its ping marks. Fresh captions only
    * with `certain` (no chooser can still end the turn as not-now), never on a
    * drawFailed turn. Settings come from `config`, the turn's live config.
+   * `candidate` (default: the trigger) is what the route hook judges: on a
+   * turn answering one part of a split message, the trigger with that part's text.
    * @returns {Promise<{ pulled: object[], sourceSkip: string|null }>}  The PulledChannel records,
    *   source first; `sourceSkip` is the skip code of a source that could not be pulled.
    */
-  async function pullChannels({ channel, guildId, history, trigger, triggerKind = null, source, selfId, selfName, config, now, certain, drawFailure, labelled }) {
+  async function pullChannels({ channel, guildId, history, trigger, candidate = trigger, triggerKind = null, source, selfId, selfName, config, now, certain, drawFailure, labelled }) {
     const guild = channel.guild;
     const settings = pullSettings(config);
     const channelPull = channelPullOn(config) && labelled;
@@ -1701,7 +1804,7 @@ export function createTurnRunner({
     }
     if (typeof routeChannels === 'function' && channelPull && !drawFailure && targets.length < settings.maxChannels) {
       const routedLines = source?.reason === 'routed' ? sourcePulled?.messages : null;
-      const ids = await routeIds({ guildId, channel, history: routedLines ?? history, trigger, triggerKind, selfName, config });
+      const ids = await routeIds({ guildId, channel, history: routedLines ?? history, trigger: candidate, triggerKind, selfName, config });
       judging = 'route';
       if (ids.length > 0) targets = targetsWith(ids);
     }
@@ -1748,14 +1851,18 @@ export function createTurnRunner({
    * the bot cannot write in under that channel -- a call there is answered
    * here, so one queued meanwhile and already shown is not answered twice. A
    * pulled channel the bot can write in keeps its own record: a call written
-   * there is answered there, not by being shown here.
+   * there is answered there, not by being shown here. The calls the request
+   * named as still waiting for their own turn (`deferred`: the author's queued
+   * calls under `labels.task.queued` or a part's `{others}`) are left out: in
+   * view, yet deliberately not answered by this turn.
    * @param {object} channel
    * @param {object[]} history
    * @param {{ channelId: string, ids: string[] }[]} shown  buildRequest's `pulledKept`.
    * @param {object[]} pulled  The PulledChannel records (their `readOnly`).
+   * @param {Set<string>} [deferred]
    */
-  function noteSpokeSaw(channel, history, shown, pulled) {
-    spokeSaw.set(channel.id, new Set(history.map((m) => m.id)));
+  function noteSpokeSaw(channel, history, shown, pulled, deferred = new Set()) {
+    spokeSaw.set(channel.id, new Set(history.map((m) => m.id).filter((id) => !deferred.has(id))));
     const readOnly = readOnlyIdsOf(pulled);
     for (const { channelId, ids } of shown) {
       if (readOnly.has(channelId)) spokeSaw.set(channelId, new Set(ids));
@@ -1824,6 +1931,13 @@ export function createTurnRunner({
    * @param {boolean} [params.forced]  True for an owner-forced turn (`/nep interject`, `/nep
    *   initiate`) -- passed straight through to buildRequest, which appends prompts.forced (when
    *   present) to the task text so the model knows `<skip/>` is not the expected outcome this time.
+   * @param {(() => { id: string, text: string }[])|null} [params.queued]  The trigger author's other
+   *   calls still waiting in the queue (src/discord/events.js), read when the request is built:
+   *   named under `labels.task.queued` (on a part, in `labels.task.part`'s `{others}`) so the
+   *   persona leaves them to their own turns; a call so named is not counted as answered by this
+   *   turn (spokeAfterSeeing). Without the label they are not named and the old rule holds.
+   * @param {{ id: string, text: string, ts: number }[]|null} [params.added]  Later messages of the
+   *   author folded into this call (src/discord/events.js): `labels.task.added` names them.
    * @returns {Promise<{ outcome: TurnOutcome, mode?: string, dryRun?: boolean, drawFailed?: string,
    *   delivered?: boolean, limit?: { key: string, used: number, cap: number }|null }>}
    *   `drawFailed` (the reason) when the persona's picture could not be posted; `delivered` on a
@@ -1835,20 +1949,31 @@ export function createTurnRunner({
    *   one but a routed turn's own call, which the caller stamps by this outcome.
    */
   async function runTurn(params) {
-    const first = await runTurnOnce(params);
+    const first = await runTurnOnce({ ...params, maySplit: true });
+    if (first.outcome === 'split') return runChain(params, first);
+    return answerDrawFailure(params, first);
+  }
+
+  /**
+   * After a turn whose picture failed (`first.drawFailed`): a failed picture
+   * someone asked for gets its own turn, started only once the first one has
+   * fully returned (and freed the channel), with the reason in the trigger
+   * label; its own <draw> is dropped. The first turn held back its idle
+   * notifications (see runTurnOnce's `finally`), so a pending ping is drained
+   * only after this second turn -- never raced by it. Nobody asked on a
+   * spontaneous or an overheard turn (askedFor, the same predicate as
+   * runTurnOnce's hand-off): the failure is only logged. A turn about another
+   * channel keeps its source: a routed call is still answered here, with the
+   * call shown and linked -- what that turn posts reached the chat for the
+   * call too (`delivered`). It posts plain when the first turn did (a
+   * follow-up, a later part of a split message: `plainPosts`): it carries that
+   * turn's kind. Inside a chain (`owned`) the second turn keeps the chain's
+   * attention and leaves the idle notifications to it. Any other `first` comes
+   * back as it is.
+   */
+  async function answerDrawFailure(params, first, { owned = false, plainPosts = false } = {}) {
     if (!first.drawFailed) return first;
     const { channel, guildId, trigger = null, triggerKind = null, source = null } = params;
-    // A failed picture someone asked for gets its own turn, started only once
-    // the first one has fully returned (and freed the channel), with the
-    // reason in the trigger label; its own <draw> is dropped. The first turn
-    // held back its idle notifications (see runTurnOnce's `finally`), so a
-    // pending ping is drained only after this second turn -- never raced by
-    // it. Nobody asked on a spontaneous or an overheard turn (askedFor, the
-    // same predicate as runTurnOnce's hand-off): the failure is only logged.
-    // A turn about another channel keeps its source: a routed call is still
-    // answered here, with the call shown and linked -- what that turn posts
-    // reached the chat for the call too (`delivered`). It posts plain when the
-    // first turn did (a follow-up): it carries that turn's kind.
     if (askedFor(trigger, triggerKind)) {
       try {
         const second = await runTurnOnce({
@@ -1861,16 +1986,113 @@ export function createTurnRunner({
           drawFailedAfter: triggerKind,
           source,
           holdIdle: true,
+          owned,
+          plainPosts,
         });
         log.info('turn: draw failure answered', { channel: channel.id, reason: first.drawFailed, outcome: second.outcome });
         if (second.outcome === 'spoke' && second.delivered === true) return { ...first, delivered: true };
       } finally {
-        notifyIdle();
+        if (!owned) notifyIdle();
       }
     } else {
       log.warn('turn: draw failed', { channel: channel.id, reason: first.drawFailed });
     }
     return first;
+  }
+
+  /** Why a chain ends before its next part: `paused` (/nep pause), `warmup` (a warmup run), or null. */
+  function chainStop() {
+    if (store.state.data.paused) return 'paused';
+    try {
+      return isWarmingUp() ? 'warmup' : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * A message that holds several requests (the splitter's `parts`), answered
+   * part by part: one ordinary turn per part, in order, each with its own
+   * deadline and bar. Turn k's helpers (the search classifier, recall, the
+   * route hook, the re-watch) judge part k's text instead of the whole
+   * message, and its request names the part and the others
+   * (buildRequest's `tasks.part`, `labels.task.part`). The first part reuses
+   * the history the whole message's turn fetched and replies as any turn
+   * does; the later ones fetch it afresh (the earlier answers are in it) and
+   * post plain. The persona may answer a part in any way a turn allows,
+   * silence included; a part that fails, is dropped at its bar or refused
+   * does not stop the next. The attention stays the chain's from the
+   * whole message's turn to the end -- nothing else starts in between
+   * (pending calls keep queueing) -- and the idle notifications fire once, at
+   * the end. A pause or a warmup ends the chain before its next part (`turn:
+   * chain stopped`). While it runs, the parts not started yet are the
+   * author's waiting items (waitingParts); a later message of the author
+   * folded into one of them (addToPart) reaches that part's request as
+   * `tasks.added`. Every part logs `turn: part` with its outcome. Resolves one
+   * result for the message (chainOutcome).
+   */
+  async function runChain(params, { parts, history }) {
+    const { channel, trigger } = params;
+    const total = parts.length;
+    const chain = { authorId: trigger?.authorId ?? null, parts, next: 0, added: new Map() };
+    chains.set(channel.id, chain);
+    const results = [];
+    try {
+      for (let i = 0; i < total; i += 1) {
+        const index = i + 1;
+        const stop = i > 0 ? chainStop() : null;
+        if (stop) {
+          log.info('turn: chain stopped', { channel: channel.id, reason: stop, index, total });
+          break;
+        }
+        // From here on this part is no longer waiting: nothing more is folded into it.
+        chain.next = index;
+        const plainPosts = i > 0;
+        let result;
+        try {
+          const once = await runTurnOnce({
+            ...params,
+            owned: true,
+            part: { index, total, parts },
+            reuseHistory: i === 0 ? history : null,
+            // Messages folded into the whole call before it split go with its first part.
+            added: [...(i === 0 && Array.isArray(params.added) ? params.added : []), ...(chain.added.get(index) ?? [])],
+            plainPosts,
+          });
+          result = await answerDrawFailure(params, once, { owned: true, plainPosts });
+        } catch (err) {
+          log.error('turn: failed', { channel: channel.id, error: err });
+          result = { outcome: 'error' };
+        }
+        log.info('turn: part', { channel: channel.id, index, total, outcome: result.outcome });
+        results.push(result);
+      }
+    } finally {
+      chains.delete(channel.id);
+      busy.delete(channel.id);
+      notifyIdle();
+    }
+    return chainOutcome(results);
+  }
+
+  /**
+   * One result for a message answered part by part, as its caller counts a
+   * turn: `spoke` when any part spoke (`delivered` when anything of any part
+   * reached the chat; `dryRun` when every part that spoke was a rehearsal),
+   * else the first part's `skip`, else the first part's result (a refusal
+   * keeps its `limit`).
+   */
+  function chainOutcome(results) {
+    const spoke = results.filter((result) => result.outcome === 'spoke');
+    if (spoke.length > 0) {
+      const real = spoke.filter((result) => result.dryRun !== true);
+      return {
+        outcome: 'spoke',
+        mode: spoke[0].mode,
+        ...(real.length === 0 ? { dryRun: true } : { delivered: real.some((result) => result.delivered === true) }),
+      };
+    }
+    return results.find((result) => result.outcome === 'skip') ?? results[0] ?? { outcome: 'error' };
   }
 
   /**
@@ -1898,7 +2120,14 @@ export function createTurnRunner({
    * `drawReason`, `drawFailedAfter` (the first turn's trigger kind: the
    * second posts plain when the first did, postsPlain), and `holdIdle` --
    * leave the idle notifications to the caller (runTurn fires them once the
-   * second turn is over).
+   * second turn is over). Internal for a split message: `maySplit` (runTurn's
+   * first turn may ask the splitter; parts in time end it with the internal
+   * outcome `split`, `{ parts, history }`, still holding the attention for
+   * runChain), `owned` (a turn of the chain: the chain holds the attention and
+   * fires the idle notifications), `part` (`{ index, total, parts }`: its
+   * helpers judge that part's text, its request names it), `reuseHistory` (the
+   * first part's history, already fetched) and `plainPosts` (a later part
+   * posts plain).
    */
   async function runTurnOnce({
     channel,
@@ -1913,6 +2142,13 @@ export function createTurnRunner({
     drawReason = null,
     drawFailedAfter = null,
     holdIdle = false,
+    queued = null,
+    added = null,
+    maySplit = false,
+    owned = false,
+    part = null,
+    reuseHistory = null,
+    plainPosts = false,
   }) {
     // A server channel carries its guild; a private chat is served on behalf of the pinned one.
     const guildId = channel.guild?.id ?? guildIdParam;
@@ -1920,21 +2156,26 @@ export function createTurnRunner({
     const isPrivate = !channel.guild;
     // Set when this turn hands off to a drawFailed turn: runTurn notifies after it.
     let handOff = false;
+    // Set when this turn hands its message to a chain of parts: the chain keeps the attention.
+    let chained = false;
     // /nep pause: the owner is editing data/ by hand -- no new turn may
     // start (a reply, an interject, an initiate, an eavesdrop, or a forced turn)
     // until /nep resume. A turn already in flight when the pause is
     // requested is left to finish naturally; admin.js's pause handler waits
     // for it via waitIdle() below instead of aborting it here.
     if (store.state.data.paused) return { outcome: 'paused' };
-    if (busy.has(channel.id)) return { outcome: 'busy' };
-    // One attention (config.mention.oneAtATime, default on): while a turn is
-    // running anywhere else, nothing else may start. src/discord/events.js
-    // is the only caller that turns a direct ping caught by this into a
-    // pending one instead of just dropping it -- this rail applies to every
-    // caller (a reply, an interject, an initiate, an eavesdrop) alike.
-    const oneAtATime = hot.config.mention?.oneAtATime !== false;
-    if (oneAtATime && busy.size > 0) return { outcome: 'busy' };
-    busy.add(channel.id);
+    // A turn of a chain runs under the attention the chain already holds.
+    if (!owned) {
+      if (busy.has(channel.id)) return { outcome: 'busy' };
+      // One attention (config.mention.oneAtATime, default on): while a turn is
+      // running anywhere else, nothing else may start. src/discord/events.js
+      // is the only caller that turns a direct ping caught by this into a
+      // pending one instead of just dropping it -- this rail applies to every
+      // caller (a reply, an interject, an initiate, an eavesdrop) alike.
+      const oneAtATime = hot.config.mention?.oneAtATime !== false;
+      if (oneAtATime && busy.size > 0) return { outcome: 'busy' };
+      busy.add(channel.id);
+    }
     // The typing indicator, the preparation's deadline and the turn's bar, ended in `finally`
     // whatever the outcome; the start and the mode a dropped turn logs.
     let stopTyping = () => {};
@@ -1990,15 +2231,21 @@ export function createTurnRunner({
       stopTyping = typingWhilePreparing(channel, triggerKind, config);
 
       const historyStartedAt = clock();
-      const rawHistory = await beforeBar(
-        fetchHistory(channel, {
-          limit: config.context.channelMessages,
-          selfId,
-          embedTextChars: config.media?.embedTextChars,
-          videoSites: config.media?.video?.sites,
-        }),
-      );
+      // The first part of a split message reuses the history its message's turn fetched.
+      const rawHistory =
+        reuseHistory ??
+        (await beforeBar(
+          fetchHistory(channel, {
+            limit: config.context.channelMessages,
+            selfId,
+            embedTextChars: config.media?.embedTextChars,
+            videoSites: config.media?.video?.sites,
+          }),
+        ));
       const historyMs = clock() - historyStartedAt;
+      // What the helpers judge: the trigger, or on a part of a split message the trigger with
+      // that part's text (same id, author and time).
+      const candidate = part && trigger ? { ...trigger, content: part.parts[part.index - 1] ?? trigger.content } : trigger;
       // The history the request is built from: with its file previews once they are ready (below).
       let history = rawHistory;
 
@@ -2016,7 +2263,7 @@ export function createTurnRunner({
       const pullStartedAt = clock();
       const pullsPending = isPrivate
         ? Promise.resolve({ pulled: [], sourceSkip: null })
-        : pullChannels({ channel, guildId, history, trigger, triggerKind, source, selfId, selfName, config, now, certain, drawFailure: answersDrawFailure, labelled: pullLabelled })
+        : pullChannels({ channel, guildId, history, trigger, candidate, triggerKind, source, selfId, selfName, config, now, certain, drawFailure: answersDrawFailure, labelled: pullLabelled })
             // Never fails the turn: anything unexpected is no pull (and no source).
             .catch((err) => {
               log.warn('pull: failed', { channel: channel.id, error: err });
@@ -2113,6 +2360,34 @@ export function createTurnRunner({
         }
       };
 
+      // The splitter (runTurn's first turn only): a call that may hold several requests asks it
+      // now, beside everything else and under the same deadline. The turn waits for it as for any
+      // stage; parts in time end the wait at once (below). Without prompts.split it is off
+      // (`split: skipped`, `no-prompt`); without labels.task.part (an older labels file) it is
+      // never asked. A routed call is read in its source, as the search classifier reads it.
+      let splitStage = null;
+      if (maySplit && !answersDrawFailure && splitCandidate(trigger, triggerKind, config)) {
+        const splitPrompt = hot.prompts?.split;
+        if (!splitPrompt) {
+          log.info('split: skipped', { channel: channel.id, reason: 'no-prompt' });
+        } else if (hot.prompts?.labels?.task?.part) {
+          const shown = captionsSoFar();
+          splitStage = track('split', () =>
+            maybeSplit({
+              config,
+              channelId: channel.id,
+              selfName,
+              history: routedPull ? routedPull.messages : rawHistory,
+              trigger,
+              descriptions: routedPull ? new Map([...(shown ?? []), ...routedPull.descriptions]) : shown,
+              prompt: splitPrompt,
+              isLate: () => deadline.passed,
+            }),
+          );
+        }
+      }
+      const hasParts = () => Boolean(splitStage?.done) && Array.isArray(splitStage.value);
+
       // Videos (attached, or linked from a known video site) may be watched
       // by the video describer, newest first, at most media.video.maxPerTurn
       // NEW ones per turn; cached results and limit/error states are free.
@@ -2153,7 +2428,7 @@ export function createTurnRunner({
                       channelId: channel.id,
                       selfName,
                       history: previewed(),
-                      trigger,
+                      trigger: candidate,
                       videos: own,
                       descriptions: captionsSoFar(),
                       candidates,
@@ -2239,7 +2514,7 @@ export function createTurnRunner({
                     selfName,
                     history: routedPull ? routedPull.messages : chat,
                     chatHistory: chat,
-                    trigger,
+                    trigger: candidate,
                     descriptions: routedPull ? new Map([...(shown ?? []), ...routedPull.descriptions]) : shown,
                     videos: videosShown,
                     // Link reads of this turn when they are in, else what the link cache already holds.
@@ -2279,6 +2554,8 @@ export function createTurnRunner({
       const pulledStage = isPrivate ? null : track('pulled', () => pulledPending, pullStartedAt);
       const varietyStage = wornPending ? track('variety', () => wornPending, varietyStartedAt) : null;
 
+      // Parts in time end the wait at once: the whole message's preparation is set aside.
+      const partsReady = splitStage ? splitStage.settled.then(() => (hasParts() ? undefined : new Promise(() => {}))) : null;
       await beforeBar(
         Promise.race([
           Promise.all([
@@ -2291,10 +2568,18 @@ export function createTurnRunner({
             neighborsStage?.settled,
             pulledStage?.settled,
             varietyStage?.settled,
+            splitStage?.settled,
           ]),
           deadline.reached,
+          ...(partsReady ? [partsReady] : []),
         ]),
       );
+      if (hasParts()) {
+        // The message holds several requests: runChain answers them, this turn's attention kept.
+        deadline.close();
+        chained = true;
+        return { outcome: 'split', parts: splitStage.value, history: rawHistory };
+      }
       deadline.close();
       const prepareMs = clock() - startedAt;
       // What this turn has: a stage still running is left out (named in `late`).
@@ -2336,11 +2621,21 @@ export function createTurnRunner({
       const destination = isPrivate ? null : usableDestination(channel.guild, config).channel;
       // `<recent>`: the guild's live recent lines (none: an empty list) and the channels this turn may show them from.
       const recent = memoryOn ? recentInput({ channel, guildId, isPrivate, config, now }) : NO_RECENT;
+      // The prompts this request is built from, read once: the task labels below decide what it names.
+      const prompts = hot.prompts;
+      // A part of a split message, the author's other calls still queued, the messages folded into this one.
+      const tasks = taskInput({ part, queued, added, labels: prompts?.labels, channelId: channel.id });
+      // What this turn had in view yet does not answer (spokeAfterSeeing): the queued calls it
+      // named, and on a part of a split message every line after the message -- a call that came
+      // while the chain ran waits for its own turn after the chain.
+      const triggerAt = part && trigger ? history.findIndex((m) => m.id === trigger.id) : -1;
+      const notAnswered =
+        triggerAt === -1 ? tasks.deferred : new Set([...tasks.deferred, ...history.slice(triggerAt + 1).map((m) => m.id)]);
       // Every input named (turnRequestInput throws on one left undefined); null marks an absent one.
       const request = buildRequest(
         turnRequestInput({
           config,
-          prompts: hot.prompts,
+          prompts,
           calibrator,
           mode: finalMode,
           forced,
@@ -2385,6 +2680,7 @@ export function createTurnRunner({
           pulled,
           source,
           focus,
+          tasks: tasks.input,
           elsewhereDestination: destination?.name ? { name: destination.name } : null,
           readOnlyIds,
           // `<recent>`: the last hours, its live lines and the members' moments (no block without the store).
@@ -2542,14 +2838,15 @@ export function createTurnRunner({
       });
       // A follow-up or an overheard turn (postsPlain) never posts as a Discord reply -- the
       // model's reply="#n" quotes nothing --, nor does the drawFailed turn after one.
-      const plain = postsPlain(triggerKind) || postsPlain(drawFailedAfter);
+      // A later part of a split message posts plain too: the first part replied to the message.
+      const plain = postsPlain(triggerKind) || postsPlain(drawFailedAfter) || plainPosts;
       const routing = { pulledIds, lines, linkFor, plain };
       // Read fresh right here, not from the `features` snapshot taken at the
       // top of this turn: unlike the other switches this one defaults to OFF,
       // and whether to actually post is the very last decision of a turn.
       if (hot.config.features?.dryRun === true) {
-        await dryAct({ channel, parsed, idByIndex, mode: finalMode, triggerKind, selfName, ...routing });
-        noteSpokeSaw(channel, history, shownPulled, pulled);
+        await dryAct({ channel, parsed, idByIndex, mode: finalMode, triggerKind, selfName, part, ...routing });
+        noteSpokeSaw(channel, history, shownPulled, pulled, notAnswered);
         return { outcome: 'spoke', mode: finalMode, dryRun: true };
       }
       const acted = await act({
@@ -2567,7 +2864,7 @@ export function createTurnRunner({
         ...routing,
         sourceId: isPrivate ? null : (source?.channelId ?? null),
       });
-      noteSpokeSaw(channel, history, shownPulled, pulled);
+      noteSpokeSaw(channel, history, shownPulled, pulled, notAnswered);
       stampShownCalls({ shown: shownPulled, pulled, answered: acted.answered ?? new Set(), exceptId: ownCallId });
       const spoke = { outcome: 'spoke', mode: finalMode, delivered: acted.delivered === true };
       if (!acted.drawFailed) return spoke;
@@ -2596,15 +2893,41 @@ export function createTurnRunner({
       stopTyping();
       deadline?.close();
       bar?.close();
-      busy.delete(channel.id);
+      // A turn of a chain, or one that hands its message to a chain, leaves the attention and
+      // the notifications to the chain (runChain), which releases them once every part is done.
+      if (!owned && !chained) busy.delete(channel.id);
       // A hand-off to the drawFailed turn (or that turn itself) leaves the
       // notifications to runTurn, which fires them once both are done.
-      if (!handOff && !holdIdle) notifyIdle();
+      if (!handOff && !holdIdle && !owned && !chained) notifyIdle();
     }
   }
 
   return {
     runTurn,
+    /**
+     * The parts of the chain running in `channelId` not started yet, when its message is
+     * `authorId`'s: `{ index, text }` in order (1-based indices). Empty otherwise. Read only.
+     * @param {string} channelId
+     * @param {string} authorId
+     * @returns {{ index: number, text: string }[]}
+     */
+    waitingParts: (channelId, authorId) => {
+      const chain = chains.get(channelId);
+      if (!chain || chain.authorId !== authorId) return [];
+      return chain.parts.map((text, i) => ({ index: i + 1, text })).filter(({ index }) => index > chain.next);
+    },
+    /**
+     * Fold `message` (`{ id, text, ts }`) into part `index` of `authorId`'s chain in `channelId`,
+     * so that part's request names it (`labels.task.added`). False -- nothing changed -- when no
+     * such chain runs or the part has started.
+     * @returns {boolean}
+     */
+    addToPart: (channelId, authorId, index, message) => {
+      const chain = chains.get(channelId);
+      if (!chain || chain.authorId !== authorId || !(index > chain.next) || index > chain.parts.length) return false;
+      chain.added.set(index, [...(chain.added.get(index) ?? []), message]);
+      return true;
+    },
     isBusy: (channelId) => busy.has(channelId),
     isAnyBusy: () => busy.size > 0,
     lastPostAt: (channelId) => lastPostAt.get(channelId) ?? 0,

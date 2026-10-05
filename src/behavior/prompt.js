@@ -747,6 +747,42 @@ export function hasRequiredLabels(labels) {
   return Boolean(labels) && typeof labels === 'object' && Boolean(labels.transcript);
 }
 
+// How the task labels list several items inline: `{others}` and `{added}` sit inside a sentence.
+const TASK_ITEM_JOIN = '; ';
+
+/** `texts` as `<n>. <text>` items, numbered from `first`. */
+function numberedItems(texts, first) {
+  return texts.map((text, i) => `${first + i}. ${text}`);
+}
+
+/**
+ * The task labels for buildRequest's `input.tasks` (see there), joined by a
+ * blank line: `labels.task.part` (or, without a usable part,
+ * `labels.task.queued`), then `labels.task.added`. '' when nothing applies.
+ * @param {{ part?: { index: number, total?: number, parts: string[] }|null, queued?: string[],
+ *   added?: string[] }|null|undefined} tasks
+ * @param {object} labels
+ * @returns {string}
+ */
+function renderTasks(tasks, labels) {
+  if (!tasks) return '';
+  const queued = Array.isArray(tasks.queued) ? tasks.queued : [];
+  const added = Array.isArray(tasks.added) ? tasks.added : [];
+  const texts = [];
+  const part = tasks.part;
+  const parts = Array.isArray(part?.parts) ? part.parts : [];
+  const usablePart = Boolean(part) && Number.isInteger(part.index) && part.index >= 1 && part.index <= parts.length;
+  if (usablePart && labels.task?.part) {
+    const otherParts = numberedItems(parts, 1).filter((_, i) => i + 1 !== part.index);
+    const others = [...otherParts, ...numberedItems(queued, parts.length + 1)].join(TASK_ITEM_JOIN);
+    texts.push(fill(labels.task.part, { index: part.index, total: part.total ?? parts.length, part: parts[part.index - 1], others }));
+  } else if (!usablePart && queued.length > 0 && labels.task?.queued) {
+    texts.push(fill(labels.task.queued, { others: numberedItems(queued, 1).join(TASK_ITEM_JOIN) }));
+  }
+  if (added.length > 0 && labels.task?.added) texts.push(fill(labels.task.added, { added: added.join(TASK_ITEM_JOIN) }));
+  return texts.join('\n\n');
+}
+
 /** A deployment with no/broken labels.json must fail loudly, not send a broken prompt. */
 function requireLabels(prompts) {
   const labels = prompts?.labels;
@@ -1462,6 +1498,16 @@ function pulledAuthors(pulledFits) {
  * @param {object|null} [input.focus]  A message of the chat put to everyone present (a room
  *   question): `labels.room.focus` (`{author}` `{target}`) follows the task text when it is in
  *   the chat.
+ * @param {{ part: { index: number, total: number, parts: string[] }|null, queued: string[],
+ *   added: string[] }|null} [input.tasks]  What else the trigger's author is waiting for, after
+ *   the task text (src/behavior/turn.js). `part`: this turn answers one part of a message that
+ *   holds several requests (src/behavior/split.js) -- `labels.task.part` with `{index}` (1-based),
+ *   `{total}`, `{part}` (the part answered now) and `{others}` (every other part, then each of
+ *   `queued`, as `<n>. <text>` items numbered on, joined by `; `). `queued`: the author's other
+ *   calls still waiting for their own turns -- without a part, `labels.task.queued` with
+ *   `{others}` (them, `<n>. <text>` items from 1, joined by `; `). `added`: later messages of the
+ *   author about this same call -- `labels.task.added` with `{added}` (their texts joined by `; `).
+ *   A label missing (an older labels file) or a part outside its parts adds nothing for it.
  * @param {{ name: string }|null} [input.elsewhereDestination]  Where a call from a read-only
  *   channel is answered: `<senses>` gains `senses.elsewhere` with `{destination}`.
  * @param {Set<string>|string[]} [input.readOnlyIds]  Channels the bot can read but not write in:
@@ -1609,6 +1655,9 @@ export function buildRequest(input) {
   const focus = privateChat ? null : (input.focus ?? null);
   const focusItem = focus ? chatItems.find((item) => item.id === focus.id) : null;
   const focusText = focusItem && labels.room?.focus ? fill(labels.room.focus, { author: focus.authorName ?? '', target: `#${focusItem.index}` }) : '';
+  // What else the author waits for: the part answered now and the rest, their queued calls, and
+  // their later messages about this call.
+  const tasksText = renderTasks(input.tasks, labels);
   // The task text. `callShown`: whether the pulled trigger's line made it into
   // `<channel_view>` -- a task never points at a line the request does not show.
   const composeTask = (callShown) => {
@@ -1634,7 +1683,7 @@ export function buildRequest(input) {
       routed && sourceChannel && callItem && here && labels.elsewhere?.called
         ? fill(labels.elsewhere.called, { channel: sourceChannel.name, destination: here })
         : '';
-    return [baseTask, calledText, focusText, privateText, forcedText].filter(Boolean).join('\n\n');
+    return [baseTask, calledText, focusText, tasksText, privateText, forcedText].filter(Boolean).join('\n\n');
   };
   // Fitted as if the call's line is shown: the pulled block keeps it whenever the request has
   // room for it (see fitPulledChannel); checked once the budget is spent.
