@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { block, buildDrawPrompt, buildRequest, hasRequiredLabels, renderProfile, fillPromptTemplate } from '../src/behavior/prompt.js';
 import { estimateTokens } from '../src/llm/tokens.js';
 import { fill, formatClock, formatDate, formatDuration } from '../src/discord/format.js';
+import { zonedDay } from '../src/time.js';
 import { labels } from './fixtures/labels.js';
 import { tokenIds } from '../src/memory/mentions.js';
 
@@ -2169,6 +2170,69 @@ test('buildRequest: the <lookup> block is kept whole, ahead of the chat, when th
   assert.ok(request.stats.chat.dropped > 0, 'the chat is trimmed');
   assert.equal(request.stats.lookup.kept, 1);
   assert.ok(lookupOf(request).includes(LOOKUP.text));
+});
+
+// --- the server part of <lookup>: what the search of the server's own history found ----------
+
+const SERVER_PART = { text: 'Ana a fini le gâteau le 1er octobre.', stretch: null, people: [] };
+
+/** The web part as the block rendered it before the server part existed. */
+function webLookupText(lookup) {
+  return [fill(labels.lookup.header, { query: lookup.query }), lookup.text, fill(labels.lookup.sources, { list: 'example.com, news.example.org' })].join('\n');
+}
+
+test('buildRequest: a server part alone renders under labels.lookup.serverHeader, with no web header and no both-note', () => {
+  const request = buildRequest(baseInput({ config: webConfig(), lookup: { server: SERVER_PART } }));
+  assert.equal(lookupOf(request), [labels.lookup.serverHeader, SERVER_PART.text].join('\n'));
+});
+
+test('buildRequest: a web and a server part -- the both-note once at the top, the web part under its header as before, then the server part', () => {
+  const request = buildRequest(baseInput({ config: webConfig(), lookup: { ...LOOKUP, server: SERVER_PART } }));
+  assert.equal(
+    lookupOf(request),
+    [labels.lookup.bothNote, labels.lookup.webHeader, webLookupText(LOOKUP), labels.lookup.serverHeader, SERVER_PART.text].join('\n'),
+  );
+  assert.equal(request.stats.lookup.kept, 1, 'one piece');
+});
+
+test('buildRequest: a stretch follows the summary under labels.lookup.stretch (the full date in the bot time zone, the channel) with its lines as they are', () => {
+  // 22:30 UTC on 1 October is already 2 October in the bot's zone (Europe/Moscow).
+  const startTs = Date.UTC(2026, 9, 1, 22, 30);
+  const lines = '[01:30] Ana: le gâteau\n>> [01:31] Élodie: tu l\'as fini ?';
+  const stretch = { channelId: 'c9', channelName: 'jardin', startTs, lines };
+  // The full date, year included: a stretch may be years old.
+  const date = zonedDay(startTs, 'Europe/Moscow');
+  assert.notEqual(date, zonedDay(startTs, 'UTC'), 'the scene tells the zones apart');
+  const heading = fill(labels.lookup.stretch, { date, channel: 'jardin' });
+
+  const withText = buildRequest(baseInput({ config: webConfig(), lookup: { server: { ...SERVER_PART, stretch } } }));
+  assert.equal(lookupOf(withText), [labels.lookup.serverHeader, SERVER_PART.text, heading, lines].join('\n'));
+  const alone = buildRequest(baseInput({ config: webConfig(), lookup: { server: { text: null, stretch, people: [] } } }));
+  assert.equal(lookupOf(alone), [labels.lookup.serverHeader, heading, lines].join('\n'));
+});
+
+test('buildRequest: an older labels.json without the server keys renders no server part -- the web part as before, a server part alone no block', () => {
+  const { webHeader: _w, serverHeader: _s, bothNote: _b, stretch: _st, ...olderLookup } = labels.lookup;
+  const older = fakePrompts({ labels: { ...labels, lookup: olderLookup } });
+  const both = buildRequest(baseInput({ config: webConfig(), lookup: { ...LOOKUP, server: SERVER_PART }, prompts: older }));
+  assert.equal(lookupOf(both), webLookupText(LOOKUP));
+  assert.equal(lookupOf(buildRequest(baseInput({ config: webConfig(), lookup: { server: SERVER_PART }, prompts: older }))), null);
+
+  // Without the stretch key alone: the summary stays, the stretch is left out.
+  const { stretch: _only, ...noStretch } = labels.lookup;
+  const stretch = { channelId: 'c9', channelName: 'jardin', startTs: NOW - 60 * MIN, lines: '>> [12:00] Ana: le gâteau' };
+  const request = buildRequest(baseInput({ config: webConfig(), lookup: { server: { ...SERVER_PART, stretch } }, prompts: fakePrompts({ labels: { ...labels, lookup: noStretch } }) }));
+  assert.equal(lookupOf(request), [labels.lookup.serverHeader, SERVER_PART.text].join('\n'));
+});
+
+test('buildRequest: a server part never costs the web part its place -- when both do not fit, the web part alone stays as before', () => {
+  const history = Array.from({ length: 60 }, (_, i) => makeMessage(i + 1, NOW - (60 - i) * MIN, { content: 'λόγια '.repeat(30) }));
+  const config = webConfig();
+  config.llm.maxRequestTokens = 2500;
+  const server = { ...SERVER_PART, text: 'ιστορία '.repeat(2000) };
+  const request = buildRequest(baseInput({ config, history, lookup: { ...LOOKUP, server } }));
+  assert.equal(lookupOf(request), webLookupText(LOOKUP));
+  assert.equal(request.stats.lookup.kept, 1);
 });
 
 test('buildRequest: reads reach the <chat> transcript as linkRead', () => {

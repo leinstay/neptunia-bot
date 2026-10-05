@@ -17,11 +17,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SnowflakeUtil } from 'discord.js';
 import { deepMerge, isPlainObject } from '../src/config.js';
-import { DAY_MS, HOUR_MS, MINUTE_MS, utcDay } from '../src/time.js';
+import { DAY_MS, HOUR_MS, MINUTE_MS, utcDay, zonedDay } from '../src/time.js';
 import { buildDrawPrompt, buildRequest, hasRequiredLabels } from '../src/behavior/prompt.js';
 import { fill, formatDate } from '../src/discord/format.js';
 import { buildVarietyRequest, selectOwnLines } from '../src/behavior/variety.js';
 import { createTurnRunner } from '../src/behavior/turn.js';
+import { createRecall } from '../src/behavior/recall-run.js';
 import { createChannelRouter } from '../src/behavior/route-channel.js';
 import { createTagHistory } from '../src/behavior/mention.js';
 import { createMessageHandler } from '../src/discord/events.js';
@@ -138,6 +139,7 @@ const LOADS = {
   readLink: ['read-link'],
   lookup: ['lookup'],
   searchSummary: ['search-summary'],
+  recallSummary: ['recall-summary'],
   routeChannel: ['route-channel'],
   room: ['room'],
   turn:[...SYSTEM, 'reply'],
@@ -886,9 +888,18 @@ test('createWarmup: a portrait refresh fills profile.md, and portrait.md in two-
 
 // ---- the helpers of a turn: describer, re-watch, link reader, search --------------------------
 
-test('createTurnRunner: a reply turn fills the describer, re-watch, link, search and turn requests', async () => {
+test('createTurnRunner: a reply turn fills the describer, re-watch, link, search, recall and turn requests', async () => {
   const hot = shippedHot({ features: { webLookup: true, videoDescriptions: true } });
-  const guild = discordGuild([[GENERAL_INFO, generalRaws()]]);
+  // An old line of #jardin the server search finds (the turn's own chat is never a hit).
+  const old = rawMessage(GARDEN_INFO, { ts: NOW - 4 * DAY_MS, author: PEOPLE[NIKOS], content: 'la tomate a gelé cette nuit' });
+  const guild = discordGuild([
+    [GENERAL_INFO, generalRaws()],
+    [GARDEN_INFO, [old]],
+  ]);
+  const hit = { id: old.id, channel_id: GARDEN, timestamp: iso(old.createdTimestamp), author: { id: NIKOS, username: 'Nikos', global_name: 'Nikos', bot: false }, content: old.content };
+  guild.client = {
+    rest: { get: async (route) => (route.endsWith('/messages/search') ? { total_results: 1, messages: [[{ ...hit, hit: true }]] } : []) },
+  };
   const channel = guild.channels.cache.get(GENERAL);
   const client = discordClient(guild);
   const mediaCache = {};
@@ -907,7 +918,7 @@ test('createTurnRunner: a reply turn fills the describer, re-watch, link, search
     getRecent: () => ({ lines: RECENT_LINES }),
   };
   // Which prompt a request was built from, by the text of its system message.
-  const kinds = ['describe-gif', 'describe-video', 'rewatch-answer', 'describe', 'rewatch', 'read-link', 'lookup', 'search-summary', 'system-prompt'];
+  const kinds = ['describe-gif', 'describe-video', 'rewatch-answer', 'describe', 'rewatch', 'read-link', 'lookup', 'search-summary', 'recall-summary', 'system-prompt'];
   const answers = {
     'describe-gif': 'a cat waves at the camera',
     'describe-video': 'a person juggles three oranges in a kitchen',
@@ -915,8 +926,9 @@ test('createTurnRunner: a reply turn fills the describer, re-watch, link, search
     describe: 'a tomato plant covered in frost',
     rewatch: '1 | what colour are the oranges?',
     'read-link': 'How to grow tomatoes in pots on a balcony, with watering and frost advice.',
-    lookup: 'tomato frost date',
+    lookup: 'web: tomato frost date\nserver: tomate, gelé',
     'search-summary': 'Tomatoes die below zero degrees [1].',
+    'recall-summary': 'stretch: 1\nNikos said in #jardin four days ago that the tomato froze.',
     'system-prompt': '<skip/>',
   };
   const kindOf = (messages) => kinds.find((name) => carries(contentText(messages[0].content), name)) ?? null;
@@ -934,7 +946,8 @@ test('createTurnRunner: a reply turn fills the describer, re-watch, link, search
   const pageFetcher = { fetchText: async () => ({ ok: true, title: 'Tomates en pot', text: 'Tomatoes grow well in pots. Water them often. Bring them in before the frost.' }) };
   const braveSearch = { search: async () => ({ ok: true, results: [{ title: 'Garden notes', url: 'https://www.example.com/frost', snippet: 'frost kills tomatoes', age: '2 days' }] }) };
   const lookup = createLookup({ hot, store, llm, state, pageFetcher, braveSearch, braveApiKey: 'test-key', now: () => NOW });
-  const turns = createTurnRunner({ hot, store, llm, calibrator: createCalibrator(), client, describer, lookup, imageFetcher, fetchImpl: previewFetch, now: () => NOW, rng: () => 0.5 });
+  const recall = createRecall({ hot, store, llm, describer, now: () => NOW });
+  const turns = createTurnRunner({ hot, store, llm, calibrator: createCalibrator(), client, describer, lookup, recall, imageFetcher, fetchImpl: previewFetch, now: () => NOW, rng: () => 0.5 });
 
   const history = await generalHistory();
   const { result } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: history.at(-1), triggerKind: 'mention' }));
@@ -949,14 +962,20 @@ test('createTurnRunner: a reply turn fills the describer, re-watch, link, search
     ['read-link', LOADS.readLink],
     ['lookup', LOADS.lookup],
     ['search-summary', LOADS.searchSummary],
+    ['recall-summary', LOADS.recallSummary],
   ];
   for (const [kind, files] of expected) {
     const calls = llm.calls.filter((call) => kindOf(call.messages) === kind);
     assert.ok(calls.length > 0, `no ${kind} request was sent`);
     for (const call of calls) assertFilled(call.messages, { files }, kind);
   }
+  const [summary] = llm.calls.filter((call) => kindOf(call.messages) === 'recall-summary');
+  assertFilled(summary.messages, { files: LOADS.recallSummary, blocks: ['found', 'question'] }, 'recall-summary');
   const [turn] = llm.calls.filter((call) => kindOf(call.messages) === 'system-prompt');
-  assertFilled(turn?.messages, { files: LOADS.turn, blocks: ['senses', 'about_chat', 'server', 'lore', 'people', 'lookup', 'chat', 'tempo', 'task'] }, 'the turn');
+  const text = assertFilled(turn?.messages, { files: LOADS.turn, blocks: ['senses', 'about_chat', 'server', 'lore', 'people', 'lookup', 'chat', 'tempo', 'task'] }, 'the turn');
+  // Both parts of <lookup>, with the stretch the summary named.
+  for (const key of ['bothNote', 'webHeader', 'serverHeader']) assert.ok(text.includes(LABELS.lookup[key]), `the turn: no labels.lookup.${key}`);
+  assert.ok(text.includes(fill(LABELS.lookup.stretch, { date: zonedDay(old.createdTimestamp, SHIPPED.config.bot.timezone), channel: 'jardin' })));
 });
 
 test('createChannelRouter: the route classifier fills route-channel.md', async () => {

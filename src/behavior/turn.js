@@ -26,6 +26,7 @@ import { buildDrawPrompt, buildRequest, fillPromptTemplate } from './prompt.js';
 import { channelPullOn, pullSettings, pullTargets } from './pull.js';
 import { audienceCovers, markSeen, messageLink, resolveDestination, stampPings } from './elsewhere.js';
 import { classifierTextModel } from './mention.js';
+import { parseLookupAnswer, recallSettings } from './recall.js';
 import { turnRequestInput } from './turn-input.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, TokenLimitError, RETRY_STATUS, helperRequestOptions, sleep } from '../llm/openrouter.js';
@@ -333,47 +334,6 @@ export function parseRewatchPickDetailed(raw, count) {
   return { pick: { n, question, retry: REWATCH_RETRY.test(question) }, reason: 'ok' };
 }
 
-const LOOKUP_QUERY_CHARS = 200;
-// Protocol token of the search classifier (prompts/lookup.md), not wording:
-// a line whose first word is `none` (so `None needed.` counts too).
-const LOOKUP_NONE = /^none\b/i;
-// Quotes and backticks a model may wrap its one line in (straight, curly, guillemets).
-const LOOKUP_QUOTES = new Set(['"', "'", '`', '\u201c', '\u201d', '\u2018', '\u2019', '\u00ab', '\u00bb']);
-const LOOKUP_TRAILING_PUNCTUATION = new Set(['.', ',', ';', ':', '!', '?', '\u2026']);
-
-/** `line` without surrounding quotes/backticks and trailing punctuation (one pass each way, no regex). */
-function stripLookupLine(line) {
-  const points = [...line];
-  let start = 0;
-  let end = points.length;
-  const isSpace = (c) => c.trim() === '';
-  while (start < end && (LOOKUP_QUOTES.has(points[start]) || isSpace(points[start]))) start += 1;
-  while (end > start && (LOOKUP_QUOTES.has(points[end - 1]) || LOOKUP_TRAILING_PUNCTUATION.has(points[end - 1]) || isSpace(points[end - 1]))) end -= 1;
-  return points.slice(start, end).join('');
-}
-
-/**
- * Parse the search classifier's answer (prompts/lookup.md): ONE line, `none`
- * or a search query. Only the first non-empty line counts. Surrounding
- * quotes/backticks and trailing punctuation are stripped first; then a line
- * whose first word is `none` (any case: `none`, `"none"`, `None needed.`) or
- * nothing at all -> no query. The query is cut to 200 characters. `reason`
- * is a code safe to log: `none`, `empty` or `ok`.
- * @param {string} raw
- * @returns {{ query: string|null, reason: 'none'|'empty'|'ok' }}
- */
-export function parseLookupQuery(raw) {
-  const line = String(raw ?? '')
-    .split('\n')
-    .map((l) => l.trim())
-    .find(Boolean);
-  if (!line) return { query: null, reason: 'empty' };
-  const stripped = stripLookupLine(line);
-  if (LOOKUP_NONE.test(stripped)) return { query: null, reason: 'none' };
-  const query = [...stripped].slice(0, LOOKUP_QUERY_CHARS).join('').trim();
-  return query ? { query, reason: 'ok' } : { query: null, reason: 'empty' };
-}
-
 /**
  * The link items of `history` the web lookup may read (src/discord/media.js#collectReadableLinks:
  * no video-site link, no gif embed), newest message first.
@@ -474,6 +434,16 @@ export function usableDestination(guild, config, { exceptId = null } = {}) {
  * `lookup` (src/web/lookup.js#createLookup) is optional too: absent, or
  * `features.webLookup` not true, no link is read and no search is made.
  *
+ * `recall` (src/behavior/recall-run.js#createRecall) is optional too: the
+ * search of the server's own history beside the web search. Absent, or its
+ * `available()` false, or a private chat, no server search is made. The one
+ * lookup classifier serves both (maybeLookup) and the request's `lookup`
+ * input carries both parts: the web search's result as it is
+ * (src/web/lookup.js#search, `{ query, text, sources, cached? }`), with a
+ * `server` key (`{ text, stretch, people }`, recall's result) added only when
+ * the server search found something; a server part alone is `{ server }`.
+ * A web-only result is exactly the web search's object, as before recall.
+ *
  * `now` (default Date.now) is the turn's clock: its own time, `{{today}}` of
  * the search classifier, the daily GIF counter, every `lastPostAt` stamp and
  * the post ledger's times.
@@ -536,6 +506,7 @@ export function createTurnRunner({
   fetchImpl = fetch,
   imageFetcher = createImageFetcher(),
   lookup,
+  recall = null,
   images,
   emoji,
   variety,
@@ -1220,32 +1191,76 @@ export function createTurnRunner({
   }
 
   /**
-   * The search on a question (features.webLookup, web.search.enabled): one
-   * cheap classifier call (prompts.lookup, `{{name}}` = the persona's display
-   * name, `{{today}}` = the injected clock's UTC date `YYYY-MM-DD`, on
-   * classifierTextModel, its answer capped at `web.search.classifierMaxOutputTokens`) reads
-   * the last `web.search.contextMessages` messages of `history` before the trigger (with the pictures' captions, the video
-   * states and the read links this turn already has; on a routed turn the caller passes the
-   * source channel's lines, where the call was written) and the trigger itself,
-   * and answers `none` or a query (parseLookupQuery); a query goes to
-   * lookup.search. One classifier call and at most one search per turn
-   * (`web.search.maxPerTurn` below 1 turns the search off). Resolves the
-   * search result or null. The query and the transcript are data: never
-   * logged; every early stop logs `lookup: skipped` with its reason; an
-   * empty or blank answer is a failed call (`lookup: classifier failed`,
-   * `reason: 'empty'`), no query. The classifier is not asked when no search
-   * could run today (`reason: 'cap'`): the lookup's `webCapLeft()` (when it
-   * has one; read only) says the web slots (`web.maxPerDay`) are spent. Its
-   * request is a helper's (helperRequestOptions).
+   * Whether the server search (`recall`) could run now: wired, and its
+   * `available()` (the switch, its prompt, the daily caps; read only) says
+   * yes. A throw counts as no.
    */
-  async function maybeLookup({ config, guildId, channelId, selfName, history, trigger, descriptions, videos, reads }) {
+  function recallAvailable() {
+    if (typeof recall?.available !== 'function' || typeof recall.run !== 'function') return false;
+    try {
+      return recall.available() === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * `work()` as a promise that never rejects: a throw or a rejection logs
+   * `lookup: failed` with the `part` it was (`web` / `server`) and gives null.
+   */
+  function settleLookupPart(work, channelId, part) {
+    return Promise.resolve()
+      .then(work)
+      .catch((err) => {
+        log.warn('lookup: failed', { channel: channelId, part, error: err });
+        return null;
+      });
+  }
+
+  /**
+   * The searches on a question: the web search (`webOn`: features.webLookup,
+   * web.search.enabled, a lookup with `search`) and the search of the
+   * server's own history (`serverOn`: recall wired and available, a server
+   * turn). One cheap classifier call (prompts.lookup, `{{name}}` = the
+   * persona's display name, `{{today}}` = the injected clock's UTC date
+   * `YYYY-MM-DD`, on classifierTextModel, its answer capped at
+   * `web.search.classifierMaxOutputTokens`) reads the last
+   * `web.search.contextMessages` messages of `history` before the trigger
+   * (with the pictures' captions, the video states and the read links this
+   * turn already has; on a routed turn the caller passes the source
+   * channel's lines, where the call was written) and the trigger itself, and
+   * answers `none` or labelled lines (src/behavior/recall.js#parseLookupAnswer,
+   * `when:` read in `bot.timezone`, forms capped at `recall.maxForms`).
+   * The web side runs only under its own gates: `web.search.maxPerTurn`
+   * below 1 (`no-slot`), no search key (`no-key`), its daily slots spent
+   * (`cap`: the lookup's `webCapLeft()`, when it has one; read only); the
+   * classifier is not asked when neither side can run (`lookup: skipped`
+   * with the web side's reason, or `no-prompt` without prompts.lookup). Then
+   * what the answer asks for runs in parallel: a `web` query goes to
+   * lookup.search (at most one per turn), a `server` part to `recall.run`
+   * (`history` = `chatHistory`, the turn's own chat; `candidate` = the
+   * trigger); a part the answer asks for whose side cannot run is not run,
+   * and a failing part logs `lookup: failed` and counts as nothing. Resolves
+   * the `lookup` input of the request (see createTurnRunner) or null. The
+   * query, the forms and the transcript are data: never logged (`lookup:
+   * classified` carries codes and counts only); an empty or blank answer is
+   * a failed call (`lookup: classifier failed`, `reason: 'empty'`), no
+   * search. Its request is a helper's (helperRequestOptions).
+   */
+  async function maybeLookup({ config, guildId, channel, selfId, selfName, history, chatHistory, trigger, descriptions, videos, reads, webOn, serverOn }) {
+    const channelId = channel.id;
     const prompt = hot.prompts?.lookup;
     const searchCfg = config.web?.search ?? {};
+    let webSkip = null;
+    if (webOn) {
+      if ((searchCfg.maxPerTurn ?? 1) < 1) webSkip = 'no-slot';
+      else if (typeof lookup.hasSearch === 'function' && !lookup.hasSearch()) webSkip = 'no-key';
+      else if (typeof lookup.webCapLeft === 'function' && !(lookup.webCapLeft() > 0)) webSkip = 'cap';
+    }
+    const webCan = webOn && webSkip === null;
     let skip = null;
     if (!prompt) skip = 'no-prompt';
-    else if ((searchCfg.maxPerTurn ?? 1) < 1) skip = 'no-slot';
-    else if (typeof lookup.hasSearch === 'function' && !lookup.hasSearch()) skip = 'no-key';
-    else if (typeof lookup.webCapLeft === 'function' && !(lookup.webCapLeft() > 0)) skip = 'cap';
+    else if (!webCan && !serverOn) skip = webSkip ?? 'no-search';
     if (skip) {
       log.info('lookup: skipped', { channel: channelId, reason: skip });
       return null;
@@ -1273,7 +1288,7 @@ export function createTurnRunner({
           { role: 'system', content: fillPromptTemplate(prompt, { today: todayDate(), name: selfName ?? '' }) },
           { role: 'user', content: user },
         ],
-        { model, ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: searchCfg.classifierMaxOutputTokens ?? 60, purpose: 'lookup' }) },
+        { model, ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: searchCfg.classifierMaxOutputTokens ?? 200, purpose: 'lookup' }) },
       );
     } catch (err) {
       log.warn('lookup: classifier failed', { channel: channelId, status: err.statusCode ?? null, name: err.name });
@@ -1285,11 +1300,39 @@ export function createTurnRunner({
       log.warn('lookup: classifier failed', { channel: channelId, reason: 'empty', model: model ?? null });
       return null;
     }
-    const { query, reason } = parseLookupQuery(completion.text);
-    // Codes only, never the query.
-    log.info('lookup: classified', { channel: channelId, picked: Boolean(query), parse: reason });
-    if (!query) return null;
-    return lookup.search(guildId, query);
+    const parsed = parseLookupAnswer(completion.text, { timezone: config.bot?.timezone, now: clock(), maxForms: recallSettings(config)?.maxForms });
+    const server = parsed.server;
+    // Codes and counts only, never the query, a form or a name.
+    log.info('lookup: classified', {
+      channel: channelId,
+      picked: Boolean(parsed.web || server),
+      parse: parsed.reason,
+      web: Boolean(parsed.web),
+      server: Boolean(server),
+      forms: server?.forms.length ?? 0,
+      who: server?.who.length ?? 0,
+      ranged: Boolean(server && (server.from !== null || server.to !== null)),
+    });
+    const runWeb = webCan && Boolean(parsed.web);
+    const runServer = serverOn && Boolean(server);
+    if (!runWeb && !runServer) return null;
+    const [webResult, found] = await Promise.all([
+      runWeb ? settleLookupPart(() => lookup.search(guildId, parsed.web), channelId, 'web') : null,
+      runServer
+        ? settleLookupPart(
+            () => recall.run({ guild: channel.guild, guildId, channel, selfId, selfName, history: chatHistory, candidate: trigger, server }),
+            channelId,
+            'server',
+          )
+        : null,
+    ]);
+    // A server search that found nothing leaves no server part.
+    const serverPart =
+      found && (found.text || found.stretch)
+        ? { text: found.text ?? null, stretch: found.stretch ?? null, people: Array.isArray(found.people) ? found.people : [] }
+        : null;
+    if (!serverPart) return webResult ?? null;
+    return { ...(webResult ?? {}), server: serverPart };
   }
 
   /**
@@ -1830,33 +1873,41 @@ export function createTurnRunner({
       // missing key counts as OFF: it costs money and the search needs a
       // key). Links first: the newest readable links of the history, at most
       // web.links.maxPerTurn NEW reads (cached excerpts are free). Then, on a
-      // direct address only (not an overheard line), the search classifier and
-      // at most one search.
+      // direct address only (not an overheard line), the search classifier
+      // when the web search or the server search (recall, never in a private
+      // chat) can run, and what its answer asks for of the two, in parallel.
       let reads;
       let lookupResult = null;
       const webCfg = config.web ?? {};
-      if (features.webLookup === true && lookup) {
-        if (webCfg.links?.enabled !== false && typeof lookup.readLinks === 'function') {
-          try {
-            const candidates = readableLinkCandidates(history, config.media?.video?.sites);
-            const read = await lookup.readLinks(guildId, candidates, { maxNew: webCfg.links?.maxPerTurn ?? 2 });
-            reads = read.reads;
-          } catch (err) {
-            log.warn('lookup: links failed', { channel: channel.id, error: err });
-          }
+      const webLookupOn = features.webLookup === true && Boolean(lookup);
+      if (webLookupOn && webCfg.links?.enabled !== false && typeof lookup.readLinks === 'function') {
+        try {
+          const candidates = readableLinkCandidates(history, config.media?.video?.sites);
+          const read = await lookup.readLinks(guildId, candidates, { maxNew: webCfg.links?.maxPerTurn ?? 2 });
+          reads = read.reads;
+        } catch (err) {
+          log.warn('lookup: links failed', { channel: channel.id, error: err });
         }
-        if (asked && !answersDrawFailure && webCfg.search?.enabled !== false && typeof lookup.search === 'function') {
+      }
+      if (asked && !answersDrawFailure) {
+        const webOn = webLookupOn && webCfg.search?.enabled !== false && typeof lookup.search === 'function';
+        const serverOn = !isPrivate && recallAvailable();
+        if (webOn || serverOn) {
           try {
             lookupResult = await maybeLookup({
               config,
               guildId,
-              channelId: channel.id,
+              channel,
+              selfId,
               selfName,
               history: searchHistory,
+              chatHistory: history,
               trigger,
               descriptions: searchDescriptions,
               videos,
               reads,
+              webOn,
+              serverOn,
             });
           } catch (err) {
             log.warn('lookup: failed', { channel: channel.id, error: err });

@@ -3,7 +3,8 @@
 // is spent in this priority order (see src/llm/budget.js):
 //   1. system prompt (persona + live rules + output format), task, clock, tempo — never cut
 //   2. memory about the trigger's author (the person the persona is talking to, or the one overheard)
-//   2b. what the persona looked up online this turn (`<lookup>`, one piece)
+//   2b. what the persona looked up this turn (`<lookup>`, one piece: online,
+//       in the server's own history, or both)
 //   3. how this server talks + what the persona has said about itself
 //   3b. lorebook entries matched by the transcript (`<lore>`)
 //   4. the map of the server's channels
@@ -41,6 +42,7 @@ import {
   renderTempo,
   renderTranscript,
 } from '../discord/format.js';
+import { zonedDay } from '../time.js';
 import { affinityBand, roundScore } from '../memory/affinity.js';
 import { isConfirmed, isStale } from '../memory/interests.js';
 import { topByRank } from '../memory/ranking.js';
@@ -728,17 +730,17 @@ function siteOf(url) {
 }
 
 /**
- * The `<lookup>` block body: what the persona looked up online this turn
+ * The web part of `<lookup>`: what the persona looked up online this turn
  * (src/web/lookup.js#search) -- `labels.lookup.header` with the query, then
  * the condensed text and `labels.lookup.sources` with the distinct sites, or
- * `labels.lookup.none` when nothing useful came back. '' when there is no
- * lookup or an older labels.json has no `labels.lookup` (no block at all).
- * @param {{ query: string, text: string, sources?: { site?: string, url?: string }[] }|null} lookup
+ * `labels.lookup.none` when nothing useful came back. '' when an older
+ * labels.json has no `labels.lookup.header`.
+ * @param {{ query: string, text: string, sources?: { site?: string, url?: string }[] }} lookup
  * @param {object} labels
  */
-function renderLookup(lookup, labels) {
+function renderWebLookup(lookup, labels) {
   const l = labels.lookup;
-  if (!lookup || !l?.header) return '';
+  if (!l?.header) return '';
   const lines = [fill(l.header, { query: lookup.query ?? '' })];
   const text = String(lookup.text ?? '').trim();
   if (!text) {
@@ -750,6 +752,62 @@ function renderLookup(lookup, labels) {
   const sites = [...new Set(sources.map((source) => source?.site || siteOf(source?.url)).filter(Boolean))];
   if (sites.length > 0 && l.sources) lines.push(fill(l.sources, { list: sites.join(', ') }));
   return lines.join('\n');
+}
+
+/**
+ * The server part of `<lookup>`: what the search of the server's own history
+ * found this turn (src/behavior/recall-run.js) -- `labels.lookup.serverHeader`,
+ * then the summary text, then, when a stretch came back and the labels have
+ * `labels.lookup.stretch`, that label with `{date}` (the day of the stretch's
+ * first line as `YYYY-MM-DD` in `timezone`: with its year, a stretch may be
+ * years old) and `{channel}` (its channel's
+ * name), followed by the stretch's lines as they are. '' when there is no
+ * server part, nothing to show, or an older labels.json has no
+ * `labels.lookup.serverHeader`.
+ * @param {{ text?: string|null, stretch?: { channelName?: string|null, startTs: number, lines: string }|null }|null|undefined} server
+ * @param {object} labels
+ * @param {string} timezone
+ * @returns {string}
+ */
+function renderServerLookup(server, labels, timezone) {
+  const l = labels.lookup;
+  if (!server || !l?.serverHeader) return '';
+  const lines = [];
+  const text = String(server.text ?? '').trim();
+  if (text) lines.push(text);
+  const stretch = server.stretch;
+  if (l.stretch && typeof stretch?.lines === 'string' && stretch.lines.trim() && Number.isFinite(stretch.startTs)) {
+    lines.push(fill(l.stretch, { date: zonedDay(stretch.startTs, timezone), channel: String(stretch.channelName ?? '') }), stretch.lines);
+  }
+  return lines.length > 0 ? [l.serverHeader, ...lines].join('\n') : '';
+}
+
+/**
+ * The `<lookup>` block body as candidates in order of preference, for the
+ * budget to take the first that fits (all of them one piece, never split).
+ * `lookup` is the turn's `lookup` input: the web search's result
+ * (src/web/lookup.js#search) and, under `server`, the server search's
+ * (renderServerLookup); either may be missing. The web part alone renders
+ * exactly as it did before the server part existed (no part header); the
+ * server part alone renders under its header. With both, the block is
+ * `labels.lookup.bothNote` (when present), `labels.lookup.webHeader` (when
+ * present) over the web part, then the server part -- followed by the web
+ * part alone and the server part alone as smaller fallbacks. [] when there is
+ * no lookup or the labels can render neither part.
+ * @param {object|null} lookup
+ * @param {object} labels
+ * @param {string} timezone
+ * @returns {string[]}
+ */
+function lookupCandidates(lookup, labels, timezone) {
+  if (!lookup || typeof lookup !== 'object') return [];
+  const { server, ...webPart } = lookup;
+  const web = Object.keys(webPart).length > 0 ? renderWebLookup(webPart, labels) : '';
+  const serverText = renderServerLookup(server, labels, timezone);
+  if (!web || !serverText) return [web || serverText].filter(Boolean);
+  const l = labels.lookup;
+  const whole = [l.bothNote, l.webHeader, web, serverText].filter(Boolean).join('\n');
+  return [whole, web, serverText];
 }
 
 /**
@@ -1306,8 +1364,14 @@ function pulledAuthors(pulledFits) {
  *   (src/memory/describe.js#describeVideos), passed to formatTranscript.
  * @param {Map<string, string>} [input.reads]  Link id -> the excerpt the web lookup read from that
  *   page (src/web/lookup.js#readLinks), passed to formatTranscript.
- * @param {{ query: string, text: string, sources: object[] }|null} [input.lookup]  What the web
- *   search found this turn (src/web/lookup.js#search), rendered as `<lookup>`.
+ * @param {{ query?: string, text?: string, sources?: object[], cached?: boolean,
+ *   server?: { text: string|null, stretch: { channelId: string, channelName: string|null, startTs: number,
+ *   lines: string }|null, people: object[] } }|null} [input.lookup]  What was looked up this turn,
+ *   rendered as `<lookup>` (see `lookupCandidates`): the web search's result
+ *   (src/web/lookup.js#search) as it is, and under `server` what the search of the server's own
+ *   history found (src/behavior/recall-run.js; src/behavior/turn.js adds the key only when it found
+ *   something). A web result without `server` renders exactly as before the server part existed;
+ *   the server part needs `labels.lookup.serverHeader`, its stretch `labels.lookup.stretch`.
  * @param {boolean} [input.searchAvailable]  Whether a web search key is configured
  *   (lookup.hasSearch()); `senses.search` renders only when it is true.
  * @param {{ spent: boolean, userSpent: boolean }} [input.drawQuota]  The image client's
@@ -1581,13 +1645,24 @@ export function buildRequest(input) {
   });
   const fixedSection = { name: 'fixed', required: true, items: [system, fittedTask, formatNow(now, timezone, labels.locale), sensesText, tempoText] };
   const interlocutorSection = { name: 'interlocutor', cap: caps.interlocutor, items: [interlocutorShown.text].filter(Boolean) };
+  // `<lookup>`: one piece. With both a web and a server part, the first candidate that fits the
+  // room the two sections ahead of it leave (the whole block, else the web part alone, else the
+  // server part alone); so a server part never costs the web part its place, and the block as a
+  // whole stays one item the main pass keeps or drops like before.
+  const lookupOptions = lookupCandidates(lookup, labels, timezone);
+  let lookupItem = lookupOptions[0] ?? '';
+  if (lookupOptions.length > 1) {
+    const room = limit - fitSections([fixedSection, interlocutorSection], limit, cost).used;
+    lookupItem = lookupOptions.find((text) => cost(text) <= room) ?? lookupItem;
+  }
   // The sections fitted ahead of the chat, in priority order.
   const head = [
     fixedSection,
     interlocutorSection,
-    // One piece, never split: already bounded by web.search.summaryChars,
-    // and ahead of the chat so a tight budget trims old messages first.
-    { name: 'lookup', items: [renderLookup(lookup, labels)].filter(Boolean) },
+    // One piece, never split: already bounded by web.search.summaryChars and
+    // recall.answerChars / recall.stretchChars, and ahead of the chat so a
+    // tight budget trims old messages first.
+    { name: 'lookup', items: [lookupItem].filter(Boolean) },
     {
       name: 'aboutChat',
       cap: caps.aboutChat,

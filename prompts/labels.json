@@ -137,7 +137,11 @@
   "lookup": {
     "header": "Looked up: {query}",
     "sources": "Sources: {list}",
-    "none": "Nothing useful found."
+    "none": "Nothing useful found.",
+    "webHeader": "Online (web search):",
+    "serverHeader": "This server (message history):",
+    "bothNote": "A web search and a server search both ran. They may answer different things; which one fits is yours to call.",
+    "stretch": "{date} in #{channel}:"
   },
   "affinity": {
     "bands": {
