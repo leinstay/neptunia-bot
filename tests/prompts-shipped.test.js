@@ -23,6 +23,8 @@ import { fill, formatDate } from '../src/discord/format.js';
 import { buildVarietyRequest, selectOwnLines } from '../src/behavior/variety.js';
 import { createTurnRunner } from '../src/behavior/turn.js';
 import { createChannelRouter } from '../src/behavior/route-channel.js';
+import { createTagHistory } from '../src/behavior/mention.js';
+import { createMessageHandler } from '../src/discord/events.js';
 import { normalizeMessage, withTextPreviews } from '../src/discord/collect.js';
 import { createCalibrator } from '../src/llm/tokens.js';
 import { buildMemoryRequest, characterText } from '../src/memory/update.js';
@@ -80,9 +82,6 @@ const NOT_BUILT = {
   // Built inside the createMessageHandler closure of src/discord/events.js (buildFollowUpRequest),
   // which fetches its own history: no seam reaches it (mentor-05, owner decision O-9).
   address: 'built inside the src/discord/events.js closure (mentor-05, O-9)',
-  // Tracked ahead of its code (06cd762): no file under src/ reads it yet. Move it into LOADS with
-  // a request of its own once the room classifier is wired.
-  room: 'no builder reads it yet: the room classifier follows on this branch',
 };
 
 /**
@@ -140,7 +139,8 @@ const LOADS = {
   lookup: ['lookup'],
   searchSummary: ['search-summary'],
   routeChannel: ['route-channel'],
-  turn: [...SYSTEM, 'reply'],
+  room: ['room'],
+  turn:[...SYSTEM, 'reply'],
   mentorSituations: ['mentor-situations', 'mentor-signs'],
   mentorVariety: ['variety'],
   mentorSandbox: [...SYSTEM, 'reply'],
@@ -977,6 +977,48 @@ test('createChannelRouter: the route classifier fills route-channel.md', async (
   assert.deepEqual(result, []);
   assert.equal(llm.calls.length, 1, 'one route request');
   assertFilled(llm.calls[0].messages, { files: LOADS.routeChannel, blocks: ['transcript', 'channels', 'candidate'] }, 'route-channel');
+});
+
+test('createMessageHandler: the room classifier fills room.md', async () => {
+  const hot = shippedHot({ memory: { mainChannelIds: [GENERAL] } });
+  const guild = discordGuild([[GENERAL_INFO, generalRaws()]]);
+  const channel = guild.channels.cache.get(GENERAL);
+  // An untagged line put to everyone, outside any follow-up window; its author has a stored alias.
+  const line = rawMessage(GENERAL_INFO, { ts: NOW - MINUTE_MS, author: PEOPLE[NIKOS], content: 'qui vient au marché samedi ?' });
+  Object.assign(line, { guild, channel, system: false, webhookId: null });
+  const store = { state: { data: {}, markDirty() {} }, getUser: (guildId, id) => PROFILES[id] ?? null };
+  const turns = { notePost() {}, runTurn: async () => ({ outcome: 'skip' }), isBusy: () => false, isAnyBusy: () => false, lastPostAt: () => 0 };
+  const scheduled = [];
+  // The eavesdrop roll lost, its rails pass: the room path is next.
+  const spontaneous = {
+    onMessage: (...args) => {
+      scheduled.push(args);
+      return false;
+    },
+    eavesdropReady: () => true,
+  };
+  const llm = recordingLlm(() => 'yes');
+  const handler = createMessageHandler({
+    hot,
+    store,
+    client: discordClient(guild),
+    turns,
+    spontaneous,
+    memory: { observe() {} },
+    tagHistory: createTagHistory(),
+    getGuildId: () => GUILD,
+    getSelfName: () => SELF_NAME,
+    llm,
+    rng: () => 0,
+    now: () => NOW,
+  });
+
+  await withCapturedLogs(() => handler(line));
+
+  assert.equal(llm.calls.length, 1, 'one room request');
+  assertFilled(llm.calls[0].messages, { files: LOADS.room, blocks: ['author', 'candidate'] }, 'room');
+  assert.equal(llm.calls[0].options.purpose, 'room');
+  assert.deepEqual(scheduled.at(-1)?.[2], { room: true }, 'the yes reached the scheduler');
 });
 
 // ---- the mentor -----------------------------------------------------------------------------

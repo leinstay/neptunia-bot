@@ -4649,7 +4649,8 @@ function routeChannel(guild, id, { send = true, viewers = ['g1', 'r1'] } = {}) {
 /**
  * The sources `s1` and `s2` (the bot reads them, cannot write in them) and the main channel
  * `d1` (`memory.mainChannelIds`), a state store, fake timers and a clock at ROUTE_T0. `config`
- * merges over the shipped defaults plus the main channel and a name trigger.
+ * merges over the shipped defaults plus the main channel and a name trigger. `spontaneous`
+ * replaces the default fake scheduler.
  */
 function routeScene({
   config: overrides = {},
@@ -4661,6 +4662,7 @@ function routeScene({
   rng = () => 0.5,
   prompts,
   tagHistory,
+  spontaneous,
 } = {}) {
   const config = baseConfig(deepMerge({ memory: { mainChannelIds: ['d1'] }, bot: { nameTriggers: ['νεπτούνια'] } }, overrides));
   const guild = routeGuild();
@@ -4669,7 +4671,7 @@ function routeScene({
   const main = routeChannel(guild, 'd1', { send: mainCanSend });
   const clock = mutableNow(ROUTE_T0);
   const timers = fakeTimers();
-  const handler = makeHandler({ config, turns, store, now: clock, timers, rng, isWarmingUp, prompts, tagHistory, sleep: async () => {} });
+  const handler = makeHandler({ config, turns, store, now: clock, timers, rng, isWarmingUp, prompts, tagHistory, spontaneous, sleep: async () => {} });
   return { config, guild, source, source2, main, sourceViewers, clock, timers, handler, turns, store };
 }
 
@@ -6071,4 +6073,413 @@ test('events: a call in a writable channel is untouched by routing', async () =>
   assert.equal(scene.timers.all.length, 0);
   assert.equal(scene.store.state.data.elsewherePings, undefined);
   assert.equal(byMsg(logs, 'mention: decided')[0].destination, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Noticed comments: an eavesdrop hit on an untriggered message in a read-only
+// channel (spontaneous.noticeElsewhere) arms a settle wait of kind `noticed`;
+// when it is over, spontaneous.runNoticed runs the comment. events.js is only
+// the glue: the rails and the roll are the scheduler's.
+
+/**
+ * A fake scheduler for the noticed path: `noticeElsewhere` answers `hit` (recording its calls),
+ * `runNoticed` records the source it got and answers `result`.
+ */
+function noticingSpontaneous({ hit = true, result = { outcome: 'spoke' } } = {}) {
+  const fake = fakeSpontaneous();
+  fake.noticeCalls = [];
+  fake.runCalls = [];
+  fake.noticeElsewhere = (channel, normalized) => {
+    fake.noticeCalls.push({ channel, normalized });
+    return hit;
+  };
+  fake.runNoticed = async (channel) => {
+    fake.runCalls.push(channel);
+    return result;
+  };
+  return fake;
+}
+
+/** An untriggered member line in `channel`. */
+const plainLine = (id, extra = {}) => ({ id, mention: false, authorId: 'u2', authorName: 'Ίων', content: 'σημείωση', ...extra });
+
+test('events: an eavesdrop hit in a read-only channel settles, then runs the noticed turn', async () => {
+  const spontaneous = noticingSpontaneous();
+  const scene = routeScene({ spontaneous });
+  const { logs } = await withCapturedLogs(async () => {
+    await routeSend(scene, scene.source, 0, plainLine('m1'));
+    assert.equal(spontaneous.noticeCalls.length, 1);
+    assert.equal(spontaneous.noticeCalls[0].channel, scene.source);
+    assert.equal(spontaneous.noticeCalls[0].normalized.id, 'm1');
+    assert.equal(scene.timers.live().length, 1, 'one settle timer for the source');
+    assert.equal(scene.timers.live()[0].ms, 90 * SECOND);
+
+    await routeSend(scene, scene.source, 30, plainLine('m2', { authorId: 'u3', authorName: 'Χλόη' }));
+    assert.equal(spontaneous.noticeCalls.length, 1, 'a wait already armed in the source asks no second roll');
+    assert.equal(spontaneous.runCalls.length, 0, 'nothing runs before the source settles');
+    await routeFire(scene, 120);
+  });
+
+  assert.deepEqual(spontaneous.runCalls, [scene.source], 'the noticed comment runs on its source');
+  assert.equal(scene.turns.calls.length, 0, 'the turn is the scheduler\'s, not a call\'s');
+  assert.equal(scene.store.state.data.elsewherePings, undefined, 'a noticed message is no call of the ring');
+  assert.deepEqual(
+    byMsg(logs, 'elsewhere: settling').map(({ source, kind, message, destination }) => ({ source, kind, message, destination })),
+    [{ source: 's1', kind: 'noticed', message: 'm1', destination: 'd1' }],
+  );
+  const [settled] = byMsg(logs, 'elsewhere: settled');
+  assert.equal(settled.kind, 'noticed');
+  assert.equal(settled.waitedMs, 120 * SECOND);
+  assert.equal(settled.moved, 1);
+  assert.equal(byMsg(logs, 'elsewhere: dropped').length, 0);
+});
+
+test('events: a call arriving during a noticed settle takes its place', async () => {
+  const spontaneous = noticingSpontaneous();
+  const scene = routeScene({ spontaneous });
+  const { logs } = await withCapturedLogs(async () => {
+    await routeSend(scene, scene.source, 0, plainLine('m1'));
+    await routeSend(scene, scene.source, 30, { id: 'm2' });
+    assert.equal(scene.timers.live().length, 1, 'still one wait for the source');
+    await routeFire(scene, 120);
+  });
+
+  assert.equal(spontaneous.runCalls.length, 0, 'no noticed comment once a call took the wait');
+  assert.equal(scene.turns.calls.length, 1);
+  const [args] = scene.turns.calls;
+  assert.equal(args.channel, scene.main);
+  assert.equal(args.trigger.id, 'm2');
+  assert.deepEqual(args.source, { channelId: 's1', reason: 'routed' });
+  assert.deepEqual(
+    byMsg(logs, 'elsewhere: dropped').map(({ source, kind, message, reason }) => [source, kind, message, reason]),
+    [['s1', 'noticed', 'm1', 'replaced']],
+  );
+  assert.equal(byMsg(logs, 'elsewhere: settled')[0].kind, 'ping');
+  assert.equal(byMsg(logs, 'elsewhere: settled')[0].waitedMs, 120 * SECOND, 'the wait keeps its start');
+  assert.deepEqual(scene.store.state.data.elsewherePings.map((entry) => entry.messageId), ['m2'], 'only the call is in the ring');
+});
+
+test('events: a noticed settle the scheduler refuses at fire time is dropped with its code', async () => {
+  const spontaneous = noticingSpontaneous({ result: { outcome: 'not-now', reason: 'gap' } });
+  const scene = routeScene({ spontaneous });
+  const { logs } = await withCapturedLogs(async () => {
+    await routeSend(scene, scene.source, 0, plainLine('m1'));
+    await routeFire(scene, 90);
+  });
+  assert.equal(spontaneous.runCalls.length, 1);
+  assert.deepEqual(
+    byMsg(logs, 'elsewhere: dropped').map(({ source, kind, message, reason }) => [source, kind, message, reason]),
+    [['s1', 'noticed', 'm1', 'gap']],
+  );
+});
+
+test('events: a noticed settle that ends while warming up runs nothing', async () => {
+  let warming = false;
+  const spontaneous = noticingSpontaneous();
+  const scene = routeScene({ spontaneous, isWarmingUp: () => warming });
+  await routeSend(scene, scene.source, 0, plainLine('m1'));
+  warming = true;
+  const { logs } = await withCapturedLogs(() => routeFire(scene, 90));
+  assert.equal(spontaneous.runCalls.length, 0);
+  assert.deepEqual(
+    byMsg(logs, 'elsewhere: dropped').map(({ kind, reason }) => [kind, reason]),
+    [['noticed', 'warmup']],
+  );
+});
+
+test('events: an eavesdrop miss, or a writable channel, arms no noticed settle', async () => {
+  const miss = noticingSpontaneous({ hit: false });
+  const missScene = routeScene({ spontaneous: miss });
+  await routeSend(missScene, missScene.source, 0, plainLine('m1'));
+  assert.equal(miss.noticeCalls.length, 1);
+  assert.equal(missScene.timers.all.length, 0, 'a miss arms nothing');
+
+  const writable = noticingSpontaneous();
+  const writableScene = routeScene({ spontaneous: writable });
+  await routeSend(writableScene, writableScene.main, 0, plainLine('m1'));
+  assert.equal(writable.noticeCalls.length, 0, 'a channel the bot can send in is never a source');
+  assert.equal(writable.onMessageCalls.length, 1, 'its ordinary eavesdrop is unchanged');
+  assert.equal(writableScene.timers.all.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Room questions (spontaneous.roomQuestionChance) -- a line put to everyone
+// present, outside any follow-up window, that failed the eavesdrop roll may
+// roll the room chance; the room classifier (room.md) then says yes or no,
+// and a yes schedules an unprompted turn about that line.
+
+const ROOM_T0 = Date.UTC(2026, 0, 5, 12, 0, 0);
+
+/** A spontaneous scheduler stand-in: onMessage answers `scheduled`, eavesdropReady answers `ready`. */
+function roomSpontaneous({ scheduled = false, ready = true } = {}) {
+  const calls = [];
+  const readyCalls = [];
+  return {
+    calls,
+    readyCalls,
+    onMessage: (...args) => {
+      calls.push(args);
+      return typeof scheduled === 'function' ? scheduled(...args) : scheduled;
+    },
+    eavesdropReady: (channel) => {
+      readyCalls.push(channel);
+      return ready;
+    },
+  };
+}
+
+function fakeRoomPrompts() {
+  return { ...fakeAddressPrompts(), room: 'You watch the room for {{name}}. Is the candidate put to everyone? Answer yes or no.' };
+}
+
+/** A channel holding one earlier line, the room scene's clock fixed at ROOM_T0. */
+function roomChannel(id = 'c1', guild = fakeGuild('g1', 'Neptunia')) {
+  const history = [rawHistoryMessage({ id: `${id}-h1`, authorId: 'u2', authorName: 'Ἀλέξης', ts: ROOM_T0 - 60000, content: 'earlier line', channelId: id })];
+  return fakeChannelWithHistory(id, guild, history);
+}
+
+function roomMessage(channel, overrides = {}) {
+  return fakeMessage({
+    id: 'm-room',
+    guild: channel.guild,
+    channel,
+    channelId: channel.id,
+    author: { id: 'u7', bot: false, globalName: 'Ελένη', username: 'el' },
+    member: { displayName: 'Ελένη' },
+    cleanContent: 'ποιος θέλει καφέ;',
+    createdTimestamp: ROOM_T0 - 1000,
+    ...overrides,
+  });
+}
+
+/** Lets the handler reach a pending classifier call. */
+const tickOnce = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test('follow-up: the address request is byte-identical to the one before the room classifier shared its builder', async () => {
+  const store = fakeStore({ u7: profileWithAliases('u7', ['Λένα', 'Ελενάκι']) });
+  const llm = fakeFollowUpLlm();
+  const handler = makeHandler({ llm, prompts: fakeAddressPrompts(), store, now: () => ROOM_T0 });
+  const guild = fakeGuild('g1', 'Neptunia');
+  const history = [rawHistoryMessage({ id: 'h1', authorId: 'u1', authorName: 'Alice', ts: ROOM_T0 - 60000, content: 'earlier message' })];
+  const channel = fakeChannelWithHistory('c1', guild, history);
+  await openFollowUpWindow(handler, { guild, channel, ts: ROOM_T0 - 30000 });
+  const p = handler(roomMessage(channel, { id: 'm-candidate', cleanContent: 'and you too' }));
+  await tickOnce();
+  assert.equal(llm.calls.length, 1);
+  const [{ messages }] = llm.calls;
+  // Pinned from the request built before the extraction (the same fixtures, the same clock).
+  assert.deepEqual(messages, [
+    { role: 'system', content: 'You are Neptunia. Is the candidate message addressed to you? Answer yes or no.' },
+    {
+      role: 'user',
+      content:
+        '=== Mon, January 5 ===\n#1 [11:59] Alice: earlier message\n<author>\nΕλένη -- known as: Λένα, Ελενάκι\n</author>\n' +
+        '<candidate>\n#2 [11:59] Ελένη: and you too\n</candidate>',
+    },
+  ]);
+  llm.respond('no');
+  await p;
+});
+
+test('events: a failed eavesdrop roll may roll roomQuestionChance and ask the room classifier', async () => {
+  const llm = fakeFollowUpLlm();
+  const spontaneous = roomSpontaneous();
+  // The chance is set here, so the test does not move with the shipped default.
+  const config = baseConfig({ spontaneous: { roomQuestionChance: 0.5 } });
+  const handler = makeHandler({ llm, spontaneous, config, prompts: fakeRoomPrompts(), rng: scripted([0.49]), now: () => ROOM_T0 });
+  const channel = roomChannel();
+  const p = handler(roomMessage(channel));
+  await tickOnce();
+
+  assert.equal(llm.calls.length, 1, 'the room classifier was asked');
+  const [{ messages, options }] = llm.calls;
+  assert.equal(messages[0].role, 'system');
+  assert.equal(messages[0].content, 'You watch the room for Neptunia. Is the candidate put to everyone? Answer yes or no.', 'room.md, {{name}} filled');
+  assert.equal(messages[1].role, 'user');
+  assert.match(messages[1].content, /earlier line[\s\S]*<candidate>\n[^\n]*ποιος θέλει καφέ;\n<\/candidate>$/, 'the transcript, then the candidate');
+  assert.deepEqual(
+    { ...options },
+    {
+      model: 'anthropic/claude-sonnet-4.6',
+      role: 'classifier.text',
+      maxOutputTokens: 8,
+      countAgainstDailyCap: true,
+      skipCalibration: true,
+      timeoutMs: 30000,
+      purpose: 'room',
+      signal: undefined,
+    },
+    'the helper request options: classifier.text, mention.followUpMaxOutputTokens, the daily cap, llm.helperTimeoutMs',
+  );
+  llm.respond('no');
+  await p;
+
+  // The roll is strict: at the chance itself the classifier is not asked.
+  const llm2 = fakeFollowUpLlm();
+  const handler2 = makeHandler({ llm: llm2, spontaneous: roomSpontaneous(), config, prompts: fakeRoomPrompts(), rng: scripted([0.5]), now: () => ROOM_T0 });
+  await handler2(roomMessage(roomChannel()));
+  assert.equal(llm2.calls.length, 0);
+});
+
+test('events: the room classifier is never asked when the eavesdrop rails fail', async () => {
+  const noRoll = () => {
+    throw new Error('no room roll');
+  };
+  const llm = fakeFollowUpLlm();
+  const spontaneous = roomSpontaneous({ ready: false });
+  const handler = makeHandler({ llm, spontaneous, prompts: fakeRoomPrompts(), rng: noRoll, now: () => ROOM_T0 });
+  const channel = roomChannel();
+  await handler(roomMessage(channel));
+  assert.equal(spontaneous.readyCalls.length, 1, 'the rails were asked');
+  assert.equal(spontaneous.readyCalls[0], channel);
+  assert.equal(llm.calls.length, 0);
+
+  // The pre-filter: a reply or a member mention, or no text, is never a room line.
+  const ready = roomSpontaneous();
+  const handler2 = makeHandler({ llm, spontaneous: ready, prompts: fakeRoomPrompts(), rng: noRoll, now: () => ROOM_T0 });
+  await handler2(roomMessage(channel, { id: 'm-r1', reference: { messageId: 'other' } }));
+  await handler2(roomMessage(channel, { id: 'm-r2', mentions: { users: new Map([['u2', { id: 'u2' }]]) } }));
+  await handler2(roomMessage(channel, { id: 'm-r3', cleanContent: '   ' }));
+  assert.equal(llm.calls.length, 0);
+
+  // An eavesdrop that scheduled leaves nothing to the room path.
+  const hit = roomSpontaneous({ scheduled: true });
+  const handler3 = makeHandler({ llm, spontaneous: hit, prompts: fakeRoomPrompts(), rng: noRoll, now: () => ROOM_T0 });
+  await handler3(roomMessage(channel));
+  assert.equal(hit.readyCalls.length, 0);
+  assert.equal(llm.calls.length, 0);
+});
+
+test('events: roomQuestionChance 0 never asks', async () => {
+  const llm = fakeFollowUpLlm();
+  const spontaneous = roomSpontaneous();
+  const config = baseConfig({ spontaneous: { roomQuestionChance: 0 } });
+  const handler = makeHandler({ llm, spontaneous, config, prompts: fakeRoomPrompts(), rng: () => 0, now: () => ROOM_T0 });
+  const { logs } = await withCapturedLogs(() => handler(roomMessage(roomChannel())));
+  assert.equal(llm.calls.length, 0);
+  assert.equal(spontaneous.readyCalls.length, 0, 'not even the rails are read');
+  assert.equal(logs.some((entry) => entry.msg?.startsWith('room:')), false, 'silent');
+});
+
+test('events: a yes schedules the room turn, a no leaves the message', async () => {
+  for (const [answer, scheduled] of [['yes', true], ['Yes.', true], ['no', false], ['overheard', false]]) {
+    const llm = fakeFollowUpLlm();
+    const spontaneous = roomSpontaneous();
+    const handler = makeHandler({ llm, spontaneous, prompts: fakeRoomPrompts(), rng: scripted([0]), now: () => ROOM_T0 });
+    const channel = roomChannel();
+    const { logs } = await withCapturedLogs(async () => {
+      const p = handler(roomMessage(channel));
+      await tickOnce();
+      llm.respond(answer);
+      await p;
+    });
+    assert.equal(spontaneous.calls.length, scheduled ? 2 : 1, answer);
+    const [first] = spontaneous.calls;
+    assert.equal(first.length, 2, 'the ordinary eavesdrop comes first, no options');
+    if (scheduled) {
+      const [roomChannelArg, roomLine, options] = spontaneous.calls[1];
+      assert.equal(roomChannelArg, channel);
+      assert.equal(roomLine, first[1], 'the same message is the focus');
+      assert.deepEqual(options, { room: true });
+    }
+    const verdict = logs.find((entry) => entry.msg === 'room: verdict');
+    assert.equal(verdict?.answer, scheduled ? 'yes' : 'no', answer);
+    assert.equal(verdict.channel, 'c1');
+    assert.equal(verdict.author, 'u7');
+    assert.equal(typeof verdict.ms, 'number');
+    assert.ok(!JSON.stringify(logs).includes('καφέ'), 'no message text in the logs');
+  }
+});
+
+test('events: a failed or empty room classifier call schedules nothing and says why', async () => {
+  const rows = [
+    ['an error', (llm) => llm.fail(Object.assign(new Error('boom'), { statusCode: 503 })), { reason: 'llm-error', status: 503 }],
+    ['the daily cap', (llm) => llm.fail(new DailyCapError('cap')), { reason: 'daily-cap', status: null }],
+    ['an empty answer', (llm) => llm.respond('   '), { reason: 'empty', status: null }],
+  ];
+  for (const [label, settle, expected] of rows) {
+    const llm = fakeFollowUpLlm();
+    const spontaneous = roomSpontaneous();
+    const handler = makeHandler({ llm, spontaneous, prompts: fakeRoomPrompts(), rng: scripted([0]), now: () => ROOM_T0 });
+    const { logs } = await withCapturedLogs(async () => {
+      const p = handler(roomMessage(roomChannel()));
+      await tickOnce();
+      settle(llm);
+      await p;
+    });
+    assert.equal(spontaneous.calls.length, 1, `${label}: nothing scheduled`);
+    const failed = logs.find((entry) => entry.msg === 'room: classifier failed');
+    assert.equal(failed?.channel, 'c1', label);
+    assert.equal(failed.reason, expected.reason, label);
+    assert.equal(failed.status, expected.status, label);
+    assert.equal(logs.some((entry) => entry.msg === 'room: verdict'), false, `${label}: no verdict`);
+  }
+
+  // No room.md: skipped with its code, nothing asked.
+  const llm = fakeFollowUpLlm();
+  const handler = makeHandler({ llm, spontaneous: roomSpontaneous(), prompts: fakeAddressPrompts(), rng: scripted([0]), now: () => ROOM_T0 });
+  const { logs } = await withCapturedLogs(() => handler(roomMessage(roomChannel())));
+  assert.equal(llm.calls.length, 0);
+  assert.deepEqual(
+    logs.filter((entry) => entry.msg === 'room: skipped').map((entry) => [entry.channel, entry.reason]),
+    [['c1', 'no-prompt']],
+  );
+});
+
+test('events: one room call per channel at a time', async () => {
+  const llm = fakeFollowUpLlm();
+  const spontaneous = roomSpontaneous();
+  const handler = makeHandler({ llm, spontaneous, prompts: fakeRoomPrompts(), rng: () => 0, now: () => ROOM_T0 });
+  const guild = fakeGuild('g1', 'Neptunia');
+  const c1 = roomChannel('c1', guild);
+  const c2 = roomChannel('c2', guild);
+  const { logs } = await withCapturedLogs(async () => {
+    const first = handler(roomMessage(c1, { id: 'm1' }));
+    await tickOnce();
+    await handler(roomMessage(c1, { id: 'm2' }));
+    assert.equal(llm.calls.length, 1, 'the second line of c1 is skipped while the first is classified');
+    const other = handler(roomMessage(c2, { id: 'm3' }));
+    await tickOnce();
+    assert.equal(llm.calls.length, 2, 'another channel has its own slot');
+    llm.respond('no');
+    await Promise.all([first, other]);
+    const third = handler(roomMessage(c1, { id: 'm4' }));
+    await tickOnce();
+    assert.equal(llm.calls.length, 3, 'the slot is free again once the call ended');
+    llm.respond('no');
+    await third;
+  });
+  assert.deepEqual(
+    logs.filter((entry) => entry.msg === 'room: skipped').map((entry) => [entry.channel, entry.reason]),
+    [['c1', 'in-flight']],
+  );
+});
+
+test('events: a message inside an open follow-up window never reaches the room path', async () => {
+  // The address classifier handles it: one address call, no room call.
+  const llm = fakeFollowUpLlm();
+  const spontaneous = roomSpontaneous();
+  const handler = makeHandler({ llm, spontaneous, prompts: fakeRoomPrompts(), rng: () => 0, now: () => ROOM_T0 });
+  const channel = roomChannel();
+  await openFollowUpWindow(handler, { guild: channel.guild, channel, ts: ROOM_T0 - 30000 });
+  const p = handler(roomMessage(channel));
+  await tickOnce();
+  assert.equal(llm.calls.length, 1);
+  assert.match(llm.calls[0].messages[0].content, /addressed to you/, 'the address classifier, not room.md');
+  llm.respond('no');
+  await p;
+  assert.equal(llm.calls.length, 1);
+  assert.equal(spontaneous.readyCalls.length, 0);
+
+  // An open window the address classifier passed over (features.followUp off here): still no room path.
+  const config = baseConfig({ features: { followUp: false } });
+  const llm2 = fakeFollowUpLlm();
+  const spontaneous2 = roomSpontaneous();
+  const handler2 = makeHandler({ llm: llm2, spontaneous: spontaneous2, config, prompts: fakeRoomPrompts(), rng: () => 0, now: () => ROOM_T0 });
+  const channel2 = roomChannel();
+  await openFollowUpWindow(handler2, { guild: channel2.guild, channel: channel2, ts: ROOM_T0 - 30000 });
+  await handler2(roomMessage(channel2));
+  assert.equal(spontaneous2.calls.length, 1, 'the ordinary eavesdrop still sees it');
+  assert.equal(llm2.calls.length, 0);
+  assert.equal(spontaneous2.readyCalls.length, 0);
 });

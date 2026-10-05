@@ -5,7 +5,10 @@
 // (features.privateMessages, src/behavior/private.js). A turn someone asked
 // for that a rail refused gets one plain limit notice (src/behavior/limits.js).
 // A call in a channel the persona can read but not write in is answered in
-// the main channel (features.elsewhere) once that channel settles.
+// the main channel (features.elsewhere) once that channel settles; so is a
+// remark the persona chose to make about it (a noticed comment). A line put
+// to the whole room may get a higher chance of an unprompted answer
+// (spontaneous.roomQuestionChance, the room classifier).
 // Owner commands are a separate pipeline entirely (src/discord/commands.js,
 // driven by `interactionCreate`, not `messageCreate`). Kept free of
 // discord.js-specific assumptions beyond the shape already used by
@@ -13,7 +16,6 @@
 // tests.
 
 import { normalizeMessage, channelAllowed, canSend, fetchHistory, fetchMessage } from './collect.js';
-import { audienceAllows } from './pull-fetch.js';
 import { isOwnerId } from './access.js';
 import { collectPictures, collectEmojiItems, collectVideos, collectReadableLinks, isDescribable } from './media.js';
 import {
@@ -26,13 +28,15 @@ import {
   parseAddressAnswer,
   followUpTriggerKind,
   classifierTextModel,
+  roomPreFilter,
 } from '../behavior/mention.js';
+import { helperRequestOptions, railReason } from '../llm/openrouter.js';
 import { fill, formatTranscript, renderTranscript } from './format.js';
 import { topByRank } from '../memory/ranking.js';
 import { addPending, isExpired, popOldest, requeuePending } from '../behavior/pending.js';
 import { between } from '../behavior/random.js';
 import { fillPromptTemplate } from '../behavior/prompt.js';
-import { usableDestination } from '../behavior/turn.js';
+import { routeFor, roomQuestionChance } from '../behavior/spontaneous.js';
 import { elsewhereSettings, pingsIn, pingStatus, recordPing, settleDueAt, stampPings } from '../behavior/elsewhere.js';
 import { privateGate } from '../behavior/private.js';
 import { isLimitNotice, postLimitNotice } from '../behavior/limits.js';
@@ -99,11 +103,13 @@ function missingReason(missing) {
  * @param {ReturnType<import('../behavior/spontaneous.js').createSpontaneous>} deps.spontaneous
  * @param {ReturnType<import('../memory/update.js').createMemoryUpdater>} deps.memory
  * @param {ReturnType<import('../behavior/mention.js').createTagHistory>} deps.tagHistory
- * @param {object} [deps.llm]  From createLlm() (src/llm/openrouter.js), used ONLY for the address
+ * @param {object} [deps.llm]  From createLlm() (src/llm/openrouter.js), used for the address
  *   classifier (`features.followUp`): a message with no trigger, arriving while a
  *   conversation window this instance opened by answering is still open, is checked here before
  *   ever running a turn. Absent -- an older/direct caller, or a test that never opens a window --
  *   simply means `features.followUp` cannot ever fire (nothing reaches this dependency otherwise).
+ *   The room classifier (spontaneous.roomQuestionChance, see maybeRoom) uses it too; absent, no
+ *   room call is made.
  * @param {() => string | null} deps.getGuildId  the single guild this instance serves, or null before it resolves
  * @param {(guildId: string) => string} [deps.getSelfName]  The persona's display name in a guild
  *   (src/index.js). Default: the client's cached guild member, else the bot user's name.
@@ -116,7 +122,7 @@ function missingReason(missing) {
  *   media.prefillPerMessage) are handed to it fire-and-forget -- errors swallowed -- so the
  *   cache is already warm by the time the live memory analyzer (src/memory/update.js#analyze)
  *   wants a caption for one of them; the analyzer itself never triggers a new request. Only the
- *   address classifier awaits a message's own prefill, then reads captions from the cache alone
+ *   address and room classifiers await a message's own prefill, then read captions from the cache alone
  *   (`describer.cachedDescriptions` / `cachedVideos`), never a new request. With
  *   features.mediaDescriptions, features.videoDescriptions (a missing key counts as on) and
  *   media.video.prefill all on, the message's first videos (up to
@@ -186,8 +192,8 @@ export function createMessageHandler({
    * createMessageHandler). A no-op when the feature is off or no describer was wired in, so
    * this pipeline makes zero describer calls in that case. Returns the
    * picture prefill's promise (it never rejects), or null when none started:
-   * only the address classifier awaits it, so a sticker- or picture-only
-   * follow-up reaches it with its caption (see cachedFollowUpMedia).
+   * only the address and room classifiers await it, so a sticker- or
+   * picture-only line reaches them with its caption (see cachedFollowUpMedia).
    * @returns {Promise<void>|null}
    */
   function warmMediaCache(guildId, normalized) {
@@ -403,17 +409,18 @@ export function createMessageHandler({
   }
 
   /**
-   * The classifier's request: system = address.md (`{{name}}` filled), user =
-   * the last `mention.followUpContext` lines of the channel, then an
-   * `<author>` block when the new message's author has stored aliases
-   * (followUpAuthorLine), then the new message wrapped in a `<candidate>`
-   * block (tags structural, not model-facing wording). Pictures, stickers, emoji and videos carry the captions the
-   * describer already cached (cachedFollowUpMedia). `null` when
-   * `prompts.address` is missing -- the caller treats that the same as a "no".
+   * The request of a classifier about one new message, shared by the address
+   * classifier and the room classifier: system = `prompt` (address.md or
+   * room.md, `{{name}}` filled), user = the last `mention.followUpContext`
+   * lines of the channel, then an `<author>` block when the new message's
+   * author has stored aliases (followUpAuthorLine), then the new message
+   * wrapped in a `<candidate>` block (tags structural, not model-facing
+   * wording). Pictures, stickers, emoji and videos carry the captions the
+   * describer already cached (cachedFollowUpMedia). `null` when `prompt` is
+   * missing -- the caller treats that the same as a "no".
    */
-  async function buildFollowUpRequest({ config, prompts, channel, selfId, selfName, normalized, ownPrefill }) {
-    const addressPrompt = prompts?.address;
-    if (!addressPrompt) return null;
+  async function buildClassifierRequest({ prompt, config, prompts, channel, selfId, selfName, normalized, ownPrefill }) {
+    if (!prompt) return null;
     const labels = prompts.labels;
     const contextLines = Math.max(0, config.mention.followUpContext ?? 15);
     const raw = contextLines > 0 ? await fetchHistory(channel, { limit: contextLines, selfId, embedTextChars: config.media?.embedTextChars, videoSites: config.media?.video?.sites }) : [];
@@ -436,7 +443,7 @@ export function createMessageHandler({
     const author = followUpAuthorLine(channel.guild.id, normalized, config, labels);
     const authorBlock = author ? `\n<author>\n${author}\n</author>` : '';
     return {
-      system: fillPromptTemplate(addressPrompt, { name: selfName }),
+      system: fillPromptTemplate(prompt, { name: selfName }),
       user: `${transcript}${authorBlock}\n<candidate>\n${candidateItem.text}\n</candidate>`,
     };
   }
@@ -672,7 +679,8 @@ export function createMessageHandler({
     let request = null;
     let buildFailed = false;
     try {
-      request = await buildFollowUpRequest({ config, prompts: hot.prompts, channel, selfId, selfName, normalized, ownPrefill });
+      const prompts = hot.prompts;
+      request = await buildClassifierRequest({ prompt: prompts?.address, config, prompts, channel, selfId, selfName, normalized, ownPrefill });
     } catch (err) {
       buildFailed = true;
       log.warn('follow-up: building the classifier request failed', { channel: channelId, error: err });
@@ -771,6 +779,109 @@ export function createMessageHandler({
       })
       .catch((err) => log.error('follow-up: reply turn failed', { channel: channelId, error: err }));
     return true;
+  }
+
+  // --- Room questions (spontaneous.roomQuestionChance) -----------------------
+  // Outside any follow-up window, an untagged line that failed the eavesdrop
+  // roll may be a question or remark put to everyone present. When the
+  // eavesdrop rails pass for its channel now (spontaneous.eavesdropReady),
+  // the line passes roomPreFilter (text, no reply, no member mention) and a
+  // roll of spontaneous.roomQuestionChance wins, the room classifier
+  // (room.md, the same request shape as the address classifier:
+  // buildClassifierRequest) is asked once; a `yes` hands the line back to the
+  // scheduler as a room line (spontaneous.onMessage with `room`: no second
+  // roll, the turn about that line). At most one call per channel in flight;
+  // a line arriving meanwhile is skipped, not held. Nothing is persisted.
+  const roomInFlight = new Set(); // channelIds with a room classifier call running right now
+
+  /**
+   * The room path of an untagged `normalized` message the eavesdrop roll did
+   * not schedule (onMessage step 10), every check read from the live config
+   * now, the cheap ones first: the chance above 0 and an llm, no open
+   * follow-up window in the channel, the eavesdrop rails, the pre-filter,
+   * then the roll; only then the prompt (`room: skipped`, `no-prompt`) and
+   * the channel's slot (`in-flight`). Never throws past its own call:
+   * classifyRoom logs a failure and answers null.
+   */
+  async function maybeRoom(message, normalized, selfId, ownPrefill) {
+    const config = hot.config;
+    const chance = roomQuestionChance(config);
+    if (!(chance > 0) || !llm) return;
+    const channel = message.channel;
+    if (isFollowUpOpen(followUpWindows.get(channel.id), now(), config.mention)) return;
+    if (spontaneous.eavesdropReady?.(channel) !== true) return;
+    if (!roomPreFilter(normalized)) return;
+    if (rng() >= chance) return;
+    const prompt = hot.prompts?.room;
+    if (!prompt) {
+      log.info('room: skipped', { channel: channel.id, reason: 'no-prompt' });
+      return;
+    }
+    if (roomInFlight.has(channel.id)) {
+      log.info('room: skipped', { channel: channel.id, reason: 'in-flight' });
+      return;
+    }
+    roomInFlight.add(channel.id);
+    try {
+      const answer = await classifyRoom({ channel, normalized, selfId, ownPrefill, prompt, config });
+      if (answer === 'yes') spontaneous.onMessage(channel, normalized, { room: true });
+    } finally {
+      roomInFlight.delete(channel.id);
+    }
+  }
+
+  /**
+   * One room classifier call for `normalized` in `channel`: the request from
+   * buildClassifierRequest with `prompt` (room.md), sent with the helper
+   * request options (classifier.text, mention.followUpMaxOutputTokens, the
+   * daily cap, llm.helperTimeoutMs, purpose `room`). Resolves to `'yes'` or
+   * `'no'` (`room: verdict`; the first word, read as the address
+   * classifier's answer is: anything but a yes is a no), or null when no
+   * verdict came: a request that could not be built (`room: skipped`,
+   * `failed`) or a call that failed or answered nothing (`room: classifier
+   * failed` with `reason`: the rail's code, `llm-error` or `empty`, and the
+   * HTTP `status` when there is one).
+   * @returns {Promise<'yes'|'no'|null>}
+   */
+  async function classifyRoom({ channel, normalized, selfId, ownPrefill, prompt, config }) {
+    const channelId = channel.id;
+    const startedAt = now();
+    const selfName = getSelfName(channel.guild.id);
+    let request = null;
+    try {
+      request = await buildClassifierRequest({ prompt, config, prompts: hot.prompts, channel, selfId, selfName, normalized, ownPrefill });
+    } catch (err) {
+      log.warn('room: skipped', { channel: channelId, reason: 'failed', name: err?.name ?? null });
+      return null;
+    }
+    if (!request) return null;
+
+    const model = classifierTextModel(config);
+    let completion;
+    try {
+      completion = await llm.complete(
+        [
+          { role: 'system', content: request.system },
+          { role: 'user', content: request.user },
+        ],
+        {
+          model,
+          ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: config.mention?.followUpMaxOutputTokens, purpose: 'room' }),
+        },
+      );
+    } catch (err) {
+      log.warn('room: classifier failed', { channel: channelId, reason: railReason(err), status: err?.statusCode ?? null, name: err?.name ?? null });
+      return null;
+    }
+    const text = String(completion?.text ?? '').trim();
+    if (!text) {
+      // Nothing at all (a reasoning model that spent its whole output cap) is a failed call, not a "no".
+      log.warn('room: classifier failed', { channel: channelId, reason: 'empty', status: null, model: model ?? null });
+      return null;
+    }
+    const answer = parseAddressAnswer(text) === 'yes' ? 'yes' : 'no';
+    log.info('room: verdict', { channel: channelId, author: normalized.authorId, answer, ms: now() - startedAt });
+    return answer;
   }
 
   // --- Limit notices ----------------------------------------------------------
@@ -1441,7 +1552,8 @@ export function createMessageHandler({
   // can read but not send has nowhere to be answered. When a destination is
   // usable (the first usable id of memory.mainChannelIds,
   // src/behavior/turn.js#usableDestination) and everyone who can view it can
-  // view the source too (the audience rail, context.pull.sameAudience), the
+  // view the source too (the audience rail, context.pull.sameAudience;
+  // src/behavior/spontaneous.js#routeFor), the
   // call is recorded in the ring (state.json `elsewherePings`: ids and a time,
   // no author, no text) and a settle wait is armed for the source: one timer
   // per source, never a busy mark, so the one attention stays free while it
@@ -1463,6 +1575,11 @@ export function createMessageHandler({
   // waits live in memory only: a restart during one loses
   // the call, which stays unanswered in the ring; a pause (clearPending) and
   // shutdown (stop) clear them.
+  // The same wait (kind `noticed`, no call, nothing in the ring) follows an
+  // eavesdrop hit on an untriggered message there (spontaneous.noticeElsewhere)
+  // when no wait is armed in that source; when it is over the persona may
+  // comment on the source in the destination (spontaneous.runNoticed). A call
+  // arriving meanwhile takes its place, as a newer call does.
   // source channel id -> { kind, channel, normalized, triggerKind, superseded, firstAt, lastAt, due, moved, timer }
   const settles = new Map();
 
@@ -1477,23 +1594,6 @@ export function createMessageHandler({
       if (reason) log.info('elsewhere: dropped', { source: sourceId, kind: entry.kind, message: entry.normalized.id, reason });
     }
     settles.clear();
-  }
-
-  /**
-   * Where a call written in `source` (a channel the bot cannot send in) is
-   * answered, read from `config` (the live config) now: `{ destination,
-   * reason: null }` with the discord.js channel, or `{ destination: null,
-   * reason }` with the code logged as `route`: `off` (features.elsewhere
-   * false), `no-destination` (no usable memory.mainChannelIds entry other than
-   * the source) or `audience` (someone who can view the destination cannot
-   * view the source).
-   * @returns {{ destination: object, reason: null } | { destination: null, reason: 'off'|'no-destination'|'audience' }}
-   */
-  function routeFor(source, config) {
-    const { channel: destination, reason } = usableDestination(source.guild, config, { exceptId: source.id });
-    if (!destination) return { destination: null, reason };
-    if (!audienceAllows(destination, source, config)) return { destination: null, reason: 'audience' };
-    return { destination, reason: null };
   }
 
   /**
@@ -1538,7 +1638,9 @@ export function createMessageHandler({
    * one dropped (`outranked`; it stays in the ring too) and the waiting call
    * keeps its place. Either way the call that keeps the wait carries the one
    * dropped, and whatever that one carried, in `superseded`. Waits are per
-   * source: a call elsewhere never touches this one.
+   * source: a call elsewhere never touches this one. A waiting noticed
+   * comment (no call: callRank 0) always gives way to a call, and the call
+   * carries nothing for it (its message is no call of the ring).
    */
   function armSettle(source, normalized, triggerKind, destination) {
     const waiting = settles.get(source.id);
@@ -1549,15 +1651,49 @@ export function createMessageHandler({
         return;
       }
       log.info('elsewhere: dropped', { source: source.id, kind: waiting.kind, message: waiting.normalized.id, reason: 'replaced' });
-      const superseded = [...waiting.superseded, waiting.normalized.id];
+      const superseded = waiting.kind === 'noticed' ? [...waiting.superseded] : [...waiting.superseded, waiting.normalized.id];
       Object.assign(waiting, { kind: 'ping', channel: source, normalized, triggerKind, superseded });
       return;
     }
+    startSettle(source, normalized, 'ping', triggerKind, destination);
+  }
+
+  /**
+   * Arm a new settle wait in `source` (none is armed there) for a routed call
+   * (`ping`, its `triggerKind`) or a noticed comment (`noticed`, no
+   * triggerKind) and log `elsewhere: settling`.
+   * @param {'ping'|'noticed'} kind
+   */
+  function startSettle(source, normalized, kind, triggerKind, destination) {
     const t = now();
-    const entry = { kind: 'ping', channel: source, normalized, triggerKind, superseded: [], firstAt: t, lastAt: t, due: null, moved: 0, timer: null };
+    const entry = { kind, channel: source, normalized, triggerKind, superseded: [], firstAt: t, lastAt: t, due: null, moved: 0, timer: null };
     settles.set(source.id, entry);
     scheduleSettle(source.id, entry, settleDue(entry));
-    log.info('elsewhere: settling', { source: source.id, kind: entry.kind, message: normalized.id, destination: destination.id });
+    log.info('elsewhere: settling', { source: source.id, kind, message: normalized.id, destination: destination.id });
+  }
+
+  /**
+   * An untriggered message in `source`, a channel the bot cannot send in,
+   * after its settle wait was touched: with no wait armed there, an
+   * eavesdrop hit (spontaneous.noticeElsewhere: the rails and the roll)
+   * arms one of kind `noticed` toward the destination resolved now.
+   */
+  function maybeNotice(source, normalized) {
+    if (settles.has(source.id)) return;
+    if (spontaneous.noticeElsewhere?.(source, normalized) !== true) return;
+    const route = routeFor(source, hot.config);
+    if (!route.destination) return;
+    startSettle(source, normalized, 'noticed', null, route.destination);
+  }
+
+  /**
+   * A noticed wait is over: the comment runs through spontaneous.runNoticed,
+   * which reads every rail again; one that refuses is logged as
+   * `elsewhere: dropped` with its code.
+   */
+  async function fireNoticed(sourceId, { channel, normalized }) {
+    const result = await spontaneous.runNoticed?.(channel);
+    if (result?.reason) log.info('elsewhere: dropped', { source: sourceId, kind: 'noticed', message: normalized.id, reason: result.reason });
   }
 
   /**
@@ -1595,8 +1731,9 @@ export function createMessageHandler({
    * ring: skipSeenCalls); when its channel is no longer allowed
    * (bot.channels) or its kind's switch was turned off (`mention: dropped`,
    * `channel` / `off`). The calls it carries (`superseded`) go with it to
-   * answerCall. A timer whose wait already ended (or was removed) does
-   * nothing. Never rejects: it runs from a timer.
+   * answerCall. A noticed wait (no call) goes to fireNoticed instead once
+   * the pause / warmup check passed. A timer whose wait already ended (or
+   * was removed) does nothing. Never rejects: it runs from a timer.
    */
   async function fireSettle(sourceId, entry) {
     if (settles.get(sourceId) !== entry) return;
@@ -1607,6 +1744,10 @@ export function createMessageHandler({
       const muted = followUpMuted();
       if (muted) {
         log.info('elsewhere: dropped', { source: sourceId, kind, message: normalized.id, reason: muted });
+        return;
+      }
+      if (kind === 'noticed') {
+        await fireNoticed(sourceId, entry);
         return;
       }
       const held = await heldCallState(channel, normalized.id, true);
@@ -1803,10 +1944,17 @@ export function createMessageHandler({
       // window the persona itself opened by answering -- fully handled by
       // maybeFollowUp either way (a computed verdict or a deliberate no-op,
       // see its own header comment); otherwise let the spontaneous scheduler
-      // eavesdrop, nothing more.
+      // eavesdrop, nothing more. In a channel the bot cannot send in, an
+      // eavesdrop hit there arms a noticed settle wait (maybeNotice). A
+      // line the eavesdrop roll did not schedule may still be put to the
+      // whole room (maybeRoom).
       if (!kind) {
         const followedUp = await maybeFollowUp(message, normalized, selfId, ownPrefill);
-        if (!followedUp) spontaneous.onMessage(message.channel, normalized);
+        if (!followedUp) {
+          const scheduled = spontaneous.onMessage(message.channel, normalized) === true;
+          if (!canSend(message.channel)) maybeNotice(message.channel, normalized);
+          else if (!scheduled) await maybeRoom(message, normalized, selfId, ownPrefill);
+        }
         return;
       }
 

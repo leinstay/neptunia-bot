@@ -132,6 +132,7 @@
     "deadAfterMinutes": 90,
     "initiateChance": 0.35,
     "eavesdropChance": 0.02,
+    "roomQuestionChance": 0.04,
     "eavesdropDelayMs": [5000, 40000],
     "minGapMinutes": 12,
     "maxChannelSilenceHours": 72

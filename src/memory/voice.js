@@ -40,14 +40,17 @@
 // the system message is prompts/memory-voice.md, everything else is JSON keys and kind codes.
 
 import { isPlainObject } from '../config.js';
-import { fitSections } from '../llm/budget.js';
+import { fitSections, requestTokenLimit, sectionCost } from '../llm/budget.js';
 import { estimateTokens } from '../llm/tokens.js';
 import { parseJsonObject } from '../llm/parse.js';
 import { block, fillPromptTemplate } from '../behavior/prompt.js';
-import { HOUR_MS, MINUTE_MS, utcDay } from '../time.js';
+import { HOUR_MS, MINUTE_MS } from '../time.js';
+import { REASON_CHARS, deltaCapOf } from './affinity.js';
 import { clampText } from './clamp.js';
+import { EPISODE_CHARS, episodeDate, isSameEpisode } from './episodes.js';
 import { normalizeTopic } from './interests.js';
-import { ID_DIGITS, fromTokens } from './mentions.js';
+import { TEACHER_TOKEN_RE, fromTokens, teacherToken } from './mentions.js';
+import { MEMORY_LIMIT_DEFAULTS, SELF_CHARS } from './text-limits.js';
 
 /**
  * Code fallbacks of the `memory.voice.*` keys this module and the voice run read, equal to
@@ -82,37 +85,13 @@ const MAX_BRIEFS = 3;
 // The clamps the store already applies to these texts (tests/voice.test.js measures them on the
 // store's own functions): src/memory/affinity.js#applyDelta (reason),
 // src/memory/episodes.js#sanitizeEpisode (feeling; an episode's `what` soft, its `quote` hard),
-// src/memory/update.js#applyMemoryUpdate's `self` list. The first three are exported for the
-// store's voice writes (src/memory/store.js#fillAffinityReason, #fillEpisodeFeeling,
-// #applySelfOps), so a voice text is cut at one limit wherever it is written.
-//
-// TODO: the constants below are copies waiting for their one home, which does not exist yet.
-// Once it does, import them from there, delete the copies here, and keep re-exporting
-// REASON_CHARS, FEELING_CHARS and SELF_CHARS for src/memory/store.js:
-//   REASON_CHARS                    -> src/memory/affinity.js#REASON_CHARS
-//   FEELING_CHARS, WHAT_CHARS,      -> src/memory/episodes.js#EPISODE_CHARS
-//     QUOTE_CHARS                      (`feeling`, `what`, `quote`)
-//   SELF_CHARS                      -> src/memory/text-limits.js#SELF_CHARS
-//   FIELD_CHARS .. CLAMP_TOLERANCE  -> src/memory/text-limits.js#MEMORY_LIMIT_DEFAULTS
-//                                      (`fieldChars`, `learnedChars`, `relationshipChars`,
-//                                      `maxNewEpisodes`, `maxDeltaPerUpdate`, `clampTolerance`)
-
-/** How long an attitude reason may be, in characters (before `memory.clampTolerance`). */
-export const REASON_CHARS = 200;
+// src/memory/update.js#applyMemoryUpdate's `self` list. Each has one home (affinity.js,
+// episodes.js, text-limits.js); the three below are re-exported for the store's voice writes
+// (src/memory/store.js#fillAffinityReason, #fillEpisodeFeeling, #applySelfOps), so a voice text
+// is cut at one limit wherever it is written.
+export { REASON_CHARS, SELF_CHARS };
 /** How long an episode's feeling may be, in characters (before `memory.clampTolerance`). */
-export const FEELING_CHARS = 120;
-/** How long one self fact may be, in characters (before `memory.clampTolerance`). */
-export const SELF_CHARS = 200;
-const WHAT_CHARS = 200;
-const QUOTE_CHARS = 120;
-// config.json's values (and src/memory/update.js#MEMORY_LIMIT_DEFAULTS'), for a deployment
-// missing the key. Not imported from update.js, which wires this module in (no import cycle).
-const FIELD_CHARS = 1000;
-const LEARNED_CHARS = 160;
-const RELATIONSHIP_CHARS = 600;
-const MAX_NEW_EPISODES = 3;
-const MAX_DELTA = 15;
-const CLAMP_TOLERANCE = 1.25;
+export const FEELING_CHARS = EPISODE_CHARS.feeling;
 
 // What the answer adds around its texts, in raw tokens: `{"items":{ ... }}` (with a code fence
 // the model may wrap it in), and per item its `"24": "",` key and quotes.
@@ -121,16 +100,6 @@ const ANSWER_ITEM_OVERHEAD = 8;
 // Any character past ASCII: an answer text is priced at src/llm/tokens.js#estimateTokens'
 // costlier rate, since the persona's language need not be written in Latin script.
 const NON_ASCII = '\u00e9';
-
-// TODO: a copy of src/memory/episodes.js#sanitizeEpisode's date rule; use
-// src/memory/episodes.js#episodeDate once episodes.js exports it, and delete this.
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-// src/memory/update.js#parseLearnedOps' teacher rule, the same two patterns: exactly one `<@id>`
-// token, or one `name (id:...)` reference (any name, several words, or none).
-// TODO: a copy; use src/memory/mentions.js#teacherToken (and its token pattern for cleanPayload)
-// once mentions.js exports it, and delete these two and `teacherOf`.
-const TEACHER_TOKEN_RE = new RegExp(`^<@(${ID_DIGITS})>$`);
-const TEACHER_REF_RE = new RegExp(`^[^()<>]*\\(id:(${ID_DIGITS})\\)$`);
 
 const identity = (text) => text;
 
@@ -152,43 +121,9 @@ function kindOn(kind, config) {
   return true;
 }
 
-// TODO: the rule is a copy of applyDelta's; use src/memory/affinity.js#deltaCapOf once
-// affinity.js exports it (keeping the 15 fallback here), and delete the copy.
-/** `relationships.maxDeltaPerUpdate` as src/memory/affinity.js#applyDelta applies it: the
- * fallback is update.js's (config.json's 15), a value that is not a number caps nothing. */
-function deltaCap(config) {
-  const cap = config?.relationships?.maxDeltaPerUpdate ?? MAX_DELTA;
-  return Number.isFinite(cap) ? Math.abs(cap) : Infinity;
-}
-
-// TODO: a copy of isDuplicate's rule; use src/memory/episodes.js#isSameEpisode once episodes.js
-// exports it, and delete this.
-/** src/memory/episodes.js#isDuplicate's rule: the same date and `what` (each trimmed, whitespace
- * collapsed, lower-cased: src/memory/interests.js#normalizeTopic, the one text-identity helper),
- * or the same non-empty quote. */
-function sameEpisode(a, b) {
-  if (a.date === b.date && normalizeTopic(a.what) === normalizeTopic(b.what)) return true;
-  return Boolean(a.quote && b.quote && a.quote === b.quote);
-}
-
 /** A finite number above 0, else `fallback`. */
 function positive(value, fallback) {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-// TODO: a stand-in for src/llm/budget.js#requestTokenLimit(config), the same rule; import that
-// once budget.js exports it, and delete this.
-/**
- * The input budget of a voice request, `floor(llm.maxRequestTokens * llm.safetyMargin)`, by the
- * chat turn's rule (src/behavior/prompt.js#buildRequest): a margin that is not a number in
- * (0, 1] counts as config.json's 0.9, a token cap that is not a positive number as its 50000.
- * Taken raw, a null margin gave a limit of 0 (every request refused) and a missing one NaN
- * (nothing trimmed).
- */
-function inputLimit(config) {
-  const llm = isPlainObject(config?.llm) ? config.llm : {};
-  const margin = Number.isFinite(llm.safetyMargin) && llm.safetyMargin > 0 && llm.safetyMargin <= 1 ? llm.safetyMargin : 0.9;
-  return Math.floor(positive(llm.maxRequestTokens, 50000) * margin);
 }
 
 /** An integer of at least 1, else `fallback`. */
@@ -230,12 +165,12 @@ export function voiceSettings(config) {
  * @returns {Record<string, number>}  Keyed by kind.
  */
 export function voiceLimits(config) {
-  const fieldChars = positive(config?.memory?.fieldChars, FIELD_CHARS);
+  const fieldChars = positive(config?.memory?.fieldChars, MEMORY_LIMIT_DEFAULTS.fieldChars);
   return {
-    relationship: positive(config?.relationships?.textChars, RELATIONSHIP_CHARS),
+    relationship: positive(config?.relationships?.textChars, MEMORY_LIMIT_DEFAULTS.relationshipChars),
     reason: REASON_CHARS,
-    feeling: FEELING_CHARS,
-    learned: positive(config?.memory?.learnedChars, LEARNED_CHARS),
+    feeling: EPISODE_CHARS.feeling,
+    learned: positive(config?.memory?.learnedChars, MEMORY_LIMIT_DEFAULTS.learnedChars),
     self: SELF_CHARS,
     patterns: fieldChars * 2,
     starters: fieldChars * 2,
@@ -301,7 +236,7 @@ function cleanPayload(kind, value) {
     return { delta, at: raw.at };
   }
   if (kind === 'feeling') {
-    if (typeof raw.at !== 'string' || !raw.at || !DATE_RE.test(raw.date) || typeof raw.what !== 'string' || !raw.what.trim()) return null;
+    if (typeof raw.at !== 'string' || !raw.at || episodeDate(raw.date) === '' || typeof raw.what !== 'string' || !raw.what.trim()) return null;
     return { at: raw.at, date: raw.date, what: raw.what, quote: typeof raw.quote === 'string' ? raw.quote : '' };
   }
   if (kind === 'learned') {
@@ -378,17 +313,6 @@ function present(value) {
   return typeof value === 'string' ? value.trim() !== '' : true;
 }
 
-// TODO: a copy; replace with src/memory/mentions.js#teacherToken (see TEACHER_TOKEN_RE).
-/** A lesson's teacher as a `<@id>` token, by src/memory/update.js#parseLearnedOps' rule (one
- * `<@id>` token or one `name (id:...)` reference, whatever the name, of an id `isKnownId`
- * accepts), so both analyzer modes keep the same teachers; else undefined. */
-function teacherOf(from, isKnownId) {
-  if (typeof from !== 'string') return undefined;
-  const trimmed = from.trim();
-  const id = TEACHER_TOKEN_RE.exec(trimmed)?.[1] ?? TEACHER_REF_RE.exec(trimmed)?.[1];
-  return id && isKnownId(id) ? `<@${id}>` : undefined;
-}
-
 /**
  * Split one stage A answer (the JSON prompts/memory-decide.md asks for) into what is stored at
  * once and what waits for the voice model. Untrusted input: any shape of `decision` gives a
@@ -453,8 +377,8 @@ export function splitDecision(decision, { config, nowMs, knownUserIds, tokenize 
   const isPrivate = layer === 'private';
   const relationshipsOn = kindOn('relationship', config);
   const episodesOn = kindOn('feeling', config);
-  const maxNew = count(config?.memory?.maxNewEpisodes, MAX_NEW_EPISODES);
-  const maxDelta = deltaCap(config);
+  const maxNew = count(config?.memory?.maxNewEpisodes, MEMORY_LIMIT_DEFAULTS.maxNewEpisodes);
+  const maxDelta = deltaCapOf(config?.relationships?.maxDeltaPerUpdate ?? MEMORY_LIMIT_DEFAULTS.maxDeltaPerUpdate);
   const tolerance = config?.memory?.clampTolerance;
   const at = new Date(nowMs).toISOString();
   const text = (value) => (typeof value === 'string' ? String(tokenize(value) ?? '').trim() : '');
@@ -521,13 +445,13 @@ export function splitDecision(decision, { config, nowMs, knownUserIds, tokenize 
           if (!isPlainObject(episode)) continue;
           // Clamped exactly as src/memory/episodes.js#sanitizeEpisode will (idempotent there), so
           // the feeling item's `what` equals the stored one: one episode, one address.
-          const what = clampText(text(episode.what), WHAT_CHARS, { tolerance });
+          const what = clampText(text(episode.what), EPISODE_CHARS.what, { tolerance });
           if (!what) continue;
-          const date = typeof episode.date === 'string' && DATE_RE.test(episode.date) ? episode.date : utcDay(nowMs);
-          const quote = typeof episode.quote === 'string' ? clampText(episode.quote, QUOTE_CHARS, { tolerance: 1 }) : '';
+          const date = episodeDate(episode.date, nowMs);
+          const quote = typeof episode.quote === 'string' ? clampText(episode.quote, EPISODE_CHARS.quote, { tolerance: 1 }) : '';
           // All of a batch's episodes share the stamp `at`: a repeat would be stored twice under
           // one address (the store compares only with what was stored before the batch).
-          if (stored.some((kept) => sameEpisode(kept, { date, what, quote }))) continue;
+          if (stored.some((kept) => isSameEpisode(kept, { date, what, quote }))) continue;
           const neutralEpisode = { date, what, quote };
           if (episode.weight !== undefined) neutralEpisode.weight = episode.weight;
           stored.push({ ...neutralEpisode, feeling: '' });
@@ -564,7 +488,7 @@ export function splitDecision(decision, { config, nowMs, knownUserIds, tokenize 
           const brief = text(object ? lesson.brief : lesson);
           if (!brief) continue;
           const payload = { seenAt: Number.isFinite(seenAt) ? seenAt : nowMs };
-          const from = object ? teacherOf(lesson.from, isKnownId) : undefined;
+          const from = object ? teacherToken(lesson.from, isKnownId) : undefined;
           if (from) payload.from = from;
           if (object && lesson.sure === false) payload.sure = false;
           queue({ kind: 'learned', brief: [brief], payload });
@@ -853,7 +777,7 @@ function itemView(item, { limits, nameOf, oldTextOf }) {
  * on purpose.
  */
 function answerPrices(limits, tolerance, calibrator) {
-  const overshoot = Number.isFinite(tolerance) && tolerance >= 1 ? tolerance : CLAMP_TOLERANCE;
+  const overshoot = Number.isFinite(tolerance) && tolerance >= 1 ? tolerance : MEMORY_LIMIT_DEFAULTS.clampTolerance;
   const prices = {};
   for (const [kind, chars] of Object.entries(limits)) {
     prices[kind] = calibrator.apply(estimateTokens(NON_ASCII.repeat(Math.ceil(chars * overshoot))) + ANSWER_ITEM_OVERHEAD);
@@ -920,10 +844,8 @@ export function buildVoiceRequest({ prompts, config, calibrator, items, selfName
   const widest = String(Math.max(1, list.length)).replace(/\d/g, '9');
   const drafts = views.map((view) => JSON.stringify({ id: widest, ...view }));
 
-  // TODO: a copy of the request builders' section cost; use src/llm/budget.js#sectionCost(calibrator)
-  // once budget.js exports it, and delete this.
-  const cost = (text) => calibrator.apply(estimateTokens(text)) + 2;
-  const limit = inputLimit(config);
+  const cost = sectionCost(calibrator);
+  const limit = requestTokenLimit(config);
   // The fixed part is required: alone over the cap it throws, and nothing can be sent.
   const { used } = fitSections(
     [{ name: 'fixed', required: true, items: [system, characterBlock, block('items', '[]')].filter(Boolean) }],

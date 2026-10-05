@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseEnv, applyEnv, deepMerge, readConfig, need, isPlainObject } from '../src/config.js';
+import { roomQuestionChance } from '../src/behavior/spontaneous.js';
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-'));
@@ -186,4 +188,10 @@ test('need: throws when the value is an empty string', () => {
   } finally {
     delete process.env.NEP_TEST_EMPTY;
   }
+});
+
+test('config.json: the code fallback of spontaneous.roomQuestionChance is the shipped value', () => {
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const shipped = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
+  assert.equal(roomQuestionChance({}), shipped.spontaneous.roomQuestionChance);
 });

@@ -55,12 +55,15 @@ import { imageFileName } from './behavior/turn.js';
 import { renderVarietyReport, varietyStatusLine } from './behavior/variety.js';
 import { effectiveAffinity, privateRepliesToday } from './behavior/private.js';
 import { ImageCapError, ImageGenError, UnsupportedImageModelError, familyOf as imageFamilyOf, IMAGE_ROLE } from './llm/images.js';
-import { matchRoute, resolveProvider } from './llm/openrouter.js';
+import { matchRoute, resolveProvider, llmCountToday } from './llm/openrouter.js';
+import { PAGE } from './discord/collect.js';
 import { anchorMax, checkCaseText } from './mentor/cases.js';
 import { renderCard, renderFile, renderLastRun } from './mentor/report.js';
 import { log } from './log.js';
 import { clampChars } from './memory/clamp.js';
-import { utcDay } from './time.js';
+import { countToday, utcDay } from './time.js';
+import { VOICE_DAILY } from './memory/update.js';
+import { PORTRAIT_SLOTS, portraitSettings } from './memory/portrait.js';
 
 /** `/nep access grant/revoke`'s command keys that ONLY read — everything else (including every
  * group and `*`) is treated as opening a write command, and gets the "changes memory or config"
@@ -105,9 +108,6 @@ const NO_GUILD = 'no guild resolved yet';
 
 /** The reply for an empty list, the same for every list command. */
 const NONE = '(none)';
-
-/** Page size of a Discord message history fetch (Discord's maximum). */
-const PAGE = 100;
 
 // ---------------------------------------------------------------------------
 // Pure functions
@@ -1283,7 +1283,7 @@ export function createAdmin({
       `dry-run: ${onOff(dryRunOn)}${dryRunTarget}`,
       `model: ${cfg?.llm?.model ?? '-'}`,
       `calibration ratio: ${calibrator ? calibrator.ratio.toFixed(3) : '-'}`,
-      `llm requests today: ${data.llmCount ?? 0} / ${cfg?.llm?.maxRequestsPerDay ?? '-'} (day: ${data.llmDay ?? '-'})`,
+      `llm requests today: ${llmCountToday(data, Date.now())} / ${cfg?.llm?.maxRequestsPerDay ?? '-'} (day: ${todayUtc()})`,
       `paused: ${onOff(data.paused)}${data.paused ? ` (since ${data.pausedAt ?? '?'})` : ''}`,
       `warming up: ${onOff(isWarmingUp())}`,
     ];
@@ -1296,6 +1296,10 @@ export function createAdmin({
     // GIF watches have their own daily cap (media.gif.maxPerDay), apart from the video one.
     const gifWatches = gifWatchesToday(data, cfg, todayUtc());
     lines.push(`gif watches today: ${gifWatches.used}/${gifWatches.cap}`);
+
+    // Portraits share one daily cap (memory.portraitRefreshPerDay) between the analyzer and the owner.
+    const portraitsToday = countToday(data, PORTRAIT_SLOTS, todayUtc());
+    lines.push(`portraits refreshed today: ${portraitsToday}/${portraitSettings(cfg).perDay}`);
 
     if (warmup && typeof warmup.summary === 'function') {
       const summary = warmup.summary();
@@ -1315,6 +1319,14 @@ export function createAdmin({
       lines.push(`guild: ${label} profiles=${profiles} buffer=${buffer.length} nextSpontaneous=${next ?? '-'}`);
       // The variety pass: the switch, how many patterns its latest list holds and how old it is.
       lines.push(varietyStatusLine(typeof store.getGuild === 'function' ? store.getGuild(guildId)?.worn : null, cfg, Date.now()));
+      // The voice lines exist only while the two-stage analyzer is on (features.memoryTwoStage).
+      if (cfg?.features?.memoryTwoStage === true) {
+        const voiceCap = cfg?.memory?.voice?.maxPerDay;
+        lines.push(
+          `voice queue: ${store.getVoiceQueue(guildId).length}`,
+          `voice requests today: ${countToday(data, VOICE_DAILY, todayUtc())}/${Number.isFinite(voiceCap) ? voiceCap : 100}`,
+        );
+      }
     } else {
       lines.push('guild: not resolved yet');
     }
@@ -1919,7 +1931,7 @@ export function createAdmin({
     if (confirm !== guildName) {
       return (
         'This deletes everything remembered about this server: every member profile and private memory, the server habits, ' +
-        'the learned list, the emoji ranking, the variety history, the channel map, analyzer lore and the warmup progress. ' +
+        'the learned list, the emoji ranking, the variety history, the voice queue, the recent lines, the channel map, analyzer lore and the warmup progress. ' +
         `To confirm, run again with confirm: ${guildName}`
       );
     }
@@ -1935,7 +1947,7 @@ export function createAdmin({
       `channels removed: ${counts.channels}`,
       `lore removed: ${counts.loreRemoved} (kept: ${counts.loreKept})`,
       `buffer messages cleared: ${counts.bufferMessages}`,
-      'Also removed: the server habits, the learned list, the emoji ranking, the variety history and the warmup progress.',
+      'Also removed: the server habits, the learned list, the emoji ranking, the variety history, the voice queue, the recent lines and the warmup progress.',
       'Kept: owner lore, the GIF library, the media description cache, token calibration, the daily request counts and the spontaneous schedule.',
     ].join('\n');
   }
@@ -2590,6 +2602,9 @@ export function createAdmin({
     if (!result.ok) {
       const why = result.reason === 'warming-up' ? warmupBusyText() : outcomeText(result, 'unknown reason');
       return `Refresh not performed: ${why}`;
+    }
+    if (result.characterQueued) {
+      return `Portrait refreshed for ${userId}; its character text lands after the next voice run.`;
     }
     return `Portrait refreshed for ${userId}.`;
   }

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SnowflakeUtil } from 'discord.js';
+import { PermissionFlagsBits, SnowflakeUtil } from 'discord.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 import {
   nextDelayMs,
   isActiveHour,
@@ -9,6 +10,8 @@ import {
   pickChannel,
   isChannelDead,
   createSpontaneous,
+  chooseRoomMode,
+  roomQuestionChance,
 } from '../src/behavior/spontaneous.js';
 
 function snowflake(ts) {
@@ -997,4 +1000,364 @@ test('tick: does nothing while a run was already due, when isWarmingUp() is true
 
   assert.equal(calls, 0);
   assert.equal(store.state.data.spontaneous.g1, t, 'the schedule is left exactly as it was');
+});
+
+// ---------------------------------------------------------------------------
+// Noticed comments: a read-only channel (the bot reads it, cannot write in it)
+// is a candidate whose turn speaks in the main channel (memory.mainChannelIds),
+// every rail checked on that destination, no counter of its own.
+
+const NOTICE_T = Date.UTC(2026, 0, 5, 12, 0, 0); // hour 12, inside 10-to-3
+const SEND = PermissionFlagsBits.SendMessages;
+const VIEW = PermissionFlagsBits.ViewChannel;
+
+/** A guild with @everyone (its id is the guild's), one more role and the bot member. */
+function noticeGuild() {
+  const everyone = { id: 'g1' };
+  const regular = { id: 'r1' };
+  return {
+    id: 'g1',
+    members: { me: { id: 'self1' } },
+    roles: { everyone, cache: new Map([[everyone.id, everyone], [regular.id, regular]]) },
+    channels: { cache: new Map() },
+  };
+}
+
+/** A text channel of `guild`, no overwrites: `send` for the bot, `viewers` the roles that view it, `lastTs` its newest message. */
+function noticeChannel(guild, id, { send = true, viewers = ['g1', 'r1'], lastTs = null } = {}) {
+  const me = guild.members.me;
+  const channel = fakeChannel(id, guild, {
+    lastMessageId: lastTs === null ? null : snowflake(lastTs),
+    permissionOverwrites: { cache: new Map() },
+    permissionsFor: (target) =>
+      target === me ? { has: (flag) => send || flag !== SEND } : { has: (flag) => flag === VIEW && viewers.includes(target?.id) },
+  });
+  guild.channels.cache.set(id, channel);
+  return channel;
+}
+
+/**
+ * The read-only source `s1` (newest message `sourceAgoMs` before NOTICE_T) and the main channel
+ * `d1` (no message: dead as a candidate of its own under maxChannelSilenceHours 72, still a
+ * destination), a schedule due now, a recording runTurn. Options adjust config, prompts, the
+ * state, the turn runner's view and the clock.
+ */
+function noticeScene({
+  spontaneous: spontaneousOverrides = {},
+  features = {},
+  mention,
+  prompts = { elsewhere: 'ELSEWHERE TASK' },
+  data = {},
+  sourceAgoMs = 3 * MINUTE,
+  sourceViewers = ['g1', 'r1'],
+  mainCanSend = true,
+  lastPostAt = () => 0,
+  isBusy = () => false,
+  isAnyBusy = () => false,
+  result = { outcome: 'spoke' },
+  rng = () => 0.1,
+  t = NOTICE_T,
+} = {}) {
+  const guild = noticeGuild();
+  const source = noticeChannel(guild, 's1', { send: false, viewers: sourceViewers, lastTs: NOTICE_T - sourceAgoMs });
+  const main = noticeChannel(guild, 'd1', { send: mainCanSend });
+  const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
+  const config = {
+    ...baseConfig({ maxChannelSilenceHours: 72, ...spontaneousOverrides }, features, mention),
+    memory: { mainChannelIds: ['d1'] },
+  };
+  const store = fakeStore({ spontaneous: { g1: NOTICE_T }, ...data });
+  const calls = [];
+  const turns = fakeTurns({
+    runTurn: async (args) => {
+      calls.push(args);
+      return result;
+    },
+    lastPostAt,
+    isBusy,
+    isAnyBusy,
+  });
+  const hot = { config, prompts };
+  const spontaneous = createSpontaneous({ hot, store, client, turns, getGuildId: () => 'g1', rng, now: () => t });
+  return { guild, source, main, client, config, hot, store, calls, spontaneous };
+}
+
+/** `count` member messages of the source, one a minute, the newest `newestAgoMs` before NOTICE_T. */
+function sourceMessages(count, newestAgoMs = 3 * MINUTE) {
+  return Array.from({ length: count }, (_, i) => msg({ ts: NOTICE_T - newestAgoMs - (count - 1 - i) * MINUTE, authorId: `u${i}` }));
+}
+
+/** What a turn's chooser answers for the source pulled with `messages`. */
+function chooseWith(args, messages) {
+  return args.chooseMode([], NOTICE_T, { pulled: [{ channelId: 's1', messages }] });
+}
+
+test('spontaneous: a read-only channel with unseen messages is a tick candidate speaking in the main channel', async () => {
+  const scene = noticeScene();
+  const { logs } = await withCapturedLogs(() => scene.spontaneous.tick());
+
+  assert.equal(scene.calls.length, 1);
+  const [args] = scene.calls;
+  assert.equal(args.channel, scene.main, 'the words go to the main channel');
+  assert.deepEqual(args.source, { channelId: 's1', reason: 'noticed' });
+  assert.equal(args.mode, 'auto');
+  // The tick path keeps the ordinary liveness: liveMinMessages member lines after the seen mark.
+  assert.equal(chooseWith(args, sourceMessages(4)), 'elsewhere');
+  assert.equal(chooseWith(args, sourceMessages(3)), null, 'fewer than liveMinMessages: not now');
+  assert.equal(args.chooseMode([], NOTICE_T, { pulled: [] }), null, 'a source that was not pulled: not now');
+
+  const [firing] = logs.filter((entry) => entry.msg === 'spontaneous: firing a turn');
+  assert.equal(firing.channel, 'd1');
+  assert.equal(firing.source, 's1');
+  assert.ok(scene.store.state.data.spontaneous.g1 > NOTICE_T, 'rescheduled like any tick');
+});
+
+test('spontaneous: the noticed chooser counts only lines after the seen mark, read when it runs', async () => {
+  const scene = noticeScene();
+  await scene.spontaneous.tick();
+  const [args] = scene.calls;
+  const lines = sourceMessages(6); // 8..3 minutes ago
+  assert.equal(chooseWith(args, lines), 'elsewhere');
+  scene.store.state.data.elsewhereSeen = { s1: NOTICE_T - 5 * MINUTE }; // only three lines are newer
+  assert.equal(chooseWith(args, lines), null);
+});
+
+test('spontaneous: a source already seen is not a candidate', async () => {
+  const scene = noticeScene({ data: { elsewhereSeen: { s1: NOTICE_T - 3 * MINUTE } } });
+  await scene.spontaneous.tick();
+  assert.equal(scene.calls.length, 0);
+
+  const newer = noticeScene({ data: { elsewhereSeen: { s1: NOTICE_T - 4 * MINUTE } } });
+  await newer.spontaneous.tick();
+  assert.equal(newer.calls.length, 1, 'a message newer than the mark makes it a candidate again');
+});
+
+test('spontaneous: a read-only candidate needs the main channel\'s minGapMinutes', async () => {
+  const postedAgo = (age) => (id) => (id === 'd1' ? NOTICE_T - age : 0);
+  const recent = noticeScene({ lastPostAt: postedAgo(5 * MINUTE) });
+  await recent.spontaneous.tick();
+  assert.equal(recent.calls.length, 0, 'the persona posted in the main channel 5 minutes ago');
+
+  const old = noticeScene({ lastPostAt: postedAgo(13 * MINUTE) });
+  await old.spontaneous.tick();
+  assert.equal(old.calls.length, 1);
+
+  const sourceOnly = noticeScene({ lastPostAt: (id) => (id === 's1' ? NOTICE_T : 0) });
+  await sourceOnly.spontaneous.tick();
+  assert.equal(sourceOnly.calls.length, 1, 'the source\'s own stamp is not the rail');
+});
+
+test('spontaneous: a source still mid-burst is not a candidate', async () => {
+  const burst = noticeScene({ sourceAgoMs: 30 * 1000 });
+  await burst.spontaneous.tick();
+  assert.equal(burst.calls.length, 0, 'the last message is younger than elsewhere.settleSeconds');
+
+  const settled = noticeScene({ sourceAgoMs: 90 * 1000 });
+  await settled.spontaneous.tick();
+  assert.equal(settled.calls.length, 1);
+
+  const quiet = noticeScene({ sourceAgoMs: 20 * MINUTE });
+  await quiet.spontaneous.tick();
+  assert.equal(quiet.calls.length, 0, 'new content that went quiet past the live window is not live');
+});
+
+test('spontaneous: without prompts.elsewhere no source is a candidate', async () => {
+  for (const [label, prompts] of [['missing', {}], ['empty', { elsewhere: '  \n' }], ['no prompts', null]]) {
+    const scene = noticeScene({ prompts });
+    await scene.spontaneous.tick();
+    assert.equal(scene.calls.length, 0, label);
+  }
+});
+
+test('spontaneous: features.elsewhere off or a source the audience rail refuses gives no candidate', async () => {
+  const off = noticeScene({ features: { elsewhere: false } });
+  await off.spontaneous.tick();
+  assert.equal(off.calls.length, 0, 'features.elsewhere off');
+
+  const narrower = noticeScene({ sourceViewers: ['r1'] });
+  await narrower.spontaneous.tick();
+  assert.equal(narrower.calls.length, 0, 'someone who views the main channel cannot view the source');
+});
+
+test('spontaneous: a read-only candidate meets the destination\'s rails: spontaneous.channels, canSend, one attention', async () => {
+  const rows = [
+    ['spontaneous.channels without the main channel', { spontaneous: { channels: ['s1'] } }, 0],
+    ['spontaneous.channels with the main channel', { spontaneous: { channels: ['d1'] } }, 1],
+    ['the main channel cannot send', { mainCanSend: false }, 0],
+    ['a turn runs elsewhere (one attention)', { isAnyBusy: () => true }, 0],
+    ['a turn runs in the main channel', { isBusy: (id) => id === 'd1', mention: { oneAtATime: false } }, 0],
+  ];
+  for (const [label, options, expected] of rows) {
+    const scene = noticeScene(options);
+    await scene.spontaneous.tick();
+    assert.equal(scene.calls.length, expected, label);
+  }
+});
+
+test('spontaneous: noticeElsewhere rolls eavesdropChance like any message', async () => {
+  const member = { self: false, bot: false };
+  const hit = noticeScene({ rng: () => 0.01 }); // below eavesdropChance 0.02
+  const { logs } = await withCapturedLogs(async () => {
+    assert.equal(hit.spontaneous.noticeElsewhere(hit.source, member), true);
+  });
+  assert.deepEqual(
+    logs.filter((entry) => entry.msg === 'spontaneous: noticed').map(({ source, destination }) => ({ source, destination })),
+    [{ source: 's1', destination: 'd1' }],
+  );
+  assert.equal(hit.calls.length, 0, 'noticeElsewhere runs no turn itself');
+
+  const miss = noticeScene({ rng: () => 0.02 });
+  assert.equal(miss.spontaneous.noticeElsewhere(miss.source, member), false, 'a roll at the chance misses');
+
+  const rows = [
+    ['the persona\'s own line', {}, { self: true, bot: false }],
+    ['a bot', {}, { self: false, bot: true }],
+    ['features.eavesdrop off', { features: { eavesdrop: false } }, member],
+    ['features.spontaneous off', { features: { spontaneous: false } }, member],
+    ['asleep', { t: Date.UTC(2026, 0, 5, 5, 0, 0) }, member],
+    ['paused', { data: { paused: true } }, member],
+    ['main channel posted 5 minutes ago', { lastPostAt: (id) => (id === 'd1' ? NOTICE_T - 5 * MINUTE : 0) }, member],
+    ['no prompts.elsewhere', { prompts: {} }, member],
+  ];
+  for (const [label, options, normalized] of rows) {
+    const scene = noticeScene({ rng: () => 0, ...options });
+    assert.equal(scene.spontaneous.noticeElsewhere(scene.source, normalized), false, label);
+  }
+  const writable = noticeScene({ rng: () => 0 });
+  assert.equal(writable.spontaneous.noticeElsewhere(writable.main, member), false, 'a channel the bot can send in is not a source');
+});
+
+test('spontaneous: runNoticed re-checks the rails when it fires', async () => {
+  const ok = noticeScene();
+  const before = structuredClone(ok.store.state.data);
+  const result = await ok.spontaneous.runNoticed(ok.source);
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(ok.calls.length, 1);
+  const [args] = ok.calls;
+  assert.equal(args.channel, ok.main);
+  assert.deepEqual(args.source, { channelId: 's1', reason: 'noticed' });
+  assert.equal(chooseWith(args, sourceMessages(1)), 'elsewhere', 'the eavesdrop roll was the gate: one new member line is enough');
+  assert.deepEqual(ok.store.state.data, before, 'the schedule and the state are untouched: no counter of its own');
+
+  const again = await ok.spontaneous.runNoticed(ok.source);
+  assert.equal(again.outcome, 'spoke', 'no cap of its own');
+
+  const rows = [
+    ['paused', { data: { paused: true } }, 'paused'],
+    ['asleep', { t: Date.UTC(2026, 0, 5, 5, 0, 0) }, 'asleep'],
+    ['features.eavesdrop off', { features: { eavesdrop: false } }, 'off'],
+    ['features.elsewhere off', { features: { elsewhere: false } }, 'off'],
+    ['the audience rail', { sourceViewers: ['r1'] }, 'audience'],
+    ['no prompts.elsewhere', { prompts: { elsewhere: '' } }, 'no-prompt'],
+    ['the main channel cannot send', { mainCanSend: false }, 'no-destination'],
+    ['main channel minGapMinutes', { lastPostAt: (id) => (id === 'd1' ? NOTICE_T - MINUTE : 0) }, 'gap'],
+    ['one attention', { isAnyBusy: () => true }, 'busy'],
+    ['already seen', { data: { elsewhereSeen: { s1: NOTICE_T } } }, 'seen'],
+  ];
+  for (const [label, options, reason] of rows) {
+    const scene = noticeScene(options);
+    const refused = await scene.spontaneous.runNoticed(scene.source);
+    assert.equal(refused.reason, reason, label);
+    assert.equal(scene.calls.length, 0, label);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Room questions: chooseRoomMode, onMessage with { room }, eavesdropReady
+
+function roomLine({ id, ts, self = false, bot = false, authorId = 'u1' }) {
+  return { id, ts, self, bot, authorId };
+}
+
+test('chooseRoomMode: interject while no own line follows the focus', () => {
+  const history = [
+    roomLine({ id: 'm1', ts: 1000, self: true }),
+    roomLine({ id: 'm2', ts: 2000, authorId: 'a' }),
+    roomLine({ id: 'm3', ts: 3000, authorId: 'b' }),
+  ];
+  assert.equal(chooseRoomMode(history, 'm2'), 'interject', 'members talking after it change nothing');
+  assert.equal(chooseRoomMode(history, 'm3'), 'interject', 'the focus as the last line');
+  assert.equal(chooseRoomMode([roomLine({ id: 'm9', ts: 1 })], 'm9'), 'interject', 'a quiet channel: no liveness needed');
+});
+
+test('chooseRoomMode: null once the persona spoke after it', () => {
+  const history = [
+    roomLine({ id: 'm2', ts: 2000, authorId: 'a' }),
+    roomLine({ id: 'm3', ts: 3000, self: true }),
+    roomLine({ id: 'm4', ts: 4000, authorId: 'b' }),
+  ];
+  assert.equal(chooseRoomMode(history, 'm2'), null);
+  assert.equal(chooseRoomMode(history, 'gone'), null, 'a focus no longer in the history');
+  assert.equal(chooseRoomMode([], 'm2'), null);
+});
+
+/** A spontaneous scheduler for the room tests: the ordinary eavesdrop rails pass at noon. */
+function roomScene({ rng, config = baseConfig({ eavesdropDelayMs: [0, 0] }), store = fakeStore(), turns: turnOptions = {}, getGuildId = () => 'g1' } = {}) {
+  const calls = [];
+  const turns = fakeTurns({ runTurn: async (args) => { calls.push(args); return { outcome: 'spoke' }; }, ...turnOptions });
+  const channel = fakeChannel('c1', fakeGuild('g1'));
+  const hot = { config };
+  const spontaneous = createSpontaneous({ hot, store, client: {}, turns, getGuildId, rng, now: () => Date.UTC(2026, 0, 5, 12, 0, 0) });
+  return { spontaneous, channel, calls, hot, store };
+}
+
+test('spontaneous: a room line is scheduled without a roll and with its focus', async () => {
+  // One rng value only: the delay. A chance roll would take 0.5 >= eavesdropChance (0.02) and refuse.
+  const scene = roomScene({ rng: scripted([0.5]) });
+  const focus = { id: 'm7', self: false, bot: false, authorId: 'u1', ts: Date.UTC(2026, 0, 5, 11, 59, 0) };
+  assert.equal(scene.spontaneous.onMessage(scene.channel, focus, { room: true }), true);
+  await flushTimers();
+  assert.equal(scene.calls.length, 1);
+  const [args] = scene.calls;
+  assert.equal(args.channel, scene.channel);
+  assert.equal(args.mode, 'auto');
+  assert.equal(args.focus, focus);
+  assert.equal(args.chooseMode([roomLine({ id: 'm7', ts: 1 })], 2), 'interject', 'the room chooser, no liveness');
+  assert.equal(args.chooseMode([roomLine({ id: 'm7', ts: 1 }), roomLine({ id: 'm8', ts: 2, self: true })], 3), null);
+});
+
+test('spontaneous: onMessage returns whether it scheduled', async () => {
+  const hit = roomScene({ rng: scripted([0, 0]), config: baseConfig({ eavesdropChance: 0.5, eavesdropDelayMs: [0, 0] }) });
+  assert.equal(hit.spontaneous.onMessage(hit.channel, { self: false, bot: false }), true, 'a won roll');
+  const miss = roomScene({ rng: scripted([0.9]), config: baseConfig({ eavesdropChance: 0.5 }) });
+  assert.equal(miss.spontaneous.onMessage(miss.channel, { self: false, bot: false }), false, 'a lost roll');
+  const paused = roomScene({ rng: () => 0, store: fakeStore({ paused: true }) });
+  assert.equal(paused.spontaneous.onMessage(paused.channel, { self: false, bot: false }, { room: true }), false, 'paused');
+  const busy = roomScene({ rng: () => 0, turns: { isAnyBusy: () => true } });
+  assert.equal(busy.spontaneous.onMessage(busy.channel, { self: false, bot: false }, { room: true }), false, 'a room line still meets the rails');
+  const own = roomScene({ rng: () => 0 });
+  assert.equal(own.spontaneous.onMessage(own.channel, { self: true, bot: false }, { room: true }), false, 'its own line');
+  await flushTimers();
+  assert.equal(hit.calls.length, 1);
+  assert.equal(hit.calls[0].focus, undefined, 'an ordinary eavesdrop carries no focus');
+  for (const scene of [miss, paused, busy, own]) assert.equal(scene.calls.length, 0);
+});
+
+test('spontaneous: eavesdropReady is the eavesdrop rails as one boolean, with no roll', () => {
+  const rng = () => {
+    throw new Error('eavesdropReady never rolls');
+  };
+  assert.equal(roomScene({ rng }).spontaneous.eavesdropReady(roomScene({ rng }).channel), true);
+  const rows = [
+    ['paused', { store: fakeStore({ paused: true }) }],
+    ['features.eavesdrop off', { config: baseConfig({}, { eavesdrop: false }) }],
+    ['features.spontaneous off', { config: baseConfig({}, { spontaneous: false }) }],
+    ['asleep', { config: baseConfig({ activeHours: { from: 14, to: 16 } }) }],
+    ['minGapMinutes', { turns: { lastPostAt: () => Date.UTC(2026, 0, 5, 11, 55, 0) } }],
+    ['one attention', { turns: { isAnyBusy: () => true } }],
+    ['spontaneous.channels', { config: baseConfig({ channels: ['other'] }) }],
+    ['another guild', { getGuildId: () => 'g2' }],
+  ];
+  for (const [label, options] of rows) {
+    const scene = roomScene({ rng, ...options });
+    assert.equal(scene.spontaneous.eavesdropReady(scene.channel), false, label);
+  }
+  const readOnly = roomScene({ rng });
+  const cannotSend = fakeChannel('c2', fakeGuild('g1'), { permissionsFor: () => ({ has: () => false }) });
+  assert.equal(readOnly.spontaneous.eavesdropReady(cannotSend), false, 'a channel the bot cannot send in');
+});
+
+test('roomQuestionChance: the configured value is read as it is, 0 included', () => {
+  assert.equal(roomQuestionChance({ spontaneous: { roomQuestionChance: 0.3 } }), 0.3);
+  assert.equal(roomQuestionChance({ spontaneous: { roomQuestionChance: 0 } }), 0);
 });
