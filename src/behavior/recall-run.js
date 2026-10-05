@@ -21,14 +21,22 @@
 // `recall.minSummaryMs` is left. A summary that fails, times out or is
 // skipped never costs the result: the verbatim stretch of the first-ranked
 // window (recall.js fallbackWindow) is returned without a text.
+// Before any Discord request the same forms are matched against the
+// persona's stored memory (recall.js matchMemory; read-only store calls, no
+// request), under the gates the reply prompt applies to each store, and the
+// items go to the summary as `<memory>`: they alone are enough to ask it,
+// but they are notes, not chat, so they are never returned verbatim.
 // Logs carry counts, ids and codes only: never a form, a name or a message.
 
 import { log } from '../log.js';
+import { audienceOf } from '../discord/collect.js';
 import { checkPull } from '../discord/pull-fetch.js';
 import { fetchAround, searchMembers, searchMessages } from '../discord/search.js';
 import { helperRequestOptions, railReason } from '../llm/openrouter.js';
 import { oneLine } from '../memory/clamp.js';
+import { liveRecent, recentSettings } from '../memory/recent.js';
 import { bumpDaily, countToday } from '../time.js';
+import { audienceCovers } from './elsewhere.js';
 import { classifierTextModel } from './mention.js';
 import { pullPictures } from './pull.js';
 import {
@@ -36,6 +44,7 @@ import {
   clusterHits,
   cutStretch,
   fallbackWindow,
+  matchMemory,
   mergeWindows,
   parseRecallAnswer,
   recallSettings,
@@ -80,7 +89,7 @@ function hitFrom(raw) {
 
 /** A fresh stats record of one run. */
 function emptyStats() {
-  return { planned: 0, queries: 0, failed: 0, hits: 0, kept: 0, clusters: 0, windows: 0, summary: null, ms: 0 };
+  return { memory: 0, planned: 0, queries: 0, failed: 0, hits: 0, kept: 0, clusters: 0, windows: 0, summary: null, ms: 0 };
 }
 
 /** The kind of a failed summary request: `timeout` for a request cut at its limit, else `failed`. */
@@ -101,7 +110,8 @@ function summaryFailure(err) {
  * The recall runner for the turn (task R2 wires it beside the web search).
  * @param {object} deps
  * @param {{ config: object, prompts: object }} deps.hot  Live config + prompts; read at the moment of use.
- * @param {object} deps.store      `state` (`data`, `markDirty`) and `listUserProfiles` (src/memory/store.js).
+ * @param {object} deps.store      `state` (`data`, `markDirty`) and `listUserProfiles` (src/memory/store.js);
+ *   read only, when present: `getLore`, `getGuild` (its `learned`), `getRecent`. Never `getPrivate`.
  * @param {object} deps.llm        From createLlm(): `complete`, `capLeft`.
  * @param {object|null} [deps.describer]  From createDescriber (src/memory/describe.js): only its
  *   `cachedDescriptions` is used, never a fresh caption.
@@ -185,6 +195,65 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
     return [...found.values()];
   }
 
+  /**
+   * The recent lines this turn may show: the live ones (`memory.recentHours`,
+   * none with `features.recent` off), from the turn's own channel or a channel
+   * whose audience covers it -- the rule of the turn's `<recent>` block
+   * (src/behavior/turn.js recentInput, server side).
+   */
+  function shownRecentLines(config, guild, guildId, channel) {
+    const settings = recentSettings(config);
+    if (!settings || typeof store.getRecent !== 'function') return [];
+    const lines = liveRecent(store.getRecent(guildId)?.lines, { now: now(), hours: settings.hours });
+    if (lines.length === 0) return [];
+    const here = audienceOf(channel);
+    const allowed = new Map();
+    const shown = (id) => {
+      if (typeof id !== 'string' || !id) return false;
+      if (id === channel.id) return true;
+      if (!allowed.has(id)) allowed.set(id, audienceCovers(here, audienceOf(guild?.channels?.cache?.get?.(id) ?? null)));
+      return allowed.get(id);
+    };
+    return lines.filter((line) => shown(line.channelId));
+  }
+
+  /**
+   * The stored memory the forms point at (recall.js matchMemory), at most
+   * `recall.memoryItems`, with the display names of the stored members, or
+   * no item. Read-only store calls, no request. The gates are the reply
+   * prompt's: nothing with `features.memory` off; members' moments with
+   * `features.episodes` on, lore with `features.lore` on, learned items with
+   * memory on (all three guild-wide), recent lines by shownRecentLines. A
+   * private layer is never read. A store read that throws gives no item.
+   */
+  function storedMemory({ config, settings, guild, guildId, channel, server }) {
+    const none = { items: [], nameOf: () => null };
+    const forms = Array.isArray(server.forms) ? server.forms : [];
+    const who = Array.isArray(server.who) ? server.who : [];
+    if (settings.memoryItems <= 0 || config.features?.memory === false || (forms.length === 0 && who.length === 0)) return none;
+    try {
+      const features = config.features ?? {};
+      const profiles = typeof store.listUserProfiles === 'function' ? (store.listUserProfiles(guildId) ?? []) : [];
+      const names = new Map(profiles.filter((p) => p?.id).map((p) => [String(p.id), typeof p.names?.[0] === 'string' ? p.names[0] : null]));
+      const items = matchMemory({
+        forms,
+        who,
+        profiles: features.episodes !== false ? profiles : profiles.map((p) => ({ ...p, episodes: [] })),
+        lore: features.lore !== false && typeof store.getLore === 'function' ? (store.getLore(guildId) ?? []) : [],
+        learned: typeof store.getGuild === 'function' ? (store.getGuild(guildId)?.learned ?? []) : [],
+        recentLines: shownRecentLines(config, guild, guildId, channel),
+        from: server.from ?? null,
+        to: server.to ?? null,
+        max: settings.memoryItems,
+        timezone: config.bot?.timezone,
+      });
+      return { items, nameOf: (id) => names.get(String(id)) ?? null };
+    } catch (err) {
+      log.warn('recall: memory failed', { channel: channel.id, name: err?.name ?? null });
+      return none;
+    }
+  }
+
   /** The cached captions of the windows' pictures and custom emoji, or undefined (cache only, never a request). */
   function cachedCaptions(config, guildId, windows) {
     if (config.features?.mediaDescriptions !== true || typeof describer?.cachedDescriptions !== 'function') return undefined;
@@ -217,6 +286,10 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
     };
     const result = (extra = {}) => ({ text: null, stretch: null, people: [], stats: { ...stats, ms: now() - started }, ...extra });
 
+    // 0. Stored memory: no request, before the first Discord one so it always fits the budget.
+    const memory = storedMemory({ config, settings, guild, guildId, channel, server });
+    stats.memory = memory.items.length;
+
     // 1. People.
     const people = await findPeople({ guild, guildId, who: server.who ?? [], maxPeople: settings.maxPeople, selfId, signal: searchSignal, searchUntil, beforeRequest });
     if (signal.aborted) return null;
@@ -235,7 +308,7 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
       before: Number.isFinite(oldest) ? oldest : null,
     });
     const peopleOut = () => people.map((p) => ({ count: 0, newestTs: null, ...p }));
-    if (plan.length === 0) {
+    if (plan.length === 0 && memory.items.length === 0) {
       log.info('recall: skipped', { channel: channelId, reason: Number.isFinite(server.from) ? 'visible' : 'no-query' });
       return result({ people: peopleOut() });
     }
@@ -317,6 +390,7 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
     for (const window of windows) window.descriptions = descriptions;
     log.info('recall: searched', {
       channel: channelId,
+      memory: stats.memory,
       planned: stats.planned,
       queries: stats.queries,
       failed: stats.failed,
@@ -346,15 +420,17 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
       if (lines.length === 0) return null;
       return { channelId: window.channelId, channelName: window.channelName, startTs: lines[0].ts, lines: lines.map((line) => line.text).join('\n') };
     };
+    // Stored memory alone is enough to ask the summary.
     const messages =
-      windows.length > 0
-        ? buildRecallRequest({ prompt, selfName, question: candidate ?? {}, people, windows, answerChars: settings.answerChars, now: now(), ...render })
+      windows.length > 0 || memory.items.length > 0
+        ? buildRecallRequest({ prompt, selfName, question: candidate ?? {}, people, windows, memory: memory.items, nameOf: memory.nameOf, answerChars: settings.answerChars, now: now(), ...render })
         : null;
     if (!messages) {
       log.info('recall: skipped', { channel: channelId, reason: 'no-hits' });
       return result({ people: peopleOut() });
     }
-    // Without a summary the search still answers: the first-ranked window verbatim, no text.
+    // Without a summary the search still answers: the first-ranked window verbatim, no text
+    // (stored memory alone gives nothing then: its items are notes, not chat).
     let asked = null;
     const fallback = (kind) => {
       stats.summary = kind;
@@ -364,6 +440,8 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
     };
     progress.fallback = fallback;
     if (started + settings.timeoutMs - now() < settings.minSummaryMs) return fallback('skipped');
+    // A run on stored memory alone sent no Discord request: its summary is what counts it.
+    beforeRequest();
     asked = now();
     let completion;
     try {
@@ -399,8 +477,11 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
    * `prompts['recall-summary']`), `daily-cap` (`llm.capLeft()` spent) or
    * `daily` (`recall.maxPerDay` runs today), each before any request; later
    * `visible` (the range lies inside the turn's own chat) or `no-hits`
-   * (nothing left to read). The first Discord request of a run bumps
-   * `recallDay`/`recallCount` once. Never rejects: a failure logs `recall:
+   * (nothing left to read), either only when no stored memory matched
+   * either (storedMemory; `stats.memory` its items, also on `recall:
+   * searched`): matched memory alone still asks the summary. The first
+   * request of a run (a Discord one, or the summary of a run on memory
+   * alone) bumps `recallDay`/`recallCount` once. Never rejects: a failure logs `recall:
    * failed` (`reason`: the rail code of a failed summary request, `timeout`
    * when `recall.timeoutMs` ran out -- the run is abandoned, its requests
    * aborted -- or `error`). Once the windows are read the result is never
@@ -410,7 +491,8 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
    * (fallbackWindow), `stats.summary` `failed` | `timeout` | `skipped`, and
    * logs `recall: summary` with `answer: 'fallback'`; an answered summary
    * sets `stats.summary` `answered`. Resolves `text` null when nothing was
-   * found or the helper answered `nothing`; `stretch` is the window the
+   * found or the helper answered `nothing` (and when the summary of a run
+   * on stored memory alone gives no answer); `stretch` is the window the
    * helper named, else null; `people` the members the name forms found,
    * with how many of their messages were kept and the newest one's time.
    */

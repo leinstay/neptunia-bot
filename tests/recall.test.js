@@ -10,6 +10,7 @@ import {
   clusterHits,
   cutStretch,
   fallbackWindow,
+  matchMemory,
   mergeWindows,
   parseLookupAnswer,
   parseRecallAnswer,
@@ -307,6 +308,130 @@ test('parseRecallAnswer: nothing or an empty answer gives no text and no stretch
   const long = 'Ana did it. '.repeat(40).trim();
   const { text } = parseRecallAnswer(long, { answerChars: 100, count: 0 });
   assert.ok(text.length <= 125 && text.endsWith('.'), text);
+});
+
+// ---- stored memory -------------------------------------------------------------------------
+
+const ANA = '411111111111111111';
+const KITE = '477777777777777777';
+const ELO = '433333333333333333';
+
+/** A stored episode. */
+function ep(date, what, { quote = '', feeling = '', weight = 3, addedAt = `${date}T20:00:00.000Z` } = {}) {
+  return { date, what, quote, feeling, weight, addedAt };
+}
+
+test('matchMemory: forms match whole words only, folded; inflected forms count separately; more forms rank first', () => {
+  const profiles = [
+    {
+      id: ANA,
+      names: ['Ana'],
+      aliases: [],
+      episodes: [
+        ep('2026-10-01', 'shot the κουνέλι behind the shed', { weight: 5 }),
+        ep('2026-10-02', 'held a funeral for the κουνέλι at the κουνελιού grave', { weight: 1 }),
+        ep('2026-09-01', 'showed photos of κουνελάκια', { weight: 5 }),
+        ep('2026-09-02', 'said nothing about animals', { quote: 'το ΚΟΥΝΈΛΙ μου', weight: 2 }),
+      ],
+    },
+  ];
+  const lore = [
+    { id: 'l1', title: 'Le Lapin', keys: ['lapin'], text: 'The rabbit of the garden, buried in L’Été.', weight: 3, updatedAt: '2026-09-10T00:00:00.000Z' },
+    { id: 'l2', title: 'Lapinou', keys: ['lapinou'], text: 'A plush toy.', weight: 3 },
+  ];
+  const items = matchMemory({ forms: ['κουνέλι', 'κουνελιού', 'ete'], profiles, lore, max: 10 });
+  assert.deepEqual(
+    items.map((i) => [i.kind, i.score, i.text]),
+    [
+      ['episode', 2, 'held a funeral for the κουνέλι at the κουνελιού grave'],
+      ['episode', 1, 'shot the κουνέλι behind the shed'],
+      ['lore', 1, 'Le Lapin: The rabbit of the garden, buried in L’Été.'],
+      ['episode', 1, 'said nothing about animals "το ΚΟΥΝΈΛΙ μου"'],
+    ],
+  );
+  assert.deepEqual([items[0].date, items[0].memberId], ['2026-10-02', ANA]);
+  assert.deepEqual([items[2].date, items[2].memberId], [null, null]);
+  assert.deepEqual(matchMemory({ forms: ['lapin'], lore, max: 10 }).map((i) => i.text), ['Le Lapin: The rabbit of the garden, buried in L’Été.'], 'not inside lapinou');
+  assert.equal(matchMemory({ forms: ['κουνέλι'], profiles, max: 1 }).length, 1, 'capped at max');
+  assert.deepEqual(matchMemory({ forms: ['κουνέλι'], profiles, max: 0 }), []);
+  assert.deepEqual(matchMemory({ forms: [], who: [], profiles, lore, max: 10 }), [], 'nothing asked, nothing found');
+});
+
+test('matchMemory: a feeling is never searched; learned items and recent lines are', () => {
+  const profiles = [{ id: ANA, names: ['Ana'], episodes: [ep('2026-10-01', 'a quiet evening', { feeling: 'the κουνέλι made her sad' })] }];
+  const learned = [{ id: 1, text: 'a κουνέλι lives in the garden', from: `<@${ELO}>`, weight: 1, firstSeen: '2026-09-01T00:00:00.000Z', lastSeen: '2026-09-05T00:00:00.000Z' }];
+  const recentLines = [{ id: 1, at: Date.UTC(2026, 9, 4, 22, 30), channelId: 'c1', text: `<@${ANA}> lost her κουνέλι`, who: [ANA], weight: 2 }];
+  const items = matchMemory({ forms: ['κουνέλι'], profiles, learned, recentLines, max: 10, timezone: 'Europe/Berlin' });
+  assert.deepEqual(
+    items.map((i) => [i.kind, i.date, i.memberId, i.text]),
+    [
+      ['recent', '2026-10-05', null, `<@${ANA}> lost her κουνέλι`],
+      ['learned', null, ELO, 'a κουνέλι lives in the garden'],
+    ],
+    'the newer first among equals; a recent line dated in the zone',
+  );
+});
+
+test('matchMemory: name forms bring the member\'s moments and the lines that name them', () => {
+  const profiles = [
+    {
+      id: KITE,
+      names: ['Kitezu'],
+      aliases: [{ name: 'Κιτέζου', weight: 1 }],
+      episodes: [ep('2026-01-01', 'won the chess night', { weight: 2 }), ep('2025-06-01', 'moved to the coast', { weight: 4 })],
+    },
+    { id: ANA, names: ['Ana'], episodes: [ep('2026-05-01', `argued with <@${KITE}> about chess`, { weight: 1 }), ep('2026-05-02', 'baked bread', { weight: 5 })] },
+  ];
+  const items = matchMemory({ forms: [], who: ['κιτέζου'], profiles, max: 10 });
+  assert.deepEqual(
+    items.map((i) => [i.memberId, i.text, i.score]),
+    [
+      [KITE, 'moved to the coast', 1],
+      [KITE, 'won the chess night', 1],
+      [ANA, `argued with <@${KITE}> about chess`, 1],
+    ],
+  );
+  const both = matchMemory({ forms: ['chess'], who: ['kitezu'], profiles, max: 10 });
+  assert.deepEqual(both.map((i) => [i.text, i.score]).slice(0, 2), [
+    ['won the chess night', 2],
+    [`argued with <@${KITE}> about chess`, 2],
+  ]);
+});
+
+test('matchMemory: a range keeps only dated items inside it', () => {
+  const profiles = [{ id: ANA, names: ['Ana'], episodes: [ep('2025-12-31', 'κουνέλι fireworks'), ep('2026-01-01', 'κουνέλι brunch'), ep('2026-01-03', 'κουνέλι walk'), { what: 'κουνέλι undated', weight: 3 }] }];
+  const lore = [{ title: 'κουνέλι', keys: ['κουνέλι'], text: 'timeless' }];
+  const recentLines = [
+    { id: 1, at: Date.UTC(2026, 0, 1, 10), channelId: 'c1', text: 'κουνέλι inside', weight: 2 },
+    { id: 2, at: Date.UTC(2026, 0, 2, 10), channelId: 'c1', text: 'κουνέλι after', weight: 2 },
+  ];
+  const from = Date.UTC(2025, 11, 31, 23);
+  const to = Date.UTC(2026, 0, 1, 23) - 1;
+  const items = matchMemory({ forms: ['κουνέλι'], profiles, lore, recentLines, from, to, max: 10, timezone: 'Europe/Berlin' });
+  assert.deepEqual(items.map((i) => i.text).sort(), ['κουνέλι brunch', 'κουνέλι inside']);
+  const open = matchMemory({ forms: ['κουνέλι'], profiles, from: Date.UTC(2026, 0, 2), max: 10 });
+  assert.deepEqual(open.map((i) => i.text), ['κουνέλι walk'], 'an open end');
+});
+
+test('buildRecallRequest: the memory block comes before found, one structural line per item, tokens resolved', () => {
+  const t = Date.UTC(2026, 9, 1, 18, 40);
+  const memory = [
+    { kind: 'episode', text: `shot the κουνέλι with <@${KITE}>`, date: '2026-10-01', memberId: ANA, score: 2 },
+    { kind: 'lore', text: 'Le Lapin: the garden rabbit', date: null, memberId: null, score: 1 },
+    { kind: 'learned', text: 'a fact', date: null, memberId: '499999999999999999', score: 1 },
+  ];
+  const names = { [ANA]: 'Ana', [KITE]: 'Kitezu' };
+  const base = { prompt: 'p', selfName: 'Zoë', question: { authorName: 'Nikos', content: 'q' }, labels, timezone: 'UTC', answerChars: 100, memory, nameOf: (id) => names[id] ?? null };
+  const user = buildRecallRequest({ ...base, windows: [{ channelId: 'c1', channelName: 'general', messages: [msg('m1', t)], hitIds: ['m1'] }] })[1].content;
+  assert.ok(
+    user.startsWith(
+      ['<memory>', 'episode | 2026-10-01 | Ana | shot the κουνέλι with Kitezu', 'lore | - | - | Le Lapin: the garden rabbit', 'learned | - | - | a fact', '</memory>', '<found>\n'].join('\n'),
+    ),
+    user,
+  );
+  const alone = buildRecallRequest({ ...base, windows: [] });
+  assert.equal(alone[1].content, ['<memory>', 'episode | 2026-10-01 | Ana | shot the κουνέλι with Kitezu', 'lore | - | - | Le Lapin: the garden rabbit', 'learned | - | - | a fact', '</memory>', '<question>', 'Nikos: q', '</question>'].join('\n'));
+  assert.equal(buildRecallRequest({ ...base, memory: [], windows: [] }), null, 'neither memory nor a window');
 });
 
 test('cutStretch: whole lines go from the far ends, matched lines stay', () => {

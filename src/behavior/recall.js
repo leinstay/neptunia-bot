@@ -10,13 +10,21 @@
 // time, a window of messages around each is fetched, and one helper request
 // (prompts/recall-summary.md) reads the windows and says what the history
 // answers, optionally singling out one stretch the persona then gets
-// verbatim. This module holds those decisions with no I/O; the Discord side
-// is src/discord/search.js and the runner src/behavior/recall-run.js. No
-// wording of ours goes into the request: tags and structural marks only.
+// verbatim. The same word and name forms are also matched against the
+// persona's own stored memory (matchMemory: members' moments, lore, learned
+// items, recent lines), with no request, so a moment she already remembers
+// reaches the summary even when it sits under another member or a lore key
+// the question does not name. This module holds those decisions with no I/O;
+// the Discord side is src/discord/search.js and the runner
+// src/behavior/recall-run.js. No wording of ours goes into the request: tags
+// and structural marks only.
 
 import { block, fillPromptTemplate } from './prompt.js';
 import { formatTranscript } from '../discord/format.js';
 import { clampText, oneLine } from '../memory/clamp.js';
+import { episodeDate } from '../memory/episodes.js';
+import { TEACHER_TOKEN_RE, fromTokens, occursAsWholeWord, tokenIds } from '../memory/mentions.js';
+import { foldText, memberIdOf } from '../memory/recent.js';
 import { DAY_MS, MINUTE_MS, utcDay, zonedDay, zonedEpoch } from '../time.js';
 
 /** Defaults of the `recall` config group (config.json carries the same values). */
@@ -33,6 +41,7 @@ export const RECALL_DEFAULTS = Object.freeze({
   timeoutMs: 10000,
   minSummaryMs: 2500,
   maxOutputTokens: 500,
+  memoryItems: 6,
 });
 
 /** How many of the newest windows the fallback stretch is chosen among (fallbackWindow). */
@@ -85,14 +94,14 @@ function numberAtLeast(value, fallback, min) {
  * The `recall` settings read from the live config, or null when
  * `features.recall` is false (a missing key counts as on). Each number falls
  * back to RECALL_DEFAULTS when missing or unusable; counts are floored.
- * `maxForms`, `maxPeople`, `maxPerDay`, `stretchChars` and `minSummaryMs`
- * may be 0 (no content query, no member lookup, no recall today, no
- * stretch, the summary asked whatever time is left); `windowMessages` is at
- * most 100.
+ * `maxForms`, `maxPeople`, `maxPerDay`, `stretchChars`, `minSummaryMs` and
+ * `memoryItems` may be 0 (no content query, no member lookup, no recall
+ * today, no stretch, the summary asked whatever time is left, no stored
+ * memory searched); `windowMessages` is at most 100.
  * @param {object} config  The live config.
  * @returns {{ maxForms: number, maxPeople: number, dateSamples: number, clusterGapMinutes: number,
  *   maxClusters: number, windowMessages: number, answerChars: number, stretchChars: number, maxPerDay: number,
- *   timeoutMs: number, minSummaryMs: number, maxOutputTokens: number }|null}
+ *   timeoutMs: number, minSummaryMs: number, maxOutputTokens: number, memoryItems: number }|null}
  */
 export function recallSettings(config) {
   if (config?.features?.recall === false) return null;
@@ -111,6 +120,7 @@ export function recallSettings(config) {
     timeoutMs: intAtLeast(r.timeoutMs, d.timeoutMs, 1),
     minSummaryMs: intAtLeast(r.minSummaryMs, d.minSummaryMs, 0),
     maxOutputTokens: intAtLeast(r.maxOutputTokens, d.maxOutputTokens, 1),
+    memoryItems: intAtLeast(r.memoryItems, d.memoryItems, 0),
   };
 }
 
@@ -492,6 +502,156 @@ export function renderRecallWindows(windows, { labels, timezone = 'UTC', selfNam
   return out;
 }
 
+/** The weight a stored item other than an episode ranks with: an episode's default weight. */
+const NEUTRAL_WEIGHT = 3;
+/** The mark of an absent field in a `<memory>` line. */
+const NO_FIELD = '-';
+
+/** The folded, non-empty, distinct forms of `list` (src/memory/recent.js#foldText). */
+function foldedForms(list) {
+  return [...new Set((Array.isArray(list) ? list : []).filter((form) => typeof form === 'string').map(foldText).filter(Boolean))];
+}
+
+/** How many of `forms` (folded) occur as a whole word in at least one of `texts` (folded here). */
+function formsMatched(texts, forms) {
+  const folded = texts.filter((text) => typeof text === 'string' && text).map(foldText);
+  return forms.filter((form) => folded.some((text) => occursAsWholeWord(text, form))).length;
+}
+
+/** A time from an ISO string, or -Infinity. */
+function isoMs(value) {
+  const ms = typeof value === 'string' ? Date.parse(value) : NaN;
+  return Number.isFinite(ms) ? ms : -Infinity;
+}
+
+/**
+ * The persona's stored memory that speaks to a recall question, matched with
+ * no request. Searched: the members' moments (`profiles[].episodes`: `what`
+ * and `quote`, never `feeling`), the lorebook (`title`, `keys`, `text`), the
+ * learned items (`text`) and the recent lines (`text`) -- each list as the
+ * caller passes it, already gated (the caller never passes a private layer).
+ * - A form of `forms` or `who` matches a text when it occurs in it as a whole
+ *   word or phrase, both folded (src/memory/recent.js#foldText: case, accents;
+ *   src/memory/mentions.js#occursAsWholeWord). Inflected forms are separate
+ *   forms; nothing is stemmed.
+ * - A `who` form equal (folded) to one of a profile's `names` or alias names
+ *   picks that member: each of their moments, and every item whose text holds
+ *   their `<@id>` token (a recent line's `who` too), counts the person once.
+ * - `score` = distinct forms matched + 1 when the item counts the person; an
+ *   item of score 0 is left out.
+ * - With `from` / `to` (epoch ms, either may be null) only dated items inside
+ *   are kept: a moment by its `date` against the local days of the bounds in
+ *   `timezone`, a recent line by its `at`; lore and learned items are undated
+ *   and go.
+ * Ranked by score, then weight (a moment's own; any other item weighs 3, a
+ * moment's default), then the newer (a moment's date then `addedAt`, lore's
+ * `updatedAt` or `createdAt`, a learned item's `lastSeen`, a line's `at`),
+ * then input order; at most `max` (RECALL_DEFAULTS.memoryItems when unusable,
+ * 0 for none). An item: `text` (a moment's `what`, with its `quote` in double
+ * quotes after it when it has one; lore as `title: text`; the stored text
+ * otherwise; `<@id>` tokens kept), `date` (`YYYY-MM-DD`: a moment's own, a
+ * line's local day in `timezone`; null for lore and learned), `memberId` (the
+ * moment's member, a learned item's teacher, else null), `score`. Pure.
+ * @param {{ forms?: string[], who?: string[], profiles?: object[], lore?: object[], learned?: object[],
+ *   recentLines?: object[], from?: number|null, to?: number|null, max?: number, timezone?: string }} params
+ * @returns {{ kind: 'episode'|'lore'|'learned'|'recent', text: string, date: string|null, memberId: string|null,
+ *   score: number }[]}
+ */
+export function matchMemory({ forms = [], who = [], profiles = [], lore = [], learned = [], recentLines = [], from = null, to = null, max, timezone = 'UTC' } = {}) {
+  const limit = intAtLeast(max, RECALL_DEFAULTS.memoryItems, 0);
+  const whoForms = foldedForms(who);
+  const allForms = foldedForms([...(Array.isArray(forms) ? forms : []), ...(Array.isArray(who) ? who : [])]);
+  if (limit === 0 || allForms.length === 0) return [];
+  const list = (value) => (Array.isArray(value) ? value.filter((item) => item && typeof item === 'object') : []);
+
+  const ranged = Number.isFinite(from) || Number.isFinite(to);
+  const fromDay = Number.isFinite(from) ? zonedDay(from, timezone) : null;
+  const toDay = Number.isFinite(to) ? zonedDay(to, timezone) : null;
+  const dayInside = (day) => !ranged || (Boolean(day) && (fromDay === null || day >= fromDay) && (toDay === null || day <= toDay));
+  const atInside = (at) => !ranged || (Number.isFinite(at) && (!Number.isFinite(from) || at >= from) && (!Number.isFinite(to) || at <= to));
+
+  const people = new Set();
+  for (const profile of list(profiles)) {
+    const id = memberIdOf(profile.id);
+    if (id === null || whoForms.length === 0) continue;
+    const names = [...list(profile.aliases).map((alias) => alias.name), ...(Array.isArray(profile.names) ? profile.names : [])];
+    if (names.some((name) => typeof name === 'string' && whoForms.includes(foldText(name)))) people.add(id);
+  }
+  const namesPerson = (texts, extraIds = []) => [...extraIds, ...texts.flatMap((text) => tokenIds(text))].some((id) => people.has(String(id)));
+
+  const found = [];
+  const add = (item, texts, person) => {
+    const score = formsMatched(texts, allForms) + (person ? 1 : 0);
+    if (score > 0) found.push({ ...item, score, order: found.length });
+  };
+
+  for (const profile of list(profiles)) {
+    const memberId = memberIdOf(profile.id);
+    if (memberId === null) continue;
+    for (const ep of list(profile.episodes)) {
+      const what = typeof ep.what === 'string' ? oneLine(ep.what) : '';
+      if (!what) continue;
+      const date = episodeDate(ep.date) || null;
+      if (!dayInside(date)) continue;
+      const quote = typeof ep.quote === 'string' ? oneLine(ep.quote) : '';
+      const texts = [what, quote];
+      const item = {
+        kind: 'episode',
+        text: quote ? `${what} "${quote}"` : what,
+        date,
+        memberId,
+        weight: Number.isFinite(ep.weight) ? ep.weight : NEUTRAL_WEIGHT,
+        ts: date ? Date.parse(`${date}T00:00:00Z`) : -Infinity,
+        ts2: isoMs(ep.addedAt),
+      };
+      add(item, texts, people.has(memberId) || namesPerson(texts));
+    }
+  }
+  // Lore and learned items carry no date: a range leaves them out.
+  if (!ranged) {
+    for (const entry of list(lore)) {
+      const title = typeof entry.title === 'string' ? oneLine(entry.title) : '';
+      const text = typeof entry.text === 'string' ? oneLine(entry.text) : '';
+      if (!text) continue;
+      const keys = Array.isArray(entry.keys) ? entry.keys.filter((key) => typeof key === 'string') : [];
+      const item = { kind: 'lore', text: title ? `${title}: ${text}` : text, date: null, memberId: null, weight: NEUTRAL_WEIGHT, ts: isoMs(entry.updatedAt || entry.createdAt), ts2: 0 };
+      add(item, [title, ...keys, text], namesPerson([title, text]));
+    }
+    for (const entry of list(learned)) {
+      const text = typeof entry.text === 'string' ? oneLine(entry.text) : '';
+      if (!text) continue;
+      const teacher = typeof entry.from === 'string' ? (TEACHER_TOKEN_RE.exec(entry.from.trim())?.[1] ?? null) : null;
+      const item = { kind: 'learned', text, date: null, memberId: teacher, weight: NEUTRAL_WEIGHT, ts: isoMs(entry.lastSeen), ts2: 0 };
+      add(item, [text], namesPerson([text]));
+    }
+  }
+  for (const line of list(recentLines)) {
+    const text = typeof line.text === 'string' ? oneLine(line.text) : '';
+    if (!text || !Number.isFinite(line.at) || !atInside(line.at)) continue;
+    const item = { kind: 'recent', text, date: zonedDay(line.at, timezone), memberId: null, weight: NEUTRAL_WEIGHT, ts: line.at, ts2: 0 };
+    add(item, [text], namesPerson([text], Array.isArray(line.who) ? line.who : []));
+  }
+
+  return found
+    .sort((a, b) => b.score - a.score || b.weight - a.weight || b.ts - a.ts || b.ts2 - a.ts2 || a.order - b.order)
+    .slice(0, limit)
+    .map(({ kind, text, date, memberId, score }) => ({ kind, text, date, memberId, score }));
+}
+
+/**
+ * The `<memory>` line of one matchMemory item: `kind | date | name | text`,
+ * structural fields only -- `kind` the item's kind code, `date` its date or
+ * `-`, `name` the display name `nameOf` gives its `memberId` or `-`, `text`
+ * on one line with `<@id>` tokens resolved through `nameOf` (an unresolved
+ * one stays as stored).
+ */
+function memoryLine(item, nameOf) {
+  const resolve = typeof nameOf === 'function' ? nameOf : () => null;
+  const name = item?.memberId ? oneLine(resolve(item.memberId) ?? '') : '';
+  const text = oneLine(fromTokens(String(item?.text ?? ''), resolve, 'chat'));
+  return `${item?.kind} | ${item?.date || NO_FIELD} | ${name || NO_FIELD} | ${text}`;
+}
+
 /** The `<people>` line of one found member: `name | username | count | newest date` (structural fields). */
 function personLine(person, timezone) {
   const newest = Number.isFinite(person?.newestTs) ? zonedDay(person.newestTs, timezone) : '';
@@ -504,15 +664,19 @@ function personLine(person, timezone) {
  * `{{name}}` (the persona's display name), `{{answerChars}}` and, given
  * `now`, `{{today}}` (the local date key in `timezone`) filled; the user
  * message holds `<people>` (one line per found member, see personLine; left
- * out when none), `<found>` (one section per window, numbered from 1 in the
+ * out when none), `<memory>` (one line per item of `memory`, matchMemory's
+ * order, as memoryLine renders it: `kind | date | name | text`; left out
+ * when none), `<found>` (one section per window, numbered from 1 in the
  * order given: a header `## n | YYYY-MM-DD | #channel` with the local date
- * of its first line, then its lines, renderRecallWindows with indices) and
- * `<question>` (the candidate's author and text cut to `maxChars`). Null
- * when the prompt is blank or no window has a line.
+ * of its first line, then its lines, renderRecallWindows with indices; left
+ * out when no window has a line) and `<question>` (the candidate's author
+ * and text cut to `maxChars`). Null when the prompt is blank, or when no
+ * window has a line and there is no memory item.
  * @param {{ prompt: string|null|undefined, selfName: string, question: { authorName?: string, content?: string },
  *   people?: { name: string, username?: string, count?: number, newestTs?: number|null }[], windows: object[],
- *   labels: object, timezone?: string, answerChars: number, now?: number, maxChars?: number, gapMinutes?: number,
- *   seeReactions?: boolean, reactionsPerMessage?: number }} params
+ *   memory?: { kind: string, text: string, date: string|null, memberId: string|null }[],
+ *   nameOf?: (id: string) => (string|null|undefined), labels: object, timezone?: string, answerChars: number,
+ *   now?: number, maxChars?: number, gapMinutes?: number, seeReactions?: boolean, reactionsPerMessage?: number }} params
  * @returns {{ role: string, content: string }[]|null}
  */
 export function buildRecallRequest({
@@ -521,6 +685,8 @@ export function buildRecallRequest({
   question,
   people = [],
   windows,
+  memory = [],
+  nameOf,
   labels,
   timezone = 'UTC',
   answerChars,
@@ -532,13 +698,15 @@ export function buildRecallRequest({
 }) {
   if (typeof prompt !== 'string' || !prompt.trim()) return null;
   const rendered = renderRecallWindows(windows, { labels, timezone, selfName, gapMinutes, maxChars, seeReactions, reactionsPerMessage, indexed: true });
-  if (rendered.length === 0) return null;
+  const notes = (Array.isArray(memory) ? memory : []).filter((item) => item && typeof item.text === 'string' && item.text.trim());
+  if (rendered.length === 0 && notes.length === 0) return null;
   const sections = rendered.map((window, i) =>
     [`## ${i + 1} | ${zonedDay(window.startTs, timezone)} | #${oneLine(window.channelName)}`, ...window.lines.map((line) => line.text)].join('\n'),
   );
   const text = [...String(question?.content ?? '')].slice(0, maxChars).join('');
   const user = [
     block('people', (Array.isArray(people) ? people : []).map((p) => personLine(p, timezone)).join('\n')),
+    block('memory', notes.map((item) => memoryLine(item, nameOf)).join('\n')),
     block('found', sections.join('\n\n')),
     block('question', `${oneLine(question?.authorName)}: ${text}`),
   ]

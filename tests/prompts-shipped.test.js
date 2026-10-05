@@ -970,7 +970,8 @@ test('createTurnRunner: a reply turn fills the describer, re-watch, link, search
     for (const call of calls) assertFilled(call.messages, { files }, kind);
   }
   const [summary] = llm.calls.filter((call) => kindOf(call.messages) === 'recall-summary');
-  assertFilled(summary.messages, { files: LOADS.recallSummary, blocks: ['found', 'question'] }, 'recall-summary');
+  // `<memory>`: the stored lore entry keyed `tomate` matches the form `tomate`.
+  assertFilled(summary.messages, { files: LOADS.recallSummary, blocks: ['memory', 'found', 'question'] }, 'recall-summary');
   const [turn] = llm.calls.filter((call) => kindOf(call.messages) === 'system-prompt');
   const text = assertFilled(turn?.messages, { files: LOADS.turn, blocks: ['senses', 'about_chat', 'server', 'lore', 'people', 'lookup', 'chat', 'tempo', 'task'] }, 'the turn');
   // Both parts of <lookup>, with the stretch the summary named.
