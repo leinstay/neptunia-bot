@@ -68,11 +68,14 @@ const SLOW_COMMANDS = new Set([
  * The roles whose model `/nep model set` changes, each with the config path it
  * writes (src/admin.js). `/nep route` adds `image` (src/llm/images.js), `/nep
  * ping` adds `image` and `classifier`: every role choice list is derived
- * from this one.
+ * from this one. `voice` is the two-stage analyzer's stage B, the model that
+ * words the memory texts in the persona's voice (src/memory/update.js#runVoice;
+ * unset = the talk model).
  */
 export const MODEL_ROLE_PATHS = Object.freeze({
   talk: 'llm.model',
   analyzer: 'memory.model',
+  voice: 'memory.voiceModel',
   'classifier.text': 'classifier.text',
   'classifier.media': 'classifier.media',
   'classifier.video': 'classifier.video',

@@ -53,7 +53,7 @@ test('buildCommandTree: top-level leaves (status, ping, reload, pause, resume, i
   const pingRole = findOption(ping.options, 'role');
   assert.equal(pingRole.type, 3); // STRING
   assert.equal(pingRole.required, false);
-  assert.deepEqual(pingRole.choices.map((c) => c.value), ['talk', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor', 'image', 'classifier']);
+  assert.deepEqual(pingRole.choices.map((c) => c.value), ['talk', 'analyzer', 'voice', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor', 'image', 'classifier']);
 
   const pause = findOption(command.options, 'pause');
   assert.equal(pause.type, 1); // SUBCOMMAND
@@ -322,7 +322,7 @@ test('buildCommandTree: lore group (add/list/show/remove)', () => {
   assert.equal(findOption(remove.options, 'id').required, true);
 });
 
-test('buildCommandTree: model group (show/set) role choices are talk/analyzer/classifier.text/classifier.media/classifier.video/mentor', () => {
+test('buildCommandTree: model group (show/set) role choices are talk/analyzer/voice/classifier.text/classifier.media/classifier.video/mentor', () => {
   const [command] = buildCommandTree('nep');
   const model = findOption(command.options, 'model');
   assert.equal(model.type, 2); // SUBCOMMAND_GROUP
@@ -335,7 +335,7 @@ test('buildCommandTree: model group (show/set) role choices are talk/analyzer/cl
   const role = findOption(set.options, 'role');
   assert.equal(role.type, 3); // STRING
   assert.equal(role.required, true);
-  assert.deepEqual(role.choices.map((c) => c.value), ['talk', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor']);
+  assert.deepEqual(role.choices.map((c) => c.value), ['talk', 'analyzer', 'voice', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor']);
 });
 
 test('buildCommandTree: the ping role choices contain image, the model-set choices do not', () => {
@@ -349,7 +349,7 @@ test('buildCommandTree: the ping role choices contain image, the model-set choic
 });
 
 test('MODEL_ROLES: the model-set, route and ping role choices are all derived from the one list', () => {
-  assert.deepEqual(MODEL_ROLES, ['talk', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor']);
+  assert.deepEqual(MODEL_ROLES, ['talk', 'analyzer', 'voice', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor']);
   assert.ok(Object.isFrozen(MODEL_ROLES));
   const [command] = buildCommandTree('nep');
   const values = (option) => option.choices.map((c) => c.value);
@@ -1607,6 +1607,20 @@ test('buildCommandTree: the whole command stays under 7600 characters (Discord r
   assert.ok(commandSize(buildCommandTree('a'.repeat(32))[0]) <= 7600 + 29);
 });
 
+test('commands: the voice role is offered in model set, route and ping, and the command tree still fits Discord\'s size limit', () => {
+  const [command] = buildCommandTree('nep');
+  const roleChoices = (...path) => {
+    let option = command;
+    for (const name of path) option = findOption(option.options, name);
+    return option.choices.map((c) => c.value);
+  };
+  assert.ok(roleChoices('model', 'set', 'role').includes('voice'));
+  assert.ok(roleChoices('route', 'set', 'role').includes('voice'));
+  assert.ok(roleChoices('route', 'remove', 'role').includes('voice'));
+  assert.ok(roleChoices('ping', 'role').includes('voice'));
+  assert.ok(commandSize(command) <= 7600, `the command tree is ${commandSize(command)} characters`);
+});
+
 test('buildCommandTree: at most 25 options and 25 choices per level, valid names, choice names 1..100', () => {
   const [command] = buildCommandTree('nep');
   const walk = (o, path) => {
@@ -1839,7 +1853,7 @@ test('autocomplete: command-option choices never offer the owner-only mentor com
 // route: provider routing per model prefix and role (llm.providerByModel)
 // ---------------------------------------------------------------------------
 
-const ROUTE_ROLES = ['talk', 'analyzer', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor', 'image'];
+const ROUTE_ROLES = ['talk', 'analyzer', 'voice', 'classifier.text', 'classifier.media', 'classifier.video', 'mentor', 'image'];
 
 test('buildCommandTree: route group (list/set/remove) with model, providers, role and fallbacks options', () => {
   const [command] = buildCommandTree('nep');

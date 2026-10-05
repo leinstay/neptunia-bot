@@ -9,11 +9,11 @@ import path from 'node:path';
 
 import { createStore } from '../src/memory/store.js';
 import { isDue, buildMemoryRequest, applyMemoryUpdate, applyPrivateUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap, characterText, analyzerTemperature, analyzerMode, feedsCalibration } from '../src/memory/update.js';
-import { voiceLimits, mergeIntoQueue } from '../src/memory/voice.js';
+import { voiceLimits, mergeIntoQueue, retryLater } from '../src/memory/voice.js';
 import { createCalibrator, estimateTokens } from '../src/llm/tokens.js';
 import { formatTranscript } from '../src/discord/format.js';
-import { TokenLimitError } from '../src/llm/openrouter.js';
-import { DAY_MS } from '../src/time.js';
+import { DailyCapError, TokenLimitError } from '../src/llm/openrouter.js';
+import { DAY_MS, HOUR_MS, MINUTE_MS, utcDay } from '../src/time.js';
 import { labels } from './fixtures/labels.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
@@ -6556,7 +6556,8 @@ test('analyze (two-stage): a missing memory-decide prompt runs the single-stage 
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
     store.touchUser(guildId, '1', 'Aria', STAGE_A_AT);
-    const hot = twoStageHot({ model: 'openai/gpt-z', voiceModel: 'anthropic/voice-v' });
+    // The fallback is a role voice request: it needs the voice rail config.json ships.
+    const hot = twoStageHot({ model: 'openai/gpt-z', voiceModel: 'anthropic/voice-v', voice: { maxPerDay: 100 } });
     delete hot.prompts['memory-decide'];
     const llm = recordingLlm({ users: { 1: { relationship: 'φίλοι από παλιά' } } });
     const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => STAGE_A_AT });
@@ -6607,7 +6608,7 @@ test('analyze (two-stage): the single-stage fallback goes out on memory.voiceMod
       return llm.calls[0].options;
     });
   const fallback = (memory) => {
-    const hot = twoStageHot({ model: 'openai/gpt-z', reasoning: { effort: 'low' }, ...memory });
+    const hot = twoStageHot({ model: 'openai/gpt-z', reasoning: { effort: 'low' }, voice: { maxPerDay: 100 }, ...memory });
     delete hot.prompts['memory-voice'];
     return hot;
   };
@@ -6622,7 +6623,7 @@ test('analyze (two-stage): the single-stage fallback goes out on memory.voiceMod
   assert.equal(other.model, 'anthropic/voice-v');
   assert.equal(other.skipCalibration, true);
   for (const options of [talk, named, other]) {
-    assert.equal(options.role, 'analyzer', 'no voice role exists yet: an @analyzer provider pin keeps covering the fallback');
+    assert.equal(options.role, 'voice', 'on the voice model as role voice: the provider pin of that role covers it');
     assert.equal('reasoning' in options, false, 'the stage A reasoning setting stays with stage A');
   }
 
@@ -6630,8 +6631,67 @@ test('analyze (two-stage): the single-stage fallback goes out on memory.voiceMod
   off.config.features.memoryTwoStage = false;
   const today = await optionsOf(off);
   assert.equal(today.model, 'openai/gpt-z', 'with the switch off the request goes out on memory.model, as before');
+  assert.equal(today.role, 'analyzer');
   assert.equal('skipCalibration' in today, false);
   assert.equal('reasoning' in today, false);
+});
+
+test('analyze (two-stage): the single-stage fallback counts against memory.voice.maxPerDay; past the rail nothing is sent and the batch backs off', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const clock = STAGE_A_AT;
+    store.touchUser(guildId, '1', 'Aria', clock - MINUTE_MS);
+    const hot = twoStageHot({ voiceModel: 'anthropic/voice-v', batchMessages: 1, minBatchMessages: 1, voice: { maxPerDay: 1 } });
+    delete hot.prompts['memory-decide'];
+    let refusal = null;
+    const calls = [];
+    const llm = {
+      complete: async (messages, options) => {
+        calls.push(options);
+        if (refusal) throw refusal;
+        return { text: '{}' };
+      },
+    };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => clock });
+    const batch = [slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: clock - 1000 })];
+
+    const { result: outcomes } = await withCapturedLogs(async () => {
+      const seen = [];
+      for (const error of [new TokenLimitError('request estimated over the cap'), new DailyCapError('daily LLM request cap reached')]) {
+        refusal = error;
+        seen.push(await updater.analyze(guildId, batch));
+        assert.equal(store.state.data.voiceCount, 0, `${error.name}: refused before sending, the count is given back`);
+      }
+      refusal = null;
+      seen.push(await updater.analyze(guildId, batch));
+      seen.push(await updater.analyze(guildId, batch));
+      return seen;
+    });
+
+    assert.deepEqual(outcomes.map((outcome) => outcome.ok), [false, false, true, false]);
+    assert.equal(outcomes[3].reason, 'daily-cap');
+    assert.equal(outcomes[3].stage, 'single');
+    assert.equal(calls.length, 3, 'the batch past the rail is never sent');
+    assert.ok(calls.every((options) => options.role === 'voice'));
+    assert.equal(store.state.data.voiceCount, 1, 'the request that went out counts');
+    assert.equal(store.state.data.voiceDay, utcDay(clock));
+
+    // Through run(): the refusal backs the guild off (it is not the batch's size), the buffer stays.
+    store.pushBuffer(guildId, batch[0], 100);
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+    const failed = logs.find((entry) => entry.msg === 'memory: update failed, backing off');
+    assert.deepEqual({ reason: failed.reason, stage: failed.stage }, { reason: 'daily-cap', stage: 'single' });
+    assert.equal(store.getBuffer(guildId).length, 1);
+    assert.equal(calls.length, 3);
+
+    for (const maxPerDay of [0, undefined, '100']) {
+      hot.config.memory.voice = { maxPerDay };
+      store.state.data.voiceDay = undefined;
+      const { result } = await withCapturedLogs(() => updater.analyze(guildId, batch));
+      assert.equal(result.reason, 'daily-cap', `maxPerDay ${JSON.stringify(maxPerDay)}`);
+    }
+    assert.equal(calls.length, 3, 'never sent');
+  });
 });
 
 test('analyze (two-stage): memory.reasoning, a plain object, goes with every stage A request and no other', async () => {
@@ -6915,7 +6975,8 @@ test('run (two-stage): "memory: update applied" says which stage ran and how man
   assert.equal(two.voiceQueued, 2, 'the relationship and the reason');
   assert.equal(twoLogs.some((entry) => entry.msg === 'memory: two-stage unavailable'), false);
 
-  const fallback = twoStageHot({ batchMessages: 1, minBatchMessages: 1 });
+  // The fallback is a role voice request: it needs the voice rail config.json ships.
+  const fallback = twoStageHot({ batchMessages: 1, minBatchMessages: 1, voice: { maxPerDay: 100 } });
   delete fallback.prompts['memory-voice'];
   const singleLogs = await appliedLog(fallback);
   const single = applied(singleLogs);
@@ -6951,5 +7012,940 @@ test('runPrivate (two-stage): "memory: private update applied" says which stage 
     assert.equal(applied.voiceQueued, 1);
     assert.ok(!JSON.stringify(logs).includes('κρυφή'), 'counts only');
     assert.deepEqual(queuedKinds(store, guildId), ['relationship']);
+  });
+});
+
+// ---- two-stage analyzer, stage B: the voice run (runVoice) -----------------
+
+const VOICE_PROMPT = 'voice prompt for {{name}}: relationship {{relationshipChars}}, portrait {{fieldChars}}';
+const VOICE_AT = Date.UTC(2026, 0, 10, 12);
+
+/**
+ * twoStageHot with the voice rail a deployment's config.json carries: makeConfig has no
+ * `memory.voice`, and a missing `memory.voice.maxPerDay` refuses every voice request (fail
+ * closed). A `voice` override is merged into it.
+ */
+function voiceHot(memoryOverrides = {}, configOverrides = {}) {
+  const { voice, ...memory } = memoryOverrides;
+  const hot = twoStageHot({ voice: { maxPerDay: 100, ...voice }, ...memory }, configOverrides);
+  hot.prompts['memory-voice'] = VOICE_PROMPT;
+  return hot;
+}
+
+/** Queue `items` (mergeIntoQueue's input shape) in a guild's voice queue as of `nowMs`. */
+function queueVoice(store, guildId, items, nowMs, config) {
+  store.updateVoiceQueue(guildId, (queue) => mergeIntoQueue(queue, items, nowMs, config));
+  return store.getVoiceQueue(guildId);
+}
+
+/** Every queued item of a guild due at `nowMs` (the back-off of the items is the test's to skip). */
+function makeVoiceDue(store, guildId, nowMs) {
+  store.updateVoiceQueue(guildId, (queue) => queue.map((item) => ({ ...item, nextAt: nowMs })));
+}
+
+/** The parsed `<items>` array of a voice request. */
+function voiceItemsOf(messages) {
+  return JSON.parse(blockBody(messages[1].content, 'items'));
+}
+
+/** Whether a request is a stage B one (prompts/memory-voice.md): it carries `<items>`. The role
+ * alone does not tell: the single-stage fallback on the voice model goes out as role `voice` too. */
+function isVoiceRequest(messages) {
+  return blockBody(messages[1]?.content ?? '', 'items') !== null;
+}
+
+/**
+ * A fake llm. A voice request is answered with `word(item)` for each item it carries (a string
+ * words it, anything else leaves it out); any other request gets `decision` (stage A, or the
+ * single-stage fallback) as JSON. `before(messages, options)` runs, and is awaited, before either
+ * answer: it may throw (a failed request) or change the store (something happening meanwhile).
+ */
+function voiceLlm({ word = () => null, decision = {}, before } = {}) {
+  const calls = [];
+  return {
+    calls,
+    voiceCalls: () => calls.filter((call) => isVoiceRequest(call.messages)),
+    complete: async (messages, options) => {
+      calls.push({ messages, options });
+      if (before) await before(messages, options);
+      if (!isVoiceRequest(messages)) return { text: JSON.stringify(decision) };
+      const items = {};
+      for (const item of voiceItemsOf(messages)) {
+        const text = word(item);
+        if (typeof text === 'string') items[item.id] = text;
+      }
+      return { text: JSON.stringify({ items }) };
+    },
+  };
+}
+
+function voiceUpdater(store, hot, llm, now = () => VOICE_AT) {
+  return createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now });
+}
+
+test('run (two-stage): a voice request follows a successful batch on memory.voiceModel with role voice, and its texts are stored', async () => {
+  await withStoreAsync(async (store, dir) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now() - 60_000);
+    store.pushBuffer(guildId, slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: Date.now() - 1000 }), 100);
+    const hot = voiceHot(
+      { model: 'openai/gpt-z', voiceModel: 'anthropic/voice-v', batchMessages: 1, minBatchMessages: 1, temperature: 0.4, timeoutMs: 4321, voice: { maxOutputTokens: 2500 } },
+      { relationships: { damping: false } },
+    );
+    const texts = { relationship: 'φίλοι από το παζλ', reason: 'με βοήθησε στο δύσκολο σημείο', feeling: 'χάρηκα πολύ' };
+    const llm = voiceLlm({
+      decision: { users: { 1: { relationship: 'έγιναν φίλοι', affinity: { delta: 4, event: 'τη βοήθησε' }, episodes: [{ what: 'έλυσαν ένα παζλ', tone: 'χαρά' }] } } },
+      word: (item) => texts[item.kind],
+    });
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+    assert.equal(llm.calls.length, 2, 'stage A, then one voice request');
+    const [stageA, voice] = llm.calls;
+    assert.equal(stageA.options.role, 'analyzer');
+    assert.equal(stageA.options.model, 'openai/gpt-z');
+    assert.equal(voice.options.role, 'voice');
+    assert.equal(voice.options.model, 'anthropic/voice-v');
+    assert.equal(voice.options.maxOutputTokens, 2500);
+    assert.equal(voice.options.temperature, 0.4);
+    assert.equal(voice.options.timeoutMs, 4321);
+    assert.equal(voice.options.skipCalibration, true, 'not the talk model');
+    assert.equal(voice.messages[0].content, 'voice prompt for Nept: relationship 600, portrait 400');
+    assert.deepEqual(voiceItemsOf(voice.messages).map((item) => item.kind).sort(), ['feeling', 'reason', 'relationship']);
+
+    const aria = store.getUser(guildId, '1');
+    assert.equal(aria.relationship, 'φίλοι από το παζλ');
+    assert.equal(aria.relationshipScore, 4, 'stamped with the score stage A already moved');
+    assert.equal(aria.affinity.score, 4, 'the score moved once, at stage A');
+    assert.equal(aria.affinity.reason, 'με βοήθησε στο δύσκολο σημείο');
+    assert.equal(aria.affinity.history.at(-1).reason, 'με βοήθησε στο δύσκολο σημείο');
+    assert.equal(aria.episodes[0].feeling, 'χάρηκα πολύ');
+    assert.deepEqual(store.getVoiceQueue(guildId), [], 'every applied item left the queue');
+    assert.equal(store.state.data.voiceCount, 1);
+    assert.equal(store.state.data.voiceDay, utcDay(Date.now()));
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'guilds', guildId, 'voice.json'), 'utf8')), [], 'flushed');
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'guilds', guildId, 'users', '1.json'), 'utf8'));
+    assert.equal(onDisk.relationship, 'φίλοι από το παζλ');
+
+    const applied = logs.find((entry) => entry.msg === 'memory: voice applied');
+    assert.deepEqual(
+      { guildId: applied.guildId, sent: applied.sent, applied: applied.applied, missing: applied.missing, gone: applied.gone, queued: applied.queued },
+      { guildId, sent: 3, applied: 3, missing: 0, gone: 0, queued: 0 },
+    );
+    assert.deepEqual(applied.byKind, { relationship: 1, reason: 1, feeling: 1 });
+    assert.ok(Number.isInteger(applied.outputTokens) && applied.outputTokens > 0 && applied.outputTokens <= 2500, 'the answer budget the request was fitted to');
+    assert.ok(!JSON.stringify(logs).includes('παζλ'), 'counts only');
+  });
+});
+
+test('runVoice: memory.voiceModel null sends on the talk model and feeds calibration; memory.model is never used', async () => {
+  const cases = [
+    { voiceModel: null, model: undefined, skip: false },
+    { voiceModel: 'x/y', model: 'x/y', skip: false },
+    { voiceModel: 'anthropic/voice-v', model: 'anthropic/voice-v', skip: true },
+  ];
+  for (const { voiceModel, model, skip } of cases) {
+    await withStoreAsync(async (store) => {
+      store.touchUser('g1', '1', 'Aria', VOICE_AT);
+      const hot = voiceHot({ model: 'openai/gpt-z', voiceModel, reasoning: { effort: 'low' } });
+      queueVoice(store, 'g1', [{ kind: 'relationship', userId: '1', brief: ['φίλοι'] }], VOICE_AT, hot.config);
+      const llm = voiceLlm({ word: () => 'φίλοι' });
+
+      await withCapturedLogs(() => voiceUpdater(store, hot, llm).runVoice('g1'));
+
+      assert.equal(llm.calls.length, 1);
+      const [{ options }] = llm.calls;
+      assert.equal(options.model, model, `voiceModel ${voiceModel}`);
+      assert.notEqual(options.model, 'openai/gpt-z');
+      assert.equal(options.role, 'voice');
+      assert.equal(options.skipCalibration, skip, `voiceModel ${voiceModel}`);
+      assert.equal(options.maxOutputTokens, 3000, "memory.voice.maxOutputTokens missing: config.json's 3000");
+      assert.equal('reasoning' in options, false, 'the stage A reasoning setting stays with stage A');
+    });
+  }
+});
+
+test('runVoice: an item queued while the request is in flight stays queued; only the applied ids leave the queue', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', VOICE_AT);
+    store.touchUser(guildId, '2', 'Βασίλης', VOICE_AT);
+    const hot = voiceHot();
+    queueVoice(
+      store,
+      guildId,
+      [
+        { kind: 'relationship', userId: '1', brief: ['φίλοι'] },
+        { kind: 'patterns', brief: ['αστεία το βράδυ'] },
+        { kind: 'self', brief: ['της αρέσει ο καφές'] },
+      ],
+      VOICE_AT - MINUTE_MS,
+      hot.config,
+    );
+    const llm = voiceLlm({
+      word: (item) => (item.kind === 'self' ? null : `κείμενο ${item.kind}`),
+      // A stage A batch queues meanwhile: a new member's item, and a brief folded into the queued patterns item.
+      before: () => queueVoice(store, guildId, [{ kind: 'relationship', userId: '2', brief: ['νέος φίλος'] }, { kind: 'patterns', brief: ['εικόνες τα πρωινά'] }], VOICE_AT, hot.config),
+    });
+
+    const { logs } = await withCapturedLogs(() => voiceUpdater(store, hot, llm).runVoice(guildId));
+
+    assert.deepEqual(voiceItemsOf(llm.calls[0].messages).map((item) => item.kind), ['relationship', 'patterns', 'self']);
+    const queue = store.getVoiceQueue(guildId);
+    assert.deepEqual(queue.map((item) => item.kind).sort(), ['patterns', 'relationship', 'self']);
+    assert.equal(store.getUser(guildId, '1').relationship, 'κείμενο relationship', 'the applied item landed and left');
+    const added = queue.find((item) => item.kind === 'relationship');
+    assert.equal(added.userId, '2', 'the item queued during the request is still there');
+    assert.equal(added.attempts, 0, 'untouched');
+    const patterns = queue.find((item) => item.kind === 'patterns');
+    assert.deepEqual(patterns.brief, ['αστεία το βράδυ', 'εικόνες τα πρωινά'], 'the merged item stays queued');
+    assert.equal(store.getGuild(guildId).patterns, '', 'an answer to the brief before the merge never lands on the merged item');
+    const self = queue.find((item) => item.kind === 'self');
+    assert.equal(self.misses, 1, 'left out of the answer: a miss');
+    assert.equal(self.attempts, 1);
+    assert.equal(self.nextAt, VOICE_AT + 15 * MINUTE_MS);
+    const applied = logs.find((entry) => entry.msg === 'memory: voice applied');
+    assert.deepEqual(
+      { sent: applied.sent, applied: applied.applied, missing: applied.missing, stale: applied.stale, queued: applied.queued },
+      { sent: 3, applied: 1, missing: 1, stale: 1, queued: 3 },
+    );
+  });
+});
+
+test('run (two-stage): a failed voice request keeps the items with a later nextAt, backs the guild off, and the batch stays consumed', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    let clock = VOICE_AT;
+    store.touchUser(guildId, '1', 'Aria', clock - MINUTE_MS);
+    store.pushBuffer(guildId, slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: clock - 1000 }), 100);
+    const hot = voiceHot({ batchMessages: 1, minBatchMessages: 1 });
+    const llm = voiceLlm({
+      decision: { users: { 1: { relationship: 'έγιναν φίλοι' } } },
+      before: (messages) => {
+        if (isVoiceRequest(messages)) throw Object.assign(new Error('provider unavailable'), { statusCode: 503 });
+      },
+    });
+    const updater = voiceUpdater(store, hot, llm, () => clock);
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+
+    assert.equal(llm.voiceCalls().length, 1);
+    assert.equal(store.state.data.voiceCount, 1, 'a request that went out counts even when it failed');
+    assert.deepEqual(store.getBuffer(guildId), [], 'the batch stays consumed');
+    const [item, ...rest] = store.getVoiceQueue(guildId);
+    assert.deepEqual(rest, []);
+    assert.equal(item.kind, 'relationship');
+    assert.equal(item.attempts, 1);
+    assert.equal(item.misses, 0, 'a failed request is not a miss');
+    assert.equal(item.nextAt, clock + 15 * MINUTE_MS);
+    assert.equal(store.getUser(guildId, '1').relationship, '');
+    assert.equal(logs.find((entry) => entry.msg === 'memory: update applied').stage, 'two');
+    const failed = logs.find((entry) => entry.msg === 'memory: voice failed');
+    assert.deepEqual(
+      { reason: failed.reason, status: failed.status, sent: failed.sent, queued: failed.queued, backoffMinutes: failed.backoffMinutes },
+      { reason: 'llm-error', status: 503, sent: 1, queued: 1, backoffMinutes: 15 },
+    );
+
+    // The guild backs off too: an item made due again is not sent before the back-off is over.
+    makeVoiceDue(store, guildId, clock);
+    clock += 10 * MINUTE_MS;
+    await withCapturedLogs(() => updater.tick());
+    assert.equal(llm.voiceCalls().length, 1, 'inside the guild back-off');
+    clock += 5 * MINUTE_MS;
+    await withCapturedLogs(() => updater.tick());
+    assert.equal(llm.voiceCalls().length, 2, 'retried once it is over, without a new batch');
+  });
+});
+
+test('runVoice: the guild back-off doubles with each failed request up to memory.voice.queueHours, a character item is never dropped, and a parsed answer clears it', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    let clock = VOICE_AT;
+    store.touchUser(guildId, '1', 'Aria', clock);
+    const hot = voiceHot({ voice: { retryMinutes: 10, queueHours: 1 } });
+    queueVoice(store, guildId, [{ kind: 'character', userId: '1', brief: { add: ['γράφει σύντομα'] } }], clock, hot.config);
+    let failing = true;
+    const llm = voiceLlm({
+      word: () => 'νέο πορτρέτο',
+      before: () => {
+        if (failing) throw new Error('down');
+      },
+    });
+    const updater = voiceUpdater(store, hot, llm, () => clock);
+
+    const backoffs = [];
+    for (let i = 0; i < 5; i += 1) {
+      makeVoiceDue(store, guildId, clock);
+      const { logs } = await withCapturedLogs(() => updater.runVoice(guildId));
+      const { backoffMinutes } = logs.find((entry) => entry.msg === 'memory: voice failed');
+      backoffs.push(backoffMinutes);
+      clock += backoffMinutes * MINUTE_MS - 1;
+      makeVoiceDue(store, guildId, clock);
+      assert.equal((await updater.runVoice(guildId)).reason, 'backoff', `failure ${i + 1}`);
+      clock += 1;
+    }
+
+    assert.deepEqual(backoffs, [10, 20, 40, 60, 60], 'doubling from retryMinutes, never longer than queueHours');
+    assert.equal(llm.calls.length, 5, 'one request per back-off');
+    assert.equal(store.getVoiceQueue(guildId).length, 1, 'past queueHours and every retry, the character item is still queued');
+    failing = false;
+    makeVoiceDue(store, guildId, clock);
+    await withCapturedLogs(() => updater.runVoice(guildId));
+    assert.equal(store.getUser(guildId, '1').character, 'νέο πορτρέτο');
+
+    // The next outage starts again from retryMinutes: the parsed answer cleared the failures in a row.
+    failing = true;
+    queueVoice(store, guildId, [{ kind: 'self', brief: ['της αρέσει η βροχή'] }], clock, hot.config);
+    const { logs } = await withCapturedLogs(() => updater.runVoice(guildId));
+    assert.equal(llm.calls.length, 7, 'sent at once: no back-off left after a parsed answer');
+    assert.equal(logs.find((entry) => entry.msg === 'memory: voice failed').backoffMinutes, 10, 'counted from memory.voice.retryMinutes again');
+  });
+});
+
+test('tick: while the guild backs off, an item past memory.voice.queueHours still takes the degraded path on time, and nothing is sent', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    let clock = VOICE_AT;
+    const hot = voiceHot({ voice: { retryMinutes: 30, queueHours: 1 } });
+    queueVoice(store, guildId, [{ kind: 'self', brief: ['της αρέσει η βροχή'] }], clock, hot.config);
+    const llm = voiceLlm({
+      before: () => {
+        throw new Error('down');
+      },
+    });
+    const updater = voiceUpdater(store, hot, llm, () => clock);
+
+    await withCapturedLogs(() => updater.runVoice(guildId)); // the guild backs off 30 minutes
+    clock += 30 * MINUTE_MS;
+    await withCapturedLogs(() => updater.runVoice(guildId)); // and now 60
+    assert.equal(llm.calls.length, 2);
+    clock += 31 * MINUTE_MS;
+    const { logs } = await withCapturedLogs(() => updater.tick());
+
+    assert.equal(llm.calls.length, 2, 'nothing sent while backed off');
+    assert.deepEqual(store.getGuild(guildId).self, ['της αρέσει η βροχή'], 'the expired self fact is stored from its brief');
+    assert.deepEqual(store.getVoiceQueue(guildId), []);
+    assert.equal(logs.find((entry) => entry.msg === 'memory: voice dropped').expired, 1);
+  });
+});
+
+test('tick: a queued item past nextAt is retried without a new batch, and not before', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    let clock = VOICE_AT;
+    store.touchUser(guildId, '1', 'Aria', clock);
+    const hot = voiceHot();
+    queueVoice(store, guildId, [{ kind: 'relationship', userId: '1', brief: ['φίλοι'] }], clock, hot.config);
+    store.updateVoiceQueue(guildId, (queue) => retryLater(queue, queue.map((item) => item.id), clock, hot.config));
+    const llm = voiceLlm({ word: () => 'φίλοι πια' });
+    const updater = voiceUpdater(store, hot, llm, () => clock);
+
+    await withCapturedLogs(() => updater.tick());
+    assert.equal(llm.calls.length, 0, 'not due yet');
+    clock += 15 * MINUTE_MS;
+    await withCapturedLogs(() => updater.tick());
+
+    assert.equal(llm.calls.length, 1);
+    assert.equal(llm.calls[0].options.role, 'voice');
+    assert.equal(store.getUser(guildId, '1').relationship, 'φίλοι πια');
+    assert.deepEqual(store.getVoiceQueue(guildId), []);
+  });
+});
+
+test('runVoice: one request per run with at most memory.voice.maxItems items; the rest wait for the next run', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = voiceHot({ voice: { maxItems: 2 } });
+    const claims = ['αγαπά τη βροχή', 'μισεί το κρύο', 'μαζεύει πέτρες', 'διαβάζει ποίηση', 'πίνει τσάι'];
+    queueVoice(store, guildId, claims.map((claim) => ({ kind: 'self', brief: [claim] })), VOICE_AT, hot.config);
+    const llm = voiceLlm({ word: (item) => item.brief[0] });
+    const updater = voiceUpdater(store, hot, llm);
+
+    await withCapturedLogs(() => updater.runVoice(guildId));
+    assert.equal(llm.calls.length, 1);
+    assert.equal(voiceItemsOf(llm.calls[0].messages).length, 2);
+    assert.equal(store.getVoiceQueue(guildId).length, 3);
+
+    await withCapturedLogs(() => updater.runVoice(guildId));
+    assert.equal(llm.calls.length, 2);
+    assert.deepEqual(store.getGuild(guildId).self, claims.slice(0, 4), 'oldest first');
+  });
+});
+
+test('runVoice: memory.voice.maxPerDay reached sends nothing and logs memory: voice skipped once an hour; 0, a missing key or a non-number never sends', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    let clock = VOICE_AT;
+    store.touchUser(guildId, '1', 'Aria', clock);
+    const hot = voiceHot({ voice: { maxPerDay: 1 } });
+    // Every answer leaves the item out: it stays queued (a character item never expires).
+    const llm = voiceLlm({ word: () => null });
+    const updater = voiceUpdater(store, hot, llm, () => clock);
+    queueVoice(store, guildId, [{ kind: 'character', userId: '1', brief: { add: ['γράφει σύντομα'] } }], clock, hot.config);
+
+    await withCapturedLogs(() => updater.runVoice(guildId));
+    assert.equal(llm.calls.length, 1);
+    assert.equal(store.state.data.voiceCount, 1);
+
+    const { result: capped, logs } = await withCapturedLogs(async () => {
+      makeVoiceDue(store, guildId, clock);
+      const first = await updater.runVoice(guildId);
+      clock += 30 * MINUTE_MS;
+      makeVoiceDue(store, guildId, clock);
+      await updater.runVoice(guildId);
+      clock += 31 * MINUTE_MS;
+      makeVoiceDue(store, guildId, clock);
+      await updater.runVoice(guildId);
+      return first;
+    });
+    assert.equal(capped.reason, 'daily-cap');
+    assert.equal(llm.calls.length, 1, 'nothing sent past the cap');
+    const skipped = logs.filter((entry) => entry.msg === 'memory: voice skipped');
+    assert.equal(skipped.length, 2, 'at most once an hour');
+    assert.deepEqual({ guildId: skipped[0].guildId, reason: skipped[0].reason }, { guildId, reason: 'daily-cap' });
+
+    clock = VOICE_AT + DAY_MS;
+    makeVoiceDue(store, guildId, clock);
+    await withCapturedLogs(() => updater.runVoice(guildId));
+    assert.equal(llm.calls.length, 2, 'the next UTC day counts from zero');
+
+    for (const maxPerDay of [0, undefined, '100']) {
+      hot.config.memory.voice = { maxPerDay };
+      clock += DAY_MS;
+      makeVoiceDue(store, guildId, clock);
+      const { result } = await withCapturedLogs(() => updater.runVoice(guildId));
+      assert.equal(result.reason, 'daily-cap', `maxPerDay ${JSON.stringify(maxPerDay)}`);
+    }
+    assert.equal(llm.calls.length, 2, 'never sent');
+  });
+});
+
+test('runVoice: a request the llm refuses before sending gives the voice count back and backs off', async () => {
+  const refusals = [
+    [new DailyCapError('daily LLM request cap reached'), 'daily-cap'],
+    [new TokenLimitError('request estimated over the cap'), 'token-limit'],
+  ];
+  for (const [error, reason] of refusals) {
+    await withStoreAsync(async (store) => {
+      const guildId = 'g1';
+      store.touchUser(guildId, '1', 'Aria', VOICE_AT);
+      const hot = voiceHot();
+      queueVoice(store, guildId, [{ kind: 'relationship', userId: '1', brief: ['φίλοι'] }], VOICE_AT, hot.config);
+      const llm = voiceLlm({
+        before: () => {
+          throw error;
+        },
+      });
+      const updater = voiceUpdater(store, hot, llm);
+
+      const { result, logs } = await withCapturedLogs(() => updater.runVoice(guildId));
+
+      assert.equal(result.reason, reason);
+      assert.equal(store.state.data.voiceCount, 0, 'nothing was sent: the count is given back');
+      assert.equal(logs.find((entry) => entry.msg === 'memory: voice failed').reason, reason);
+      assert.equal(store.getVoiceQueue(guildId)[0].misses, 0);
+      assert.equal((await updater.runVoice(guildId)).reason, 'backoff');
+    });
+  }
+});
+
+test('runVoice: an answer without an items object is bad-json and a cut one truncated: every sent item backs off, none counts a miss', async () => {
+  const answers = [
+    ['καμία απάντηση', 'stop', 'bad-json'],
+    ['{"items": {"1": "μισή', 'length', 'truncated'],
+    ['{"texts": {"1": "λάθος κλειδί"}}', 'stop', 'bad-json'],
+  ];
+  for (const [text, finishReason, reason] of answers) {
+    await withStoreAsync(async (store) => {
+      const guildId = 'g1';
+      store.touchUser(guildId, '1', 'Aria', VOICE_AT);
+      const hot = voiceHot();
+      queueVoice(store, guildId, [{ kind: 'relationship', userId: '1', brief: ['φίλοι'] }, { kind: 'self', brief: ['της αρέσει ο καφές'] }], VOICE_AT, hot.config);
+      const llm = { complete: async () => ({ text, finishReason }) };
+
+      const { result, logs } = await withCapturedLogs(() => voiceUpdater(store, hot, llm).runVoice(guildId));
+
+      assert.equal(result.reason, reason, text);
+      assert.equal(store.state.data.voiceCount, 1, 'billed: the request counts');
+      assert.ok(store.getVoiceQueue(guildId).every((item) => item.attempts === 1 && item.misses === 0 && item.nextAt === VOICE_AT + 15 * MINUTE_MS));
+      const failed = logs.find((entry) => entry.msg === 'memory: voice failed');
+      assert.equal(failed.reason, reason);
+      assert.equal(failed.sent, 2);
+      for (const word of ['απάντηση', 'μισή', 'κλειδί']) assert.ok(!JSON.stringify(logs).includes(word), 'never the answer');
+    });
+  }
+});
+
+test('runVoice: items older than memory.voice.queueHours take the degraded path before the request; a character item stays and is sent', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const old = VOICE_AT - 25 * HOUR_MS;
+    store.touchUser(guildId, '1', 'Aria', old);
+    store.addEpisodes(guildId, '1', [{ date: '2026-01-09', what: 'γέλασαν με την πάπια', feeling: '' }], { maxEpisodes: 20, now: old });
+    const hot = voiceHot();
+    queueVoice(
+      store,
+      guildId,
+      [
+        { kind: 'feeling', userId: '1', brief: ['ήσυχη χαρά'], payload: { at: new Date(old).toISOString(), date: '2026-01-09', what: 'γέλασαν με την πάπια', quote: '' } },
+        { kind: 'relationship', userId: '1', brief: ['φίλοι'] },
+        { kind: 'character', userId: '1', brief: { add: ['γράφει σύντομα'] } },
+      ],
+      old,
+      hot.config,
+    );
+    const llm = voiceLlm({ word: (item) => (item.kind === 'character' ? 'νέο πορτρέτο' : 'αργά πια') });
+
+    const { logs } = await withCapturedLogs(() => voiceUpdater(store, hot, llm).runVoice(guildId));
+
+    assert.deepEqual(voiceItemsOf(llm.calls[0].messages).map((item) => item.kind), ['character'], 'only the character item is still sent');
+    const aria = store.getUser(guildId, '1');
+    assert.equal(aria.episodes[0].feeling, 'ήσυχη χαρά', 'an expired feeling keeps the stage A tone');
+    assert.equal(aria.relationship, '', 'an expired relationship is dropped');
+    assert.equal(aria.character, 'νέο πορτρέτο');
+    assert.deepEqual(store.getVoiceQueue(guildId), []);
+    const dropped = logs.find((entry) => entry.msg === 'memory: voice dropped');
+    assert.deepEqual(
+      { guildId: dropped.guildId, expired: dropped.expired, overflow: dropped.overflow, degraded: dropped.degraded },
+      { guildId, expired: 2, overflow: 0, degraded: 1 },
+    );
+    assert.ok(!JSON.stringify(logs).includes('χαρά'), 'counts only');
+  });
+});
+
+test('runVoice: a character item rewrites the portrait only, and the portrait stamps are written when it is applied, never before', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    let clock = VOICE_AT;
+    store.touchUser(guildId, ZOE, 'Zoé', clock - DAY_MS);
+    store.applyProfileOps(guildId, ZOE, { character: 'παλιό πορτρέτο', style: 'σύντομες φράσεις', relationship: 'φίλοι' }, { fieldChars: 400 });
+    store.updateUser(guildId, ZOE, { messageCount: 420, portraitAttemptAt: new Date(clock - HOUR_MS).toISOString() });
+    const hot = voiceHot();
+    const queuedAt = clock - 2 * HOUR_MS;
+    queueVoice(store, guildId, [{ kind: 'character', userId: ZOE, brief: { keep: ['μιλάει πολύ'], add: ['γράφει σύντομα'] } }], queuedAt, hot.config);
+    let failing = true;
+    const llm = voiceLlm({
+      word: () => 'συγχωνευμένο πορτρέτο',
+      before: () => {
+        if (failing) throw new Error('down');
+      },
+    });
+    const updater = voiceUpdater(store, hot, llm, () => clock);
+
+    await withCapturedLogs(() => updater.runVoice(guildId));
+
+    const [view] = voiceItemsOf(llm.calls[0].messages);
+    assert.equal(view.member, `Zoé (id:${ZOE})`);
+    assert.equal(view.old, 'παλιό πορτρέτο', 'the stored portrait goes in as the base');
+    assert.deepEqual(view.brief, { keep: ['μιλάει πολύ'], add: ['γράφει σύντομα'] });
+    let zoe = store.getUser(guildId, ZOE);
+    assert.equal(zoe.character, 'παλιό πορτρέτο');
+    assert.equal(zoe.portraitRefreshedAt, undefined, 'no stamp while the item waits');
+    assert.equal(zoe.portraitMessageCount, undefined);
+    assert.equal(store.getVoiceQueue(guildId).length, 1, 'a failed character item stays queued');
+
+    failing = false;
+    clock += DAY_MS;
+    store.updateUser(guildId, ZOE, { messageCount: 450 });
+    const { logs } = await withCapturedLogs(() => updater.runVoice(guildId));
+
+    zoe = store.getUser(guildId, ZOE);
+    assert.equal(zoe.character, 'συγχωνευμένο πορτρέτο');
+    assert.equal(zoe.style, 'σύντομες φράσεις', 'style untouched');
+    assert.equal(zoe.relationship, 'φίλοι', 'relationship untouched');
+    assert.equal(zoe.portraitRefreshedAt, new Date(queuedAt).toISOString(), 'dated when the refresh queued it');
+    assert.equal(zoe.portraitMessageCount, 450, 'the count when it was applied');
+    assert.equal(zoe.portraitAttemptAt, null);
+    assert.deepEqual(store.getVoiceQueue(guildId), []);
+    assert.equal(logs.find((entry) => entry.msg === 'memory: voice applied').portraits, 1);
+  });
+});
+
+test('runVoice: paused, nothing is sent; paused while the request is in flight, nothing is written', async () => {
+  /** A store with two queued items; `pauseDuring` (given the store) answers the voice request. */
+  const pausedRun = (pausedBefore, pauseDuring) =>
+    withStoreAsync(async (store) => {
+      const guildId = 'g1';
+      store.touchUser(guildId, '1', 'Aria', VOICE_AT);
+      const hot = voiceHot();
+      queueVoice(store, guildId, [{ kind: 'relationship', userId: '1', brief: ['φίλοι'] }, { kind: 'self', brief: ['της αρέσει ο καφές'] }], VOICE_AT, hot.config);
+      const before = store.getVoiceQueue(guildId);
+      store.state.data.paused = pausedBefore;
+      const llm = pauseDuring(store);
+      const updater = voiceUpdater(store, hot, llm);
+
+      const { result, logs } = await withCapturedLogs(() => updater.runVoice(guildId));
+
+      assert.equal(result.reason, 'paused');
+      assert.equal(store.getUser(guildId, '1').relationship, '', 'nothing applied');
+      assert.deepEqual(store.getGuild(guildId).self, []);
+      assert.deepEqual(store.getVoiceQueue(guildId), before, 'no item removed or backed off');
+      store.state.data.paused = false;
+      assert.notEqual((await withCapturedLogs(() => updater.runVoice(guildId))).result.reason, 'backoff', 'no guild back-off either');
+      return { calls: llm.calls.length, logs };
+    });
+
+  const idle = await pausedRun(true, () => voiceLlm({ word: () => 'κείμενο' }));
+  assert.equal(idle.calls, 1, 'nothing sent while paused (the one call is the run after resuming)');
+  assert.equal(idle.logs.find((entry) => entry.msg === 'memory: voice skipped').reason, 'paused');
+
+  const answered = await pausedRun(false, (store) =>
+    voiceLlm({
+      word: (item) => (item.kind === 'self' ? null : 'κείμενο'),
+      before: () => {
+        store.state.data.paused = true;
+      },
+    }),
+  );
+  assert.equal(answered.calls, 2, 'the paused answer, then the run after resuming');
+  const discarded = answered.logs.find((entry) => entry.msg === 'memory: voice skipped');
+  assert.deepEqual({ reason: discarded.reason, sent: discarded.sent }, { reason: 'paused', sent: 2 });
+
+  const failed = await pausedRun(false, (store) =>
+    voiceLlm({
+      before: () => {
+        if (store.state.data.paused) return;
+        store.state.data.paused = true;
+        throw new Error('down');
+      },
+    }),
+  );
+  assert.equal(failed.calls, 2);
+  assert.equal(failed.logs.some((entry) => entry.msg === 'memory: voice failed'), false, 'a failure while paused writes no back-off');
+});
+
+test('waitIdle: waits for a voice request in flight, and its texts land before it resolves', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', VOICE_AT);
+    const hot = voiceHot();
+    queueVoice(store, guildId, [{ kind: 'relationship', userId: '1', brief: ['φίλοι'] }], VOICE_AT, hot.config);
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const llm = voiceLlm({ word: () => 'φίλοι', before: () => gate });
+    const updater = voiceUpdater(store, hot, llm);
+
+    const voice = withCapturedLogs(() => updater.runVoice(guildId));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(llm.calls.length, 1, 'in flight');
+    let landed = null;
+    const waiting = updater.waitIdle().then(() => {
+      landed = store.getUser(guildId, '1').relationship;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(landed, null, 'still waiting');
+
+    release();
+    await voice;
+    await waiting;
+    assert.equal(landed, 'φίλοι');
+  });
+});
+
+test('runVoice: with features.memoryTwoStage off, or the memory-voice prompt missing, no stage B request is ever made', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', Date.now() - 60_000);
+    const hot = voiceHot({ batchMessages: 1, minBatchMessages: 1 });
+    queueVoice(store, guildId, [{ kind: 'relationship', userId: '1', brief: ['φίλοι'] }], Date.now() - HOUR_MS, hot.config);
+    const llm = voiceLlm({ word: () => 'φίλοι', decision: { users: { 1: { interests: { add: [{ topic: 'σκάκι', note: '' }] } } } } });
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
+
+    hot.config.features.memoryTwoStage = false;
+    assert.equal((await updater.runVoice(guildId)).reason, 'off');
+    store.pushBuffer(guildId, slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: Date.now() - 1000 }), 100);
+    await withCapturedLogs(() => updater.tick());
+    assert.equal(llm.calls.length, 1, 'the single-stage batch ran');
+    assert.equal(llm.calls[0].options.role, 'analyzer', 'with the switch off, on memory.model as before');
+    assert.equal(llm.voiceCalls().length, 0, 'no voice request after it, nor from the tick');
+    assert.equal(store.state.data.voiceCount, undefined, 'nothing counted on the voice rail');
+
+    hot.config.features.memoryTwoStage = true;
+    delete hot.prompts['memory-voice'];
+    store.pushBuffer(guildId, slimMessage({ id: 'm2', authorId: '1', authorName: 'Aria', ts: Date.now() - 1000 }), 100);
+    const { logs } = await withCapturedLogs(async () => {
+      await updater.runVoice(guildId);
+      await updater.tick();
+      await updater.runVoice(guildId);
+    });
+    assert.equal(llm.voiceCalls().length, 0);
+    assert.equal(llm.calls.length, 2, 'only the batch, on the single-stage fallback');
+    assert.equal(llm.calls[1].messages[0].content, 'memory system prompt', 'not a stage B request');
+    assert.equal(llm.calls[1].options.role, 'voice', 'the fallback goes out on the voice model as role voice');
+    assert.equal(store.state.data.voiceCount, 1, 'and counts on the voice rail');
+    const warned = logs.filter((entry) => entry.msg === 'memory: voice skipped');
+    assert.equal(warned.length, 1, 'warned once');
+    assert.deepEqual({ level: warned[0].level, reason: warned[0].reason }, { level: 'warn', reason: 'no-prompt' });
+    assert.equal(store.getVoiceQueue(guildId).length, 1, 'the queue is left alone');
+
+    hot.prompts['memory-voice'] = VOICE_PROMPT;
+    await withCapturedLogs(() => updater.tick());
+    assert.equal(llm.voiceCalls().length, 1, 'back with the prompt');
+    assert.equal(store.getUser(guildId, '1').relationship, 'φίλοι');
+  });
+});
+
+test('runVoice: private items go in a request of their own and their texts land in the private layer only', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    seedPrivate(store, guildId);
+    store.applyProfileOps(guildId, 'u1', { relationship: 'δημόσια γνωριμία' }, { fieldChars: 400 });
+    store.applyPrivateOps(guildId, 'u1', { relationship: 'ιδιωτική φιλία' }, { fieldChars: 400 });
+    const hot = voiceHot();
+    queueVoice(store, guildId, [{ kind: 'relationship', userId: 'u1', brief: ['μιλούν πιο συχνά'] }], VOICE_AT - MINUTE_MS, hot.config);
+    queueVoice(store, guildId, [{ kind: 'relationship', userId: 'u1', layer: 'private', brief: ['της είπε ένα μυστικό'] }], VOICE_AT, hot.config);
+    const llm = voiceLlm({ word: (item) => (item.layer === 'private' ? 'μοιράζονται μυστικά' : 'γνωστοί από το κανάλι') });
+    const updater = voiceUpdater(store, hot, llm);
+
+    await withCapturedLogs(async () => {
+      await updater.runVoice(guildId);
+      await updater.runVoice(guildId);
+    });
+
+    assert.equal(llm.calls.length, 2, 'one request per audience');
+    const [publicItems, privateItems] = llm.calls.map((call) => voiceItemsOf(call.messages));
+    assert.deepEqual(publicItems.map((item) => [item.kind, item.layer, item.old]), [['relationship', undefined, 'δημόσια γνωριμία']]);
+    assert.deepEqual(privateItems.map((item) => [item.kind, item.layer, item.old]), [['relationship', 'private', 'ιδιωτική φιλία']]);
+    assert.ok(!llm.calls[0].messages[1].content.includes('μυστικό'), 'nothing said in private sits beside the public items');
+    assert.equal(store.getUser(guildId, 'u1').relationship, 'γνωστοί από το κανάλι');
+    const priv = store.getPrivate(guildId, 'u1');
+    assert.equal(priv.relationship, 'μοιράζονται μυστικά');
+    assert.equal(priv.relationshipScore, 14, 'stamped with the effective score: public 10 + private 4');
+    assert.deepEqual(store.getVoiceQueue(guildId), []);
+  });
+});
+
+test('runVoice: every write runs through its store method by kind; an item of a member without a profile leaves the queue as gone', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const at = new Date(VOICE_AT - HOUR_MS).toISOString();
+    store.touchUser(guildId, '1', 'Aria', VOICE_AT - DAY_MS);
+    store.touchUser(guildId, ZOE, 'Zoé', VOICE_AT - DAY_MS);
+    store.adjustAffinity(guildId, '1', 5, 'παλιός λόγος', { maxDelta: 15, historySize: 10, damping: false, now: VOICE_AT - HOUR_MS });
+    store.updateGuild(guildId, { patterns: 'παλιά μοτίβα', starters: 'παλιές αρχές' });
+    const hot = voiceHot();
+    queueVoice(
+      store,
+      guildId,
+      [
+        { kind: 'reason', userId: '1', brief: ['τη βοήθησε'], payload: { delta: 5, at } },
+        { kind: 'learned', brief: ['γκγκ σημαίνει καληνύχτα'], payload: { from: `<@${ZOE}>`, sure: false, seenAt: VOICE_AT - HOUR_MS } },
+        { kind: 'self', brief: ['της αρέσει η βροχή'] },
+        { kind: 'patterns', brief: ['αστεία το βράδυ'] },
+        { kind: 'starters', brief: ['ερωτήσεις για παιχνίδια'] },
+        { kind: 'relationship', userId: '9', brief: ['άγνωστος'] },
+      ],
+      VOICE_AT - MINUTE_MS,
+      hot.config,
+    );
+    const texts = {
+      reason: `με βοήθησε, όπως και η Zoé (id:${ZOE})`,
+      learned: 'γκγκ θα πει καληνύχτα',
+      self: 'μου αρέσει η βροχή',
+      patterns: 'αστεία κυρίως το βράδυ',
+      starters: 'ξεκινούν με ερωτήσεις για παιχνίδια',
+      relationship: 'κάτι',
+    };
+    const llm = voiceLlm({ word: (item) => texts[item.kind] });
+
+    const { logs } = await withCapturedLogs(() => voiceUpdater(store, hot, llm).runVoice(guildId));
+
+    const aria = store.getUser(guildId, '1');
+    assert.equal(aria.affinity.score, 5, 'the score never moves at stage B');
+    assert.equal(aria.affinity.reason, `με βοήθησε, όπως και η <@${ZOE}>`, 'tokenized');
+    const guild = store.getGuild(guildId);
+    assert.equal(guild.learned.length, 1);
+    assert.equal(guild.learned[0].text, 'γκγκ θα πει καληνύχτα');
+    assert.equal(guild.learned[0].from, `<@${ZOE}>`);
+    assert.equal(guild.learned[0].weight, 0, 'sure: false');
+    assert.equal(guild.learned[0].firstSeen, new Date(VOICE_AT - HOUR_MS).toISOString(), 'dated when it was taught');
+    assert.deepEqual(guild.self, ['μου αρέσει η βροχή']);
+    assert.equal(guild.patterns, 'αστεία κυρίως το βράδυ');
+    assert.equal(guild.starters, 'ξεκινούν με ερωτήσεις για παιχνίδια');
+    assert.equal(store.getUser(guildId, '9'), null, 'no profile is created for the gone member');
+    assert.deepEqual(store.getVoiceQueue(guildId), []);
+    const applied = logs.find((entry) => entry.msg === 'memory: voice applied');
+    assert.deepEqual({ applied: applied.applied, gone: applied.gone, landed: applied.landed }, { applied: 5, gone: 1, landed: 5 });
+  });
+});
+
+test('tick: with features.memoryTwoStage off, or the memory-voice prompt missing, items past memory.voice.queueHours still take the degraded path, and nothing is sent', async () => {
+  for (const variant of ['off', 'no-prompt']) {
+    await withStoreAsync(async (store, dir) => {
+      const guildId = 'g1';
+      const old = VOICE_AT - 25 * HOUR_MS;
+      store.touchUser(guildId, '1', 'Aria', old);
+      store.addEpisodes(guildId, '1', [{ date: '2026-01-09', what: 'γέλασαν με την πάπια', feeling: '' }], { maxEpisodes: 20, now: old });
+      const hot = voiceHot();
+      queueVoice(
+        store,
+        guildId,
+        [
+          { kind: 'feeling', userId: '1', brief: ['ήσυχη χαρά'], payload: { at: new Date(old).toISOString(), date: '2026-01-09', what: 'γέλασαν με την πάπια', quote: '' } },
+          { kind: 'self', brief: ['της αρέσει η βροχή'] },
+          { kind: 'character', userId: '1', brief: { add: ['γράφει σύντομα'] } },
+        ],
+        old,
+        hot.config,
+      );
+      if (variant === 'off') hot.config.features.memoryTwoStage = false; // a rollback
+      else delete hot.prompts['memory-voice'];
+      const llm = voiceLlm({ word: () => 'κείμενο' });
+      const updater = voiceUpdater(store, hot, llm);
+
+      const { logs } = await withCapturedLogs(() => updater.tick());
+
+      assert.equal(llm.calls.length, 0, `${variant}: nothing sent`);
+      assert.equal(store.state.data.voiceCount, undefined, `${variant}: nothing counted on the voice rail`);
+      assert.equal(store.getUser(guildId, '1').episodes[0].feeling, 'ήσυχη χαρά', `${variant}: the feeling keeps the stage A tone`);
+      assert.deepEqual(store.getGuild(guildId).self, ['της αρέσει η βροχή'], `${variant}: the self fact is stored from its brief`);
+      assert.deepEqual(store.getVoiceQueue(guildId).map((item) => item.kind), ['character'], `${variant}: a character item is never dropped`);
+      const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'guilds', guildId, 'voice.json'), 'utf8'));
+      assert.deepEqual(onDisk.map((item) => item.kind), ['character'], `${variant}: flushed`);
+      const dropped = logs.find((entry) => entry.msg === 'memory: voice dropped');
+      assert.deepEqual({ guildId: dropped.guildId, expired: dropped.expired, degraded: dropped.degraded }, { guildId, expired: 2, degraded: 2 }, variant);
+      assert.ok(!JSON.stringify(logs).includes('χαρά'), 'counts only');
+    });
+  }
+});
+
+test('runVoice: a second run while one is in flight is busy and the tick starts none beside it; one request, each text written once', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', VOICE_AT);
+    const hot = voiceHot();
+    queueVoice(store, guildId, [{ kind: 'relationship', userId: '1', brief: ['φίλοι'] }, { kind: 'self', brief: ['της αρέσει ο καφές'] }], VOICE_AT - MINUTE_MS, hot.config);
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const llm = voiceLlm({ word: (item) => `κείμενο ${item.kind}`, before: () => gate });
+    const updater = voiceUpdater(store, hot, llm);
+
+    const { result, logs } = await withCapturedLogs(async () => {
+      const first = updater.runVoice(guildId);
+      await new Promise((resolve) => setImmediate(resolve));
+      const second = updater.runVoice(guildId);
+      const ticked = updater.tick();
+      await new Promise((resolve) => setImmediate(resolve));
+      const inFlight = llm.calls.length;
+      release();
+      await ticked;
+      return { first: await first, second: await second, inFlight };
+    });
+
+    assert.equal(result.second.reason, 'busy');
+    assert.equal(result.inFlight, 1, 'neither the second run nor the tick sent anything beside the first');
+    assert.deepEqual(result.first, { sent: 2, applied: 2 });
+    assert.equal(llm.calls.length, 1);
+    assert.equal(logs.filter((entry) => entry.msg === 'memory: voice applied').length, 1, 'applied once');
+    assert.equal(store.state.data.voiceCount, 1);
+    assert.equal(store.getUser(guildId, '1').relationship, 'κείμενο relationship');
+    assert.deepEqual(store.getGuild(guildId).self, ['κείμενο self']);
+    assert.deepEqual(store.getVoiceQueue(guildId), []);
+  });
+});
+
+test('tick: no voice run starts beside a batch in flight for the guild; the batch runs one request that carries the queued and the new items', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const clock = VOICE_AT;
+    store.touchUser(guildId, '1', 'Aria', clock - MINUTE_MS);
+    store.pushBuffer(guildId, slimMessage({ id: 'm1', authorId: '1', authorName: 'Aria', ts: clock - 1000 }), 100);
+    const hot = voiceHot({ batchMessages: 1, minBatchMessages: 1 });
+    queueVoice(store, guildId, [{ kind: 'self', brief: ['της αρέσει η βροχή'] }], clock - MINUTE_MS, hot.config);
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const llm = voiceLlm({
+      decision: { users: { 1: { relationship: 'έγιναν φίλοι' } } },
+      word: (item) => `κείμενο ${item.kind}`,
+      // Only stage A is held: a voice request started beside it would go out at once.
+      before: (messages) => (isVoiceRequest(messages) ? undefined : gate),
+    });
+    const updater = voiceUpdater(store, hot, llm, () => clock);
+
+    await withCapturedLogs(async () => {
+      const first = updater.tick();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(llm.calls.length, 1, 'only the stage A request is in flight');
+      await updater.tick();
+      assert.equal(llm.calls.length, 1, 'a second tick starts nothing beside the batch either');
+      release();
+      await first;
+    });
+
+    const voiceCalls = llm.voiceCalls();
+    assert.equal(voiceCalls.length, 1, 'one voice request, after the batch');
+    assert.deepEqual(voiceItemsOf(voiceCalls[0].messages).map((item) => item.kind).sort(), ['relationship', 'self']);
+    assert.equal(store.getUser(guildId, '1').relationship, 'κείμενο relationship');
+    assert.deepEqual(store.getGuild(guildId).self, ['κείμενο self']);
+    assert.deepEqual(store.getVoiceQueue(guildId), []);
+  });
+});
+
+test('runVoice: a request that cannot fit llm.maxRequestTokens sends and counts nothing; every due item and the guild back off', async () => {
+  const cases = [
+    { name: 'the system message alone is over the cap', maxRequestTokens: 10, briefs: ['της αρέσει ο καφές', 'της αρέσει η βροχή'] },
+    { name: 'the fixed part fits, no due item does even alone', maxRequestTokens: 200, briefs: ['βροχή '.repeat(300), 'ήλιος '.repeat(300)] },
+  ];
+  for (const { name, maxRequestTokens, briefs } of cases) {
+    await withStoreAsync(async (store) => {
+      const guildId = 'g1';
+      const hot = voiceHot();
+      hot.config.llm.maxRequestTokens = maxRequestTokens;
+      queueVoice(store, guildId, briefs.map((brief) => ({ kind: 'self', brief: [brief] })), VOICE_AT - MINUTE_MS, hot.config);
+      const llm = voiceLlm({ word: () => 'κείμενο' });
+      const updater = voiceUpdater(store, hot, llm);
+
+      const { result, logs } = await withCapturedLogs(() => updater.runVoice(guildId));
+
+      assert.equal(result.reason, 'token-limit', name);
+      assert.equal(llm.calls.length, 0, `${name}: nothing sent`);
+      assert.equal(store.state.data.voiceCount, 0, `${name}: counted only once there is something to send`);
+      const queue = store.getVoiceQueue(guildId);
+      assert.equal(queue.length, 2, name);
+      assert.ok(queue.every((item) => item.attempts === 1 && item.misses === 0 && item.nextAt === VOICE_AT + 15 * MINUTE_MS), name);
+      const failed = logs.find((entry) => entry.msg === 'memory: voice failed');
+      assert.deepEqual({ reason: failed.reason, sent: failed.sent, backoffMinutes: failed.backoffMinutes }, { reason: 'token-limit', sent: 2, backoffMinutes: 15 }, name);
+      assert.ok(!JSON.stringify(logs).includes('βροχή'), 'counts only');
+      makeVoiceDue(store, guildId, VOICE_AT);
+      assert.equal((await updater.runVoice(guildId)).reason, 'backoff', `${name}: the guild backs off`);
+    });
+  }
+});
+
+test('runVoice: a write the store refuses is apply-error, logged by the error name only, and the guild backs off', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    const hot = voiceHot();
+    queueVoice(store, guildId, [{ kind: 'self', brief: ['της αρέσει ο καφές'] }], VOICE_AT - MINUTE_MS, hot.config);
+    store.applySelfOps = () => {
+      throw new TypeError('ο δίσκος αρνήθηκε');
+    };
+    const llm = voiceLlm({ word: () => 'μου αρέσει ο καφές' });
+    const updater = voiceUpdater(store, hot, llm);
+
+    const { result, logs } = await withCapturedLogs(() => updater.runVoice(guildId));
+
+    assert.equal(result.reason, 'apply-error');
+    assert.equal(llm.calls.length, 1);
+    assert.equal(store.state.data.voiceCount, 1, 'the request went out');
+    const failed = logs.find((entry) => entry.msg === 'memory: voice failed');
+    assert.deepEqual(
+      { level: failed.level, reason: failed.reason, error: failed.error, backoffMinutes: failed.backoffMinutes },
+      { level: 'warn', reason: 'apply-error', error: 'TypeError', backoffMinutes: 15 },
+    );
+    assert.equal('detail' in failed, false);
+    assert.ok(!JSON.stringify(logs).includes('δίσκος'), 'never the error message');
+    assert.ok(!JSON.stringify(logs).includes('καφές'), 'never a text');
+    assert.equal(store.getVoiceQueue(guildId).length, 1, 'the item stays queued');
+    makeVoiceDue(store, guildId, VOICE_AT);
+    assert.equal((await updater.runVoice(guildId)).reason, 'backoff');
+    assert.equal(llm.calls.length, 1);
   });
 });

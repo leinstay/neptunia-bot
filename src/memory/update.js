@@ -16,6 +16,9 @@
 // short briefs for every text written in the persona's voice; the neutral part
 // is stored at once through the same apply functions, the briefs go into the
 // guild's voice queue (src/memory/voice.js) for the voice model to word later.
+// That is the voice run (`runVoice`, stage B): one request per run on
+// `memory.voiceModel`, right after a stage A batch and from the tick while
+// queued items are due, its texts written by id into what stage A stored.
 // Memory is persistent: nothing here ever wipes it — a failed update just
 // leaves the buffer alone and backs off for a while.
 
@@ -24,10 +27,10 @@ import { fitSections, SectionsTooLargeError } from '../llm/budget.js';
 import { estimateTokens } from '../llm/tokens.js';
 import { formatTranscript, renderTranscript } from '../discord/format.js';
 import { parseJsonObject } from '../llm/parse.js';
-import { TokenLimitError } from '../llm/openrouter.js';
+import { DailyCapError, TokenLimitError, dailyCapOf } from '../llm/openrouter.js';
 import { isDescribable, mediaParts, stickerUrl } from '../discord/media.js';
 import { log } from '../log.js';
-import { MINUTE_MS } from '../time.js';
+import { HOUR_MS, MINUTE_MS, bumpDaily, dailyCounter } from '../time.js';
 import { emptyAffinity, roundScore, affinityBand, applyDelta, relationshipStaleOf } from './affinity.js';
 import { emptyChannel } from './store.js';
 import { keywordMatches } from './lore.js';
@@ -43,7 +46,23 @@ import { videoStateFromCache } from './describe.js';
 import { isVideoVisionOn } from './youtube-check.js';
 import { block, fillPromptTemplate, renderProfile } from '../behavior/prompt.js';
 import { effectiveAffinity } from '../behavior/private.js';
-import { degradedApply, mergeIntoQueue, splitDecision, voiceLimits } from './voice.js';
+import {
+  applyVoiceItems,
+  buildVoiceRequest,
+  degradedApply,
+  dueItems,
+  expireItems,
+  mergeIntoQueue,
+  parseVoiceAnswer,
+  removeItems,
+  retryDelayMs,
+  retryLater,
+  splitDecision,
+  voiceLimits,
+  voiceSettings,
+} from './voice.js';
+// A call-time cycle (portrait.js imports errorNameOf from here): both sides are function declarations.
+import { storedCount } from './portrait.js';
 
 const BACKOFF_MS = 15 * 60_000;
 const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
@@ -113,7 +132,10 @@ export function feedsCalibration(config, model) {
  *   the output budget on reasoning);
  * - `single` (a two-stage prompt is missing, see `analyzerMode`): today's request words every
  *   text in the persona's voice, which two-stage mode keeps on the voice model, so it goes out on
- *   `memory.voiceModel` (null = `llm.model`), never on `memory.model`;
+ *   `memory.voiceModel` (null = `llm.model`), never on `memory.model`, as role `voice` like
+ *   every request on that model (`voiceRequestOptions`), so the voice role's provider route
+ *   (`/nep route`, src/llm/openrouter.js#matchRoute) covers it, and under the same daily rail,
+ *   `memory.voice.maxPerDay` (`analyzeBatch`): every role `voice` request counts there;
  * and both pass `skipCalibration` per `feedsCalibration`.
  * @param {object} config  The live config.
  * @param {'single'|'two'} stage  The batch's `analyzerMode`.
@@ -122,12 +144,10 @@ export function feedsCalibration(config, model) {
 function batchRequestOptions(config, stage) {
   const cfg = config.memory ?? {};
   const twoStageOn = config.features?.memoryTwoStage === true;
+  const onVoiceModel = twoStageOn && stage !== 'two';
   const options = {
-    model: (twoStageOn && stage !== 'two' ? cfg.voiceModel : cfg.model) || undefined,
-    // The fallback on the voice model stays role `analyzer` until `voice` is a role of
-    // src/discord/commands.js#MODEL_ROLE_PATHS (`/nep route set` refuses any other role), so
-    // an `@analyzer` provider pin keeps covering it.
-    role: 'analyzer',
+    model: (onVoiceModel ? cfg.voiceModel : cfg.model) || undefined,
+    role: onVoiceModel ? 'voice' : 'analyzer',
     maxOutputTokens: cfg.maxOutputTokens,
     temperature: analyzerTemperature(config),
     // A 150-message batch with an 8000-token answer on a large model can
@@ -142,6 +162,34 @@ function batchRequestOptions(config, stage) {
   if (stage === 'two' && isPlainObject(cfg.reasoning)) options.reasoning = cfg.reasoning;
   return options;
 }
+
+/**
+ * The `llm.complete` options of one voice request (stage B, `runVoice`), from the live config at
+ * the moment of use: on `memory.voiceModel` (null = `llm.model`, never `memory.model`), role
+ * `voice` (the `/nep model` role, so a `<prefix>@voice` provider route applies), at most
+ * `memory.voice.maxOutputTokens` (src/memory/voice.js#voiceSettings, the budget
+ * buildVoiceRequest fitted the items to), the analyzer's temperature and timeout, and
+ * `skipCalibration` per `feedsCalibration`. No `reasoning`: that setting is stage A's.
+ * @param {object} config  The live config.
+ * @returns {object}
+ */
+function voiceRequestOptions(config) {
+  const model = config.memory?.voiceModel || undefined;
+  return {
+    model,
+    role: 'voice',
+    maxOutputTokens: voiceSettings(config).maxOutputTokens,
+    temperature: analyzerTemperature(config),
+    timeoutMs: config.memory?.timeoutMs ?? config.llm?.timeoutMs,
+    skipCalibration: !feedsCalibration(config, model),
+  };
+}
+
+// The per-day count of voice requests in state.json, capped by `memory.voice.maxPerDay`.
+const VOICE_DAILY = { dayKey: 'voiceDay', countKey: 'voiceCount' };
+
+/** The `running` key of one guild's voice run (a guild id and a `private:` key never collide with it). */
+const voiceKey = (guildId) => `voice:${guildId}`;
 
 // Fallbacks for the memory-prompt placeholders below (and for the guild
 // `learned` limits and the affinity rails), equal to config.json's own
@@ -1473,23 +1521,48 @@ function hasVoiceAddress(item, holderOf) {
 }
 
 /**
- * Run the store writes src/memory/voice.js#degradedApply planned for items that left the voice
- * queue unworded: a feeling keeps stage A's tone (store.fillEpisodeFeeling, in the item's layer),
- * a lesson and a self fact are stored from their brief. Those are the only kinds that path
- * writes; any other write is skipped.
+ * Run voice writes (the plain-data `writes` of src/memory/voice.js#applyVoiceItems, or of
+ * #degradedApply for items that left the queue unworded) through the store method of each kind,
+ * every text already tokenized and clamped:
+ * - relationship: `applyProfileOps`, stamped with the score stage A already moved and the clock
+ *   `nowMs`; a private one `applyPrivateOps`, stamped with the effective (public + private)
+ *   score, as a private batch stamps it;
+ * - reason: `fillAffinityReason`, feeling: `fillEpisodeFeeling`, in the write's layer (both write
+ *   nothing when the address is gone, and are safe to run twice);
+ * - learned: `applyLearnedOps`, dated when it was taught; self: `applySelfOps`;
+ * - patterns / starters: `updateGuild`;
+ * - character: `applyProfileOps` (the portrait stamps are `stampVoicePortraits`').
+ * A write of any other kind, or a character write with a layer, is skipped.
  * @param {object} store
  * @param {string} guildId
- * @param {object[]} writes  degradedApply's `writes`.
- * @param {object} cfg       `config.memory`.
- * @param {number} nowMs     The batch clock (stamps a changed self list).
- * @returns {number}  The writes that landed.
+ * @param {object[]} writes
+ * @param {object} config  The live config.
+ * @param {number} nowMs   When the writes happen (stamps a relationship text and a changed self list).
+ * @returns {number}  The writes that landed (an address filled, a fact added, a text written).
  */
-function runDegradedWrites(store, guildId, writes, cfg, nowMs) {
+function runVoiceWrites(store, guildId, writes, config, nowMs) {
+  const cfg = config.memory ?? {};
+  const limits = voiceLimits(config);
+  const textOpts = { fieldChars: limits.character, relationshipChars: limits.relationship, clampTolerance: cfg.clampTolerance, now: nowMs };
   let landed = 0;
   for (const write of writes) {
-    if (write.kind === 'feeling') {
+    const layer = write.layer === 'private' ? 'private' : undefined;
+    if (write.kind === 'relationship') {
+      if (layer) {
+        const score = effectiveAffinity(store.getUser(guildId, write.userId)?.affinity, store.getPrivate(guildId, write.userId)?.affinity).score;
+        store.applyPrivateOps(guildId, write.userId, { relationship: write.text }, { ...textOpts, relationshipScore: score });
+      } else {
+        store.applyProfileOps(guildId, write.userId, { relationship: write.text }, textOpts);
+      }
+      landed += 1;
+    } else if (write.kind === 'character' && !layer) {
+      store.applyProfileOps(guildId, write.userId, { character: write.text }, textOpts);
+      landed += 1;
+    } else if (write.kind === 'reason') {
+      if (store.fillAffinityReason(guildId, write.userId, write.at, write.text, { layer, clampTolerance: cfg.clampTolerance })) landed += 1;
+    } else if (write.kind === 'feeling') {
       const episode = { at: write.at, date: write.date, what: write.what };
-      if (store.fillEpisodeFeeling(guildId, write.userId, episode, write.text, { layer: write.layer, clampTolerance: cfg.clampTolerance })) landed += 1;
+      if (store.fillEpisodeFeeling(guildId, write.userId, episode, write.text, { layer, clampTolerance: cfg.clampTolerance })) landed += 1;
     } else if (write.kind === 'learned') {
       const add = { text: write.text };
       if (write.from) add.from = write.from;
@@ -1498,9 +1571,56 @@ function runDegradedWrites(store, guildId, writes, cfg, nowMs) {
       landed += 1;
     } else if (write.kind === 'self') {
       landed += store.applySelfOps(guildId, { add: [write.text] }, selfOpsOptions(cfg, nowMs)).added;
+    } else if (write.kind === 'patterns' || write.kind === 'starters') {
+      store.updateGuild(guildId, { [write.kind]: write.text });
+      landed += 1;
     }
   }
   return landed;
+}
+
+/**
+ * The portrait stamps of the character items a voice run just applied (DECISIONS-R4: written
+ * when the item is APPLIED, never when the refresh queued it, so a portrait merge the voice model
+ * has not worded yet leaves the member due): `portraitRefreshedAt` = when the item was queued
+ * (`createdAt`, the closest the queue keeps to the moment the refresh read the history, so the
+ * next sample misses no line written while the item waited), `portraitMessageCount` = the
+ * member's message count now, and no pending attempt -- the fields
+ * src/memory/warmup.js#stampPortrait writes.
+ * @param {object} store
+ * @param {string} guildId
+ * @param {object[]} items       The sent items still queued (one character item per member).
+ * @param {string[]} portraits   applyVoiceItems' `portraits`: members whose character item was applied.
+ * @returns {number}  Portraits stamped.
+ */
+function stampVoicePortraits(store, guildId, items, portraits) {
+  let stamped = 0;
+  for (const userId of portraits) {
+    const item = items.find((queued) => queued.kind === 'character' && queued.userId === userId);
+    if (!item) continue;
+    store.updateUser(guildId, item.userId, {
+      portraitRefreshedAt: new Date(item.createdAt).toISOString(),
+      portraitMessageCount: storedCount(store.getUser(guildId, item.userId)?.messageCount),
+      portraitAttemptAt: null,
+    });
+    stamped += 1;
+  }
+  return stamped;
+}
+
+/** The stored text a relationship, patterns, starters or character item rewrites (with `<@id>`
+ * tokens; the member's private layer's for a private item), '' when none: buildVoiceRequest's
+ * `oldTextOf`, so a rewrite is a merge. */
+function voiceOldText(store, guildId, item) {
+  if (item.kind === 'patterns' || item.kind === 'starters') return store.getGuild(guildId)?.[item.kind] ?? '';
+  const holder = item.layer === 'private' ? store.getPrivate(guildId, item.userId) : store.getUser(guildId, item.userId);
+  return holder?.[item.kind] ?? '';
+}
+
+/** Whether a voice item's member still has what its text belongs to: their public profile, or
+ * (`private`) their private layer. applyVoiceItems' and degradedApply's `hasMember`. */
+function voiceMemberCheck(store, guildId) {
+  return (userId, layer) => (layer === 'private' ? store.getPrivate(guildId, userId) : store.getUser(guildId, userId)) != null;
 }
 
 /**
@@ -1534,9 +1654,8 @@ function queueStageA(store, guildId, split, config, nowMs) {
   counts.voiceQueued = added + merged;
   counts.voiceOverflow = overflow.length;
   if (overflow.length > 0) {
-    const hasMember = (userId, layer) => holderOf({ userId, layer }) != null;
-    const { writes } = degradedApply(overflow, { config, hasMember });
-    counts.voiceDegraded = runDegradedWrites(store, guildId, writes, config.memory ?? {}, nowMs);
+    const { writes } = degradedApply(overflow, { config, hasMember: voiceMemberCheck(store, guildId) });
+    counts.voiceDegraded = runVoiceWrites(store, guildId, writes, config, nowMs);
     log.info('memory: voice dropped', { guildId, expired: 0, overflow: overflow.length, degraded: counts.voiceDegraded });
   }
   return counts;
@@ -1748,6 +1867,13 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
   // Whether the two-stage switch is on while its prompts are not there (the batches run single):
   // `memory: two-stage unavailable` is logged once each time this turns true.
   let twoStageUnavailable = false;
+  // The voice run (`runVoice`), per guild: the back-off after failed requests (`failures` in a
+  // row, `until` epoch ms), so an outage does not send every due item in turn; when each
+  // `memory: voice skipped` reason was last logged; whether the voice prompt was missing at the
+  // last run that looked (warned once per change). In memory: a restart starts without them.
+  const voiceBackoff = new Map();
+  const voiceSkipLogged = new Map();
+  let voicePromptMissing = false;
 
   /**
    * The analyzer one batch runs (`analyzerMode`), read from the live config and prompts at the
@@ -2074,7 +2200,10 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * stages, so a failed stage A batch is halved or backed off exactly as today.
    * With `features.memoryTwoStage` on, every outcome carries `stage`, and the request goes out
    * on the model `batchRequestOptions` names: stage A on `memory.model`, the single-stage
-   * fallback (a two-stage prompt missing) on the voice model.
+   * fallback (a two-stage prompt missing) on the voice model as role `voice`, which counts
+   * against `memory.voice.maxPerDay` like a voice run's request (`countVoiceRequest`): with
+   * the rail reached nothing is sent and the reason is 'daily-cap' (backed off, not halved); a
+   * request the llm refuses before sending gives its count back.
    */
   async function analyzeBatch(guildId, messages, requestInput, applyUpdate) {
     const stage = stageOfBatch();
@@ -2092,6 +2221,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     let completion;
     let fit; // the request's { shown, trimmed, roster, rosterCandidates, rosterTokens, staleRelationships }, reported with a success
     let rosterIds = []; // the roster members the request carried: the only non-authors an answer may give an alias
+    let voiceDay = null; // the UTC day a role `voice` request counts for (the single-stage fallback)
     try {
       const { messages: llmMessages, shown, trimmed, rosterIds: sentRoster, rosterCandidates, rosterTokens, staleRelationships } = buildMemoryRequest({
         prompts: hot.prompts,
@@ -2111,8 +2241,16 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       fit = { shown, trimmed, roster: sentRoster.length, rosterCandidates, rosterTokens, staleRelationships };
       rosterIds = sentRoster;
 
-      completion = await llm.complete(llmMessages, batchRequestOptions(hot.config, stage));
+      const options = batchRequestOptions(hot.config, stage);
+      if (options.role === 'voice') {
+        const sendMs = now();
+        if (voiceRailReached(sendMs)) return { ok: false, usage: null, estimated: 0, result: null, reason: 'daily-cap', ...marker };
+        voiceDay = countVoiceRequest(sendMs);
+      }
+      completion = await llm.complete(llmMessages, options);
     } catch (err) {
+      // Refused before sending: a role `voice` request that never went out does not count.
+      if (voiceDay !== null && (err instanceof DailyCapError || err instanceof TokenLimitError)) releaseVoiceRequest(voiceDay);
       // Nothing was billed: the request never left this process, or the
       // provider never returned a completion. `status` (the HTTP status when
       // the error carries one, e.g. 429) lets a caller tell a rate limit apart
@@ -2219,7 +2357,11 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     }
   }
 
-  /** Run a memory update for one guild if its buffer is due and it is not busy/backed off. */
+  /**
+   * Run a memory update for one guild if its buffer is due and it is not busy/backed off. A
+   * stage A batch that was stored is followed by one voice run for the guild (`runVoice`), still
+   * under the guild's own `running` key, so the tick never starts a second one beside it.
+   */
   async function run(guildId) {
     running.add(guildId);
     try {
@@ -2250,6 +2392,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           emojiUsage,
           ...stageLogFields(outcome),
         });
+        if (outcome.stage === 'two') await runVoice(guildId);
         return;
       }
       recordFailure(guildId, outcome, 'memory: update', { guildId, ...stageField(outcome) });
@@ -2329,7 +2472,280 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     }
   }
 
-  /** Check every guild and every private buffer, and kick off a memory update for the ones that are due. */
+  /** `memory: voice skipped` for `reason`, at most once an hour per guild and reason. */
+  function logVoiceSkip(guildId, reason, nowMs) {
+    const key = `${guildId}:${reason}`;
+    const last = voiceSkipLogged.get(key);
+    if (last !== undefined && nowMs - last < HOUR_MS) return;
+    voiceSkipLogged.set(key, nowMs);
+    log.info('memory: voice skipped', { guildId, reason });
+  }
+
+  /** One more failed voice request for the guild: it waits src/memory/voice.js#retryDelayMs of
+   * the failures in a row (`memory.voice.retryMinutes`, doubling, at most `queueHours`). */
+  function backOffVoice(guildId, nowMs) {
+    const failures = (voiceBackoff.get(guildId)?.failures ?? 0) + 1;
+    const delay = retryDelayMs(failures, hot.config);
+    voiceBackoff.set(guildId, { failures, until: nowMs + delay });
+    return delay / MINUTE_MS;
+  }
+
+  /**
+   * Whether this UTC day's `memory.voice.maxPerDay` requests on the voice model went out already
+   * (`voiceDay` / `voiceCount` in state.json, read at the moment of use; a value that is not a
+   * number refuses, src/llm/openrouter.js#dailyCapOf, and 0 never sends).
+   * @param {number} nowMs
+   * @returns {boolean}
+   */
+  function voiceRailReached(nowMs) {
+    const cap = dailyCapOf(hot.config.memory?.voice?.maxPerDay, 'memory.voice.maxPerDay');
+    const today = dailyCounter(store.state.data, VOICE_DAILY, nowMs);
+    if (today.rolled) store.state.markDirty();
+    return today.count >= cap;
+  }
+
+  /**
+   * Count one request about to go out on the voice model as role `voice` (a voice run's, or a
+   * batch's single-stage fallback) against `memory.voice.maxPerDay`; the caller checked
+   * `voiceRailReached` with nothing awaited since.
+   * @param {number} nowMs
+   * @returns {string}  The UTC day it counts for (for `releaseVoiceRequest`).
+   */
+  function countVoiceRequest(nowMs) {
+    const { day } = bumpDaily(store.state.data, VOICE_DAILY, nowMs);
+    store.state.markDirty();
+    return day;
+  }
+
+  /** Give back the count `countVoiceRequest` took on `day` for a request refused before it
+   * went out, unless the day has turned since. */
+  function releaseVoiceRequest(day) {
+    const state = store.state.data;
+    if (state.voiceDay !== day || !(state.voiceCount > 0)) return;
+    state.voiceCount -= 1;
+    store.state.markDirty();
+  }
+
+  /**
+   * Take the expired items out of the guild's queue (src/memory/voice.js#expireItems: queued
+   * `memory.voice.queueHours`, left out of `memory.voice.maxAttempts` answers, or of a kind
+   * switched off since; never a `character` item) and run their degraded writes (#degradedApply).
+   * @returns {number}  Items expired.
+   */
+  function expireVoice(guildId, config, nowMs) {
+    const { expired } = store.updateVoiceQueue(guildId, (queue) => expireItems(queue, nowMs, config));
+    if (expired.length === 0) return 0;
+    const { writes } = degradedApply(expired, { config, hasMember: voiceMemberCheck(store, guildId) });
+    const degraded = runVoiceWrites(store, guildId, writes, config, nowMs);
+    store.flush();
+    log.info('memory: voice dropped', { guildId, expired: expired.length, overflow: 0, degraded });
+    return expired.length;
+  }
+
+  /** A voice request that failed: every item it carried (`ids`, those still queued) waits
+   * src/memory/voice.js#retryLater's back-off without counting a miss, the guild backs off. */
+  function voiceFailed(guildId, ids, { reason, detail, status }) {
+    const failedMs = now();
+    const config = hot.config;
+    store.updateVoiceQueue(guildId, (queue) => retryLater(queue, ids, failedMs, config));
+    store.flush();
+    const backoffMinutes = backOffVoice(guildId, failedMs);
+    const queued = store.getVoiceQueue(guildId).length;
+    log.warn('memory: voice failed', { guildId, reason, detail, status, sent: ids.length, queued, backoffMinutes });
+    return { reason, sent: ids.length, applied: 0 };
+  }
+
+  /**
+   * Write one parsed voice answer. The queue is read again first (the request was awaited): only
+   * the sent items STILL queued are written, so an item merged, replaced or forgotten meanwhile
+   * never takes a stale text; then, in one synchronous read-modify-write, the applied, gone and
+   * switched-off ids leave the queue and the missing ones are backed off as misses -- an item
+   * queued during the request is left as it is. A parsed answer ends the guild's back-off.
+   * @param {string} guildId
+   * @param {string[]} sent         buildVoiceRequest's `sent`.
+   * @param {Map<string, string>} worded  parseVoiceAnswer's map.
+   * @param {number} outputTokens   buildVoiceRequest's estimate of the longest answer, for the log.
+   * @returns {{ sent: number, applied: number }}
+   */
+  function applyVoiceAnswer(guildId, sent, worded, outputTokens) {
+    const doneMs = now();
+    const config = hot.config;
+    const sentIds = new Set(sent);
+    const still = store.getVoiceQueue(guildId).filter((item) => sentIds.has(item.id));
+    const { tokenize } = makeTokenizers(store, guildId, new Set(still.map((item) => item.userId).filter(Boolean)));
+    const result = applyVoiceItems(worded, still, { config, tokenize, hasMember: voiceMemberCheck(store, guildId) });
+    const landed = runVoiceWrites(store, guildId, result.writes, config, doneMs);
+    const portraits = stampVoicePortraits(store, guildId, still, result.portraits);
+    const leaving = [...result.applied, ...result.gone, ...result.off];
+    store.updateVoiceQueue(guildId, (queue) => retryLater(removeItems(queue, leaving), result.missing, doneMs, config, { missed: true }));
+    voiceBackoff.delete(guildId);
+    store.flush();
+    log.info('memory: voice applied', {
+      guildId,
+      sent: sent.length,
+      applied: result.applied.length,
+      missing: result.missing.length,
+      gone: result.gone.length,
+      off: result.off.length,
+      // Sent, but no longer queued as sent once the answer came: merged, replaced or forgotten meanwhile.
+      stale: sent.length - still.length,
+      ignored: result.ignored,
+      landed,
+      portraits,
+      // Applied per kind, and the answer size the request was fitted to (calibrated tokens).
+      byKind: result.byKind,
+      outputTokens,
+      queued: store.getVoiceQueue(guildId).length,
+    });
+    return { sent: sent.length, applied: result.applied.length };
+  }
+
+  /** The body of `runVoice`, under its `running` key. */
+  async function voiceRun(guildId) {
+    const idle = (reason) => ({ reason, sent: 0, applied: 0 });
+    const startMs = now();
+    if (store.state.data.paused) {
+      logVoiceSkip(guildId, 'paused', startMs);
+      return idle('paused');
+    }
+
+    const config = hot.config;
+    // Local work, no request: on time whatever the switch, the voice prompt or the guild's
+    // back-off say (an item's age is not the model's fault), so a rollback of the switch or a
+    // missing prompt never strands what the queue holds.
+    expireVoice(guildId, config, startMs);
+    if (config.features?.memoryTwoStage !== true) return idle('off');
+    if (!hasContent(hot.prompts?.['memory-voice'])) {
+      if (!voicePromptMissing) log.warn('memory: voice skipped', { guildId, reason: 'no-prompt' });
+      voicePromptMissing = true;
+      return idle('no-prompt');
+    }
+    voicePromptMissing = false;
+
+    if (startMs < (voiceBackoff.get(guildId)?.until ?? 0)) return idle('backoff');
+    const due = dueItems(store.getVoiceQueue(guildId), startMs, config);
+    if (due.length === 0) return idle('nothing-due');
+    if (voiceRailReached(startMs)) {
+      logVoiceSkip(guildId, 'daily-cap', startMs);
+      return idle('daily-cap');
+    }
+
+    const selfName = getSelfName(guildId);
+    let request;
+    try {
+      request = buildVoiceRequest({
+        prompts: hot.prompts,
+        config,
+        calibrator,
+        items: due,
+        selfName,
+        character: characterText(hot.prompts, selfName),
+        nameOf: storeNameOf(store, guildId),
+        oldTextOf: (item) => voiceOldText(store, guildId, item),
+      });
+    } catch (err) {
+      // The system message and the character block alone are over the cap: nothing can be sent.
+      if (!(err instanceof SectionsTooLargeError)) throw err;
+      return voiceFailed(guildId, due.map((item) => item.id), { reason: 'token-limit', detail: detailOf(err) });
+    }
+    // No due item fits the request even alone.
+    if (request.sent.length === 0) return voiceFailed(guildId, due.map((item) => item.id), { reason: 'token-limit' });
+
+    // Counted only once there is something to send; a request that went out counts even when it fails.
+    const day = countVoiceRequest(startMs);
+    let completion;
+    let failure = null;
+    try {
+      completion = await llm.complete(request.messages, voiceRequestOptions(config));
+    } catch (err) {
+      // Refused before sending: the request never went out, so it does not count.
+      if (err instanceof DailyCapError || err instanceof TokenLimitError) releaseVoiceRequest(day);
+      const reason = err instanceof DailyCapError ? 'daily-cap' : err instanceof TokenLimitError ? 'token-limit' : 'llm-error';
+      failure = { reason, detail: detailOf(err), status: err?.statusCode };
+    }
+
+    // Right before any write, with no await left until it is done: a pause during the request
+    // wins (/nep pause waits for this run, then the owner edits data/): nothing is written, the
+    // items stay exactly as they were.
+    if (store.state.data.paused) {
+      log.info('memory: voice skipped', { guildId, reason: 'paused', sent: request.sent.length });
+      return { reason: 'paused', sent: request.sent.length, applied: 0 };
+    }
+    if (failure) return voiceFailed(guildId, request.sent, failure);
+
+    let worded;
+    try {
+      worded = parseVoiceAnswer(completion.text, request.sent);
+    } catch (err) {
+      // Billed, but unusable: by the error's name only, never the answer.
+      const reason = looksTruncated(completion.text, completion.finishReason) ? 'truncated' : 'bad-json';
+      return voiceFailed(guildId, request.sent, { reason, detail: errorNameOf(err) });
+    }
+    return applyVoiceAnswer(guildId, request.sent, worded, request.outputTokens);
+  }
+
+  /**
+   * The voice run of one guild (stage B of the two-stage analyzer): ONE request on
+   * `memory.voiceModel` (null = `llm.model`, never `memory.model`; role `voice`) that words the
+   * guild's due queued items (src/memory/voice.js#dueItems: oldest first, one audience -- the
+   * server's items, or one member's private ones -- at most `memory.voice.maxItems`), built from
+   * prompts/memory-voice.md (#buildVoiceRequest) and applied by id through the store
+   * (`runVoiceWrites`). Before it, the expired items take the degraded path (`expireVoice`, local
+   * work that sends nothing), also while the guild backs off, with `features.memoryTwoStage` off
+   * or with the voice prompt missing.
+   *
+   * Does nothing at all while paused. Sends nothing with `features.memoryTwoStage` off, with the
+   * voice prompt missing (warned once per change), while the guild backs off after a failed
+   * request, with no item due, or once `memory.voice.maxPerDay` requests went out this UTC day
+   * (`voiceDay` / `voiceCount` in state.json, shared with a batch's single-stage fallback; 0, or a
+   * value that is not a number, never sends). A failed request (`token-limit`,
+   * `daily-cap`, `llm-error`, `bad-json`, `truncated`) backs off every item it carried and the
+   * guild (`voiceFailed`); a pause during the request writes nothing at all. A character item is
+   * never dropped, and its portrait stamps are written only when it is applied. Its `running`
+   * key (`voice:<guildId>`) makes `waitIdle()` -- `/nep pause` -- wait for it. Never throws:
+   * anything unexpected is logged by name and backs the guild off.
+   * @param {string} guildId
+   * @returns {Promise<{ sent: number, applied: number, reason?: string }>}  `reason` when it did
+   *   not apply an answer: `busy`, `off`, `paused`, `no-prompt`, `backoff`, `nothing-due`,
+   *   `daily-cap`, `token-limit`, `llm-error`, `bad-json`, `truncated`, `apply-error`.
+   */
+  async function runVoice(guildId) {
+    const key = voiceKey(guildId);
+    if (running.has(key)) return { reason: 'busy', sent: 0, applied: 0 };
+    running.add(key);
+    try {
+      return await voiceRun(guildId);
+    } catch (err) {
+      const backoffMinutes = backOffVoice(guildId, now());
+      log.warn('memory: voice failed', { guildId, reason: 'apply-error', error: errorNameOf(err), backoffMinutes });
+      return { reason: 'apply-error', sent: 0, applied: 0 };
+    } finally {
+      settle(key);
+    }
+  }
+
+  /**
+   * The voice runs one tick starts: one per guild whose queue holds anything, that has no voice
+   * run in flight and no batch in flight (that batch runs the voice itself once stored, see
+   * `run`). Retries need no new batch. Whatever `features.memoryTwoStage` says: with it off (a
+   * rollback), the voice prompt missing or the guild backing off, the run only expires old items
+   * down the degraded path and sends nothing (`runVoice`), so no queued text is stranded.
+   * @returns {Promise<object>[]}
+   */
+  function dueVoiceRuns() {
+    const runs = [];
+    for (const guildId of store.listGuilds()) {
+      if (running.has(guildId) || running.has(voiceKey(guildId))) continue;
+      if (store.getVoiceQueue(guildId).length === 0) continue;
+      runs.push(runVoice(guildId));
+    }
+    return runs;
+  }
+
+  /**
+   * Check every guild and every private buffer, and kick off a memory update for the ones that
+   * are due, then the voice runs (`dueVoiceRuns`).
+   */
   async function tick() {
     // /nep pause: the live analyzer never runs while paused.
     if (store.state.data.paused) return;
@@ -2344,14 +2760,16 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       jobs.push(run(guildId));
     }
     jobs.push(runDuePrivate());
+    jobs.push(...dueVoiceRuns());
     await Promise.all(jobs);
   }
 
   /**
-   * Resolves once no `run()` / `runPrivate()` is in flight -- immediately if
+   * Resolves once no `run()` / `runPrivate()` / `runVoice()` is in flight -- immediately if
    * that is already true. Never starts a new run itself. Used by admin.js's
-   * `/nep pause` to wait out a live-analyzer run that was already in
-   * flight when the pause was requested (an LLM call can take 30-90s): its
+   * `/nep pause` to wait out a live-analyzer or voice run that was already in
+   * flight when the pause was requested (an LLM call can take 30-90s; a voice
+   * answer that arrives once paused writes nothing, see `runVoice`): its
    * result must land on disk BEFORE the pause flushes and drops the store's
    * caches, or the eventual `applyMemoryUpdate` would re-read a profile from
    * disk, mutate it and mark it dirty after the owner started editing files
@@ -2362,5 +2780,5 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     return running.size === 0 ? Promise.resolve() : new Promise((resolve) => idleWaiters.push(resolve));
   }
 
-  return { observe, tick, run, runPrivate, analyze, analyzePrivate, waitIdle };
+  return { observe, tick, run, runPrivate, runVoice, analyze, analyzePrivate, waitIdle };
 }
