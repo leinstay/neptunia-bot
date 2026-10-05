@@ -10,6 +10,9 @@ import { fileURLToPath } from 'node:url';
 
 import {
   VOICE_KINDS,
+  REASON_CHARS,
+  FEELING_CHARS,
+  SELF_CHARS,
   voiceSettings,
   voiceLimits,
   normalizeQueue,
@@ -144,6 +147,9 @@ test('voiceLimits: each kind is limited like the store clamps it, fallbacks equa
   applyMemoryUpdate(store, 'g', { self: [long] }, { clampTolerance: 1 }, new Set());
   assert.equal([...self[0]].length, limits.self);
   assert.deepEqual(Object.keys(limits).sort(), [...VOICE_KINDS].sort());
+
+  // The exported limits src/memory/store.js clamps its voice writes with are these same ones.
+  assert.deepEqual([REASON_CHARS, FEELING_CHARS, SELF_CHARS], [limits.reason, limits.feeling, limits.self]);
 });
 
 // ---- splitDecision -------------------------------------------------------------

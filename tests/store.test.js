@@ -5,8 +5,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createStore, writeJsonAtomic } from '../src/memory/store.js';
-import { emptyAffinity } from '../src/memory/affinity.js';
+import { applyDelta, emptyAffinity } from '../src/memory/affinity.js';
+import { mergeEpisodes } from '../src/memory/episodes.js';
+import { applyMemoryUpdate, MEMORY_LIMIT_DEFAULTS } from '../src/memory/update.js';
+import { FEELING_CHARS, REASON_CHARS, SELF_CHARS, applyVoiceItems, mergeIntoQueue, removeItems, splitDecision } from '../src/memory/voice.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 function tmpDataDir() {
@@ -2118,4 +2122,598 @@ test('applyPrivateOps: stamps relationshipScore when the private relationship te
 
   store.applyPrivateOps('g1', 'u1', { relationship: 'Trusts the persona more' }, { fieldChars: 400, relationshipScore: 61 });
   assert.equal(store.getPrivate('g1', 'u1').relationshipScore, 61);
+});
+
+// --- the voice queue (src/memory/voice.js), self facts, filling voice texts ----
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const VOICE_NOW = Date.UTC(2026, 9, 5, 12, 0, 0);
+const VOICE_AT = new Date(VOICE_NOW).toISOString();
+const ELENI = '111111111111111111';
+const NIKOS = '222222222222222222';
+const VOICE_CONFIG = {
+  features: {},
+  memory: { maxNewEpisodes: 3, clampTolerance: 1.25, voice: { maxItems: 24, maxOutputTokens: 3000, retryMinutes: 15, maxAttempts: 4, queueMax: 100, queueHours: 24 } },
+  relationships: { maxDeltaPerUpdate: 15, textChars: 600 },
+};
+
+function voiceFileOf(dir, guildId) {
+  return path.join(dir, 'guilds', guildId, 'voice.json');
+}
+
+/** One item as src/memory/voice.js#splitDecision hands it to mergeIntoQueue, queued at `at`. */
+function voiceItem(kind, fields = {}, at = VOICE_NOW) {
+  return { kind, brief: ['σημείωση'], createdAt: at, attempts: 0, misses: 0, nextAt: at, ...fields };
+}
+
+function queueItems(store, guildId, items, nowMs = VOICE_NOW) {
+  return store.updateVoiceQueue(guildId, (queue) => mergeIntoQueue(queue, items, nowMs, VOICE_CONFIG));
+}
+
+const briefsOf = (store, guildId) => store.getVoiceQueue(guildId).map((queued) => queued.brief[0]);
+
+test('getVoiceQueue: an empty list when nothing is queued; reading creates no file', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.getVoiceQueue('g1'), []);
+  store.flush();
+  assert.equal(fs.existsSync(voiceFileOf(dir, 'g1')), false);
+});
+
+test('voice queue: written atomically to guilds/<id>/voice.json on flush and read back after a restart', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const outcome = queueItems(store, 'g1', [voiceItem('self', { brief: ['μου αρέσει ο καφές'] }), voiceItem('relationship', { userId: ELENI })]);
+  assert.equal(outcome.added, 2, 'updateVoiceQueue returns what the change returned');
+  assert.equal(fs.existsSync(voiceFileOf(dir, 'g1')), false, 'written by the flush, like every other file');
+
+  store.flush();
+  assert.deepEqual(JSON.parse(fs.readFileSync(voiceFileOf(dir, 'g1'), 'utf8')), store.getVoiceQueue('g1'));
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'guilds', 'g1')).filter((name) => name.endsWith('.tmp')), []);
+
+  const restarted = createStore({ dataDir: dir });
+  assert.deepEqual(restarted.getVoiceQueue('g1'), store.getVoiceQueue('g1'));
+  assert.deepEqual(restarted.getVoiceQueue('g1').map((queued) => [queued.kind, queued.userId ?? null]), [['self', null], ['relationship', ELENI]]);
+});
+
+test('updateVoiceQueue: replaces the queue with what the change returns, normalised; the file is written on flush', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const good = { id: 'k1', kind: 'self', brief: 'μία', createdAt: VOICE_NOW };
+  store.updateVoiceQueue('g1', () => [good, { ...good }, { id: 'k2', kind: 'relationship', brief: ['χωρίς μέλος'], createdAt: VOICE_NOW }]);
+  const expected = [{ id: 'k1', kind: 'self', brief: ['μία'], createdAt: VOICE_NOW, attempts: 0, misses: 0, nextAt: VOICE_NOW }];
+  assert.deepEqual(store.getVoiceQueue('g1'), expected);
+  store.flush();
+  assert.deepEqual(createStore({ dataDir: dir }).getVoiceQueue('g1'), expected);
+
+  store.updateVoiceQueue('g1', () => []);
+  assert.deepEqual(store.getVoiceQueue('g1'), [], 'an explicit empty list empties the queue');
+});
+
+test('getVoiceQueue: normalised on read -- not a list is empty, broken items and repeated ids are dropped', () => {
+  const dir = tmpDataDir();
+  writeRaw(voiceFileOf(dir, 'g1'), { items: [] });
+  assert.deepEqual(createStore({ dataDir: dir }).getVoiceQueue('g1'), []);
+
+  writeRaw(voiceFileOf(dir, 'g1'), [
+    { id: 'k1', kind: 'self', brief: 'μία', createdAt: VOICE_NOW, attempts: -2 },
+    { id: 'k2', kind: 'relationship', brief: ['χωρίς μέλος'], createdAt: VOICE_NOW },
+    { id: 'k1', kind: 'self', brief: ['διπλό'], createdAt: VOICE_NOW },
+    'σκουπίδι',
+  ]);
+  const raw = fs.readFileSync(voiceFileOf(dir, 'g1'), 'utf8');
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.getVoiceQueue('g1'), [{ id: 'k1', kind: 'self', brief: ['μία'], createdAt: VOICE_NOW, attempts: 0, misses: 0, nextAt: VOICE_NOW }]);
+  store.flush();
+  assert.equal(fs.readFileSync(voiceFileOf(dir, 'g1'), 'utf8'), raw, 'reading never rewrites the file');
+});
+
+test('getVoiceQueue: items left out on load are logged once as a count, never by content; a value that is not a list too', async () => {
+  const dir = tmpDataDir();
+  writeRaw(voiceFileOf(dir, 'g2'), [
+    { id: 'k1', kind: 'self', brief: ['μένει'], createdAt: VOICE_NOW },
+    { id: 'k2', kind: 'reason', userId: ELENI, brief: ['χωρίς διεύθυνση'], payload: { delta: 3 }, createdAt: VOICE_NOW },
+    { id: 'k3', kind: 'character', userId: ELENI, brief: {}, createdAt: VOICE_NOW },
+  ]);
+  const store = createStore({ dataDir: dir });
+  const { result, logs } = await withCapturedLogs(() => [store.getVoiceQueue('g2'), store.getVoiceQueue('g2')]);
+  assert.deepEqual(result[0].map((queued) => queued.id), ['k1']);
+  const dropped = logs.filter((line) => line.msg === 'store: voice items dropped');
+  assert.equal(dropped.length, 1, 'logged on the read that loads the file only');
+  assert.equal(dropped[0].level, 'warn');
+  assert.equal(dropped[0].guildId, 'g2');
+  assert.equal(dropped[0].dropped, 2);
+  assert.ok(!JSON.stringify(logs).includes('διεύθυνση') && !JSON.stringify(logs).includes('μένει'), 'counts only');
+
+  const { logs: quiet } = await withCapturedLogs(() => {
+    queueItems(store, 'g2', [voiceItem('self', { brief: ['νέο'] })]);
+    return store.getVoiceQueue('g2');
+  });
+  assert.deepEqual(quiet.filter((line) => line.msg.startsWith('store: voice')), [], 'a write and a cached read log nothing');
+
+  writeRaw(voiceFileOf(dir, 'g3'), { items: [] });
+  writeRaw(voiceFileOf(dir, 'g4'), [{ id: 'k1', kind: 'self', brief: ['καλό'], createdAt: VOICE_NOW }]);
+  const { logs: more } = await withCapturedLogs(() => [store.getVoiceQueue('g3'), store.getVoiceQueue('g4'), store.getVoiceQueue('g5')]);
+  assert.deepEqual(
+    more.filter((line) => line.msg.startsWith('store: voice')).map((line) => [line.msg, line.guildId, line.reason ?? line.dropped]),
+    [['store: voice queue replaced', 'g3', 'malformed']],
+    'a clean file and a missing one log nothing',
+  );
+});
+
+test('getVoiceQueue: an unparsable file reads as empty with a warning; a cached queue keeps its last good value', async () => {
+  const dir = tmpDataDir();
+  fs.mkdirSync(path.join(dir, 'guilds', 'g2'), { recursive: true });
+  fs.writeFileSync(voiceFileOf(dir, 'g2'), '[{ not json');
+  const { result, logs } = await withCapturedLogs(() => createStore({ dataDir: dir }).getVoiceQueue('g2'));
+  assert.deepEqual(result, []);
+  assert.equal(logs.filter((line) => line.msg === 'store: unreadable file, using fallback').length, 1);
+
+  const store = createStore({ dataDir: dir });
+  queueItems(store, 'g1', [voiceItem('self', { brief: ['ἕνα'] })]);
+  store.flush();
+  fs.writeFileSync(voiceFileOf(dir, 'g1'), '{ broken by hand');
+  assert.deepEqual(briefsOf(store, 'g1'), ['ἕνα'], 'a cached file is read once; the cache is the last good value');
+  assert.ok(store.validate().includes('guilds/g1/voice.json'), '/nep resume refuses to come back over the broken file');
+});
+
+test('getVoiceQueue: returns a copy; changing it never changes the stored queue', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  queueItems(store, 'g1', [voiceItem('self')]);
+  const copy = store.getVoiceQueue('g1');
+  copy[0].brief.push('ξένο');
+  copy.pop();
+  assert.deepEqual(store.getVoiceQueue('g1').map((queued) => queued.brief), [['σημείωση']]);
+});
+
+test('updateVoiceQueue: an item queued while a request is awaited survives; the write after the await removes only the applied ids', async () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  queueItems(store, 'g1', [voiceItem('self', { brief: ['α'] }), voiceItem('self', { brief: ['β'] })]);
+
+  const voiceRun = async () => {
+    const sent = store.getVoiceQueue('g1').map((queued) => queued.id); // read before the request
+    await new Promise((resolve) => setImmediate(resolve)); // the awaited request
+    // After the await: read the queue again and remove only what was applied.
+    store.updateVoiceQueue('g1', (queue) => removeItems(queue, [sent[0]]));
+  };
+  const running = voiceRun();
+  // A stage A batch lands while the request is in flight.
+  queueItems(store, 'g1', [voiceItem('self', { brief: ['γ'] }, VOICE_NOW + 1000)], VOICE_NOW + 1000);
+  await running;
+
+  assert.deepEqual(briefsOf(store, 'g1'), ['β', 'γ']);
+  store.flush();
+  assert.deepEqual(briefsOf(createStore({ dataDir: dir }), 'g1'), ['β', 'γ']);
+});
+
+test('updateVoiceQueue: the only queue write -- no setter takes a whole queue; a write after the await keeps an item added during it', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  assert.equal('setVoiceQueue' in store, false, 'a copy kept across an await has no door to be written back through');
+  queueItems(store, 'g1', [voiceItem('self', { brief: ['α'] })]);
+  const [applied] = store.getVoiceQueue('g1').map((queued) => queued.id);
+  const running = (async () => {
+    await new Promise((resolve) => setImmediate(resolve));
+    store.updateVoiceQueue('g1', (queue) => removeItems(queue, [applied]));
+  })();
+  queueItems(store, 'g1', [voiceItem('self', { brief: ['δ'] }, VOICE_NOW + 1)], VOICE_NOW + 1);
+  await running;
+  assert.deepEqual(briefsOf(store, 'g1'), ['δ']);
+});
+
+test('updateVoiceQueue: a change that is not synchronous, throws or returns no queue leaves the queue as it was', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  queueItems(store, 'g1', [voiceItem('self')]);
+  const before = store.getVoiceQueue('g1');
+  assert.throws(() => store.updateVoiceQueue('g1', async () => []), { name: 'TypeError', message: /synchronous/ });
+  for (const result of [undefined, null, {}, 'όχι λίστα', 7, { queue: 'x' }, { queue: undefined }]) {
+    assert.throws(() => store.updateVoiceQueue('g1', () => result), { name: 'TypeError', message: /return a queue/ }, String(JSON.stringify(result)));
+  }
+  const cyclic = [];
+  cyclic.push(cyclic);
+  assert.throws(() => store.updateVoiceQueue('g1', () => cyclic), TypeError, 'a queue that cannot be written as JSON');
+  assert.throws(
+    () =>
+      store.updateVoiceQueue('g1', (queue) => {
+        queue.length = 0; // the change works on a copy
+        throw new Error('half way');
+      }),
+    /half way/,
+  );
+  assert.deepEqual(store.getVoiceQueue('g1'), before);
+});
+
+test('updateVoiceQueue: an async change that rejects is refused and its rejection never goes unhandled', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  queueItems(store, 'g1', [voiceItem('self')]);
+  const unhandled = [];
+  const listener = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', listener);
+  try {
+    assert.throws(
+      () =>
+        store.updateVoiceQueue('g1', async () => {
+          throw new Error('ἀπορρίφθηκε');
+        }),
+      { name: 'TypeError', message: /synchronous/ },
+    );
+    // Unhandled rejections are reported once the microtask queue drains, before setImmediate runs.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    process.off('unhandledRejection', listener);
+  }
+  assert.deepEqual(unhandled, []);
+  assert.equal(store.getVoiceQueue('g1').length, 1);
+});
+
+test('updateVoiceQueue: the stored queue shares nothing with what the change returned', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const portrait = voiceItem('character', { userId: ELENI, brief: { keep: ['ήρεμη'] } });
+  const outcome = queueItems(store, 'g1', [portrait]);
+  outcome.queue[0].brief.keep.push('ξένο');
+  outcome.queue[0].attempts = 9;
+  outcome.queue.length = 0;
+  portrait.brief.keep.push('άλλο');
+
+  const mine = store.getVoiceQueue('g1');
+  store.updateVoiceQueue('g1', () => mine);
+  mine[0].brief.keep.push('τρίτο');
+
+  const [stored] = store.getVoiceQueue('g1');
+  assert.deepEqual(stored.brief, { keep: ['ήρεμη'] });
+  assert.equal(stored.attempts, 0);
+});
+
+test('updateVoiceQueue: a change that changes nothing does not rewrite the file', () => {
+  const dir = tmpDataDir();
+  writeRaw(voiceFileOf(dir, 'g1'), [{ id: 'k1', kind: 'self', brief: ['μία'], createdAt: VOICE_NOW, attempts: 0, misses: 0, nextAt: VOICE_NOW }]);
+  const raw = fs.readFileSync(voiceFileOf(dir, 'g1'), 'utf8');
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.updateVoiceQueue('g1', (queue) => ({ queue, note: 7 })).note, 7);
+  store.flush();
+  assert.equal(fs.readFileSync(voiceFileOf(dir, 'g1'), 'utf8'), raw);
+});
+
+test('voice queue: survives a pause and a restart; nothing but forget and wipe removes items', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', ELENI, 'Ελένη', 1000);
+  store.touchUser('g1', NIKOS, 'Νίκος', 1000);
+  queueItems(store, 'g1', [voiceItem('relationship', { userId: ELENI }), voiceItem('self', { brief: ['ἐγώ'] })]);
+  queueItems(store, 'g2', [voiceItem('self')]);
+  store.flush();
+
+  store.dropCaches(); // /nep pause
+  assert.equal(store.getVoiceQueue('g1').length, 2);
+  store.reloadState(); // /nep resume
+  store.forgetPrivate('g1', NIKOS);
+  store.forgetUser('g1', NIKOS);
+  store.wipeGuild('g2');
+  store.decayAffinities('g1', VOICE_NOW, { decayPerDay: 0.04, decayPower: 1 });
+  store.removeLore('g1', 'κανένα');
+  store.shiftBuffer('g1', []);
+  store.flush();
+
+  const restarted = createStore({ dataDir: dir });
+  assert.deepEqual(restarted.getVoiceQueue('g1').map((queued) => queued.kind), ['relationship', 'self']);
+  assert.deepEqual(restarted.getVoiceQueue('g2'), []);
+});
+
+test('store: forgetUser removes the member\'s queued voice items, wipeGuild removes the queue', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.touchUser('g1', ELENI, 'Ελένη', 1000);
+  queueItems(store, 'g1', [
+    voiceItem('relationship', { userId: ELENI }),
+    voiceItem('relationship', { userId: ELENI, layer: 'private' }),
+    voiceItem('learned', { brief: ['μάθημα'], payload: { from: `<@${ELENI}>` } }),
+    voiceItem('relationship', { userId: NIKOS }),
+    voiceItem('self', { brief: ['ἐγώ'] }),
+  ]);
+  queueItems(store, 'g2', [voiceItem('self', { brief: ['ἄλλος'] })]);
+  store.flush();
+
+  store.forgetUser('g1', ELENI);
+  const left = (s) => s.getVoiceQueue('g1').map((queued) => [queued.kind, queued.userId ?? null]);
+  assert.deepEqual(left(store), [['relationship', NIKOS], ['self', null]], 'items about them and the lessons they taught');
+  assert.deepEqual(left(createStore({ dataDir: dir })), [['relationship', NIKOS], ['self', null]], 'on disk at once, no flush needed');
+
+  queueItems(store, 'g1', [voiceItem('self', { brief: ['μόνο στη μνήμη'] }, VOICE_NOW + 1)], VOICE_NOW + 1); // cached, never flushed
+  store.wipeGuild('g1');
+  assert.deepEqual(store.getVoiceQueue('g1'), []);
+  assert.equal(fs.existsSync(voiceFileOf(dir, 'g1')), false);
+  store.flush();
+  assert.equal(fs.existsSync(voiceFileOf(dir, 'g1')), false, 'a wiped queue is not written back');
+  assert.deepEqual(createStore({ dataDir: dir }).getVoiceQueue('g1'), []);
+  assert.deepEqual(briefsOf(createStore({ dataDir: dir }), 'g2'), ['ἄλλος'], 'another guild keeps its queue');
+});
+
+test('forgetPrivate: removes only the member\'s private voice items, on disk at once; no queue file is created', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const payload = { at: VOICE_AT, date: '2026-10-05', what: 'μυστικό', quote: '' };
+  queueItems(store, 'g1', [
+    voiceItem('relationship', { userId: ELENI }),
+    voiceItem('relationship', { userId: ELENI, layer: 'private' }),
+    voiceItem('feeling', { userId: ELENI, layer: 'private', brief: [], payload }),
+    voiceItem('relationship', { userId: NIKOS, layer: 'private' }),
+  ]);
+  store.flush();
+
+  store.forgetPrivate('g1', ELENI);
+  const left = (s) => s.getVoiceQueue('g1').map((queued) => [queued.userId, queued.layer ?? null]);
+  assert.deepEqual(left(store), [[ELENI, null], [NIKOS, 'private']]);
+  assert.deepEqual(left(createStore({ dataDir: dir })), [[ELENI, null], [NIKOS, 'private']]);
+
+  store.forgetUser('g3', ELENI);
+  store.forgetPrivate('g3', ELENI);
+  store.flush();
+  assert.equal(fs.existsSync(voiceFileOf(dir, 'g3')), false);
+});
+
+test('applySelfOps: adds, removes exact items, keeps at most maxSelfFacts', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.updateGuild('g1', { self: ['μου αρέσει η βροχή', `φοβάμαι τη <@${ELENI}>`] });
+
+  const counts = store.applySelfOps(
+    'g1',
+    { remove: ['  ΜΟΥ αρέσει   η βροχή ', 'κάτι που δεν είπα'], add: ['παίζω κιθάρα', `φοβάμαι τη <@${ELENI}>`, 'παίζω  κιθάρα', '', 42] },
+    { maxSelfFacts: 3 },
+  );
+  assert.deepEqual(counts, { added: 1, removed: 1, evicted: 0 });
+  assert.deepEqual(store.getGuild('g1').self, [`φοβάμαι τη <@${ELENI}>`, 'παίζω κιθάρα']);
+
+  assert.deepEqual(store.applySelfOps('g1', { add: ['α', 'β'] }, { maxSelfFacts: 3 }), { added: 2, removed: 0, evicted: 1 });
+  assert.deepEqual(store.getGuild('g1').self, ['παίζω κιθάρα', 'α', 'β'], 'the oldest went');
+
+  assert.deepEqual(store.applySelfOps('g1', { add: ['γ'] }, { maxSelfFacts: 0 }), { added: 0, removed: 0, evicted: 0 }, 'a cap of 0 adds nothing and evicts nothing');
+  assert.deepEqual(store.getGuild('g1').self, ['παίζω κιθάρα', 'α', 'β']);
+});
+
+test('applySelfOps: stamps updatedAt only when the list changes; garbage, a repeat or a miss changes nothing', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.applySelfOps('g1', { add: ['α'] }, { maxSelfFacts: 20, now: VOICE_NOW }), { added: 1, removed: 0, evicted: 0 });
+  assert.equal(store.getGuild('g1').updatedAt, VOICE_AT);
+  store.flush();
+  const raw = fs.readFileSync(path.join(dir, 'guilds', 'g1', 'guild.json'), 'utf8');
+
+  for (const ops of [null, 'α', [], { add: 'β' }, { add: ['α'] }, { remove: ['ω'] }, { remove: [7] }]) {
+    assert.deepEqual(store.applySelfOps('g1', ops, { maxSelfFacts: 20, now: VOICE_NOW + 1 }), { added: 0, removed: 0, evicted: 0 }, JSON.stringify(ops));
+  }
+  store.flush();
+  assert.equal(fs.readFileSync(path.join(dir, 'guilds', 'g1', 'guild.json'), 'utf8'), raw);
+});
+
+test('applySelfOps: maxSelfFacts is required, the store keeps no copy of its default; a fraction is floored', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.applySelfOps('g1', { add: ['α'] }, { maxSelfFacts: 20, now: VOICE_NOW });
+  store.flush();
+  const raw = fs.readFileSync(path.join(dir, 'guilds', 'g1', 'guild.json'), 'utf8');
+
+  for (const opts of [undefined, {}, { maxSelfFacts: undefined }, { maxSelfFacts: null }, { maxSelfFacts: -1 }, { maxSelfFacts: NaN }, { maxSelfFacts: Infinity }, { maxSelfFacts: '20' }]) {
+    assert.throws(() => store.applySelfOps('g1', { add: ['β'], remove: ['α'] }, opts), TypeError, String(opts && opts.maxSelfFacts));
+  }
+  assert.throws(() => store.applySelfOps('g1', null), TypeError, 'checked before the ops');
+  store.flush();
+  assert.equal(fs.readFileSync(path.join(dir, 'guilds', 'g1', 'guild.json'), 'utf8'), raw, 'nothing changed');
+
+  // The caller's resolved cap: src/memory/update.js#MEMORY_LIMIT_DEFAULTS holds config.json's fallback.
+  const cap = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8')).memory.maxSelfFacts;
+  assert.equal(MEMORY_LIMIT_DEFAULTS.maxSelfFacts, cap);
+  const facts = Array.from({ length: cap + 2 }, (_, i) => `γεγονός ${i}`);
+  assert.deepEqual(store.applySelfOps('g2', { add: facts }, { maxSelfFacts: MEMORY_LIMIT_DEFAULTS.maxSelfFacts }), { added: cap + 2, removed: 0, evicted: 2 });
+  assert.deepEqual(store.getGuild('g2').self, facts.slice(-cap));
+
+  assert.deepEqual(store.applySelfOps('g3', { add: ['α', 'β', 'γ'] }, { maxSelfFacts: 2.9 }), { added: 3, removed: 0, evicted: 1 });
+  assert.deepEqual(store.getGuild('g3').self, ['β', 'γ']);
+});
+
+test('applySelfOps: a fact is clamped exactly as the single-stage analyzer clamps its self list', () => {
+  const text = 'λέξη '.repeat(100);
+  for (const clampTolerance of [1, undefined]) {
+    let analyzerSelf;
+    const fake = { getUser: () => null, getGuild: () => ({}), updateGuild: (_guildId, fields) => ((analyzerSelf = fields.self), fields) };
+    applyMemoryUpdate(fake, 'g', { self: [text] }, { clampTolerance, maxSelfFacts: 20 }, new Set());
+
+    const store = createStore({ dataDir: tmpDataDir() });
+    store.applySelfOps('g1', { add: [text] }, { maxSelfFacts: 20, clampTolerance });
+    const [stored] = store.getGuild('g1').self;
+    assert.equal(stored, analyzerSelf[0], `tolerance ${clampTolerance}`);
+    assert.ok([...stored].length < [...text.trim()].length, 'the text was cut');
+    if (clampTolerance === 1) assert.ok([...stored].length <= SELF_CHARS, `at most ${SELF_CHARS}, got ${[...stored].length}`);
+  }
+});
+
+test('applySelfOps: a call that only removes or only repeats never cuts a list stored above a lowered cap', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.applySelfOps('g1', { add: ['α', 'β', 'γ', 'δ', 'ε'] }, { maxSelfFacts: 20 });
+
+  assert.deepEqual(store.applySelfOps('g1', { remove: ['γ'] }, { maxSelfFacts: 2 }), { added: 0, removed: 1, evicted: 0 });
+  assert.deepEqual(store.getGuild('g1').self, ['α', 'β', 'δ', 'ε']);
+  assert.deepEqual(store.applySelfOps('g1', { add: [' Α '] }, { maxSelfFacts: 2 }), { added: 0, removed: 0, evicted: 0 });
+  assert.deepEqual(store.getGuild('g1').self, ['α', 'β', 'δ', 'ε']);
+
+  assert.deepEqual(store.applySelfOps('g1', { add: ['ζ'] }, { maxSelfFacts: 2 }), { added: 1, removed: 0, evicted: 3 }, 'an add trims to the cap');
+  assert.deepEqual(store.getGuild('g1').self, ['ε', 'ζ']);
+});
+
+test('applySelfOps and the voice queue tell a repeated self fact the same way', () => {
+  const pairs = [
+    ['μου αρέσει το τσάι', '  ΜΟΥ  αρέσει\tτο τσάι\n', true],
+    ['Zoë παίζει', 'zoë   παίζει', true],
+    ['μου αρέσει το τσάι', 'μου αρέσει ο καφές', false],
+  ];
+  for (const [first, second, same] of pairs) {
+    const queued = mergeIntoQueue([], [voiceItem('self', { brief: [first] })], VOICE_NOW, VOICE_CONFIG).queue;
+    const { added: queueAdded } = mergeIntoQueue(queued, [voiceItem('self', { brief: [second] })], VOICE_NOW, VOICE_CONFIG);
+
+    const store = createStore({ dataDir: tmpDataDir() });
+    store.applySelfOps('g1', { add: [first] }, { maxSelfFacts: 20 });
+    const { added: storeAdded } = store.applySelfOps('g1', { add: [second] }, { maxSelfFacts: 20 });
+    const { removed } = store.applySelfOps('g1', { remove: [second] }, { maxSelfFacts: 20 });
+
+    assert.equal(queueAdded, same ? 0 : 1, `${first} / ${second}: queue`);
+    assert.equal(storeAdded, same ? 0 : 1, `${first} / ${second}: store add`);
+    assert.equal(removed, 1, `${first} / ${second}: store remove`);
+    assert.deepEqual(store.getGuild('g1').self, same ? [] : [first]);
+  }
+});
+
+test('fillAffinityReason: fills the reason of the history entry stamped at, and affinity.reason while it is the newest', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.touchUser('g1', ELENI, 'Ελένη', 1000);
+  const opts = { maxDelta: 15, historySize: 10 };
+  store.adjustAffinity('g1', ELENI, 5, 'παλιός λόγος', { ...opts, now: VOICE_NOW - 1000 });
+  store.adjustAffinity('g1', ELENI, 4, '', { ...opts, now: VOICE_NOW }); // stage A: the score moves now, the reason later
+  assert.equal(store.getUser('g1', ELENI).affinity.reason, 'παλιός λόγος');
+
+  assert.equal(store.fillAffinityReason('g1', ELENI, VOICE_AT, 'με βοήθησε'), true);
+  let { affinity } = store.getUser('g1', ELENI);
+  assert.equal(affinity.reason, 'με βοήθησε');
+  assert.deepEqual(affinity.history.map((entry) => entry.reason), ['παλιός λόγος', 'με βοήθησε']);
+  assert.equal(affinity.score, 9, 'the score is never touched');
+
+  store.adjustAffinity('g1', ELENI, 3, 'νεότερος', { ...opts, now: VOICE_NOW + 1000 });
+  assert.equal(store.fillAffinityReason('g1', ELENI, VOICE_AT, 'αργότερα'), true);
+  ({ affinity } = store.getUser('g1', ELENI));
+  assert.equal(affinity.history[1].reason, 'αργότερα');
+  assert.equal(affinity.reason, 'νεότερος', 'a newer move keeps its own reason');
+
+  store.adjustPrivateAffinity('g1', ELENI, 2, '', { ...opts, now: VOICE_NOW });
+  assert.equal(store.fillAffinityReason('g1', ELENI, VOICE_AT, 'ιδιωτικά', { layer: 'private' }), true);
+  assert.equal(store.getPrivate('g1', ELENI).affinity.reason, 'ιδιωτικά');
+  assert.equal(store.getUser('g1', ELENI).affinity.history[1].reason, 'αργότερα', 'the public layer is not touched');
+});
+
+test('fillAffinityReason / fillEpisodeFeeling: no such entry, no profile or an empty text change nothing and create no file', () => {
+  const dir = tmpDataDir();
+  writeRaw(userFileOf(dir, 'g1', ELENI), {
+    id: ELENI,
+    names: ['Ελένη'],
+    affinity: { score: 4, reason: '', history: [{ ts: VOICE_AT, delta: 4, appliedDelta: 4, score: 4, reason: '' }] },
+    episodes: [{ date: '2026-10-05', what: 'κέρδισε', quote: '', feeling: '', weight: 3, addedAt: VOICE_AT }],
+  });
+  const raw = fs.readFileSync(userFileOf(dir, 'g1', ELENI), 'utf8');
+  const store = createStore({ dataDir: dir });
+  const episode = { at: VOICE_AT, date: '2026-10-05', what: 'κέρδισε' };
+
+  assert.equal(store.fillAffinityReason('g1', 'nobody', VOICE_AT, 'λόγος'), false);
+  assert.equal(store.fillAffinityReason('g1', ELENI, new Date(VOICE_NOW + 1).toISOString(), 'λόγος'), false);
+  assert.equal(store.fillAffinityReason('g1', ELENI, VOICE_AT, '   '), false);
+  assert.equal(store.fillAffinityReason('g1', ELENI, VOICE_AT, 'λόγος', { layer: 'private' }), false);
+  assert.equal(store.fillEpisodeFeeling('g1', 'nobody', episode, 'χαρά'), false);
+  assert.equal(store.fillEpisodeFeeling('g1', ELENI, { ...episode, date: '2026-10-04' }, 'χαρά'), false);
+  assert.equal(store.fillEpisodeFeeling('g1', ELENI, { ...episode, what: 'κέρδισε ξανά' }, 'χαρά'), false);
+  assert.equal(store.fillEpisodeFeeling('g1', ELENI, { ...episode, at: new Date(VOICE_NOW + 1).toISOString() }, 'χαρά'), false);
+  assert.equal(store.fillEpisodeFeeling('g1', ELENI, episode, ''), false);
+  assert.equal(store.fillEpisodeFeeling('g1', ELENI, episode, 'χαρά', { layer: 'private' }), false);
+  assert.equal(store.fillEpisodeFeeling('g1', ELENI, null, 'χαρά'), false);
+
+  store.flush();
+  assert.equal(fs.readFileSync(userFileOf(dir, 'g1', ELENI), 'utf8'), raw);
+  assert.equal(store.getUser('g1', 'nobody'), null);
+  assert.equal(store.getPrivate('g1', ELENI), null);
+});
+
+test('fillAffinityReason / fillEpisodeFeeling: any layer but private or none refuses; the public and the private file stay byte-identical', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  const moves = { maxDelta: 15, historySize: 10, now: VOICE_NOW };
+  const episodes = { maxEpisodes: 20, maxNew: 3, now: VOICE_NOW };
+  store.touchUser('g1', ELENI, 'Ελένη', 1000);
+  store.adjustAffinity('g1', ELENI, 4, '', moves);
+  store.addEpisodes('g1', ELENI, [{ date: '2026-10-05', what: 'κέρδισε', feeling: '' }], episodes);
+  store.adjustPrivateAffinity('g1', ELENI, 2, '', moves);
+  store.addPrivateEpisodes('g1', ELENI, [{ date: '2026-10-05', what: 'κέρδισε', feeling: '' }], episodes);
+  store.flush();
+  const files = [userFileOf(dir, 'g1', ELENI), path.join(dir, 'guilds', 'g1', 'private', `${ELENI}.json`)];
+  const before = files.map((file) => fs.readFileSync(file, 'utf8'));
+  const address = { at: VOICE_AT, date: '2026-10-05', what: 'κέρδισε' };
+
+  for (const layer of ['public', 'Private', 'PRIVATE', 'dm', 'secret', '', 0, false, {}]) {
+    assert.equal(store.fillAffinityReason('g1', ELENI, VOICE_AT, 'λόγος', { layer }), false, `reason, layer ${JSON.stringify(layer)}`);
+    assert.equal(store.fillEpisodeFeeling('g1', ELENI, address, 'χαρά', { layer }), false, `feeling, layer ${JSON.stringify(layer)}`);
+  }
+  store.flush();
+  assert.deepEqual(files.map((file) => fs.readFileSync(file, 'utf8')), before);
+
+  // The two layers a write may name, for contrast: the same address is found in each.
+  assert.equal(store.fillAffinityReason('g1', ELENI, VOICE_AT, 'λόγος', { layer: undefined }), true);
+  assert.equal(store.fillEpisodeFeeling('g1', ELENI, address, 'χαρά', { layer: 'private' }), true);
+});
+
+test('fillAffinityReason / fillEpisodeFeeling: a long text is cut exactly as applyDelta and the episode merge cut it', () => {
+  const text = 'λέξη '.repeat(100);
+  for (const clampTolerance of [1, undefined]) {
+    const store = createStore({ dataDir: tmpDataDir() });
+    store.touchUser('g1', ELENI, 'Ελένη', 1000);
+    store.adjustAffinity('g1', ELENI, 4, '', { maxDelta: 15, historySize: 10, now: VOICE_NOW });
+    store.addEpisodes('g1', ELENI, [{ date: '2026-10-05', what: 'κέρδισε', feeling: '' }], { maxEpisodes: 20, maxNew: 3, now: VOICE_NOW });
+
+    assert.equal(store.fillAffinityReason('g1', ELENI, VOICE_AT, text, { clampTolerance }), true);
+    assert.equal(store.fillEpisodeFeeling('g1', ELENI, { at: VOICE_AT, date: '2026-10-05', what: 'κέρδισε' }, text, { clampTolerance }), true);
+    const profile = store.getUser('g1', ELENI);
+
+    const reason = applyDelta(undefined, 4, text, { maxDelta: 15, historySize: 10, clampTolerance }).reason;
+    const [episode] = mergeEpisodes([], [{ date: '2026-10-05', what: 'κέρδισε', feeling: text }], { maxEpisodes: 20, clampTolerance }).episodes;
+    assert.equal(profile.affinity.reason, reason, `reason, tolerance ${clampTolerance}`);
+    assert.equal(profile.affinity.history.at(-1).reason, reason);
+    assert.equal(profile.episodes[0].feeling, episode.feeling, `feeling, tolerance ${clampTolerance}`);
+    assert.ok([...reason].length < [...text.trim()].length && [...episode.feeling].length < [...reason].length, 'both were cut');
+    if (clampTolerance === 1) {
+      assert.ok([...profile.affinity.reason].length <= REASON_CHARS);
+      assert.ok([...profile.episodes[0].feeling].length <= FEELING_CHARS);
+    }
+  }
+});
+
+test('fillEpisodeFeeling: fills the feeling of the episode stored at that stamp with that date and what; private with layer private', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.touchUser('g1', ELENI, 'Ελένη', 1000);
+  const opts = { maxEpisodes: 20, maxNew: 3 };
+  store.addEpisodes('g1', ELENI, [{ date: '2026-10-05', what: 'κέρδισε στο σκάκι', quote: '', feeling: '', weight: 3 }], { ...opts, now: VOICE_NOW });
+  store.addEpisodes('g1', ELENI, [{ date: '2026-10-05', what: 'έχασε', feeling: '' }], { ...opts, now: VOICE_NOW + 1 });
+
+  assert.equal(store.fillEpisodeFeeling('g1', ELENI, { at: VOICE_AT, date: '2026-10-05', what: 'κέρδισε στο σκάκι' }, 'χάρηκα'), true);
+  assert.deepEqual(store.getUser('g1', ELENI).episodes.map((ep) => [ep.what, ep.feeling]), [['κέρδισε στο σκάκι', 'χάρηκα'], ['έχασε', '']]);
+
+  store.addPrivateEpisodes('g1', ELENI, [{ date: '2026-10-05', what: 'μυστικό', feeling: '' }], { ...opts, now: VOICE_NOW });
+  assert.equal(store.fillEpisodeFeeling('g1', ELENI, { at: VOICE_AT, date: '2026-10-05', what: 'μυστικό' }, 'το κράτησα', { layer: 'private' }), true);
+  assert.equal(store.getPrivate('g1', ELENI).episodes[0].feeling, 'το κράτησα');
+  assert.equal(store.getUser('g1', ELENI).episodes.some((ep) => ep.what === 'μυστικό'), false);
+});
+
+test('voice writes: a reason and a feeling land on what stage A stored, and applying them twice equals once', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.touchUser('g1', ELENI, 'Ελένη', 1000);
+  const decision = { users: { [ELENI]: { affinity: { delta: 4, event: 'βοήθησε' }, episodes: [{ date: '2026-10-05', what: 'κέρδισε', quote: '', weight: 3, tone: 'χαρά' }] } } };
+  const { neutral, items } = splitDecision(decision, { config: VOICE_CONFIG, nowMs: VOICE_NOW });
+  // Stage A's neutral apply, on the same clock.
+  const entry = neutral.users[ELENI];
+  store.adjustAffinity('g1', ELENI, entry.affinity.delta, entry.affinity.reason, { maxDelta: 15, historySize: 10, now: VOICE_NOW });
+  store.addEpisodes('g1', ELENI, entry.episodes, { maxEpisodes: 20, maxNew: 3, now: VOICE_NOW });
+  queueItems(store, 'g1', items);
+
+  const queued = store.getVoiceQueue('g1');
+  const worded = new Map(queued.map((item) => [item.id, item.kind === 'reason' ? 'με βοήθησε' : 'χάρηκα']));
+  const { writes, applied } = applyVoiceItems(worded, queued, { config: VOICE_CONFIG });
+  const run = () =>
+    writes.map((write) =>
+      write.kind === 'reason'
+        ? store.fillAffinityReason('g1', write.userId, write.at, write.text, { layer: write.layer })
+        : store.fillEpisodeFeeling('g1', write.userId, write, write.text, { layer: write.layer }),
+    );
+  assert.deepEqual(run(), [true, true]);
+  const once = structuredClone(store.getUser('g1', ELENI));
+  run(); // a restart between the writes and the queue's removal applies them again
+  assert.deepEqual(store.getUser('g1', ELENI), once);
+  store.updateVoiceQueue('g1', (queue) => removeItems(queue, applied));
+
+  assert.equal(once.affinity.score, 4);
+  assert.equal(once.affinity.reason, 'με βοήθησε');
+  assert.deepEqual(once.episodes.map((ep) => ep.feeling), ['χάρηκα']);
+  assert.deepEqual(store.getVoiceQueue('g1'), []);
 });

@@ -7,11 +7,14 @@
 //   splitDecision     a stage A answer -> its neutral part, stored at once (the attitude delta and
 //                     the episode with an empty feeling included, so an outage of the voice model
 //                     never freezes scores or hides moments), plus one voice item per brief
-//   mergeIntoQueue    items into the guild's queue (a per-guild list the store persists, normalised
-//                     on read by `normalizeQueue`): one relationship / patterns / starters item per target
-//                     (briefs appended), one character item per member (the newer replaces), a
-//                     lesson or self fact already queued not queued again, the rest appended; past
-//                     `memory.voice.queueMax` the oldest non-character overflow
+//   mergeIntoQueue    items into the guild's queue (a per-guild list the store persists in
+//                     data/guilds/<id>/voice.json, normalised on read by `normalizeQueue`, changed
+//                     only by a synchronous read-modify-write in src/memory/store.js
+//                     (`updateVoiceQueue`) or a forget / wipe): one relationship / patterns /
+//                     starters item per target (briefs appended), one character item per member
+//                     (the newer replaces), a lesson or self fact already queued not queued again,
+//                     the rest appended; past `memory.voice.queueMax` the oldest non-character
+//                     overflow
 //   dueItems          what the next voice request carries (`memory.voice.maxItems`, oldest first,
 //                     one audience per request)
 //   buildVoiceRequest / parseVoiceAnswer   the stage B request, fitted to the input cap AND to
@@ -43,6 +46,7 @@ import { parseJsonObject } from '../llm/parse.js';
 import { block, fillPromptTemplate } from '../behavior/prompt.js';
 import { HOUR_MS, MINUTE_MS, utcDay } from '../time.js';
 import { clampText } from './clamp.js';
+import { normalizeTopic } from './interests.js';
 import { ID_DIGITS, fromTokens } from './mentions.js';
 
 /**
@@ -78,10 +82,16 @@ const MAX_BRIEFS = 3;
 // The clamps the store already applies to these texts (tests/voice.test.js measures them on the
 // store's own functions): src/memory/affinity.js#applyDelta (reason),
 // src/memory/episodes.js#sanitizeEpisode (feeling; an episode's `what` soft, its `quote` hard),
-// src/memory/update.js#applyMemoryUpdate's `self` list.
-const REASON_CHARS = 200;
-const FEELING_CHARS = 120;
-const SELF_CHARS = 200;
+// src/memory/update.js#applyMemoryUpdate's `self` list. The first three are exported for the
+// store's voice writes (src/memory/store.js#fillAffinityReason, #fillEpisodeFeeling,
+// #applySelfOps), so a voice text is cut at one limit wherever it is written.
+
+/** How long an attitude reason may be, in characters (before `memory.clampTolerance`). */
+export const REASON_CHARS = 200;
+/** How long an episode's feeling may be, in characters (before `memory.clampTolerance`). */
+export const FEELING_CHARS = 120;
+/** How long one self fact may be, in characters (before `memory.clampTolerance`). */
+export const SELF_CHARS = 200;
 const WHAT_CHARS = 200;
 const QUOTE_CHARS = 120;
 // config.json's values (and src/memory/update.js#MEMORY_LIMIT_DEFAULTS'), for a deployment
@@ -134,14 +144,11 @@ function deltaCap(config) {
   return Number.isFinite(cap) ? Math.abs(cap) : Infinity;
 }
 
-/** Lower-cased, trimmed, whitespace collapsed: how a repeat is told (episodes, briefs). */
-function normalized(text) {
-  return String(text).trim().toLowerCase().replace(/\s+/g, ' ');
-}
-
-/** src/memory/episodes.js#isDuplicate's rule: the same date and `what`, or the same non-empty quote. */
+/** src/memory/episodes.js#isDuplicate's rule: the same date and `what` (each trimmed, whitespace
+ * collapsed, lower-cased: src/memory/interests.js#normalizeTopic, the one text-identity helper),
+ * or the same non-empty quote. */
 function sameEpisode(a, b) {
-  if (a.date === b.date && normalized(a.what) === normalized(b.what)) return true;
+  if (a.date === b.date && normalizeTopic(a.what) === normalizeTopic(b.what)) return true;
   return Boolean(a.quote && b.quote && a.quote === b.quote);
 }
 
@@ -580,9 +587,10 @@ function sameSlot(queued, item) {
   return (queued.userId ?? '') === (item.userId ?? '') && (queued.layer ?? '') === (item.layer ?? '');
 }
 
-/** A brief as a repeat is compared: each note normalised, in order. */
+/** A brief as a repeat is compared: each note normalised (src/memory/interests.js#normalizeTopic,
+ * the rule src/memory/store.js#applySelfOps tells a stored self fact by), in order. */
 function briefKey(brief) {
-  return JSON.stringify((Array.isArray(brief) ? brief : []).map(normalized));
+  return JSON.stringify((Array.isArray(brief) ? brief : []).map(normalizeTopic));
 }
 
 /** Whether `queued` already holds `item`'s lesson (same brief and teacher) or self fact (same brief). */
@@ -953,6 +961,15 @@ export function parseVoiceAnswer(text, sent) {
  *   patterns / starters `{ id, kind, text }`: the server note replaced;
  *   character `{ id, kind, userId, text }`: the portrait replaced, and the portrait stamps
  *     (`portraitRefreshedAt`, `portraitMessageCount`) written now.
+ *   The src/memory/store.js method each runs through: relationship `applyProfileOps` /
+ *   `applyPrivateOps`; reason `fillAffinityReason`; feeling `fillEpisodeFeeling` (both take
+ *   `{ layer }`, write nothing when the address is not found, and are safe to run twice);
+ *   learned `applyLearnedOps`; self `applySelfOps`; patterns / starters `updateGuild`; character
+ *   `applyProfileOps` (the text) plus `updateUser` (`portraitRefreshedAt`,
+ *   `portraitMessageCount` and `portraitAttemptAt: null`, as src/memory/warmup.js#stampPortrait
+ *   writes them; `applyProfileOps` cannot). The queue itself changes only through
+ *   `store.updateVoiceQueue` (a synchronous read-modify-write), never from a copy kept across an
+ *   await.
  */
 
 /** The write of `item` with its (tokenized, clamped) `text`. */
