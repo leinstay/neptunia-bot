@@ -54,7 +54,7 @@
 | `mentor-signs.md` | 否 | Mentor：已知的模型文本习惯，作为 `<signs>` 块在每次 mentor 请求中发送（`features.mentor`）。文件缺失或为空时省略 | `{{name}}` |
 | `mentor-diagnose.md` | 否 | Mentor：评分后解释弱回答，指出角色上下文中的具体文本（`features.mentor`）。结果为未验证的假设，存储为运行中的 `diagnosis`。`mentor.diagnose` 为 false 或文件缺失时省略 | `{{name}}` |
 | `variety.md` | 否 | `classifier.text` 请求：识别角色近期消息中重复的表达手法（`features.variety`）。不接收角色卡 | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
-| `variety-long.md` | 否 | 长多样性过程：在全部消息环中识别手法（`features.variety`、`variety.longLines`）。与 `variety.md` 相同的占位符、`<lines>` 块和回答格式。使用 `variety.longModel`（null = `classifier.text`）。不接收角色卡。文件不存在则无长过程 | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
+| `variety-long.md` | 否 | 长多样性过程：在全部消息环中识别手法（`features.variety`、`variety.longLines`）。与 `variety.md` 相同的占位符、`<lines>` 块和回答格式。使用 `classifier.text` 模型。不接收角色卡。文件不存在则无长过程 | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `split.md` | 否 | 分类器：直接呼叫是否包含多个独立请求（`features.splitTasks`）。接收一段短 `<transcript>` 和新消息作为 `<candidate>`。输出为 `one`，或 2 到 `{{maxTasks}}` 行，每行以 `- ` 开头，用作者自己的话表述一个部分。不接收角色卡。没有此文件时分拆器关闭 | `{{name}}` `{{maxTasks}}` |
 | `merge.md` | 否 | 分类器：已有等候条目的作者的新消息是否属于其中一个。接收编号的 `<waiting>` 列表和新消息作为 `<candidate>`。输出为一行：列表中的一个编号或 `new`。不接收角色卡。没有此文件时新呼叫始终作为独立条目排队 | `{{name}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
@@ -575,7 +575,7 @@ task.added                               {added}: later messages from the author
 
 `classifier.text` 过程读取角色近期的自身消息，识别角色正在陷入的重复手法（惯用表达、结构性套路、重复的玩笑模式）。结果成为本轮请求中的 `<worn>` 块。开关 `features.variety`（缺失 = 开启）。
 
-第二个更长视野的过程至多每 `variety.longEveryHours`（默认 6）小时在角色在服务器频道发帖后运行一次，读取跨所有频道的环中最新的 `variety.longLines`（默认 300；`0` = 关闭）条消息，无时间限制。当环中有至少 `variety.longMinLines`（默认 60）条消息且 `prompts/variety-long.md` 存在时，在 `variety.longModel`（null = `classifier.text` 模型）上运行，用途标记 `variety-long`，与短过程相同的 `<lines>` 块和回答格式，最多 `variety.longMaxPatterns`（默认 3）个手法。列表存储为服务器记忆中的 `wornLong`，在下次长过程前一直有效；失败保留上一次的列表。回合的 `<worn>` 块先放长过程的手法，然后是短过程的，去重（shape 不区分大小写、合并空白后比较），最多 `variety.maxPatterns` + `variety.longMaxPatterns`。长过程不在回复前运行，不阻塞回合，不为私聊运行。日志：成功为 `variety: long`，失败为 `variety: pass failed`（`cause: 'long'`）。
+第二个更长视野的过程至多每 `variety.longEveryHours`（默认 6）小时在角色在服务器频道发帖后运行一次，读取跨所有频道的环中最新的 `variety.longLines`（默认 300；`0` = 关闭）条消息，无时间限制。当环中有至少 `variety.longMinLines`（默认 60）条消息且 `prompts/variety-long.md` 存在时，在 `classifier.text` 模型上运行，用途标记 `variety-long`，与短过程相同的 `<lines>` 块和回答格式，最多 `variety.longMaxPatterns`（默认 3）个手法。列表存储为服务器记忆中的 `wornLong`，在下次长过程前一直有效；失败保留上一次的列表。回合的 `<worn>` 块先放长过程的手法，然后是短过程的，去重（shape 不区分大小写、合并空白后比较），最多 `variety.maxPatterns` + `variety.longMaxPatterns`。长过程不在回复前运行，不阻塞回合，不为私聊运行。日志：成功为 `variety: long`，失败为 `variety: pass failed`（`cause: 'long'`）。
 
 当 `features.varietyPrecompute` 开启（默认）时，过程在角色发布文本后立即启动，基于下次 `fetchHistory` 将返回的消息。回合查找自身消息集：缓存中有匹配结果则直接使用无需模型请求；同一消息的过程正在进行中则加入并最多等待 `variety.timeoutMs`；否则启动自己的请求。请求运行至 `variety.requestTimeoutMs`（默认 30000）：如果回合的等待 `variety.timeoutMs` 先到期，请求继续运行，迟到的结果保存给下一回合。加入的过程失败的回合不获得块，也不启动自己的请求。暂停期间或 `features.variety` 关闭时不保存任何内容。
 

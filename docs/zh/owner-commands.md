@@ -8,7 +8,7 @@
 |---|---|
 | `/nep status` | 模型、校准、配额（今日午夜后的 LLM 请求数、图片计数和图像模型、GIF 观看数、已刷新画像数）、每服务器记忆状态（档案、缓冲区、下次自发）、语音队列大小和今日语音请求数（两阶段开启时）、多样性过程（开关、手法数和时间）、私聊开关和私有文件数 |
 | `/nep reload` | 立即重新加载配置和提示 |
-| `/nep ping [role]` | 向一个或所有模型角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`）发送最小请求，遵循每个角色的 `llm.providerByModel` 路由，并报告模型、延迟、provider、token 或错误；`classifier.video` 之后报告 `youtube: API key — {status}`（如 `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）；`classifier.text` 之后报告 `web: API key — {status}`（`ok`、`missing` 或 `off`）。`role:image` 检查 `image.model` 是否在 provider 的公开模型列表中且支持图片输出（一次免费 GET，不进行生成）；检查通过不代表生成一定成功。不指定 role 时 image 检查排在最后。不计入 `llm.maxRequestsPerDay`，在暂停或预热期间均可使用 |
+| `/nep ping [role]` | 向一个或所有模型角色（`voice`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`、`image`）发送最小请求，遵循每个角色的 `llm.providerByModel` 路由，并报告模型、延迟、provider、token 或错误；`/nep ping classifier` 同时 ping 三个 classifier 角色。模型行统一输出，然后是 API 密钥检查：`youtube: API key — {status}`（如 `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）和 `web: API key — {status}`（`ok`、`missing` 或 `off`）。`role:image` 检查 `image.model` 是否在 provider 的公开模型列表中且支持图片输出（一次免费 GET，不进行生成）；检查通过不代表生成一定成功。不指定 role 时 image 检查排在其他模型行之后。不计入 `llm.maxRequestsPerDay`，在暂停或预热期间均可使用 |
 | `/nep pause` | 停止所有活动，将记忆刷入磁盘并卸载；进行中的 mentor 运行会被停止，其报告在刷盘前发布。暂停期间可安全编辑 `data/` |
 | `/nep resume` | 从 `data/` 重新加载记忆并继续；如有 JSON 文件无法解析则拒绝并指出问题文件 |
 | `/nep interject [channel]` | 立即插入该频道的当前对话 |
@@ -19,8 +19,8 @@
 | `/nep rule add <text>` | 向 `prompts.local/rules.md` 追加规则 |
 | `/nep rule list` | 列出编号的规则 |
 | `/nep rule remove <number>` | 按编号移除规则 |
-| `/nep model show` | 显示每个角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`、`voice`）的当前模型 |
-| `/nep model set <role> <id>` | 设置某个角色（`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`、`voice`）的模型。`voice` 角色写入 `memory.voiceModel` |
+| `/nep model show` | 显示每个角色（`voice`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`、`image`）的当前模型 |
+| `/nep model set <role> <id>` | 设置某个角色（`voice`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`、`image`）的模型 |
 | `/nep route list` | 列出 `llm.providerByModel` 中的所有路由，然后是每个角色的当前模型及其适用的路由。访问键 `route.list`（只读） |
 | `/nep route set <model> <providers> [role] [fallbacks]` | 将模型前缀路由到指定的 provider。`model` 为模型 id 或前缀（如 `google/`，不含 `@` 或空格）。`providers` 为逗号分隔的 provider slug 列表（如 `google-vertex`；小写字母、数字和连字符）。`role` 限制路由到一个角色（默认：任意）。`fallbacks` 在这些 provider 不可用时允许其他 provider（默认：false）。将 `{ "only": [...], "allow_fallbacks": ... }` 写入 `config.local.json` 的 `llm.providerByModel` 下并重新加载。访问键 `route.set` |
 | `/nep route remove <model> [role]` | 移除一条路由。键必须存在于 `config.local.json`；仅存在于 `config.json` 中的键无法通过此方式移除。访问键 `route.remove` |

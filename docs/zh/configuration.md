@@ -32,7 +32,7 @@
 | `channelPull` | `true` | 当最近的消息或触发器包含真实的频道提及时，将该频道拉入回合请求。缺失键 = 开。参见 `context.pull.*` |
 | `elsewhere` | `true` | 响应机器人可读但不可写的频道中的呼叫（@提及、回复、名字）。回复发送到 `memory.mainChannelIds` 中第一个可用的频道。缺失键 = 开 |
 | `portraitRefresh` | `true` | 根据消息计数器定期刷新成员画像。缺失键 = 开 |
-| `memoryTwoStage` | `false` | 将记忆分析器拆分为两个阶段：中性 GPT 模型判定变更（阶段 A），然后语音模型撰写角色文本（阶段 B）。必须严格为 `true` 才能启用；缺失键 = 关。参见 `memory.voiceModel` 和 `memory.voice.*` |
+| `memoryTwoStage` | `false` | 将记忆分析器拆分为两个阶段：中性 GPT 模型判定变更（阶段 A），然后语音模型撰写角色文本（阶段 B）。必须严格为 `true` 才能启用；缺失键 = 关。参见 `memory.voice.*` |
 | `mentor` | `false` | 手动测试子进程，使用独立模型。必须严格为 `true` 才能启用；缺失的键视为关闭。参见 [Mentor](#mentor) |
 | `promptCache` | `false` | 为系统消息添加提供商的提示缓存标记。缓存读取仅为正常输入成本的一小部分；某些提供商不将缓存读取计入 token 配额。必须严格为 `true` 才能启用；缺失的键视为关闭。参见 `llm.cache.*` |
 | `recall` | `true` | 当问题需要时，在网络搜索之外同时搜索服务器自身的消息历史。缺失的键视为开启。参见[媒体：搜索](media.md#搜索)和 `recall.*` |
@@ -78,7 +78,7 @@
 | `provider` | `null` | OpenRouter `provider` 路由对象，原样传递；`null` 表示不发送该字段 |
 | `providerByModel` | `{}` | 按模型路由 provider；详见下文 |
 | `cache.ttl` | `"1h"` | 标记上发送的缓存 TTL: `"1h"` 或 `"5m"` |
-| `cache.roles` | `["talk"]` | 系统消息会获得缓存标记的请求角色 |
+| `cache.roles` | `["voice"]` | 系统消息会获得缓存标记的请求角色。记忆语音请求不参与，因此只有回复被缓存 |
 | `cache.models` | `["anthropic/"]` | 提供商接受 `cache_control` 标记的模型 id 前缀（区分大小写）。列表外的模型发送时不带标记 |
 | `cache.promptIncludesCached` | `true` | 提供商报告的 `prompt_tokens` 是否已包含缓存读取和缓存写入的 token。通过一次实际探测设定。token 校准和每请求上限始终使用完整计数 |
 | `hedge.roles` | `["classifier.text"]` | 对冲的请求角色（两个并发尝试，先完成的获胜） |
@@ -88,7 +88,7 @@
 
 `llm.provider` 为聊天请求设置默认的 OpenRouter provider 路由字段，例如 `{ "ignore": ["some-provider"] }` 或 `{ "order": ["anthropic"], "allow_fallbacks": true }`。`llm.providerByModel` 按模型添加覆盖：每个键是模型 id 前缀（匹配任意角色）或 `<prefix>@<role>`（仅匹配一个角色），值为原样传递的 OpenRouter 路由对象。
 
-单个请求的 provider 按以下顺序解析：每次调用的固定路由（视频描述器的直接 URL 路径使用 `media.video.provider`），然后是 `providerByModel` 中与该请求角色匹配的最长前缀，然后是无角色键中匹配的最长前缀，然后是 `llm.provider`（图像请求使用 `image.provider`），最后是无路由（由 OpenRouter 选择）。角色专用键始终优先于同一模型的无角色键。角色名称：`talk`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`、`image`。
+单个请求的 provider 按以下顺序解析：每次调用的固定路由（视频描述器的直接 URL 路径使用 `media.video.provider`），然后是 `providerByModel` 中与该请求角色匹配的最长前缀，然后是无角色键中匹配的最长前缀，然后是 `llm.provider`（图像请求使用 `image.provider`），最后是无路由（由 OpenRouter 选择）。角色专用键始终优先于同一模型的无角色键。角色名称：`voice`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`、`image`。为兼容性，路由键或角色列表中仍写 `talk` 的会被读取为 `voice`，附带一条日志（`config: role talk is now voice`）。
 
 示例：`"google/": { "only": ["google-vertex"], "allow_fallbacks": false }` 将所有 Google 模型路由到 Vertex，而 `"google/@classifier.video": { "only": ["google-ai-studio"], "allow_fallbacks": false }` 将视频分类器发送到 AI Studio。包含点号的路由键（如 `google/@classifier.video`）无法通过 `/nep set` 编辑，因为它会按点号拆分路径；请使用 `/nep route set` 和 `/nep route remove`。
 
@@ -417,7 +417,6 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `channelWritersStored` | `20` | 每个频道保留的最活跃作者数，按衰减计数排名 |
 | `channelWritersHalfLifeDays` | `30` | 每频道作者计数的半衰期（天）；停止发言的作者排名会低于活跃的 |
 | `reasoning` | `null` | 在分析器的阶段 A 请求和预热的中性路径上发送的 OpenRouter `reasoning` 对象。`null` 省略该字段。示例：`{ "effort": "low" }` |
-| `voiceModel` | `null` | 两阶段分析器阶段 B 使用的模型，负责撰写角色文本。`null` 使用对话模型（`llm.model`）。通过 `/nep model set voice` 设置 |
 | `batchMessages` | `60` | 理想批次大小 |
 | `minBatchMessages` | `15` | 更新前的最少消息数 |
 | `maxBatchAgeMinutes` | `180` | 超过此时长强制更新（分钟） |
@@ -450,6 +449,8 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `timeoutMs` | `900000` | 分析器超时（毫秒），独立于 `llm.timeoutMs` |
 
 分析器提示通过占位符读取这些限制，因此调高某个值会在下一批次生效。更大的档案会消耗更多上下文 token（`context.caps.people`、`context.caps.interlocutor`）和分析器输出（`memory.maxOutputTokens`）。
+
+**迁移。**`memory.voiceModel` 不再读取；仍然设置它的配置会记录一条警告，值被忽略。回复和记忆撰写都使用 `llm.model`。
 
 ### `memory.voice`
 
@@ -572,7 +573,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 ## `variety`
 
-多样性过程的设置（`features.variety`）。角色近期的消息会发送给 `classifier.text` 模型，由其识别重复的表达手法。当 `features.varietyPrecompute` 开启时，过程在角色发布文本后立即启动，使下一回合可以直接使用结果；回合时使用缓存的结果，或加入正在进行的过程并最多等待 `variety.timeoutMs`。结果以 `<worn>` 块的形式出现在本轮请求中。超时或过程失败不会延迟或中断本轮，本轮会在没有该块的情况下继续。第二个更长时间窗口的过程（`variety.longLines`）至多每 `variety.longEveryHours` 小时运行一次，读取角色在所有频道中的消息环，使用 `prompts/variety-long.md` 在 `variety.longModel` 模型上运行（null = `classifier.text` 模型）。其手法列表存储为服务器记忆中的 `wornLong`，在下次长过程前一直有效；回合的 `<worn>` 块先放长过程的手法，然后是短过程的，去重后最多 `variety.maxPatterns` + `variety.longMaxPatterns` 个。全部热重载。
+多样性过程的设置（`features.variety`）。角色近期的消息会发送给 `classifier.text` 模型，由其识别重复的表达手法。当 `features.varietyPrecompute` 开启时，过程在角色发布文本后立即启动，使下一回合可以直接使用结果；回合时使用缓存的结果，或加入正在进行的过程并最多等待 `variety.timeoutMs`。结果以 `<worn>` 块的形式出现在本轮请求中。超时或过程失败不会延迟或中断本轮，本轮会在没有该块的情况下继续。第二个更长时间窗口的过程（`variety.longLines`）至多每 `variety.longEveryHours` 小时运行一次，读取角色在所有频道中的消息环，使用 `prompts/variety-long.md` 在 `classifier.text` 模型上运行。其手法列表存储为服务器记忆中的 `wornLong`，在下次长过程前一直有效；回合的 `<worn>` 块先放长过程的手法，然后是短过程的，去重后最多 `variety.maxPatterns` + `variety.longMaxPatterns` 个。全部热重载。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
@@ -590,7 +591,6 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `longEveryHours` | `6` | 两次长过程之间的小时数；失败也计入，避免每次发帖后重试 |
 | `longMinLines` | `60` | 环中消息少于此数时跳过长过程 |
 | `longMaxPatterns` | `3` | 长过程最多可识别的手法数 |
-| `longModel` | `null` | 长过程使用的模型。`null` 使用 `classifier.text` 模型 |
 
 ## `private`
 
@@ -612,7 +612,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `model` | `null` | Mentor 模型 ID。`null` 或缺失时，所有需要模型的命令会提示未配置 |
-| `maxTokensPerDay` | `400000` | 每日 token 预算。按实际用量计算：提示 token x1、缓存提示 token x`cachedTokenWeight`、输出 token x`outputTokenWeight`。沙盒中角色模型的回答以相同方式计算 |
+| `maxTokensPerDay` | `400000` | 每日 token 预算。按实际用量计算：提示 token x1、缓存提示 token x`cachedTokenWeight`、输出 token x`outputTokenWeight`。沙盒中角色 voice 模型的回答以相同方式计算 |
 | `outputTokenWeight` | `5` | 输出 token 在预算中的权重，反映生成 token 的较高成本 |
 | `cachedTokenWeight` | `0.1` | 缓存提示 token 在预算中的权重 |
 | `maxOutputTokens` | `6000` | 每次 mentor 请求的最大输出 token |
@@ -661,17 +661,17 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 ## 模型
 
-引擎使用五个模型角色。每个独立设置，因此语音可以使用高端模型，而辅助工具保持低成本。
+引擎使用七个模型角色。每个独立设置，因此语音可以使用高端模型，而辅助工具保持低成本。
 
 ### 声音（`llm.model`）
 
-`talk` 角色。预算允许范围内最强的模型。角色扮演质量、角色一致性和自然对话均依赖于此。较小的模型会破坏角色、忽略上下文线索且语气平淡。
+`voice` 角色。预算允许范围内最强的模型。角色扮演质量、角色一致性和自然对话均依赖于此。较小的模型会破坏角色、忽略上下文线索且语气平淡。在两阶段模式下，同一模型还负责为角色的记忆文本撰写措辞（阶段 B：关系笔记、态度原因、回忆感受、所学、自述事实、服务器规律、开场白和性格画像）。两类请求在使用日志中都携带 `voice` 角色；通过 purpose（`reply`、`memory-voice`）区分。
 
 默认：`anthropic/claude-opus-4.6`。更便宜的选择：`anthropic/claude-sonnet-4.6`。
 
 ### 分析器（`memory.model`）
 
-`analyzer` 角色。在长对话记录上进行推理并返回严格的 JSON。需要与语音相同级别的智能。`null`（默认）使用角色的模型。适用相同的示例。
+`analyzer` 角色。在长对话记录上进行推理并返回严格的 JSON。需要与语音相同级别的智能。`null`（默认）使用角色的模型。适用相同的示例。在两阶段模式（`features.memoryTwoStage`）下，此模型运行阶段 A（中性判定）。
 
 ### 文本分类器（`classifier.text`）
 
@@ -703,7 +703,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 ### Mentor（`mentor.model`）
 
-`mentor` 角色。对角色的回答进行评分并构造测试场景。建议使用与对话模型不同家族的模型：模型看不到自身家族的习惯。`null`（默认）保持 mentor 禁用；需要模型的 `/nep mentor` 命令会提示。
+`mentor` 角色。对角色的回答进行评分并构造测试场景。建议使用与 voice 模型不同家族的模型：模型看不到自身家族的习惯。`null`（默认）保持 mentor 禁用；需要模型的 `/nep mentor` 命令会提示。
 
 ### 图片输出（`image.model`）
 
