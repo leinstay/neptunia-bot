@@ -218,6 +218,35 @@ export function pingStatus(entry) {
 }
 
 /**
+ * Stamp several calls of the ring at once, in order: `answered` through
+ * `markPingAnswered`, `skipped` through `markPingSkipped` (an answered call is
+ * never skipped, an answer wins over a skip, a stamp is never moved). A
+ * message id the ring does not hold, a stamp of another status and garbage
+ * are passed over. `marked` lists each stamp that changed its call's state,
+ * with the call's channel and its state after it, so the caller logs those
+ * and marks the state dirty only when there is one.
+ * @param {RingPing[]|unknown} ring  The stored ring (not mutated).
+ * @param {{ messageId: string, status: 'answered'|'skipped' }[]|unknown} stamps
+ * @param {number} now
+ * @returns {{ ring: RingPing[], marked: { messageId: string, channelId: string, status: 'answered'|'skipped' }[] }}
+ */
+export function stampPings(ring, stamps, now) {
+  let entries = ringEntries(ring);
+  const marked = [];
+  for (const stamp of Array.isArray(stamps) ? stamps : []) {
+    const mark = stamp?.status === 'answered' ? markPingAnswered : stamp?.status === 'skipped' ? markPingSkipped : null;
+    const id = idOf(stamp?.messageId);
+    const index = entries.findIndex((entry) => entry.messageId === id);
+    if (!mark || index === -1) continue;
+    const before = pingStatus(entries[index]);
+    entries = mark(entries, id, now);
+    const after = pingStatus(entries[index]);
+    if (after !== before) marked.push({ messageId: id, channelId: entries[index].channelId, status: after });
+  }
+  return { ring: entries, marked };
+}
+
+/**
  * The ring's calls in one channel that are not past `maxAgeMs` at `now`,
  * oldest first (a `maxAgeMs` that is not positive is no limit).
  * @param {RingPing[]|unknown} ring

@@ -27,6 +27,7 @@ import {
   recordPing,
   resolveDestination,
   settleDueAt,
+  stampPings,
 } from '../src/behavior/elsewhere.js';
 import { chooseMode } from '../src/behavior/spontaneous.js';
 
@@ -222,6 +223,49 @@ test('pingStatus: answered, skipped and unanswered stay apart', () => {
   ring = markPingSkipped(markPingAnswered(ring, 'a', NOW), 's', NOW);
   assert.deepEqual(ring.map((p) => [p.messageId, pingStatus(p)]), [['a', 'answered'], ['s', 'skipped'], ['u', 'unanswered']]);
   assert.equal(pingStatus(null), 'unanswered');
+});
+
+test('stampPings: stamps each call in order and reports only the ones whose state changed', () => {
+  let ring = [];
+  for (const id of ['a', 's', 'u', 'w']) ring = recordPing(ring, { messageId: id, channelId: 'src', ts: NOW - 2 * MIN }, RING_OPTS);
+  ring = markPingSkipped(markPingAnswered(ring, 'a', NOW - MIN), 's', NOW - MIN);
+  const before = ring;
+
+  const { ring: next, marked } = stampPings(
+    ring,
+    [
+      { messageId: 'a', status: 'skipped' },
+      { messageId: 's', status: 'answered' },
+      { messageId: 'u', status: 'skipped' },
+      { messageId: 'u', status: 'answered' },
+      { messageId: 'w', status: 'skipped' },
+      { messageId: 'w', status: 'skipped' },
+      { messageId: 'unknown', status: 'answered' },
+    ],
+    NOW,
+  );
+
+  assert.deepEqual(
+    marked,
+    [
+      { messageId: 's', channelId: 'src', status: 'answered' },
+      { messageId: 'u', channelId: 'src', status: 'skipped' },
+      { messageId: 'u', channelId: 'src', status: 'answered' },
+      { messageId: 'w', channelId: 'src', status: 'skipped' },
+    ],
+    'an answered call is never skipped, an answer wins over a skip, a repeat changes nothing, an unknown id is passed over',
+  );
+  assert.deepEqual(next.map((p) => [p.messageId, pingStatus(p)]), [['a', 'answered'], ['s', 'answered'], ['u', 'answered'], ['w', 'skipped']]);
+  assert.deepEqual([next[1].skippedAt, next[1].answeredAt, next[3].skippedAt], [NOW - MIN, NOW, NOW], 'earlier stamps are kept');
+  assert.equal(pingStatus(before[2]), 'unanswered', 'the stored ring is not mutated');
+});
+
+test('stampPings: no stamp, an unknown status or garbage changes nothing and never throws', () => {
+  const ring = recordPing([], { messageId: 'm1', channelId: 'src', ts: NOW - MIN }, RING_OPTS);
+  assert.deepEqual(stampPings(ring, [], NOW), { ring, marked: [] });
+  assert.deepEqual(stampPings(ring, [{ messageId: 'm1', status: 'seen' }, null, { status: 'skipped' }], NOW).marked, []);
+  assert.deepEqual(stampPings(undefined, [{ messageId: 'm1', status: 'skipped' }], NOW), { ring: [], marked: [] });
+  assert.deepEqual(stampPings(ring, undefined, NOW).marked, []);
 });
 
 test('pingsIn: only this channel, only unexpired, oldest first', () => {
