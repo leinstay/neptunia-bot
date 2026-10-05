@@ -44,9 +44,12 @@ test('turnRequestInput: null is a deliberately absent input and passes as null',
   assert.equal(input.recentLines, null);
 });
 
-test('turnRequestInput: a key left undefined or missing throws, naming it', () => {
-  const undefinedKey = { ...fullContext(), worn: undefined };
-  assert.throws(() => turnRequestInput(undefinedKey), /worn/);
+test('turnRequestInput: a named key that holds undefined is left out, never a failed turn', () => {
+  const input = turnRequestInput({ ...fullContext(), worn: undefined });
+  assert.equal('worn' in input, false);
+});
+
+test('turnRequestInput: a key missing from the context throws, naming it', () => {
   const missing = fullContext();
   delete missing.focus;
   assert.throws(() => turnRequestInput(missing), /focus/);

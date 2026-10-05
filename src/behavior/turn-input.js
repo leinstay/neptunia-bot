@@ -58,10 +58,13 @@ const KNOWN = new Set(TURN_INPUT_KEYS);
 
 /**
  * buildRequest's input from a turn's context: every key of TURN_INPUT_KEYS,
- * in that order, taken from `ctx` as it is. A key that is missing or
- * `undefined` throws (an input nobody named); `null` passes as the
- * deliberately absent input, which buildRequest reads like an omitted one.
- * A key buildRequest does not read throws too (a misspelt input).
+ * in that order, taken from `ctx` as it is. A key missing from `ctx` throws
+ * (an input nobody named) and so does a key buildRequest does not read (a
+ * misspelt input): both depend only on how the call site is written, so a
+ * test of that call site catches them once and for all. A key that is named
+ * but holds `undefined` is left out, and buildRequest applies its own
+ * default: that depends on the turn's data, and a live turn must never fail
+ * on it. `null` passes as the deliberately absent input.
  * @param {Record<string, unknown>} ctx
  * @returns {Record<string, unknown>}
  * @throws {Error} naming the first key that is missing or unknown.
@@ -72,8 +75,8 @@ export function turnRequestInput(ctx) {
   if (unknown !== undefined) throw new Error(`turnRequestInput: buildRequest reads no input '${unknown}'`);
   const input = {};
   for (const key of TURN_INPUT_KEYS) {
-    if (ctx[key] === undefined) throw new Error(`turnRequestInput: input '${key}' is not named (null marks it absent)`);
-    input[key] = ctx[key];
+    if (!(key in ctx)) throw new Error(`turnRequestInput: input '${key}' is not named (null marks it absent)`);
+    if (ctx[key] !== undefined) input[key] = ctx[key];
   }
   return input;
 }
