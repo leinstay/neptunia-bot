@@ -30,6 +30,7 @@ Every key in `config.json` with its default, grouped by section.
 | `imageGeneration` | `false` | Let the persona draw pictures through a drawing sub-process. A missing key counts as on. Turn on in `config.local.json`; needs an image-capable model in `image.model`. See [Media: Drawing](media.md#drawing) |
 | `privateMessages` | `false` | Answer direct messages from guild members. Needs a stored public profile and `affinity.score >= private.minAffinity`. See [Messages and memory: Private layer](messages-and-memory.md#private-layer) |
 | `mentor` | `false` | Manual testing sub-process with its own model. Must be exactly `true` to enable; a missing key counts as off. See [Mentor](#mentor) |
+| `promptCache` | `false` | Mark the system message for the provider's prompt cache. A cached read costs a fraction of normal input; some providers do not count cached reads against token quotas. Must be exactly `true` to enable; a missing key counts as off. See `llm.cache.*` |
 | `variety` | `true` | A model pass names the devices the persona is overusing in its own recent lines. The result becomes a `<worn>` block in the turn's request. A missing key counts as on |
 | `varietyPrecompute` | `true` | Start the variety pass right after the persona posts text, so the next turn finds the result ready. Off: the pass runs only at the turn, but a late answer is still stored for later. A missing key counts as on |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
@@ -62,10 +63,14 @@ Every key in `config.json` with its default, grouped by section.
 | `safetyMargin` | `0.9` | Budgeting fraction of maxRequestTokens |
 | `timeoutMs` | `300000` | Request timeout (ms) |
 | `pingTimeoutMs` | `30000` | Timeout for `/nep ping` requests (ms) |
-| `retries` | `2` | Retries on transient failures |
+| `retries` | `2` | Retries on transient HTTP errors (408/429/5xx) and network failures. A provider account's daily-quota 429 gets one attempt and is thrown at once, not retried |
 | `maxRequestsPerDay` | `300` | Daily request cap |
 | `provider` | `null` | OpenRouter `provider` routing object, passed verbatim; `null` sends nothing |
 | `providerByModel` | `{}` | Per-model provider routing; see below |
+| `cache.ttl` | `"1h"` | Cache TTL sent on the marker: `"1h"` or `"5m"` |
+| `cache.roles` | `["talk"]` | Request roles whose system message gets the cache marker |
+| `cache.models` | `["anthropic/"]` | Model id prefixes (case-sensitive) whose provider accepts the `cache_control` marker. A request to a model outside the list is sent without one |
+| `cache.promptIncludesCached` | `true` | Whether the provider's reported `prompt_tokens` already includes cached and cache-write tokens. Set once from a probe; the token calibration and the per-request cap use the full count either way |
 
 `llm.provider` sets a default OpenRouter provider routing on chat requests, for example `{ "ignore": ["some-provider"] }` or `{ "order": ["anthropic"], "allow_fallbacks": true }`. `llm.providerByModel` adds per-model overrides: each key is a model id prefix (matching any role) or `<prefix>@<role>` (matching one role only), and each value is an OpenRouter routing object sent verbatim.
 
@@ -74,6 +79,8 @@ For one request the provider is resolved in order: a per-call pin (the video des
 Example: `"google/": { "only": ["google-vertex"], "allow_fallbacks": false }` routes all Google models through Vertex, while `"google/@classifier.video": { "only": ["google-ai-studio"], "allow_fallbacks": false }` sends the video classifier through AI Studio. Route keys that contain dots (e.g. `google/@classifier.video`) cannot be edited through `/nep set` because it splits on dots; use `/nep route set` and `/nep route remove`.
 
 If the OpenRouter account itself restricts allowed providers, ignoring the only one left makes every request fail with "No endpoints found". After changing provider settings, run `/nep ping` to verify that every model role is reachable; each role follows its `llm.providerByModel` route, so the provider shown is the one that route selects.
+
+With `features.promptCache` on, the system message is marked for the provider's prompt cache on requests whose role is in `llm.cache.roles` and whose model starts with a prefix in `llm.cache.models`. The marker goes on after the token estimate, so the 50k per-request cap and the calibration are unaffected. `llm.cache.promptIncludesCached` tells the engine how the provider reports cached tokens; set it once from a real probe. The `llm: usage` log line gains `cache`: `write`, `read`, `none` or `off`.
 
 ## `classifier`
 

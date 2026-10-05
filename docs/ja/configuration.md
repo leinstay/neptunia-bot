@@ -27,6 +27,7 @@
 | `imageGeneration` | `false` | ペルソナが描画サブプロセスを通じて画像を描くことを許可。キーが存在しない場合はオンとして扱われる。`config.local.json` で有効化。`image.model` に画像生成対応モデルが必要。[メディア: 描画](media.md#描画)を参照 |
 | `privateMessages` | `false` | ギルドメンバーのダイレクトメッセージに応答。保存された公開プロファイルと `affinity.score >= private.minAffinity` が必要。[メッセージとメモリ: プライベートレイヤー](messages-and-memory.md#プライベートレイヤー)を参照 |
 | `mentor` | `false` | 独自モデルを使用する手動テストサブプロセス。有効にするには厳密に `true` にする必要がある。キーが存在しない場合はオフ。[Mentor](#mentor) を参照 |
+| `promptCache` | `false` | システムメッセージにプロバイダーのプロンプトキャッシュマーカーを付与する。キャッシュ読み取りは通常入力の数分の一のコストで、プロバイダーによってはトークンクォータにカウントされない。厳密に `true` で有効。キーが存在しない場合はオフ。`llm.cache.*` を参照 |
 | `variety` | `true` | モデルパスがペルソナの最近のメッセージで使い回している表現手法を特定する。結果はターンのリクエストに `<worn>` ブロックとして含まれる。キーが存在しない場合はオン |
 | `varietyPrecompute` | `true` | ペルソナがテキストを投稿した直後に多様性パスを開始し、次のターンが結果を即座に利用できるようにする。オフ: パスはターン時にのみ実行されるが、遅延した結果は保存される。キーが存在しない場合はオン |
 | `followUp` | `true` | ペルソナの応答後、タグなしメッセージを分類して会話を継続 |
@@ -59,10 +60,14 @@
 | `safetyMargin` | `0.9` | `maxRequestTokens` のバジェット比率 |
 | `timeoutMs` | `300000` | リクエストタイムアウト（ミリ秒） |
 | `pingTimeoutMs` | `30000` | `/nep ping` リクエストのタイムアウト（ミリ秒） |
-| `retries` | `2` | 一時的な障害時のリトライ回数 |
+| `retries` | `2` | 一時的な HTTP エラー（408/429/5xx）およびネットワーク障害時のリトライ回数。プロバイダーアカウントの日次クォータ 429 はリトライされず、1 回の試行後にそのままスローされる |
 | `maxRequestsPerDay` | `300` | 1 日あたりのリクエスト上限 |
 | `provider` | `null` | OpenRouter の `provider` ルーティングオブジェクト（そのまま渡される）。`null` の場合は送信しない |
 | `providerByModel` | `{}` | モデルごとのプロバイダールーティング。詳細は下記 |
+| `cache.ttl` | `"1h"` | マーカーに付与するキャッシュ TTL: `"1h"` または `"5m"` |
+| `cache.roles` | `["talk"]` | システムメッセージにキャッシュマーカーを付与するリクエストロール |
+| `cache.models` | `["anthropic/"]` | `cache_control` マーカーを受け入れるプロバイダーのモデル id プレフィックス（大文字小文字区別）。リスト外のモデルへのリクエストにはマーカーが付かない |
+| `cache.promptIncludesCached` | `true` | プロバイダーが報告する `prompt_tokens` にキャッシュ読み取りとキャッシュ書き込みのトークンが含まれているかどうか。実際のプローブから一度設定する。トークンキャリブレーションとリクエスト上限は常にフルカウントを使用する |
 
 `llm.provider` はチャットリクエストに対するデフォルトの OpenRouter プロバイダールーティングを設定します。例: `{ "ignore": ["some-provider"] }` や `{ "order": ["anthropic"], "allow_fallbacks": true }`。`llm.providerByModel` はモデルごとのオーバーライドを追加します。キーはモデル id のプレフィックス（任意のロールに一致）または `<prefix>@<role>`（1 つのロールのみ一致）で、値はそのまま渡される OpenRouter ルーティングオブジェクトです。
 
@@ -71,6 +76,8 @@
 例: `"google/": { "only": ["google-vertex"], "allow_fallbacks": false }` はすべての Google モデルを Vertex 経由にし、`"google/@classifier.video": { "only": ["google-ai-studio"], "allow_fallbacks": false }` は動画分類器を AI Studio 経由にします。ドットを含むルートキー（例: `google/@classifier.video`）は `/nep set` では編集できません（ドットでパスを分割するため）。`/nep route set` と `/nep route remove` を使用してください。
 
 OpenRouter アカウント自体が許可プロバイダーを制限している場合、唯一残ったプロバイダーを除外するとすべてのリクエストが "No endpoints found" で失敗します。プロバイダー設定を変更した後は `/nep ping` を実行してすべてのモデルロールが到達可能か確認してください。各ロールは `llm.providerByModel` のルートに従うため、表示されるプロバイダーはそのルートが選択したものです。
+
+`features.promptCache` がオンの場合、ロールが `llm.cache.roles` に含まれ、モデルが `llm.cache.models` のプレフィックスで始まるリクエストのシステムメッセージにプロバイダーのプロンプトキャッシュマーカーが付与されます。マーカーはトークン推定の後に付与されるため、リクエストあたり 50k の上限とキャリブレーションに影響しません。`llm.cache.promptIncludesCached` は、プロバイダーがキャッシュトークンをどのように報告するかをエンジンに伝えます。実際のプローブから一度設定してください。`llm: usage` ログ行に `cache` フィールドが追加されます: `write`、`read`、`none`、`off`。
 
 ## `classifier`
 
