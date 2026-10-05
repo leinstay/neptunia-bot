@@ -67,7 +67,7 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep mentor show <id>` | The report of the last run: situations, answers, scores, comments, and the diagnosis when present |
 | `/nep mentor wrong <id> <reason>` | Tell the mentor it judged that case wrongly and why; kept as a counter-example for future scoring |
 | `/nep mentor status` | Model, enabled or not, tokens used today / cap, cases by state, the run in flight (shows `, stopping` while a stop is pending), and the most recent finished run (`last:`): its case, outcome, median overall, scored answers, tokens and finish time |
-| `/nep variety` | The variety pass: latest list with examples, then the history of passes newest first. Read-only, grantable |
+| `/nep variety` | The variety pass: latest short list with examples, the long pass's list with its line count, then the history of passes newest first. Read-only, grantable |
 | `/nep access grant <command> [role] [user]` | Open a command, group or `*` to everyone (default), a role, or a user. `private.*`, `mentor.*` and `access.*` are excluded; see above |
 | `/nep access revoke <command> [role] [user]` | Revoke a previous grant from everyone (default), a role, or a user |
 | `/nep access list` | List every current access grant |

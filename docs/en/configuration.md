@@ -17,9 +17,9 @@ Every key in `config.json` with its default, grouped by section.
 | `episodes` | `true` | Per-person long-term memories (moments, quotes, grudges) |
 | `lore` | `true` | Server-wide lorebook |
 | `reactions` | `true` | Emoji reactions (the persona places them) |
-| `seeReactions` | `true` | Show reactions on messages in the transcript. A missing key counts as on. Distinct from `reactions`, which controls whether the persona PLACES reactions; this one controls whether it SEES them |
+| `seeReactions` | `true` | Show reactions on messages in the transcript. A missing key counts as on. Distinct from `reactions`, which controls whether the persona PLACES reactions; this one controls whether they SEE them |
 | `customEmoji` | `true` | List the server's custom emoji ranked by usage so the persona can use them by `:name:`. A missing key counts as on |
-| `gifs` | `true` | Build a GIF library from what members share (Tenor, Giphy links and .gif attachments) and let the persona post from it by handle. A missing key counts as on |
+| `gifs` | `true` | Build a GIF library from what members share and let the persona post from it by handle. A missing key counts as on |
 | `multiMessage` | `true` | Allow 2–3 messages in a row |
 | `vision` | `true` | Process attached images |
 | `mediaDescriptions` | `true` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
@@ -39,7 +39,7 @@ Every key in `config.json` with its default, grouped by section.
 | `recent` | `true` | Show a `<recent>` block of what happened on the server in the last few days. A missing key counts as on. See `memory.recentHours` and `context.caps.recent` |
 | `channelRoute` | `true` | A classifier picks a channel the conversation is about before a turn, so the channel can be pulled into the request. A missing key counts as on. See `route.*` |
 | `pauseNotice` | `true` | Post a short notice when the persona is called while paused. A missing key counts as on. See `mention.pauseNoticeMinutes` and `labels.limits.paused` |
-| `variety` | `true` | A model pass names the devices the persona is overusing in its own recent lines. The result becomes a `<worn>` block in the turn's request. A missing key counts as on |
+| `variety` | `true` | A model pass names the devices the persona is overusing in their own recent lines. The result becomes a `<worn>` block in the turn's request. A missing key counts as on |
 | `varietyPrecompute` | `true` | Start the variety pass right after the persona posts text, so the next turn finds the result ready. Off: the pass runs only at the turn, but a late answer is still stored for later. A missing key counts as on |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
@@ -135,7 +135,7 @@ The three helper model roles, grouped under one key. Each is set independently, 
 | `caps.neighbors` | `3000` | Token cap: neighbour channels |
 | `caps.server` | `4000` | Token cap: channel map |
 | `caps.emoji` | `800` | Token cap: custom emoji |
-| `caps.gifs` | `600` | Token cap: GIF library |
+| `caps.gifs` | `900` | Token cap: GIF library |
 | `caps.pulled` | `4000` | Token cap: pulled channel block (`<channel_view>`) |
 | `channelActivity.liveMessagesPerDay` | `20` | Daily messages = "active" channel |
 | `channelActivity.deadAfterDays` | `7` | Days without messages = "dead" channel |
@@ -234,7 +234,8 @@ Settings for the GIF library (`features.gifs`). Uses are counted as each message
 
 | Key | Default | Meaning |
 |---|---|---|
-| `max` | `20` | GIFs shown in the `<gifs>` block, ranked by recency-weighted use |
+| `max` | `40` | GIFs shown in the `<gifs>` block, ranked by recency-weighted use |
+| `listChars` | `70` | Characters kept per caption in the `<gifs>` list, cut at a word boundary. `0` shows the whole caption |
 | `storeMax` | `300` | GIFs kept in the library; the top `max` are shown |
 | `halfLifeDays` | `30` | Recency half-life for the usage ranking (days); same formula as custom emoji |
 | `maxPerDay` | `40` | GIFs the persona may post per day |
@@ -342,7 +343,7 @@ At most one re-watch or retry per turn. Answers are cached for one hour per ques
 | `followUpContext` | `15` | Transcript lines sent to the classifier |
 | `followUpMaxOutputTokens` | `8` | Max output tokens for the address classifier. A reasoning model that thinks before answering needs a larger cap, or it returns an empty answer |
 | `followUpOverheard` | `true` | When on, an `overheard` answer from the address classifier starts its own kind of turn with `prompts/overheard.md`. Off: an `overheard` answer counts as a plain `yes` (a follow-up turn). Missing key = on |
-| `followUpAliases` | `5` | Stored aliases of the persona sent to the address classifier alongside its name, so it recognises them as a call. `0` sends none |
+| `followUpAliases` | `5` | Stored aliases of the persona sent to the address classifier alongside their name, so the classifier recognises them as a call. `0` sends none |
 | `followUpNoStreak` | `3` | Consecutive `no` verdicts that close the window |
 | `pauseNoticeMinutes` | `10` | Minimum minutes between pause notices in the same channel. `0` posts one for every call |
 
@@ -523,7 +524,7 @@ Settings for the web lookup (`features.webLookup`). Both link reading and search
 
 ## `image`
 
-Settings for the drawing sub-process (`features.imageGeneration`). The persona emits a `<draw>` tag; code generates one picture through OpenRouter's Images API and posts it as its own message. Generation and daily counts are stored in `data/state.json` (`imageDay`, `imageCount`, `imageUsers`). All pictures go through `image.model`, not the chat or classifier models.
+Settings for the drawing sub-process (`features.imageGeneration`). The persona emits a `<draw>` tag; code generates one picture through OpenRouter's Images API and posts it as a separate message. Generation and daily counts are stored in `data/state.json` (`imageDay`, `imageCount`, `imageUsers`). All pictures go through `image.model`, not the chat or classifier models.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -559,7 +560,7 @@ Provider-specific options for `google/*` image models.
 
 ## `variety`
 
-Settings for the variety pass (`features.variety`). The persona's own recent lines go to the `classifier.text` model, which names the repeated devices. With `features.varietyPrecompute` on, the pass starts right after the persona posts text so the next turn finds the answer ready; at the turn, a ready answer is used from cache, or the turn joins a pass already in flight and waits at most `variety.timeoutMs`. The result becomes a `<worn>` block in the turn's request. A timeout or a failed pass never delays or fails the turn; the turn simply goes without the block. All hot-reloaded.
+Settings for the variety pass (`features.variety`). The persona's own recent lines go to the `classifier.text` model, which names the repeated devices. With `features.varietyPrecompute` on, the pass starts right after the persona posts text so the next turn finds the answer ready; at the turn, a ready answer is used from cache, or the turn joins a pass already in flight and waits at most `variety.timeoutMs`. The result becomes a `<worn>` block in the turn's request. A timeout or a failed pass never delays or fails the turn; the turn simply goes without the block. A second, longer pass (`variety.longLines`) runs at most once per `variety.longEveryHours` over the ring of the persona's own lines across all channels, using `prompts/variety-long.md` on the `variety.longModel` model (or the `classifier.text` model when null). Its patterns are stored as `wornLong` in guild memory and stay in force until the next long pass; a turn receives them ahead of the short pass's patterns. All hot-reloaded.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -573,6 +574,11 @@ Settings for the variety pass (`features.variety`). The persona's own recent lin
 | `timeoutMs` | `8000` | How long a turn waits for a pass result (ms). A pass that outlives this wait keeps running to `requestTimeoutMs`; a late answer is stored and serves the next turn. The mentor sandbox uses this value as its request timeout |
 | `requestTimeoutMs` | `30000` | Request timeout for the variety model call (ms). The pass is cut at this time; `variety.timeoutMs` is only how long a turn waits for it |
 | `history` | `20` | Passes kept in the history ring for `/nep variety` |
+| `longLines` | `300` | Own lines the long pass reads from the ring, across all channels with no age limit. `0` turns the long pass off |
+| `longEveryHours` | `6` | Hours between long passes; a failure counts so it is not retried after every post |
+| `longMinLines` | `60` | Fewer lines than this in the ring skips the long pass |
+| `longMaxPatterns` | `3` | Most patterns the long pass may name |
+| `longModel` | `null` | Model for the long pass. `null` uses the `classifier.text` model |
 
 ## `private`
 

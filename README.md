@@ -18,7 +18,7 @@
 
 Neptunia is a locally run Discord bot that plays one configurable character through an LLM, behaving like an ordinary chat member. It runs on Node.js 20+ with a single dependency (discord.js) and talks to any OpenRouter-compatible endpoint. It comes with a pluggable character card written without touching code, hot-reloaded prompts and config, per-member memory with attitudes and episodes, a server-wide lorebook, vision for attached pictures, one-line media descriptions from a helper model, drawing on request through an image generation model, private chat in Discord DMs with a separate memory layer, owner slash commands for live tuning, and a dry-run mode. A working example character is included; write your own card for a different persona.
 
-The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals and starts topics in dead channels. It remembers people, tracks attitudes from -100 to 100, and uses them in replies. The score never appears in chat. All config and prompts are hot-reloaded; owner commands tune the bot live from Discord.
+The persona responds to mentions, replies and name triggers, sometimes ignoring them. They cut into conversations at random intervals and start topics in dead channels. They remember people, track attitudes from -100 to 100, and use them in replies. The score never appears in chat. All config and prompts are hot-reloaded; owner commands tune the bot live from Discord.
 
 Each instance serves one server, one bot account, one personality. For a second server or character, run a second copy with its own `.env`, `config.local.json`, `prompts.local/` and `data/`. Discord marks bot accounts with an APP badge; the engine does not disguise that.
 
@@ -53,43 +53,43 @@ When `bot.guildId` is empty and the bot is in exactly one server, it locks to th
 ## Features and changes
 
 **05.10.2026**  
-It distinguishes between someone talking to it and people talking about it in the third person. When a conversation mentions another channel, it opens that channel and reads the latest messages with pictures, even when the channel was named in words without a link. If someone calls it in a channel where it cannot write, it answers in the main channel with a link to that message. On its own it can comment in the main channel on something it read in a channel where it cannot write. It is more likely to respond to a question asked to everyone than to someone specific. It remembers what mattered over the last few days: what someone gave it or asked it to do, what it promised, what happened between members. When someone asks about a person, it recalls moments connected to them. It searches old server messages the same way it searches the web: for questions like "what did we do on New Year's" or "who is ..." it finds the right conversation and answers from it.
+Neptunia distinguishes between someone talking to them and people talking about them in the third person. When a conversation mentions another channel, Neptunia opens that channel and reads the latest messages with pictures, even when the channel was named in words without a link. If someone calls them in a channel where Neptunia cannot write, Neptunia answers in the main channel with a link to that message. On their own Neptunia can comment in the main channel on something they read in a channel where they cannot write. Neptunia is more likely to respond to a question asked to everyone than to someone specific. Neptunia remembers what mattered over the last few days: what someone gave them or asked them to do, what they promised, what happened between members. When someone asks about a person, Neptunia recalls moments connected to them. Neptunia searches old server messages the same way they search the web: for questions like "what did we do on New Year's" or "who is ..." Neptunia finds the right conversation and answers from it.
 
 **04.10.2026**  
-It knows what is in the pictures that were recently posted in other channels.
+Neptunia knows what is in the pictures that were recently posted in other channels.
 
 **03.10.2026**  
-When it has not talked to someone in a while, its attitude toward that person gradually returns to neutral.
+When Neptunia has not talked to someone in a while, their attitude toward that person gradually returns to neutral.
 
 **01.10.2026**  
-It notices which phrases and devices it has been repeating too often and stops using them.
+Neptunia notices which phrases and devices they have been repeating too often and stops using them.
 
 **30.09.2026**  
-It uses the server's custom emoji in its messages on its own. It posts GIFs from the ones people share on the server. It sees what is happening in a GIF. It knows today's date.
+Neptunia uses the server's custom emoji in their messages on their own. Neptunia also posts GIFs from the ones people share on the server. Neptunia sees what is happening in a GIF. Neptunia knows today's date.
 
 **29.09.2026**  
-It replies in direct messages. What someone tells it in a DM does not appear in the server channels. It sees which reactions people put on messages.
+Neptunia replies in direct messages. What someone tells them in a DM does not appear in the server channels. Neptunia sees which reactions people put on messages.
 
 **28.09.2026**  
-It draws pictures on request or on its own. It can draw itself: it has a consistent appearance.
+Neptunia draws pictures on request or on their own. Neptunia can draw themselves: they have a consistent appearance.
 
 **26.09.2026**  
-It sees pictures and videos inside forwarded messages. It watches long videos from YouTube.
+Neptunia sees pictures and videos inside forwarded messages. Neptunia also watches long videos from YouTube.
 
 **24.09.2026**  
-It remembers what people teach it in the chat: facts, rules, "that's how we do things here."
+Neptunia remembers what people teach them in the chat: facts, rules, "that's how we do things here."
 
 **23.09.2026**  
-It watches videos: both attached files and links from YouTube, TikTok, VK, X (Twitter), Reddit, Twitch. If someone asks about a detail in a video it already watched, it re-watches the video with that question. It opens links from messages and reads what is on the page. It searches the web when a question needs fresh facts or when someone directly asks it to look something up.
+Neptunia watches videos: both attached files and links from YouTube, TikTok, VK, X (Twitter), Reddit, Twitch. If someone asks about a detail in a video Neptunia already watched, Neptunia re-watches the video with that question. Neptunia opens links from messages and reads what is on the page. Neptunia searches the web when a question needs fresh facts or when someone directly asks them to look something up.
 
 **22.09.2026**  
-It understands when someone is talking to it without a mention or a tag, from the context of the conversation.
+Neptunia understands when someone is talking to them without a mention or a tag, from the context of the conversation.
 
 **21.09.2026**  
-It sees pictures posted in the chat. It sees stickers, the server's custom emoji, and link previews with the site title and description. If a message has an attachment it cannot open, such as a file or a voice message, it knows the attachment is there and does not pretend it looked. It understands forwarded messages: who sent the original and what it says. It remembers individual moments with people: who said or did what, and what it thought about it. It keeps track of local jokes and server stories. It remembers a person's hobbies and facts about them, but only what has come up more than once. It also remembers nicknames: what members call each other.
+Neptunia sees pictures posted in the chat. Neptunia also sees stickers, the server's custom emoji, and link previews with the site title and description. If a message has an attachment Neptunia cannot open, such as a file or a voice message, Neptunia knows the attachment is there and does not pretend they looked. Neptunia understands forwarded messages: who sent the original and what it says. Neptunia remembers individual moments with people: who said or did what, and what they thought about it. Neptunia keeps track of local jokes and server stories. Neptunia remembers a person's hobbies and facts about them, but only what has come up more than once. Neptunia also remembers nicknames: what members call each other.
 
 **20.09.2026**  
-The persona answers when called: by a mention, a reply to its message, or just its name in the text. It can write in a channel on its own when nobody called it. It can join someone else's conversation when it has something to say on the topic. It can also ignore a message, like someone who reads it and stays quiet. Replies are not instant: a typing indicator shows, the answer may come as several short messages, and sometimes instead of words it places a reaction. It remembers every member: who they are and how they talk. Its attitude toward each person is different and changes depending on how they talk to it. It can tell whether a channel has a live conversation or is quiet. It knows which channels the server has and what each one is about. On the first launch it reads older messages from the server and builds a first picture of the people and channels, so it does not start from zero.
+Neptunia answers when called: by a mention, a reply to their message, or just their name in the text. Neptunia can write in a channel on their own when nobody called them. Neptunia can join someone else's conversation when they have something to say on the topic. Neptunia can also ignore a message, like someone who reads it and stays quiet. Replies are not instant: a typing indicator shows, the answer may come as several short messages, and sometimes instead of words they place a reaction. Neptunia remembers every member: who they are and how they talk. Neptunia's attitude toward each person is different and changes depending on how that person talks to them. Neptunia can tell whether a channel has a live conversation or is quiet. Neptunia knows which channels the server has and what each one is about. On the first launch Neptunia reads older messages from the server and builds a first picture of the people and channels, so Neptunia does not start from zero.
 
 ## Prompt layers
 
@@ -124,7 +124,7 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). It is
 
 ## Messages and memory
 
-The persona responds to mentions, replies and name triggers, sometimes ignoring them. It cuts into conversations at random intervals, starts topics in dead channels, and may pick up a question put to the room. After answering, it tracks follow-up messages in that channel through a classifier. It writes one reply at a time across the server; pings in other channels are held and answered in turn. When someone talks about another channel, a classifier picks the channel so the persona can read it.
+The persona responds to mentions, replies and name triggers, sometimes ignoring them. They cut into conversations at random intervals, start topics in dead channels, and may pick up a question put to the room. After answering, they track follow-up messages in that channel through a classifier. They write one reply at a time across the server; pings in other channels are held and answered in turn. When someone talks about another channel, a classifier picks the channel so the persona can read it.
 
 A separate memory analyzer runs when enough messages accumulate. It builds per-member profiles with interests, details, aliases, episodes and attitudes, server-wide habits and in-jokes, a lorebook of events and stories, and a list of things people taught the persona directly (words, facts, requests). Profiles are updated incrementally; stored facts are never re-summarised. The persona also learns what people call each other and recognises a member by name or alias. Lessons are stored at the server level (`memory.maxLearned` shown, `memory.maxLearnedStored` kept on disk, `memory.learnedChars` per item) and always appear in the prompt.
 
@@ -132,7 +132,7 @@ See [`docs/en/messages-and-memory.md`](docs/en/messages-and-memory.md) for the p
 
 ## Media
 
-The persona can see attached pictures, watch short video clips, read pages behind links, search the web and the server's own message history for facts it does not have, draw pictures on request through an image generation model, and post GIFs from a library built from what the chat shares. Each capability is a separate feature switch, off or capped by default, with its own daily limit. A `<senses>` block in each request tells the persona what is on; it never claims to have perceived anything beyond it. See [`docs/en/media.md`](docs/en/media.md) for pictures, video vision, link reading, search, drawing, tools, costs and privacy.
+The persona can see attached pictures, watch short video clips, read pages behind links, search the web and the server's own message history for facts they do not have, draw pictures on request through an image generation model, and post GIFs from a library built from what the chat shares. Each capability is a separate feature switch, off or capped by default, with its own daily limit. A `<senses>` block in each request tells the persona what is on; they never claim to have perceived anything beyond it. See [`docs/en/media.md`](docs/en/media.md) for pictures, video vision, link reading, search, drawing, tools, costs and privacy.
 
 ## Private chat
 
@@ -204,6 +204,7 @@ prompts/
   appearance.md            the persona's visual look for self-portraits
   describe.md              prompt for the media describer
   describe-video.md        prompt for the video describer
+  describe-gif.md          prompt for the GIF describer
   rewatch.md               classifier: re-watch a video for a question
   rewatch-answer.md        prompt for the re-watch answer
   address.md               classifier for follow-up messages
@@ -219,6 +220,7 @@ prompts/
   mentor-signs.md          mentor: known habits of model-written text
   mentor-diagnose.md       mentor: explain weak answers after scoring
   variety.md               classifier: name the devices the persona is overusing
+  variety-long.md          classifier: name the devices across a longer stretch
   profile.md               warmup: one member's profile from a message sample
   channel.md               warmup: channel notes from a message sample
   server.md                warmup: server-level notes from channel notes and member summaries

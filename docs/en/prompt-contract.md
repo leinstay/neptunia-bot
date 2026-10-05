@@ -27,7 +27,7 @@ All instructions are English in both layers; a character's speech samples may be
 | `forced.md` | no | Appended after the mode prompt on a forced turn (`/nep interject`, `/nep initiate`). Overrides the `<skip/>` default | `{{name}}` |
 | `memory.md` | yes | Out-of-character prompt of the stream analyzer (single-stage mode and private batches): targeted edits to memory from live batches | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
 | `memory-decide.md` | no | Stage A of the two-stage analyzer (`features.memoryTwoStage`): neutral decisions on what changed, with briefs for the voice model. Same input blocks as `memory.md`. Returns JSON. Required when `features.memoryTwoStage` is on; a missing file falls back to single-stage mode | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
-| `memory-voice.md` | no | Stage B of the two-stage analyzer: the persona words queued items in its own voice. Returns JSON. Required when `features.memoryTwoStage` is on | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
+| `memory-voice.md` | no | Stage B of the two-stage analyzer: the persona words queued items in their own voice. Returns JSON. Required when `features.memoryTwoStage` is on | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
 | `portrait.md` | no | Stage A of the two-stage portrait refresh: reads the stored portrait and a message sample, returns a merged `style` text and structured `character` edits. The character edits are queued as a voice item for stage B. Used by the two-stage portrait refresh; details are in a later documentation pass | `{{name}}` `{{fieldChars}}` |
 | `profile.md` | yes | Warmup / portrait refresh: one member's profile from a message sample | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
 | `channel.md` | yes | Warmup: channel notes from a message sample | `{{fieldChars}}` |
@@ -37,16 +37,16 @@ All instructions are English in both layers; a character's speech samples may be
 | `describe-gif.md` | no | Out-of-character prompt for the GIF describer (`media.gif.watch`): a short silent clip in, one compact line out: the action, what it expresses, visible text. Always English. No character card. Falls back to `describe-video.md` when absent | `{{today}}` `{{maxChars}}` `{{seconds}}` |
 | `rewatch.md` | yes | Classifier: does this message need the persona to re-watch a video or retry one that did not load (`features.videoRewatch`). Receives a numbered list of recent videos with their status and the new message. Output is ONE line: `<number> \| <question>`, `<number> \| retry` or `none` | `{{name}}` |
 | `rewatch-answer.md` | yes | Out-of-character prompt for the re-watch answer: the video model watches a clip again and answers one question in the language of the question. No character card | `{{today}}` `{{question}}` `{{maxChars}}` |
-| `address.md` | yes | Classifier: is this untagged message addressed to the persona, about it, or neither. Output is one word: `yes`, `overheard` or `no` | `{{name}}` |
-| `overheard.md` | no | Task: the message talks about the persona, not to it. Used INSTEAD of the mode prompt when the trigger kind is `overheard` and the file is present and non-blank; missing or blank falls back to the mode prompt (degraded) | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
+| `address.md` | yes | Classifier: is this untagged message addressed to the persona, about them, or neither. Output is one word: `yes`, `overheard` or `no` | `{{name}}` |
+| `overheard.md` | no | Task: the message talks about the persona, not to them. Used INSTEAD of the mode prompt when the trigger kind is `overheard` and the file is present and non-blank; missing or blank falls back to the mode prompt (degraded) | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
 | `lookup.md` | no | Classifier: does the persona need to look something up (`features.webLookup`, `features.recall`). Receives a short transcript and a `<candidate>` block. Output is `none`, or up to four labelled lines: `web:` a web query, `server:` word forms to search in the server's messages, `who:` name forms to find a person, `when:` a date range. A single unlabelled line is still read as a web query | `{{name}}` `{{today}}` |
 | `recall-summary.md` | no | Out-of-character prompt for the recall summary (`features.recall`): reads the stretches of old chat found by the server search and answers the question, optionally naming one stretch the persona gets verbatim. No character card | `{{name}}` `{{answerChars}}` |
 | `room.md` | no | Classifier: is this message put to everyone in the room, or aimed at one person (`spontaneous.roomQuestionChance`). Receives a short transcript, the author's aliases and a `<candidate>` block. Output is ONE word: `yes` or `no` | `{{name}}` |
 | `route-channel.md` | no | Classifier: does answering this message need the persona to see another channel (`features.channelRoute`). Receives a short transcript, a `<channels>` list and a `<candidate>` block. Output is ONE line: a number from the list or `none` | `{{name}}` |
-| `elsewhere.md` | no | Task: the persona read a channel where it cannot write and may comment on it in the main channel (`features.elsewhere`). Used as the task text for a noticed turn. `<skip/>` is the normal outcome | `{{name}}` `{{channel}}` `{{destination}}` |
+| `elsewhere.md` | no | Task: the persona read a channel where they cannot write and may comment on it in the main channel (`features.elsewhere`). Used as the task text for a noticed turn. `<skip/>` is the normal outcome | `{{name}}` `{{channel}}` `{{destination}}` |
 | `read-link.md` | no | Out-of-character prompt for the link reader (`features.webLookup`, `web.links.enabled`): condense a fetched page into one paragraph. Receives the page title and body. No character card | `{{today}}` `{{maxChars}}` |
 | `search-summary.md` | no | Out-of-character prompt for the search condenser (`features.webLookup`, `web.search.enabled`): condense numbered search results into one note with inline sources. No character card | `{{today}}` `{{query}}` `{{maxChars}}` |
-| `private.md` | no | Appended after the mode prompt (`reply.md`), before `forced.md`, only in a DM (`features.privateMessages`). This is a private conversation: what is said here stays here; the persona keeps its public knowledge. A missing file adds nothing | `{{name}}` `{{author}}` |
+| `private.md` | no | Appended after the mode prompt (`reply.md`), before `forced.md`, only in a DM (`features.privateMessages`). This is a private conversation: what is said here stays here; the persona keeps their public knowledge. A missing file adds nothing | `{{name}}` `{{author}}` |
 | `draw.md` | yes | Out-of-character prompt of the drawing sub-process (`features.imageGeneration`): produces one picture from a scene description. Receives only the appearance and the request — never the character card | `{{name}}` `{{appearance}}` `{{request}}` |
 | `appearance.md` | no | The persona's visual look, inserted into `draw.md` when `self="yes"`. One paragraph, no personality, no backstory | `{{name}}` |
 | `mentor-situations.md` | no | Mentor: invent test chat situations for a case (`features.mentor`). Returns JSON only | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
@@ -54,6 +54,7 @@ All instructions are English in both layers; a character's speech samples may be
 | `mentor-signs.md` | no | Mentor: known habits of model-written text, sent as the `<signs>` block in every mentor request (`features.mentor`). Omitted when missing or empty | `{{name}}` |
 | `mentor-diagnose.md` | no | Mentor: explain weak answers after scoring by pointing at specific text in the persona's context (`features.mentor`). The result is an unverified opinion stored as `diagnosis` on the run. Omitted when `mentor.diagnose` is false or the file is missing | `{{name}}` |
 | `variety.md` | no | `classifier.text` request: name the repeated devices in the persona's own recent lines (`features.variety`). No character card | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
+| `variety-long.md` | no | Long variety pass: name the devices across the whole ring of own lines (`features.variety`, `variety.longLines`). Same placeholders, `<lines>` block and answer format as `variety.md`. Uses `variety.longModel` (null = `classifier.text`). No character card. Falls back to no long pass when absent | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
 
 `{{name}}` bot's display name · `{{author}}` caller's display name · `{{trigger}}` one of `labels.triggers.*` ·
@@ -64,7 +65,7 @@ On a forced turn (`/nep interject`, `/nep initiate`), `forced.md` is appended af
 On an `overheard` turn, `overheard.md` REPLACES the mode prompt (it is the task text, not an append). When `overheard.md` is missing or blank, the mode prompt is used instead (degraded: the mode prompt frames the line as said to the persona, which is not what happened).
 In a private chat, `private.md` is appended after the mode prompt (before `forced.md`) with the same `{{name}}` and `{{author}}` placeholders.
 The analyzer and the warmup's `profile.md` and `server.md` receive the character card and `rules.md` as a
-`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `describe-gif.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md`, `search-summary.md`, `recall-summary.md`, `room.md`, `route-channel.md`, `elsewhere.md` and `variety.md` do not receive the card.
+`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `describe-gif.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md`, `search-summary.md`, `recall-summary.md`, `room.md`, `route-channel.md`, `elsewhere.md`, `variety.md` and `variety-long.md` do not receive the card.
 
 `{{guildFieldChars}}` is `fieldChars * 2`, the limit code clamps guild-level patterns and starters to.
 `{{maxEpisodes}}` is the total episodes kept per person. Both are filled from config but not used by the default
@@ -77,18 +78,18 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 | Block | Content |
 |---|---|
 | `<now>` | Date, weekday, time in `config.bot.timezone`, formatted with `labels.locale` |
-| `<senses>` | What the persona can and cannot perceive RIGHT NOW, generated from the live config: which pictures it sees itself, which come as a helper's description, what it is blind and deaf to. So it never pretends to have watched a video and can joke about it in its own voice |
+| `<senses>` | What the persona can and cannot perceive RIGHT NOW, generated from the live config: which pictures they see themselves, which come as a helper's description, what they are blind and deaf to. So the persona never pretends to have watched a video and can joke about it in their own voice |
 | `<about_chat>` | How people talk here, how they start and cut into conversations, in-jokes, things people taught the persona |
 | `<emoji>` | Custom emoji the persona can use (`features.customEmoji`): at most `context.customEmoji.max` entries, ranked by member usage. Each carries `:name:` and the helper's caption when one is cached |
-| `<gifs>` | GIFs the persona can post (`features.gifs`): at most `gifs.max` entries from the library, ranked by recency-weighted use. Each carries the handle (`g1`, `g2`, …) and the helper's caption when one is cached |
+| `<gifs>` | GIFs the persona can post (`features.gifs`): at most `gifs.max` (default 40) entries from the library, ranked by recency-weighted use. Each carries the handle (`g1`, `g2`, …) and the helper's caption when one is cached, cut to `gifs.listChars` (default 70; `0` = whole) at a word boundary so more entries fit the budget |
 | `<server>` | The CURRENT channel in full (Discord category and topic, purpose, what people write, tone, activity, last message, top writers; marked with `labels.server.currentMark`) plus only the neighbour channels that fed `<other_channels>` this turn; no other channel |
 | `<lore>` | Server lore entries whose keys occur in the recent messages (plus entries marked always): events, recurring characters, long-running stories. Like a lorebook: hundreds may exist, only the relevant few are shown |
-| `<self_facts>` | What the persona has claimed about itself |
+| `<self_facts>` | What the persona has claimed about themselves |
 | `<recent>` | What happened on the server in the last `memory.recentHours` (default 72) hours: recent notes (short events the analyzer writes) and in-window episodes of members, shown by reference. A note appears only from the turn's own channel or from a channel everyone here can also read; in a private chat, only from channels every server member can read, with no episodes. Items about the people this turn addresses rank first; episodes already rendered in `<people>` are left out, at most 2 per member. Oldest first. A header with no item renders nothing. Switch `features.recent` (missing = on); cap `context.caps.recent` (default 1200) |
-| `<people>` | Member profiles; the caller first, marked with `labels.profile.interlocutorMark` (omitted on an `overheard` turn: the author talked about the persona, not to it); each with the persona's attitude and, for the caller, the **episodes**: moments the persona remembers about the two of them, with dates and short quotes |
+| `<people>` | Member profiles; the caller first, marked with `labels.profile.interlocutorMark` (omitted on an `overheard` turn: the author talked about the persona, not to them); each with the persona's attitude and, for the caller, the **episodes**: moments the persona remembers about the two of them, with dates and short quotes |
 | `<other_channels>` | Up to `context.neighborMessages` messages per neighbouring channel, not older than `context.neighborMaxAgeMinutes`. When `features.mediaDescriptions` is on, a picture in a neighbour's line carries its cached caption when the describer cache already holds one; no new describe request is ever made for neighbours. A channel whose block is shown in `<channel_view>` is left out of `<other_channels>`; if the budget dropped the pulled block, the channel reappears here as an ordinary neighbour |
 | `<channel_view>` | Another channel pulled into this turn (`features.channelPull`). Contains one item per pulled channel: a header line (`labels.pull.header`), a read-only mark when applicable (`labels.server.readOnly`), an "older not shown" line when the window was cut, a "pictures not seen" count, earlier calls to the persona (with answered/unanswered/skipped marks), then the window lines. Lines use the same transcript format as `<chat>` but are numbered on after the chat (the chat has `#1`..`#N`, the pulled block starts at `#N+1`), so every `#n` is unique across blocks. Pictures appear as captions or blind tags only, never as attached images. Without `labels.pull.header` the block is empty |
-| `<worn>` | Devices the persona is overusing in its own recent lines (`features.variety`): `labels.variety.intro`, then `- <shape> ("<example>", ...)` per pattern. Omitted when the variety pass did not run, returned nothing, or the switch is off |
+| `<worn>` | Devices the persona is overusing in their own recent lines (`features.variety`): `labels.variety.intro`, then `- <shape> ("<example>", ...)` per pattern. The long pass's patterns (`wornLong`, from `variety-long.md`) come first, then the short pass's, duplicates removed, at most `variety.maxPatterns` + `variety.longMaxPatterns`. Omitted when neither pass produced anything or the switch is off |
 | `<lookup>` | What the persona looked up this turn. A web search (`features.webLookup`) carries `labels.lookup.webHeader`, the condensed answer, `labels.lookup.sources` and, when nothing was found, `labels.lookup.none`. A server search (`features.recall`) carries `labels.lookup.serverHeader`, the summary note and, when the summary names a stretch, the verbatim lines of that stretch. When both ran, `labels.lookup.bothNote` sits between them. A `labels.lookup.stretch` line introduces a verbatim stretch (`{date}` `{channel}`). Appears only when a search classifier fired and at least one search completed |
 | `<chat>` | Up to `context.channelMessages` latest messages of the current channel |
 | `<tempo>` | Counts for 10 min / hour / day, distinct people, silence, a verdict (live / slow / dead) |
@@ -196,17 +197,17 @@ senses.videoWatch                        replaces videoDescribed when features.v
 senses.videoRewatch                      shown alongside videoWatch when features.videoRewatch is on; tells the persona that a second look at a watched video may appear, marked as first-hand
 senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
-senses.customEmoji                       shown when features.customEmoji is on and the server has at least one custom emoji; tells the persona it can use server custom emoji by writing :name:
-senses.gifs                              shown when features.gifs is on and the library is not empty; tells the persona it can post one GIF per turn by handle from the list
+senses.customEmoji                       shown when features.customEmoji is on and the server has at least one custom emoji; tells the persona they can use server custom emoji by writing :name:
+senses.gifs                              shown when features.gifs is on and the library is not empty; tells the persona they can post one GIF per turn by handle from the list
 senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results and that no search can happen during the reply itself
-senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona it can draw
+senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona they can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
 senses.privateChat                       shown in a DM turn: this is a one-on-one conversation, what is said here stays between the two of them
-senses.privateAware                      shown on a server turn when features.privateMessages is on: the persona knows it has private chats and never repeats or hints at anything from them
+senses.privateAware                      shown on a server turn when features.privateMessages is on: the persona knows they have private chats and never repeats or hints at anything from them
 lookup.header                            {query}: heading of the `<lookup>` block (web search)
 lookup.sources                           {list}: site names, comma-separated by code
 lookup.none                              shown in `<lookup>` when the search found nothing useful
@@ -265,7 +266,7 @@ pull.pingUnanswered                      appended to a pulled line that called t
 pull.pingSkipped                         OPTIONAL appended to a pulled line the persona saw and chose to let pass; without it no mark is shown for skipped calls
 elsewhere.called                         {channel} {destination}: appended to the reply task text on a turn answering a call from a read-only channel
 elsewhere.link                           {text} {link}: joins the jump link to the persona's posted message; members read it, the model never sees it
-triggers.mention | reply | name | followUp | overheard   followUp = an untagged message the address classifier judged to be for the persona; overheard = talk about the persona, not to it. Both post plain, never as a Discord reply. overheard falls back to followUp, then reply
+triggers.mention | reply | name | followUp | overheard   followUp = an untagged message the address classifier judged to be for the persona; overheard = talk about the persona, not to them. Both post plain, never as a Discord reply. overheard falls back to followUp, then reply
 triggers.private                         the trigger for a private (DM) message
 triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
 draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons; daily and userDaily are reserved but no longer reached by triggers.drawFailed — an image cap now posts limits.notice instead of a follow-up turn
@@ -544,7 +545,7 @@ A channel entry (`renderChannel` in `src/memory/channels.js`) carries:
   no profile is skipped.
 
 When the current channel has no stored note yet (the analyzer has not touched it), a fallback entry is synthesised from
-the Discord facts of the messages in the transcript, so the persona still knows where it is.
+the Discord facts of the messages in the transcript, so the persona still knows where they are.
 
 ## Warmup
 
@@ -598,7 +599,7 @@ the `classifier.text` model (default `anthropic/claude-sonnet-4.6`). The transcr
 (pictures, stickers, GIFs, custom emoji, watched videos) in the same label forms as the persona's transcript. Code
 makes no new describer requests for the history lines; it describes only the candidate's own media before running the
 classifier. Output is ONE word: `yes` when the candidate
-addresses the persona or continues the exchange with it, `overheard` when people talk ABOUT the persona to someone else or to the room, `no` when the conversation has nothing to do with the persona.
+addresses the persona or continues the exchange with them, `overheard` when people talk ABOUT the persona to someone else or to the room, `no` when the conversation has nothing to do with the persona.
 An empty or blank answer is a failed call (`reason: empty`), not a silent `no`.
 An explicit @mention of another member is always `no` before the model is asked; the implicit ping Discord adds for the
 replied-to author does not count as such a mention. When `mention.followUpClassifyReplies` is on (default `true`,
@@ -698,6 +699,17 @@ Rails: at most one web search and one server search per turn. The classifier, th
 A `classifier.text` pass reads the persona's own most recent lines and names the repeated devices
 (turns of phrase, structural moves, recurring joke shapes) the persona has fallen into. The result becomes a `<worn>`
 block in the turn's request. Switch `features.variety` (missing = on).
+
+A second pass with a longer view runs at most once per `variety.longEveryHours` (default 6) hours after the persona
+posts in a server channel, reading the newest `variety.longLines` (default 300; `0` = off) of the ring across all
+channels with no age limit. When the ring holds at least `variety.longMinLines` (default 60) lines and
+`prompts/variety-long.md` exists, the pass is asked on `variety.longModel` (null = the `classifier.text` model) under
+usage purpose `variety-long`, with the same `<lines>` block and answer format as the short pass and at most
+`variety.longMaxPatterns` (default 3) patterns. Its list is stored as `wornLong` in guild memory and stays in force
+until the next long pass; a failure keeps the previous list. A turn's `<worn>` block carries the long pass's patterns
+first, then the short pass's, duplicates removed (shape compared case-insensitively with whitespace collapsed), at most
+`variety.maxPatterns` + `variety.longMaxPatterns`. The long pass never runs before a reply, never holds a turn, never
+runs for a private chat. Logs: `variety: long` on success, `variety: pass failed` with `cause: 'long'` on failure.
 
 With `features.varietyPrecompute` on (the default), the pass starts right after the persona posts text, on the lines the next `fetchHistory` will return. A turn looks up its own line set: when a cached answer matches, it is used without a model request; when a pass for those lines is already in flight, the turn joins it and waits at most `variety.timeoutMs`; otherwise the turn starts its own request. A request runs to `variety.requestTimeoutMs` (default 30000): if a turn's wait of `variety.timeoutMs` runs out first, the request keeps going and a late answer is stored for the next turn. A turn that joined a pass which then fails gets no block and starts no request of its own. Nothing is stored while paused or with `features.variety` off.
 
@@ -882,7 +894,7 @@ A manual sub-process (`features.mentor`) with its own model (`mentor.model`). Th
 
 The mentor model reads the rendered sandbox request, so it reads what the persona remembers about real people. Direct messages and the private memory layer are never part of a sandbox request.
 
-The sandbox carries the same custom-emoji and GIF blocks as a live turn, so the persona can react with emoji, post a GIF or draw a picture in its sandbox answers. A GIF or drawing counts as an action the same way `<msg>` does. The sandbox also carries the `<senses>` lines for the elsewhere destination and the search sense, so the persona's awareness of those features is tested.
+The sandbox carries the same custom-emoji and GIF blocks as a live turn, so the persona can react with emoji, post a GIF or draw a picture in their sandbox answers. A GIF or drawing counts as an action the same way `<msg>` does. The sandbox also carries the `<senses>` lines for the elsewhere destination and the search sense, so the persona's awareness of those features is tested.
 
 ### Post ledger
 
@@ -1043,7 +1055,7 @@ After scoring, when the run did not end early and the case failed or any situati
 
 The result is stored on the run as `diagnosis` and printed in the report. These are hypotheses for the owner to review; the mentor does not edit anything.
 
-Layers a cause may name: `rules` (a rule in the rules block), `prompt` (the engine's system prompt, format or task), `card` (the character card), `self` (a note the persona keeps about itself), `learned` (something people taught it), `guild` (a server habit or in-joke), `profile` (what it remembers about a person), `labels` (a string from `labels.json`), `variety` (something in the `<worn>` block), `lore` (a lorebook entry), `channel` (a channel note), `recent` (a line in the `<recent>` block), `missing` (an instruction that should be there is absent).
+Layers a cause may name: `rules` (a rule in the rules block), `prompt` (the engine's system prompt, format or task), `card` (the character card), `self` (a note the persona keeps about themselves), `learned` (something people taught the persona), `guild` (a server habit or in-joke), `profile` (what the persona remembers about a person), `labels` (a string from `labels.json`), `variety` (something in the `<worn>` block), `lore` (a lorebook entry), `channel` (a channel note), `recent` (a line in the `<recent>` block), `missing` (an instruction that should be there is absent).
 
 #### Diagnosis schema
 
