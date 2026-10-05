@@ -3,7 +3,8 @@
 // scheduler eavesdrop, or run a turn) without ever throwing into discord.js.
 // A direct message goes through the private-chat gate instead
 // (features.privateMessages, src/behavior/private.js). A turn someone asked
-// for that a rail refused gets one plain limit notice (src/behavior/limits.js).
+// for that a rail refused gets one plain limit notice (src/behavior/limits.js);
+// a direct call while paused gets the pause notice the same way.
 // A call in a channel the persona can read but not write in is answered in
 // the main channel (features.elsewhere) once that channel settles; so is a
 // remark the persona chose to make about it (a noticed comment). A line put
@@ -39,7 +40,7 @@ import { fillPromptTemplate } from '../behavior/prompt.js';
 import { routeFor, roomQuestionChance } from '../behavior/spontaneous.js';
 import { elsewhereSettings, pingsIn, pingStatus, recordPing, settleDueAt, stampPings } from '../behavior/elsewhere.js';
 import { privateGate } from '../behavior/private.js';
-import { isLimitNotice, postLimitNotice } from '../behavior/limits.js';
+import { isLimitNotice, pauseNotice, pauseNoticeMinutes, postLimitNotice, postPauseNotice } from '../behavior/limits.js';
 import { isVideoVisionOn } from '../memory/youtube-check.js';
 import { log } from '../log.js';
 import { MINUTE_MS, utcDay } from '../time.js';
@@ -1842,6 +1843,76 @@ export function createMessageHandler({
       .catch((err) => log.error('private: turn failed', { channel: channel.id, error: err }));
   }
 
+  // --- The pause notice ---------------------------------------------------------
+  // While paused (`/nep pause`) a direct call gets one plain line saying so
+  // (labels.limits.paused, features.pauseNotice), like a limit notice. Read
+  // only: no model request, no observe, no queue, no window, no ring stamp,
+  // nothing marked dirty. The interval lives in memory alone.
+  const pauseNoticeAt = new Map(); // channelId -> when the last pause notice went out
+
+  /**
+   * How `message` (arriving while paused) called the persona directly, by the
+   * rules of the live path without its model request: on the server a
+   * mention, a reply to one of its messages or its name (each behind its
+   * switch) in the served guild, outside threads, in an allowed channel the
+   * bot can send in, not the dry-run mirror, from a human; in a private chat
+   * (features.privateMessages) an author the private gate lets through, the
+   * daily cap aside. `{ channel, trigger, kind }`, or null for anything else
+   * (an untagged follow-up included: it would need the address classifier).
+   */
+  async function pausedCall(message, config) {
+    const features = config.features ?? {};
+    const selfId = client.user.id;
+    if (message.author?.bot || message.author?.id === selfId) return null;
+    const normalize = () =>
+      normalizeMessage(message, selfId, { embedTextChars: config.media?.embedTextChars, videoSites: config.media?.video?.sites });
+
+    if (!message.guild) {
+      if (features.privateMessages !== true) return null;
+      const guildId = getGuildId();
+      if (!guildId) return null;
+      const { gate } = await checkPrivateGate(config, guildId, message.author.id);
+      if (!gate.ok && gate.reason !== 'cap') return null;
+      return { channel: message.channel, trigger: normalize(), kind: 'private' };
+    }
+
+    const channel = message.channel;
+    if (message.guild.id !== getGuildId() || channel.isThread?.()) return null;
+    if (!channelAllowed(channel, config.bot)) return null;
+    if (config.bot.dryRunChannelId && channel.id === config.bot.dryRunChannelId) return null;
+    if (!canSend(channel)) return null;
+    const normalized = normalize();
+    const kind = detectTrigger({
+      mentionsSelf: features.mentions !== false && message.mentions.users.has(selfId),
+      repliesToSelf: features.replies !== false && (await resolveReference(channel, normalized.replyToId, selfId)),
+      content: normalized.content,
+      nameTriggers: features.nameTriggers !== false ? config.bot.nameTriggers : [],
+    });
+    return kind ? { channel, trigger: normalized, kind } : null;
+  }
+
+  /**
+   * A message arrived while paused: a direct call (pausedCall) gets the pause
+   * notice in its channel -- a reply to the call, like a limit notice -- at
+   * most once per channel per mention.pauseNoticeMinutes (0: every call).
+   * Off with features.pauseNotice or without the label; anything else stays
+   * silent. Config and labels read now.
+   */
+  async function maybePauseNotice(message) {
+    const config = hot.config;
+    if (config.features?.pauseNotice === false) return;
+    const labels = hot.prompts?.labels;
+    if (!pauseNotice(labels)) return;
+    const call = await pausedCall(message, config);
+    if (!call) return;
+    const minutes = pauseNoticeMinutes(config);
+    const last = pauseNoticeAt.get(call.channel.id);
+    const t = now();
+    if (minutes > 0 && last !== undefined && t - last < minutes * MINUTE_MS) return;
+    pauseNoticeAt.set(call.channel.id, t);
+    await postPauseNotice({ ...call, asReply: true, labels, config, client });
+  }
+
   async function onMessage(message) {
     try {
       // 1. System / webhook messages are not conversation.
@@ -1849,8 +1920,12 @@ export function createMessageHandler({
 
       // 1b. Paused (owner editing data/ by hand, /nep pause): the
       // persona does nothing at all -- no observe, no trigger, no turn, no
-      // eavesdrop -- and nothing below may mark the store dirty.
-      if (store?.state?.data?.paused) return;
+      // eavesdrop -- and nothing below may mark the store dirty. A direct
+      // call only gets the pause notice (maybePauseNotice).
+      if (store?.state?.data?.paused) {
+        await maybePauseNotice(message);
+        return;
+      }
 
       const config = hot.config;
       const features = config.features ?? {};

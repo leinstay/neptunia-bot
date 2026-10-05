@@ -209,7 +209,8 @@
     "privateChannel": "private chat"
   },
   "limits": {
-    "notice": "...but nobody came ({limit}, {used}/{cap})"
+    "notice": "...but nobody came ({limit}, {used}/{cap})",
+    "paused": "...but nobody came (resting)"
   },
   "mentor": {
     "intended": [

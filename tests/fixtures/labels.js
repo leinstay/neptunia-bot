@@ -214,6 +214,7 @@ export const labels = {
   },
   limits: {
     notice: 'limit reached ({limit}, {used}/{cap})',
+    paused: 'paused for now, back later',
   },
   variety: {
     intro: 'devices you used in your last lines, do not repeat them:',

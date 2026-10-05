@@ -6146,3 +6146,250 @@ test('events: a message inside an open follow-up window never reaches the room p
   assert.equal(llm2.calls.length, 0);
   assert.equal(spontaneous2.readyCalls.length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// The pause notice: while paused (/nep pause) a direct call gets one plain
+// line (labels.limits.paused), at most once per channel per
+// mention.pauseNoticeMinutes; nothing else happens and nothing is marked dirty.
+
+const PAUSE_T0 = Date.UTC(2026, 9, 5, 12, 0, 0);
+
+function pauseConfig(overrides = {}) {
+  return baseConfig(
+    deepMerge(
+      { features: { pauseNotice: true, dryRun: false }, mention: { pauseNoticeMinutes: 10 }, bot: { nameTriggers: ['νεπτούνια'] } },
+      overrides,
+    ),
+  );
+}
+
+/** A paused state that counts every markDirty call. */
+function pausedState(data = {}) {
+  const state = { data: { paused: true, ...data }, dirty: 0 };
+  state.markDirty = () => {
+    state.dirty += 1;
+  };
+  return state;
+}
+
+/** A guild channel that records its sends and holds m0 (the persona's) and m-other (someone else's). */
+function pausedChannel(id = 'c1', guild = fakeGuild(), overrides = {}) {
+  const channel = sendingChannel(id, guild);
+  channel.messages.cache.set('m0', { author: { id: 'self1' } });
+  channel.messages.cache.set('m-other', { author: { id: 'u2' } });
+  return Object.assign(channel, overrides);
+}
+
+function pausedScene(options = {}) {
+  const { config = pauseConfig(), now = mutableNow(PAUSE_T0), client } = options;
+  const prompts = 'prompts' in options ? options.prompts : { labels };
+  const state = pausedState();
+  const store = { state, getUser: () => null };
+  const turns = recordingTurns();
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  const llm = fakeFollowUpLlm();
+  const handler = makeHandler({ config, prompts, store, turns, memory, spontaneous, llm, now, client, rng: scripted([]) });
+  return { handler, state, store, turns, memory, spontaneous, llm, now };
+}
+
+function assertPausedQuiet(scene, label) {
+  assert.equal(scene.turns.calls.length, 0, `${label}: no turn`);
+  assert.equal(scene.turns.notePostCalls.length, 0, `${label}: no post noted`);
+  assert.equal(scene.memory.observeCalls.length, 0, `${label}: no observe`);
+  assert.equal(scene.spontaneous.onMessageCalls.length, 0, `${label}: no eavesdrop`);
+  assert.equal(scene.llm.calls.length, 0, `${label}: no model request`);
+  assert.equal(scene.state.dirty, 0, `${label}: nothing marked dirty`);
+  assert.deepEqual(Object.keys(scene.state.data), ['paused'], `${label}: the state is untouched`);
+}
+
+const PAUSED_CALLS = [
+  { kind: 'mention', extra: {} },
+  { kind: 'reply', extra: { mentions: { users: new Map() }, reference: { messageId: 'm0' } } },
+  { kind: 'name', extra: { mentions: { users: new Map() }, cleanContent: 'γεια νεπτούνια' } },
+];
+
+for (const { kind, extra } of PAUSED_CALLS) {
+  test(`pause notice: a ${kind} while paused gets the notice once, as a reply, and nothing else`, async () => {
+    const scene = pausedScene();
+    const guild = fakeGuild();
+    const channel = pausedChannel('c1', guild);
+    const { logs } = await withCapturedLogs(async () => {
+      await scene.handler(directPingMessage({ guild, channel, channelId: 'c1', ...extra }));
+      await settle();
+    });
+    assert.equal(channel.sent.length, 1);
+    assert.equal(channel.sent[0].content, labels.limits.paused);
+    assert.equal(channel.sent[0].reply.messageReference, 'm1');
+    assert.deepEqual(channel.sent[0].allowedMentions, { parse: [] });
+    const lines = logs.filter((l) => l.msg === 'limits: pause notice');
+    assert.deepEqual(lines.map((l) => [l.channel, l.kind]), [['c1', kind]]);
+    assertPausedQuiet(scene, kind);
+  });
+}
+
+test('pause notice: a line that is not a direct call stays silent', async () => {
+  const cases = [
+    { label: 'ordinary line', message: (guild, channel) => fakeMessage({ id: 'm1', guild, channel, channelId: 'c1', cleanContent: 'καλημέρα' }) },
+    {
+      label: 'reply to someone else',
+      message: (guild, channel) => fakeMessage({ id: 'm1', guild, channel, channelId: 'c1', cleanContent: 'ναι', reference: { messageId: 'm-other' } }),
+    },
+    {
+      label: 'another bot',
+      message: (guild, channel) => directPingMessage({ guild, channel, channelId: 'c1', author: { id: 'b2', bot: true, globalName: 'Bot', username: 'bot' } }),
+    },
+    {
+      label: 'its own message',
+      message: (guild, channel) => directPingMessage({ guild, channel, channelId: 'c1', author: { id: 'self1', bot: true, globalName: 'Self', username: 'self' } }),
+    },
+    { label: 'system message', message: (guild, channel) => directPingMessage({ guild, channel, channelId: 'c1', system: true }) },
+    { label: 'other guild', message: (guild, channel) => directPingMessage({ guild: fakeGuild('g2'), channel, channelId: 'c1' }) },
+  ];
+  for (const { label, message } of cases) {
+    const scene = pausedScene();
+    const guild = fakeGuild();
+    const channel = pausedChannel('c1', guild);
+    await scene.handler(message(guild, channel));
+    await settle();
+    assert.equal(channel.sent.length, 0, label);
+    assertPausedQuiet(scene, label);
+  }
+});
+
+test('pause notice: a call where the bot may not answer stays silent', async () => {
+  const cases = [
+    { label: 'cannot send', config: pauseConfig(), overrides: { permissionsFor: () => ({ has: () => false }) } },
+    { label: 'denied channel', config: pauseConfig({ bot: { channels: { allow: [], deny: ['c1'] } } }), overrides: {} },
+    { label: 'dry-run mirror', config: pauseConfig({ bot: { dryRunChannelId: 'c1' } }), overrides: {} },
+    { label: 'thread', config: pauseConfig(), overrides: { isThread: () => true } },
+    { label: 'mentions off', config: pauseConfig({ features: { mentions: false } }), overrides: {} },
+  ];
+  for (const { label, config, overrides } of cases) {
+    const scene = pausedScene({ config });
+    const guild = fakeGuild();
+    const channel = pausedChannel('c1', guild, overrides);
+    await scene.handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+    await settle();
+    assert.equal(channel.sent.length, 0, label);
+    assertPausedQuiet(scene, label);
+  }
+});
+
+test('pause notice: a second call inside the interval posts nothing and logs nothing; one after it posts again', async () => {
+  const scene = pausedScene();
+  const guild = fakeGuild();
+  const channel = pausedChannel('c1', guild);
+  const other = pausedChannel('c2', guild);
+  const { logs } = await withCapturedLogs(async () => {
+    await scene.handler(directPingMessage({ id: 'm1', guild, channel, channelId: 'c1' }));
+    scene.now.set(PAUSE_T0 + 9 * 60 * 1000);
+    await scene.handler(directPingMessage({ id: 'm2', guild, channel, channelId: 'c1' }));
+    await scene.handler(directPingMessage({ id: 'm3', guild, channel: other, channelId: 'c2' }));
+  });
+  assert.equal(channel.sent.length, 1, 'inside the interval: nothing');
+  assert.equal(other.sent.length, 1, 'the interval is per channel');
+  assert.equal(logs.filter((l) => l.msg === 'limits: pause notice').length, 2);
+
+  scene.now.set(PAUSE_T0 + 10 * 60 * 1000);
+  await scene.handler(directPingMessage({ id: 'm4', guild, channel, channelId: 'c1' }));
+  assert.equal(channel.sent.length, 2, 'after the interval: again');
+  assert.equal(channel.sent[1].reply.messageReference, 'm4');
+  assertPausedQuiet(scene, 'interval');
+});
+
+test('pause notice: an interval of 0 lets every call get one', async () => {
+  const scene = pausedScene({ config: pauseConfig({ mention: { pauseNoticeMinutes: 0 } }) });
+  const guild = fakeGuild();
+  const channel = pausedChannel('c1', guild);
+  await scene.handler(directPingMessage({ id: 'm1', guild, channel, channelId: 'c1' }));
+  await scene.handler(directPingMessage({ id: 'm2', guild, channel, channelId: 'c1' }));
+  assert.equal(channel.sent.length, 2);
+});
+
+test('pause notice: the switch off or a missing label posts nothing', async () => {
+  const cases = [
+    { label: 'switch off', config: pauseConfig({ features: { pauseNotice: false } }), prompts: { labels } },
+    { label: 'no label', config: pauseConfig(), prompts: { labels: { ...labels, limits: { notice: labels.limits.notice } } } },
+    { label: 'empty label', config: pauseConfig(), prompts: { labels: { ...labels, limits: { ...labels.limits, paused: '' } } } },
+    { label: 'no prompts', config: pauseConfig(), prompts: undefined },
+  ];
+  for (const { label, config, prompts } of cases) {
+    const scene = pausedScene({ config, prompts });
+    const guild = fakeGuild();
+    const channel = pausedChannel('c1', guild);
+    await scene.handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+    await settle();
+    assert.equal(channel.sent.length, 0, label);
+    assertPausedQuiet(scene, label);
+  }
+});
+
+test('pause notice: in a dry run it is mirrored, never posted', async () => {
+  const mirrored = [];
+  const client = { ...fakeClient(), channels: { fetch: async () => ({ send: async (payload) => mirrored.push(payload) }) } };
+  const scene = pausedScene({ config: pauseConfig({ features: { dryRun: true }, bot: { dryRunChannelId: 'mirror1' } }), client });
+  const guild = fakeGuild();
+  const channel = pausedChannel('c1', guild);
+  await scene.handler(directPingMessage({ guild, channel, channelId: 'c1' }));
+  await settle();
+  assert.equal(channel.sent.length, 0);
+  assert.equal(mirrored.length, 1);
+  assert.ok(mirrored[0].content.endsWith(`\n${labels.limits.paused}`));
+  assertPausedQuiet(scene, 'dry run');
+});
+
+function pausedDmScene(storeOptions, clientOptions) {
+  const store = fakePrivateStore(storeOptions);
+  store.state = pausedState();
+  const turns = recordingTurns();
+  const memory = fakeMemory();
+  const spontaneous = fakeSpontaneous();
+  const llm = fakeFollowUpLlm();
+  const config = privateConfig({ features: { pauseNotice: true, dryRun: false }, mention: { pauseNoticeMinutes: 10 } });
+  const handler = makeDmHandler({ config, store, turns, memory, spontaneous, llm, client: fakeDmClient(clientOptions) });
+  return { handler, store, state: store.state, turns, memory, spontaneous, llm };
+}
+
+test('pause notice: a private message from someone the gate lets through gets it like a private limit notice', async () => {
+  const scene = pausedDmScene();
+  const message = fakeDmMessage();
+  const { logs } = await withCapturedLogs(async () => {
+    await scene.handler(message);
+    await settle();
+  });
+  assert.equal(message.channel.sent.length, 1);
+  assert.equal(message.channel.sent[0].content, labels.limits.paused);
+  assert.equal(message.channel.sent[0].reply.messageReference, 'dm-m1', 'quoted like the private limit notice');
+  assert.deepEqual(message.channel.sent[0].allowedMentions, { parse: [] });
+  assert.deepEqual(logs.filter((l) => l.msg === 'limits: pause notice').map((l) => [l.channel, l.kind]), [['dm1', 'private']]);
+  assert.deepEqual([scene.store.bumps, scene.store.noticed], [[], []]);
+  assertPausedQuiet(scene, 'private');
+});
+
+test('pause notice: the private daily cap alone does not withhold it', async () => {
+  const scene = pausedDmScene({ privates: { u1: { replies: { day: TODAY, count: 100 } } } });
+  const message = fakeDmMessage();
+  await scene.handler(message);
+  await settle();
+  assert.equal(message.channel.sent.length, 1);
+  assert.equal(message.channel.sent[0].content, labels.limits.paused);
+  assert.deepEqual(scene.store.noticed, [], 'no cap notice is marked while paused');
+  assertPausedQuiet(scene, 'cap');
+});
+
+test('pause notice: a private message the gate refuses gets nothing', async () => {
+  const cases = [
+    { label: 'not a member', store: undefined, client: { members: [] } },
+    { label: 'unknown', store: { profiles: {} }, client: undefined },
+    { label: 'affinity', store: { profiles: { u1: { affinity: { score: 4 } } } }, client: undefined },
+  ];
+  for (const { label, store, client } of cases) {
+    const scene = pausedDmScene(store, client);
+    const message = fakeDmMessage();
+    await scene.handler(message);
+    await settle();
+    assert.equal(message.channel.sent.length, 0, label);
+    assertPausedQuiet(scene, label);
+  }
+});

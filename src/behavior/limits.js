@@ -2,10 +2,12 @@
 // private reply caps) refuses a directly requested action, the bot posts one
 // plain line naming the limit and the numbers, so the requester knows it was
 // a limit and not silence in character. The wording lives in labels.json
-// (`limits.notice`); the limit name is the config key. See
-// docs/en/prompt-contract.md. The pure helpers come first; `postLimitNotice`
-// and `mirrorDryRun` are the one copy of the posting side, shared by the turn
-// runner (src/behavior/turn.js) and the message pipeline
+// (`limits.notice`); the limit name is the config key. A call while the bot
+// is paused (`/nep pause`) gets the pause notice (`limits.paused`, no
+// placeholders) the same way. See docs/en/prompt-contract.md. The pure
+// helpers come first; `postLimitNotice`, `postPauseNotice` (one sender,
+// `sendNotice`) and `mirrorDryRun` are the one copy of the posting side,
+// shared by the turn runner (src/behavior/turn.js) and the message pipeline
 // (src/discord/events.js).
 
 import { fill } from '../discord/format.js';
@@ -26,20 +28,48 @@ export function limitNotice(labels, { key, used, cap }) {
 }
 
 /**
- * Whether `content` is a line `limitNotice` produced from the current label:
- * the template with every `{name}` placeholder matching any non-empty text
- * and everything else matched literally, anchored at both ends (surrounding
- * whitespace ignored). Such a line is bookkeeping, not the persona's speech,
- * so the caller keeps it out of memory and follow-up windows. False when the
- * label is missing.
+ * The pause notice line: `labels.limits.paused` as is (it has no
+ * placeholders). An empty string when the label is missing, blank or not a
+ * string, so a deployment without it stays silent while paused.
+ * @param {object} labels
+ * @returns {string}
+ */
+export function pauseNotice(labels) {
+  const text = labels?.limits?.paused;
+  return typeof text === 'string' && text.trim() ? text : '';
+}
+
+/**
+ * The least minutes between two pause notices in one channel:
+ * `mention.pauseNoticeMinutes` (`config` read by the caller now) floored at
+ * 0, or 10 (the config.json value) when it is missing or not a number. 0
+ * lets every call get one.
+ * @param {object} config
+ * @returns {number}
+ */
+export function pauseNoticeMinutes(config) {
+  const value = config?.mention?.pauseNoticeMinutes;
+  return Number.isFinite(value) ? Math.max(0, value) : 10;
+}
+
+/**
+ * Whether `content` is a line `limitNotice` produced from the current label
+ * -- the template with every `{name}` placeholder matching any non-empty text
+ * and everything else matched literally, anchored at both ends -- or the
+ * current pause notice (`pauseNotice`), surrounding whitespace ignored in
+ * both. Such a line is bookkeeping, not the persona's speech, so the caller
+ * keeps it out of memory and follow-up windows. False when neither label is
+ * set.
  * @param {object} labels
  * @param {unknown} content
  * @returns {boolean}
  */
 export function isLimitNotice(labels, content) {
+  if (typeof content !== 'string' || !content) return false;
+  const paused = pauseNotice(labels);
+  if (paused && content.trim() === paused.trim()) return true;
   const template = labels?.limits?.notice;
   if (typeof template !== 'string' || !template) return false;
-  if (typeof content !== 'string' || !content) return false;
   const pattern = template
     .split(/(\{\w+\})/)
     .map((part, index) => (index % 2 === 1 ? '.+?' : part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
@@ -109,13 +139,60 @@ export async function mirrorDryRun({ client, dryRunChannelId, header, body }) {
 export async function postLimitNotice({ channel, trigger, limit, asReply, labels, config, client }) {
   const text = limit ? limitNotice(labels, limit) : '';
   if (!text) return 'none';
+  return sendNotice({
+    channel,
+    trigger,
+    text,
+    asReply,
+    config,
+    client,
+    tag: 'limit',
+    dryRunLog: ['dry-run: would notify limit', { key: limit.key, used: limit.used, cap: limit.cap }],
+    sentLog: ['limits: notice sent', { key: limit.key }],
+  });
+}
+
+/**
+ * Post the pause notice (`pauseNotice`) in `channel` for a call that arrived
+ * while the bot is paused, exactly like `postLimitNotice` (one plain message,
+ * no mentions, quoting `trigger` when `asReply`; logged and mirrored instead
+ * of sent with `features.dryRun`). `kind` is how the persona was called (a
+ * trigger kind or `private`), for the log. A missing label posts nothing.
+ * Never throws.
+ * @param {{ channel: object, trigger?: { id?: string }|null, kind: string, asReply: boolean,
+ *   labels: object, config: object, client: object }} args
+ * @returns {Promise<'sent'|'dry-run'|'none'|'failed'>}
+ */
+export async function postPauseNotice({ channel, trigger, kind, asReply, labels, config, client }) {
+  const text = pauseNotice(labels);
+  if (!text) return 'none';
+  return sendNotice({
+    channel,
+    trigger,
+    text,
+    asReply,
+    config,
+    client,
+    tag: 'pause',
+    dryRunLog: ['dry-run: would notify pause', { kind }],
+    sentLog: ['limits: pause notice', { kind }],
+  });
+}
+
+/**
+ * The one sender behind both notices: in dry-run log `dryRunLog` and mirror
+ * `text` under a `· <tag>` header; otherwise send it (a Discord reply to
+ * `trigger` when `asReply`, no mentions) and log `sentLog`. Each log is
+ * `[event, fields]`; the channel id is added. Never throws.
+ */
+async function sendNotice({ channel, trigger, text, asReply, config, client, tag, dryRunLog, sentLog }) {
   try {
     if (config?.features?.dryRun === true) {
-      log.info('dry-run: would notify limit', { channel: channel.id, key: limit.key, used: limit.used, cap: limit.cap });
+      log.info(dryRunLog[0], { channel: channel.id, ...dryRunLog[1] });
       await mirrorDryRun({
         client,
         dryRunChannelId: config.bot?.dryRunChannelId || '',
-        header: `[dry-run] ${mirrorChannelLabel(channel)} · limit`,
+        header: `[dry-run] ${mirrorChannelLabel(channel)} · ${tag}`,
         body: text,
       });
       return 'dry-run';
@@ -126,7 +203,7 @@ export async function postLimitNotice({ channel, trigger, limit, asReply, labels
       reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
       allowedMentions: { parse: [] },
     });
-    log.info('limits: notice sent', { channel: channel.id, key: limit.key });
+    log.info(sentLog[0], { channel: channel.id, ...sentLog[1] });
     return 'sent';
   } catch (err) {
     log.warn('limits: notice failed', { channel: channel.id, error: err });
