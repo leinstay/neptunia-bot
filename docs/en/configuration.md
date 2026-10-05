@@ -41,6 +41,7 @@ Every key in `config.json` with its default, grouped by section.
 | `pauseNotice` | `true` | Post a short notice when the persona is called while paused. A missing key counts as on. See `mention.pauseNoticeMinutes` and `labels.limits.paused` |
 | `variety` | `true` | A model pass names the devices the persona is overusing in their own recent lines. The result becomes a `<worn>` block in the turn's request. A missing key counts as on |
 | `varietyPrecompute` | `true` | Start the variety pass right after the persona posts text, so the next turn finds the result ready. Off: the pass runs only at the turn, but a late answer is still stored for later. A missing key counts as on |
+| `splitTasks` | `true` | Split a long structured direct call into separate parts, each answered in its own turn. A missing key counts as on. Needs `prompts/split.md` and `labels.task.part` |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
 | `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
@@ -208,6 +209,17 @@ Settings for the channel route classifier (`features.channelRoute`). When the co
 | `purposeChars` | `80` | Characters of each channel's stored purpose shown in the list |
 | `maxOutputTokens` | `120` | Max output tokens for the classifier |
 
+## `split`
+
+Settings for the task splitter (`features.splitTasks`). When a direct call (mention, reply, name, follow-up, private message) is long enough and structured enough, a classifier (`prompts/split.md` on the `classifier.text` role) decides whether it holds several separate requests. Each part is answered in its own turn; the first replies to the message, the rest post plain. The splitter runs beside the turn's preparation and never slows a single request. Logged as `split: verdict`, `split: skipped` or `split: failed`; each part logs `turn: part`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `minChars` | `80` | Minimum characters (links and Discord tokens excluded) before the splitter is asked |
+| `maxTasks` | `4` | Maximum parts the splitter may return. Below 2 the splitter is off |
+| `contextMessages` | `6` | Recent channel messages rendered for the classifier alongside the candidate |
+| `maxOutputTokens` | `300` | Max output tokens for the classifier |
+
 ## `recall`
 
 Settings for the server-history search (`features.recall`). When the lookup classifier (`prompts/lookup.md`) answers with `server:` forms, `who:` name forms or `when:` date ranges, the engine searches the server's own message history through Discord's search API, groups the hits into clusters, fetches a window of messages around each, and asks a summary helper (`prompts/recall-summary.md` on the `classifier.text` role) what the history answers. The summary may single out one stretch that the persona then gets verbatim alongside the condensed note. Logged as `recall: searched`, `recall: summary`, `recall: skipped` or `recall: failed`.
@@ -335,7 +347,7 @@ At most one re-watch or retry per turn. Answers are cached for one hour per ques
 | `affinityLikeBonus` | `0.08` | Max reduced ignore at affinity +100 |
 | `oneAtATime` | `true` | One reply at a time across the server |
 | `pendingSameChannel` | `true` | Hold a direct ping in the same channel while a turn is running there; answered after the turn with the usual ignore chance. Missing key = on |
-| `maxPending` | `3` | Channels that can hold a direct ping while busy |
+| `maxPending` | `6` | Total pending calls held across all channels and authors. The single oldest is evicted when full (`mention: dropped`, reason `full`) |
 | `pendingMinutes` | `10` | Minutes before a held ping expires |
 | `switchDelayMs` | `[2000, 9000]` | Pause before answering in the next channel (ms) |
 | `followUpMinutes` | `15` | Follow-up window after the persona's last reply (min) |

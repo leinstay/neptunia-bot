@@ -55,6 +55,8 @@ All instructions are English in both layers; a character's speech samples may be
 | `mentor-diagnose.md` | no | Mentor: explain weak answers after scoring by pointing at specific text in the persona's context (`features.mentor`). The result is an unverified opinion stored as `diagnosis` on the run. Omitted when `mentor.diagnose` is false or the file is missing | `{{name}}` |
 | `variety.md` | no | `classifier.text` request: name the repeated devices in the persona's own recent lines (`features.variety`). No character card | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `variety-long.md` | no | Long variety pass: name the devices across the whole ring of own lines (`features.variety`, `variety.longLines`). Same placeholders, `<lines>` block and answer format as `variety.md`. Uses `variety.longModel` (null = `classifier.text`). No character card. Falls back to no long pass when absent | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
+| `split.md` | no | Classifier: does a direct call hold several separate requests (`features.splitTasks`). Receives a short `<transcript>` and the new message as `<candidate>`. Output is the word `one`, or 2 to `{{maxTasks}}` lines each starting with `- ` and holding one part in the author's own words. No character card. Without this file the splitter is off | `{{name}}` `{{maxTasks}}` |
+| `merge.md` | no | Classifier: does a new message from an author with waiting items belong to one of them. Receives a numbered `<waiting>` list and the new message as `<candidate>`. Output is one line: a number from the list or the word `new`. No character card. Without this file a new call is always queued as its own item | `{{name}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
 
 `{{name}}` bot's display name · `{{author}}` caller's display name · `{{trigger}}` one of `labels.triggers.*` ·
@@ -93,7 +95,7 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 | `<lookup>` | What the persona looked up this turn. A web search (`features.webLookup`) carries `labels.lookup.webHeader`, the condensed answer, `labels.lookup.sources` and, when nothing was found, `labels.lookup.none`. A server search (`features.recall`) carries `labels.lookup.serverHeader`, the summary note and, when the summary names a stretch, the verbatim lines of that stretch. When both ran, `labels.lookup.bothNote` sits between them. A `labels.lookup.stretch` line introduces a verbatim stretch (`{date}` `{channel}`). Appears only when a search classifier fired and at least one search completed |
 | `<chat>` | Up to `context.channelMessages` latest messages of the current channel |
 | `<tempo>` | Counts for 10 min / hour / day, distinct people, silence, a verdict (live / slow / dead) |
-| `<task>` | `reply` / `interject` / `initiate` / `overheard` (when `overheard.md` exists) / `elsewhere` (when `elsewhere.md` exists, for a noticed comment), placeholders filled |
+| `<task>` | `reply` / `interject` / `initiate` / `overheard` (when `overheard.md` exists) / `elsewhere` (when `elsewhere.md` exists, for a noticed comment), placeholders filled. After the mode prompt, up to three `task.*` labels are appended when their conditions hold (each separated by a blank line): `task.part` when the turn answers one part of a split message, or `task.queued` when the trigger author has other calls waiting; then `task.queuedOthers` when other members have calls waiting in the channel; then `task.added` when later messages were folded into this call. See `labels.task.*` below |
 
 Budget priority (sections are trimmed from the bottom of this list first): system + task + clock + tempo + senses
 (never cut) -> caller's profile with episodes -> lookup (kept or dropped whole; may hold a web part, a server part or both) -> about_chat -> self_facts -> lore -> server -> chat (newest first) ->
@@ -286,6 +288,10 @@ recent.header                            REQUIRED {hours}: the block's first lin
 recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
 recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
 recent.episode                           OPTIONAL {date} {name} {what}: a moment the persona remembers with {name} on {date}; no quote, no feeling. Without it the block shows notes only
+task.part                                {index} {total} {part} {others}: this turn answers one part of a split message. {index} is 1-based, {part} is the text of this part, {others} lists the remaining parts and any queued calls as numbered items joined by `; `. Without this key the splitter is off even when the prompt file exists
+task.queued                              {others}: the trigger author has other calls waiting, listed as numbered items joined by `; `. Shown only when there is no `task.part` for this turn. Without this key the waiting calls are not named and the seen-in-history drop rule applies to them
+task.queuedOthers                        {others}: other members have calls waiting in this channel, listed as `<n>. <author>: <text>` items joined by `; `. Without this key those calls are not named
+task.added                               {added}: later messages from the author were folded into this call while it waited, joined by `; `. Without this key the folded messages are not named
 ```
 
 ## Output
@@ -758,6 +764,18 @@ nothing said in private reaches the owner's view or another conversation.
 
 The mentor sandbox runs one variety pass per situation, charged to the mentor's token budget (not to
 `llm.maxRequestsPerDay`). The sandbox uses `variety.timeoutMs` as its request timeout (it has no later turn that could use a late answer). The patterns are saved as `worn` on the situation record. The judge never sees the `<worn>` block.
+
+## Task splitter
+
+A direct call (mention, reply, name, follow-up, private message) that is long and structured enough (`split.minChars` characters with links and Discord tokens excluded, at least two runs of separators) is given to a classifier (`prompts/split.md` on `classifier.text`, purpose `split`) alongside the turn's preparation. The classifier reads a short `<transcript>` of the last `split.contextMessages` messages with the persona's own lines marked by `labels.self`, then the new message as `<candidate>` (`<author name>: <text>`). Its answer is the word `one`, or 2 to `split.maxTasks` (default 4) lines each starting with `- ` and holding one part in the author's own words. An empty, unparsable or late answer (the turn's preparation finished first) is treated as one request and logged `split: failed`. Switch `features.splitTasks` (missing = on).
+
+Parts become a chain of ordinary turns on the same message (`turn: part`). Each part's helpers (the search classifier, recall, the route hook, the re-watch) judge that part's text, and the request names the part and the others (`labels.task.part` with `{index}`, `{total}`, `{part}`, `{others}`). The first part reuses the history the whole message's turn fetched and replies to the message; the later ones fetch history afresh and post plain. Each part has its own deadline and drop bar; a part that fails or is refused does not stop the next. The ignore roll, the private daily cap and the ring stamp count once per message. A pause or a warmup ends the chain before its next part (`turn: chain stopped`). While the chain runs, its unstarted parts are the author's waiting items (`waitingParts` on the turn runner); a later message of the author folded into one of them (`addToPart`) reaches that part's request as `tasks.added`. The attention stays with the chain from the first turn to the end; idle notifications fire once, at the end.
+
+Without `prompts/split.md` the splitter is off (`split: skipped`, `no-prompt`). Without `labels.task.part` the splitter is also off: a parsed answer is discarded. Settings: `split.minChars` (default 80), `split.maxTasks` (default 4), `split.contextMessages` (default 6), `split.maxOutputTokens` (default 300).
+
+## Merge classifier
+
+When a call arrives from an author who already has items waiting in that channel (parts of a split message the chain has not reached, or queued calls in the pending list), a classifier (`prompts/merge.md` on `classifier.text`, purpose `merge`) decides whether the new message belongs to one of them. The classifier reads a `<waiting>` block of numbered items (`1. <text>`, one per waiting item) and the new message as `<candidate>` (`<author name>: <text>`). Its answer is one line: a number from the waiting list or the word `new`. A folded message never gets a turn of its own; it appears in the turn of its item through `labels.task.added` (`{added}`). Routed calls are never folded into. Without the prompt file, every call is queued as its own item (`merge: failed`, `no-prompt`). Logged as `merge: verdict` or `merge: failed`. No config settings of its own; the output cap is `mention.followUpMaxOutputTokens`.
 
 ## Drawing
 

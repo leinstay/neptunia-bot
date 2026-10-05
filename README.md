@@ -124,7 +124,7 @@ One Discord slash command, `/nep` (the name comes from `bot.commandName`). It is
 
 ## Messages and memory
 
-The persona responds to mentions, replies and name triggers, sometimes ignoring them. They cut into conversations at random intervals, start topics in dead channels, and may pick up a question put to the room. After answering, they track follow-up messages in that channel through a classifier. They write one reply at a time across the server; pings in other channels are held and answered in turn. When someone talks about another channel, a classifier picks the channel so the persona can read it.
+The persona responds to mentions, replies and name triggers, sometimes ignoring them. They cut into conversations at random intervals, start topics in dead channels, and may pick up a question put to the room. After answering, they track follow-up messages in that channel through a classifier. They write one reply at a time across the server; pings in other channels are held and answered in turn, any number per channel and author, up to `mention.maxPending` (default 6). When a message holds several separate requests, each is answered in its own turn. When someone sends another message about something still waiting, it is folded into that item instead of queueing separately. When someone talks about another channel, a classifier picks the channel so the persona can read it.
 
 A separate memory analyzer runs when enough messages accumulate. It builds per-member profiles with interests, details, aliases, episodes and attitudes, server-wide habits and in-jokes, a lorebook of events and stories, and a list of things people taught the persona directly (words, facts, requests). Profiles are updated incrementally; stored facts are never re-summarised. The persona also learns what people call each other and recognises a member by name or alias. Lessons are stored at the server level (`memory.maxLearned` shown, `memory.maxLearnedStored` kept on disk, `memory.learnedChars` per item) and always appear in the prompt.
 
@@ -146,7 +146,7 @@ The mentor model, budget and commands are independent from the persona's. See [`
 
 ## Costs
 
-Each turn is one LLM request; a memory update adds a second. Cost depends on the model and endpoint; `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending. Video descriptions add one request per watched clip to a separate, cheaper model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth. Link reads and web searches (`features.webLookup`, off by default) add requests to the text classifier model, capped by `web.maxPerDay`; web search additionally needs a Brave Search API key (free tier: 2,000 queries/month). Server-history searches (`features.recall`, on by default) use Discord's built-in search API and add only the classifier and summary requests. Image generation (`features.imageGeneration`, off by default) bills per output token through `image.model`; `image.maxPerDay` caps the daily count separately from chat requests. Private chat (`features.privateMessages`, off by default) uses the same LLM and caps; each DM reply is one request, each private analyzer batch is another. With `features.webLookup` on, the bot makes outbound HTTP requests to fetch pages and to the Brave Search API; private addresses are refused.
+Each turn is one LLM request; a memory update adds a second. A split-message classifier and a merge classifier may add one request each on the `classifier.text` model when their conditions are met. Cost depends on the model and endpoint; `llm.model` and `llm.baseUrl` accept any compatible values. The daily cap (`llm.maxRequestsPerDay`) prevents runaway spending. Video descriptions add one request per watched clip to a separate, cheaper model (`media.video.maxPerDay` caps the daily count); `yt-dlp` and `ffmpeg` run locally and cost nothing beyond bandwidth. Link reads and web searches (`features.webLookup`, off by default) add requests to the text classifier model, capped by `web.maxPerDay`; web search additionally needs a Brave Search API key (free tier: 2,000 queries/month). Server-history searches (`features.recall`, on by default) use Discord's built-in search API and add only the classifier and summary requests. Image generation (`features.imageGeneration`, off by default) bills per output token through `image.model`; `image.maxPerDay` caps the daily count separately from chat requests. Private chat (`features.privateMessages`, off by default) uses the same LLM and caps; each DM reply is one request, each private analyzer batch is another. With `features.webLookup` on, the bot makes outbound HTTP requests to fetch pages and to the Brave Search API; private addresses are refused.
 
 `data/` holds per-member profiles, relationship scores, channel observations, server patterns, cached media descriptions and web excerpts. It stays on your machine, is gitignored, and is only sent to the LLM as context. The analyzer is instructed not to store sensitive details. `/nep memory forget` deletes a profile entirely.
 
@@ -219,6 +219,8 @@ prompts/
   mentor-score.md          mentor: score the persona's answers
   mentor-signs.md          mentor: known habits of model-written text
   mentor-diagnose.md       mentor: explain weak answers after scoring
+  split.md                 classifier: does a direct call hold several separate requests
+  merge.md                 classifier: does a new message belong to something already waiting
   variety.md               classifier: name the devices the persona is overusing
   variety-long.md          classifier: name the devices across a longer stretch
   profile.md               warmup: one member's profile from a message sample
@@ -292,7 +294,8 @@ src/
     prompt.js              request builder with token budget
     turn.js                one turn: collect, build, call, act
     spontaneous.js         chaotic timer, eavesdrop, room questions
-    pending.js             pending direct pings while the persona is busy
+    split.js               pure: task splitter pre-filter and answer parse
+    pending.js             pending calls, merge answer parse, fold-into
     private.js             pure: DM gate, merged profiles, effective affinity
     limits.js              pure: limit and pause notices from labels
     recall.js              pure: server-history search decisions
