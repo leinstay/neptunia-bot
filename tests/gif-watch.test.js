@@ -56,3 +56,17 @@ test('gifPostsToday: the posts of today against gifs.maxPerDay; another day coun
   assert.deepEqual(gifPostsToday({ gifDay: today, gifCount: 'x' }, {}, today), { used: 0, cap: GIF_POSTS_PER_DAY_FALLBACK });
   assert.deepEqual(gifPostsToday(undefined, undefined, today), { used: 0, cap: 40 });
 });
+
+test('gifWatchesToday, gifPostsToday: a stored count that is not a finite number >= 0 reads as 0, and nothing is written', () => {
+  const today = '2026-10-03';
+  for (const bad of [-2, NaN, Infinity, '7', null, {}]) {
+    const data = { gifWatchDay: today, gifWatchCount: bad, gifDay: today, gifCount: bad };
+    assert.equal(gifWatchesToday(data, {}, today).used, 0, `watches ${String(bad)}`);
+    assert.equal(gifPostsToday(data, {}, today).used, 0, `posts ${String(bad)}`);
+  }
+  // A read never rolls a stale day over: the describer and the turn do that when they count.
+  const stale = { gifWatchDay: '2026-10-02', gifWatchCount: 9, gifDay: '2026-10-02', gifCount: 4 };
+  gifWatchesToday(stale, {}, today);
+  gifPostsToday(stale, {}, today);
+  assert.deepEqual(stale, { gifWatchDay: '2026-10-02', gifWatchCount: 9, gifDay: '2026-10-02', gifCount: 4 });
+});

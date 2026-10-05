@@ -9,6 +9,10 @@
 
 import { normalizeTopic } from '../memory/interests.js';
 import { clampScore } from '../memory/affinity.js';
+import { countToday } from '../time.js';
+
+/** The fields of the private file's `replies` counter (`{ day, count }`), counted by src/memory/store.js#bumpPrivateReplies. */
+const REPLIES_DAILY = { dayKey: 'day', countKey: 'count' };
 
 function finiteOr(value, fallback) {
   return Number.isFinite(value) ? value : fallback;
@@ -65,16 +69,16 @@ export function privateGate({ config, isMember, profile, isOwner, replies, today
  * Today's DM replies to one member against their daily cap, the numbers
  * `privateGate` decides on (and `/nep private show` reports): the cap is
  * `private.maxPerOwnerPerDay` for an owner, `private.maxPerUserPerDay`
- * otherwise, a missing one counting as 0; replies stored for a `day` other
- * than `today` count as 0.
+ * otherwise, a missing one counting as 0; the replies are read through
+ * src/time.js#countToday, so those stored for a `day` other than `today` --
+ * and a count that is not a finite number >= 0 -- count as 0. Read only.
  * @param {{ config: object, isOwner: boolean, replies?: { day?: string, count?: number }|null, today: string }} input
  * @returns {{ used: number, cap: number }}
  */
 export function privateRepliesToday({ config, isOwner, replies, today }) {
   const settings = config?.private ?? {};
   const cap = finiteOr(isOwner ? settings.maxPerOwnerPerDay : settings.maxPerUserPerDay, 0);
-  const used = replies?.day === today ? finiteOr(replies.count, 0) : 0;
-  return { used, cap };
+  return { used: countToday(replies, REPLIES_DAILY, today), cap };
 }
 
 /**

@@ -4,18 +4,30 @@
 // (a spammed mention must not burn the owner's balance).
 //
 // Deliberate exception: `complete(messages, { countAgainstDailyCap: false })`
-// skips the daily-request counter and is never refused by it. This exists
-// ONLY for a long-running memory-seeding job with its own separate token
-// budget, which would otherwise burn through the whole day's request cap
-// while seeding memory. The per-request token cap (`TokenLimitError`) always
-// applies, with no exception.
+// skips the daily-request counter and is never refused by it. Four callers
+// pass it, each with a budget or a trigger of its own, so none of them can
+// burn through the day's request cap of the chat:
+// - the memory warmup (src/memory/warmup.js), a long-running seeding job
+//   under its own token budget (`warmup.maxTokens`);
+// - the mentor's judge (src/mentor/mentor.js) and the mentor sandbox
+//   (src/mentor/sandbox.js), both under the mentor's daily token budget
+//   (`mentor.maxTokensPerDay`);
+// - `/nep ping` (src/admin.js), a 16-token request per model route, sent on
+//   the owner's command only.
+// Every other request counts: the reply and every helper before it, the
+// analyzer, the voice model, a portrait refresh. The per-request token cap
+// (`TokenLimitError`) always applies, with no exception.
+//
+// The same module holds the read-only side of that counter (`capLeft`,
+// `llmCountToday`), the reason code of a rail refusal (`railReason`) and the
+// one spelling of an in-turn helper request (`helperRequestOptions`).
 //
 // It is also the one place the prompt-cache marker is put on a request (see
 // `withCacheMarker`): after the estimate, so the rails never see it.
 
 import { estimateMessages } from './tokens.js';
 import { isPlainObject } from '../config.js';
-import { bumpDaily, dailyCounter } from '../time.js';
+import { bumpDaily, countToday, dailyCounter } from '../time.js';
 import { log } from '../log.js';
 
 // ---- transport shared with the images client (src/llm/images.js) ----------
@@ -66,8 +78,65 @@ export function apiUrl(baseUrl, path) {
   return `${String(baseUrl).replace(/\/+$/, '')}/${String(path).replace(/^\/+/, '')}`;
 }
 
-/** The state.json fields of the daily request counter. */
-const LLM_DAILY = { dayKey: 'llmDay', countKey: 'llmCount' };
+/**
+ * The state.json fields of the daily request counter: `complete()` counts every
+ * request in them, unless it is sent with `countAgainstDailyCap: false`.
+ */
+export const LLM_DAILY = Object.freeze({ dayKey: 'llmDay', countKey: 'llmCount' });
+
+/**
+ * The requests counted against `llm.maxRequestsPerDay` today, read only: the
+ * stored count when it was stamped for the UTC day of `nowMs`, else 0 (the
+ * count of yesterday reads as 0 from 00:00 UTC on, before the first request
+ * of the day rolls the pair over). Never writes. For the readers outside
+ * the client: a status line, a check before work a refusal would waste.
+ * @param {object|null|undefined} stateData  `store.state.data`.
+ * @param {number} nowMs
+ * @returns {number}
+ */
+export function llmCountToday(stateData, nowMs) {
+  return countToday(stateData, LLM_DAILY, nowMs);
+}
+
+/** `llm.helperTimeoutMs` when it is missing: config.json's value. */
+const HELPER_TIMEOUT_MS_FALLBACK = 30000;
+
+/**
+ * The options of one in-turn helper request -- a short call made on the way to
+ * a reply (the `classifier.text` passes: address, variety, re-watch, search,
+ * link read, search summary; the picture describer) -- so every helper is
+ * spelled the same way: counted against `llm.maxRequestsPerDay`, never fed to
+ * the calibration (a short or a vision prompt says nothing about the text
+ * ratio), and cut at `llm.helperTimeoutMs` per attempt instead of the
+ * turn-length `llm.timeoutMs`: while a helper is out it holds the persona's
+ * one attention. `countAgainstDailyCap` and `skipCalibration` are not the
+ * caller's to set. The model is not part of the set: the caller adds its own
+ * (`{ model, ...helperRequestOptions(config, { ... }) }`).
+ * Pure; `config` is the live config read at the moment of use.
+ * @param {object|null|undefined} config  The whole live config.
+ * @param {object} [request]
+ * @param {string} [request.role]             The subprocess, e.g. `classifier.text` (see `complete`).
+ * @param {number} [request.maxOutputTokens]  Undefined leaves `llm.maxOutputTokens` in charge.
+ * @param {string} [request.purpose]          What the request is for, a kebab-case code for the
+ *   `llm: usage` line (`address`, `variety`, `rewatch`, `lookup`, `read-link`, `search-summary`,
+ *   `describe`); never sent.
+ * @param {AbortSignal} [request.signal]      The caller's own abort signal, if it has one.
+ * @param {number} [request.timeoutMs]        A helper with a clock of its own; else
+ *   `llm.helperTimeoutMs`, else 30000 (config.json's value).
+ * @returns {{ role: string|undefined, maxOutputTokens: number|undefined, countAgainstDailyCap: true,
+ *   skipCalibration: true, timeoutMs: number, purpose: string|undefined, signal: AbortSignal|undefined }}
+ */
+export function helperRequestOptions(config, { role, maxOutputTokens, purpose, signal, timeoutMs } = {}) {
+  return {
+    role,
+    maxOutputTokens,
+    countAgainstDailyCap: true,
+    skipCalibration: true,
+    timeoutMs: timeoutMs ?? config?.llm?.helperTimeoutMs ?? HELPER_TIMEOUT_MS_FALLBACK,
+    purpose,
+    signal,
+  };
+}
 
 /**
  * Video tokens per second when `media.video.tokensPerSecond` is unset or
@@ -78,6 +147,23 @@ export const VIDEO_TOKENS_PER_SECOND_FALLBACK = 120;
 
 export class TokenLimitError extends Error {}
 export class DailyCapError extends Error {}
+
+/**
+ * The reason code of a request that was refused or failed, as callers log
+ * and report it: `daily-cap` for a `DailyCapError`, `token-limit` for a
+ * `TokenLimitError` (the two rails, refused before anything was sent),
+ * `fallback` for anything else (an HTTP error, a network failure, a timeout).
+ * The one mapping, so a refusal by the daily cap is never logged as a failed
+ * request. A caller whose codes name "anything else" differently passes its own.
+ * @param {unknown} err
+ * @param {string} [fallback]
+ * @returns {string}
+ */
+export function railReason(err, fallback = 'llm-error') {
+  if (err instanceof DailyCapError) return 'daily-cap';
+  if (err instanceof TokenLimitError) return 'token-limit';
+  return fallback;
+}
 
 /** The cap keys already reported as not a number (one warn line per key and process). */
 const reportedCaps = new Set();
@@ -327,15 +413,21 @@ function cacheCode(marked, usage) {
   return 'none';
 }
 
-// The fields of one `llm: usage` line, so a day's spend can be split by role: who asked
-// (`role`, `model`), who served it (`provider`, `id`), what it cost, read from OpenRouter's
-// `usage` and its detail objects, and what the prompt cache did (`cache`, see `cacheCode`;
-// `marked` = the sent request carried a marker). Numbers, booleans, ids and codes only -- an
-// absent value or one of another type is null -- so the line never carries text of a prompt or
-// an answer.
-function usageLogFields(json, usage, model, role, marked) {
+// The fields of one `llm: usage` line, so a day's spend can be split by role and, inside a
+// role, by what the request was for: who asked (`role`, `model`; `purpose` = the caller's
+// `options.purpose`, which tells apart the helpers that share one role; `origin` = the caller's
+// `options.origin`, e.g. `mentor` for a request that is not live chat traffic), who served it
+// (`provider`, `id`), what it cost, read from OpenRouter's `usage` and its detail objects, what
+// the prompt cache did (`cache`, see `cacheCode`; `marked` = the sent request carried a marker)
+// and how long it took (`ms`: whole milliseconds on the client's clock from the start of the
+// first attempt to the answer, retried attempts and their backoff included; never negative,
+// null when the clock gave no number). Numbers, booleans, ids and codes only -- an absent value
+// or one of another type is null -- so the line never carries text of a prompt or an answer.
+function usageLogFields(json, usage, model, options, marked, elapsedMs) {
   return {
-    role: stringOrNull(role),
+    role: stringOrNull(options.role),
+    purpose: stringOrNull(options.purpose),
+    origin: stringOrNull(options.origin),
     model: stringOrNull(model),
     provider: stringOrNull(json.provider),
     promptTokens: numberOrNull(usage.prompt_tokens),
@@ -348,6 +440,7 @@ function usageLogFields(json, usage, model, role, marked) {
     upstreamCost: numberOrNull(usage.cost_details?.upstream_inference_cost),
     byok: typeof usage.is_byok === 'boolean' ? usage.is_byok : null,
     id: stringOrNull(json.id),
+    ms: Number.isFinite(elapsedMs) ? Math.max(0, Math.round(elapsedMs)) : null,
   };
 }
 
@@ -425,9 +518,28 @@ function retryLimitFields(err) {
  * @param {object} deps.calibrator        From createCalibrator().
  * @param {object} deps.state             Persistent state with `llmDay` / `llmCount` fields.
  * @param {typeof fetch} [deps.fetchImpl]
- * @param {() => number} [deps.now]       Clock in ms, for the day rollover.
+ * @param {() => number} [deps.now]       Clock in ms, for the day rollover and a request's logged duration.
+ * @returns {{ complete: Function, modelEndpoints: Function, capLeft: (nowMs?: number) => number }}
  */
 export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fetch, now = Date.now }) {
+  /**
+   * The requests `llm.maxRequestsPerDay` still allows today, read only: the cap, read now,
+   * minus `llmCountToday` (the stored count of another UTC day reads as 0, so the whole cap is
+   * back at 00:00 UTC), never below 0. `state.data` is never touched and nothing is logged:
+   * the pair is rolled over by the next counted request. Infinity while the cap is not a finite
+   * number -- that misconfiguration is `complete()`'s own to refuse and report (`dailyCapOf`),
+   * not a reader's to answer for. For a helper that would otherwise download, reserve or cache
+   * something before `complete()` refuses it: `capLeft() <= 0` means the next counted request
+   * throws a `DailyCapError`. Only a look: a request sent in between can take the last slot.
+   * @param {number} [nowMs]  Defaults to the client's clock.
+   * @returns {number}
+   */
+  function capLeft(nowMs = now()) {
+    const cap = getConfig().llm?.maxRequestsPerDay;
+    if (typeof cap !== 'number' || !Number.isFinite(cap)) return Infinity;
+    return Math.max(0, cap - llmCountToday(state.data, nowMs));
+  }
+
   function countRequest(configured) {
     const cap = dailyCapOf(configured, 'llm.maxRequestsPerDay');
     const nowMs = now();
@@ -466,10 +578,19 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * `retried: false`; codes only, never the provider's text). Once a 200 was received
    * (the request may be billed) nothing is retried: a `json.error` body or an
    * unparsable body is thrown as it is.
-   * Every answered request logs one `llm: usage` line (role, model, provider,
-   * token counts, the prompt cache's `cache` code -- `read` | `write` | `none`,
-   * or `off` when no marker was sent --, cost, BYOK flag, response id; null
-   * where the response omits a value), whatever its role -- see `usageLogFields`.
+   * Every answered request logs one `llm: usage` line (role, purpose, origin,
+   * model, provider, token counts, the prompt cache's `cache` code -- `read` |
+   * `write` | `none`, or `off` when no marker was sent --, cost, BYOK flag,
+   * response id, and `ms`, the time from the start of the first attempt to the
+   * answer; null where the response or the caller omits a value), whatever its
+   * role -- see `usageLogFields`.
+   * `options.purpose` — what the request is for, a kebab-case code (`address`,
+   * `variety`, `rewatch`, `lookup`, `read-link`, `search-summary`, `describe`,
+   * ...): the helpers that share one role are told apart by it in the journal.
+   * `options.origin` — where the request comes from when it is not live chat
+   * traffic (e.g. `mentor`), so a day's count can leave it out. Both are
+   * logged on the usage line only: never sent in the request body, never
+   * used for routing.
    * The calibrator is fed, and the over-cap warning
    * (`llm: provider counted more prompt tokens than the cap`) compares, the
    * provider's count of the whole prompt, its cached part included
@@ -486,8 +607,10 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * `options.timeoutMs` overrides `llm.timeoutMs` for the request's abort
    * signal — the analyzer (a large batch, a long JSON answer) and the media
    * describer need more room than a chat reply's default.
-   * `options.countAgainstDailyCap` (default true) — see the header comment
-   * for the one deliberate exception.
+   * `options.countAgainstDailyCap` (default true) — `false` skips the daily
+   * request counter and is never refused by it: passed by the memory warmup,
+   * the mentor's judge, the mentor sandbox and `/nep ping` only (see the
+   * header comment for why each is exempt).
    * `options.maxRequestTokens` — overrides `cfg.maxRequestTokens` for this one call's pre-flight
    * cap check only (the global rail stays in force for every caller that omits it). Exists for
    * the memory warmup (src/memory/warmup.js), whose requests are fitted under a much larger,
@@ -512,14 +635,16 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
    * configured routing in charge. Exists for the video describer, which pins
    * the provider that can fetch a public video URL.
    * `options.role` — which subprocess makes the request (`talk`, `analyzer`,
-   * `classifier.text`, `classifier.media`, `classifier.video`, `mentor`; the
-   * names of `/nep model`), so a `"<prefix>@<role>"` key of
+   * `voice`, `classifier.text`, `classifier.media`, `classifier.video`,
+   * `mentor`; the names of `/nep model`), so a `"<prefix>@<role>"` key of
    * `llm.providerByModel` can route it; never sent. A call without a role
    * matches only role-less keys.
    * `options.reasoning` — OpenRouter's reasoning settings for this one call
    * (e.g. `{ enabled: false }`); a plain object is sent verbatim as
-   * `body.reasoning`, anything else omits the field. Exists for the video
-   * describer, whose model otherwise spends the output budget on reasoning.
+   * `body.reasoning`, anything else omits the field. Used by the video
+   * describer (`media.video.reasoning`), whose model otherwise spends the
+   * output budget on reasoning, and by the two-stage analyzer's stage A and
+   * the warmup's neutral route (`memory.reasoning`).
    * `options.videoSeconds` — seconds of video the request carries. A finite,
    * non-negative value adds `ceil(videoSeconds * tokensPerSecond)` to the raw
    * estimate before calibration, because `estimateMessages` cannot size a
@@ -577,7 +702,10 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
     });
     if (provider) body.provider = provider;
     if (isPlainObject(options.reasoning)) body.reasoning = options.reasoning;
+    // `options.purpose` and `options.origin` are for the usage line only: never put on `body`.
 
+    // The start of the first attempt: the logged duration covers the retries and their backoff.
+    const startedAt = now();
     let lastError;
     for (let attempt = 0; attempt <= cfg.retries; attempt += 1) {
       if (attempt > 0) {
@@ -652,7 +780,7 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
       if (promptTokens !== null && promptTokens > requestTokenCap) {
         log.warn('llm: provider counted more prompt tokens than the cap', { usage, estimated });
       }
-      log.info('llm: usage', usageLogFields(json, usage, body.model, options.role, marked));
+      log.info('llm: usage', usageLogFields(json, usage, body.model, options, marked, now() - startedAt));
       // `json.provider` is OpenRouter's own name for whichever upstream provider
       // actually served the request (undefined when the response omits it) --
       // surfaced so `/nep ping` can report it without a second request shape.
@@ -689,5 +817,5 @@ export function createLlm({ apiKey, getConfig, calibrator, state, fetchImpl = fe
     return { ok: response.ok, status: response.status, json };
   }
 
-  return { complete, modelEndpoints };
+  return { complete, modelEndpoints, capLeft };
 }

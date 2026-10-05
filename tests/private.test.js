@@ -277,3 +277,17 @@ test('privateRepliesToday: the owner or member cap, a missing cap as 0, another 
   assert.deepEqual(privateRepliesToday({ config: config(), isOwner: false, replies: { day: '2026-09-28', count: 7 }, today: TODAY }), { used: 0, cap: 100 });
   assert.deepEqual(privateRepliesToday({ config: {}, isOwner: false, replies: null, today: TODAY }), { used: 0, cap: 0 });
 });
+
+test('privateRepliesToday: a stored count that is not a finite number >= 0 reads as 0, and the replies are never written', () => {
+  for (const bad of [-3, NaN, Infinity, '150', null, {}]) {
+    const replies = { day: TODAY, count: bad };
+    assert.deepEqual(privateRepliesToday({ config: config(), isOwner: false, replies, today: TODAY }), { used: 0, cap: 100 }, String(bad));
+  }
+  const stale = { day: '2026-09-28', count: 7, noticedDay: '2026-09-28' };
+  privateRepliesToday({ config: config(), isOwner: false, replies: stale, today: TODAY });
+  assert.deepEqual(stale, { day: '2026-09-28', count: 7, noticedDay: '2026-09-28' }, 'a read never rolls the day over');
+});
+
+test('privateGate: a negative stored count never lowers today\'s use below 0', () => {
+  assert.deepEqual(gate({ config: config({ maxPerUserPerDay: 0 }), replies: { day: TODAY, count: -5 } }), { ok: false, reason: 'cap', cap: 0, used: 0 });
+});

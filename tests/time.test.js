@@ -3,7 +3,7 @@
 // exercised by every module that computes with them.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { utcDay, dailyCounter, bumpDaily } from '../src/time.js';
+import { utcDay, dailyCounter, bumpDaily, countToday } from '../src/time.js';
 
 const KEYS = { dayKey: 'fooDay', countKey: 'fooCount' };
 const NOON = Date.UTC(2026, 8, 21, 12, 0, 0); // 2026-09-21T12:00:00Z
@@ -54,4 +54,48 @@ test('bumpDaily: adds `by` and rolls a stale day over first', () => {
   const state = { fooDay: '2026-09-20', fooCount: 50 };
   assert.deepEqual(bumpDaily(state, KEYS, NOON, 5), { day: '2026-09-21', count: 5 });
   assert.deepEqual(state, { fooDay: '2026-09-21', fooCount: 5 });
+});
+
+test('countToday: the count stored for today, read without writing', () => {
+  const state = { fooDay: '2026-09-21', fooCount: 7, other: 1 };
+  assert.equal(countToday(state, KEYS, NOON), 7);
+  assert.deepEqual(state, { fooDay: '2026-09-21', fooCount: 7, other: 1 });
+});
+
+test('countToday: 0 for yesterday\'s stamp, and the stale pair is left as it was', () => {
+  const state = { fooDay: '2026-09-20', fooCount: 7 };
+  assert.equal(countToday(state, KEYS, NOON), 0);
+  assert.deepEqual(state, { fooDay: '2026-09-20', fooCount: 7 }, 'only dailyCounter rolls the pair over');
+  const fresh = {};
+  assert.equal(countToday(fresh, KEYS, NOON), 0);
+  assert.deepEqual(fresh, {}, 'a fresh state gets no stamp from a read');
+});
+
+test('countToday: the day turns at UTC midnight', () => {
+  const state = { fooDay: '2026-09-21', fooCount: 4 };
+  const midnight = Date.UTC(2026, 8, 22, 0, 0, 0);
+  assert.equal(countToday(state, KEYS, midnight - 1), 4);
+  assert.equal(countToday(state, KEYS, midnight), 0);
+});
+
+test('countToday: a count that is not a finite number >= 0 reads as zero, by dailyCounter\'s rule', () => {
+  for (const bad of [undefined, null, 'x', '7', NaN, Infinity, -3, {}]) {
+    const state = { fooDay: '2026-09-21', fooCount: bad };
+    assert.equal(countToday(state, KEYS, NOON), 0, `count ${String(bad)}`);
+    assert.equal(countToday(state, KEYS, NOON), dailyCounter({ ...state }, KEYS, NOON).count, `same as dailyCounter for ${String(bad)}`);
+  }
+});
+
+test('countToday: a missing state or a clock that is neither a time nor a day key reads as zero', () => {
+  for (const state of [undefined, null, 'x', 7]) assert.equal(countToday(state, KEYS, NOON), 0, String(state));
+  const state = { fooDay: '2026-09-21', fooCount: 7 };
+  for (const clock of [undefined, null, NaN, Infinity, '', {}]) assert.equal(countToday(state, KEYS, clock), 0, String(clock));
+  assert.equal(countToday({ fooCount: 7 }, KEYS, undefined), 0, 'a missing stamp never equals a missing clock');
+});
+
+test('countToday: a caller that already holds the UTC day key passes it instead of the clock', () => {
+  const state = { fooDay: '2026-09-21', fooCount: 7 };
+  assert.equal(countToday(state, KEYS, '2026-09-21'), 7);
+  assert.equal(countToday(state, KEYS, utcDay(NOON)), countToday(state, KEYS, NOON));
+  assert.equal(countToday(state, KEYS, '2026-09-22'), 0);
 });

@@ -366,6 +366,32 @@ test('images: quota ignores yesterday\'s counters without resetting them', () =>
   assert.equal(state.dirty, 0);
 });
 
+test('images: quota reads a stored count that is not a finite number >= 0 as 0, for the instance and for a member', () => {
+  for (const bad of ['many', -4, NaN, Infinity, {}]) {
+    const data = { imageDay: '2026-09-28', imageCount: bad, imageUsers: { day: '2026-09-28', counts: { u1: bad } } };
+    const state = fakeState(structuredClone(data));
+    const { gen } = makeGen({ state });
+    assert.deepEqual(gen.quota({ userId: 'u1' }), { used: 0, cap: 50, userUsed: 0, userCap: 50, spent: false, userSpent: false }, String(bad));
+    assert.deepEqual(state.data, data, `a read leaves the stored value alone (${String(bad)})`);
+    assert.equal(state.dirty, 0);
+  }
+  // A member table that is not a table at all is read as no use, never thrown on.
+  for (const imageUsers of [null, 'x', { day: '2026-09-28' }, { day: '2026-09-28', counts: 'x' }]) {
+    const { gen } = makeGen({ state: fakeState({ imageDay: '2026-09-28', imageCount: 2, imageUsers }) });
+    assert.deepEqual(gen.quota({ userId: 'u1' }), { used: 2, cap: 50, userUsed: 0, userCap: 50, spent: false, userSpent: false }, JSON.stringify(imageUsers));
+  }
+});
+
+test('images: quota follows the injected clock across 00:00 UTC', () => {
+  const state = fakeState({ imageDay: '2026-09-28', imageCount: 5, imageUsers: { day: '2026-09-28', counts: { u1: 3 } } });
+  let clock = Date.parse('2026-09-28T23:59:59Z');
+  const { gen } = makeGen({ state, now: () => clock });
+  assert.deepEqual([gen.quota({ userId: 'u1' }).used, gen.quota({ userId: 'u1' }).userUsed], [5, 3]);
+  clock = Date.parse('2026-09-29T00:00:00Z');
+  assert.deepEqual([gen.quota({ userId: 'u1' }).used, gen.quota({ userId: 'u1' }).userUsed], [0, 0]);
+  assert.equal(state.data.imageCount, 5, 'not reset by the read');
+});
+
 test('images: familyOf maps prefixes', () => {
   assert.equal(familyOf('openai/gpt-image-2.5-flare'), 'openai');
   assert.equal(familyOf('google/some-image-model'), 'google');
