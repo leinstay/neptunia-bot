@@ -55,6 +55,8 @@
 | `mentor-diagnose.md` | нет | Ментор: объяснить слабые ответы после оценки, указывая на конкретный текст в контексте персонажа (`features.mentor`). Результат — непроверенная гипотеза, сохраняется как `diagnosis` в прогоне. Опускается при `mentor.diagnose` false или отсутствии файла | `{{name}}` |
 | `variety.md` | нет | Запрос `classifier.text`: назвать повторяющиеся приёмы в последних сообщениях персонажа (`features.variety`). Без карточки персонажа | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `variety-long.md` | нет | Длинный проход разнообразия: назвать приёмы на всём кольце собственных сообщений (`features.variety`, `variety.longLines`). Те же плейсхолдеры, блок `<lines>` и формат ответа, что и `variety.md`. Использует `variety.longModel` (null = `classifier.text`). Без карточки персонажа. При отсутствии длинный проход не выполняется | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
+| `split.md` | нет | Классификатор: содержит ли прямой вызов несколько отдельных просьб (`features.splitTasks`). Получает короткий `<transcript>` и новое сообщение как `<candidate>`. Выход: слово `one` или от 2 до `{{maxTasks}}` строк, каждая начинается с `- ` и содержит одну часть словами автора. Без карточки персонажа. Без этого файла разделитель выключен | `{{name}}` `{{maxTasks}}` |
+| `merge.md` | нет | Классификатор: относится ли новое сообщение от автора с ожидающими элементами к одному из них. Получает нумерованный список `<waiting>` и новое сообщение как `<candidate>`. Выход: одна строка: номер из списка или слово `new`. Без карточки персонажа. Без этого файла новый вызов всегда ставится в очередь как собственный элемент | `{{name}}` |
 | `labels.json` | да | Все строки, которые КОД вставляет в промпт. Ключи фиксированы ниже, формулировки определяет автор текстов | см. ниже |
 
 `{{name}}` отображаемое имя бота · `{{author}}` отображаемое имя вызвавшего · `{{trigger}}` одно из значений `labels.triggers.*` ·
@@ -93,7 +95,7 @@
 | `<lookup>` | Что персонаж нашёл на этом ходу. Веб-поиск (`features.webLookup`) содержит `labels.lookup.webHeader`, сжатый ответ, `labels.lookup.sources` и, если ничего не найдено, `labels.lookup.none`. Серверный поиск (`features.recall`) содержит `labels.lookup.serverHeader`, сводку и, если помощник назвал отрезок, дословные строки этого отрезка. Когда оба выполнены, `labels.lookup.bothNote` стоит между ними. Строка `labels.lookup.stretch` вводит дословный отрезок (`{date}` `{channel}`). Появляется только когда классификатор поиска сработал и хотя бы один поиск завершился |
 | `<chat>` | До `context.channelMessages` последних сообщений текущего канала |
 | `<tempo>` | Счётчики за 10 мин / час / сутки, число участников, тишина, вердикт (live / slow / dead) |
-| `<task>` | `reply` / `interject` / `initiate` / `overheard` (при наличии `overheard.md`) / `elsewhere` (при наличии `elsewhere.md`, для замеченного комментария) с заполненными плейсхолдерами |
+| `<task>` | `reply` / `interject` / `initiate` / `overheard` (при наличии `overheard.md`) / `elsewhere` (при наличии `elsewhere.md`, для замеченного комментария) с заполненными плейсхолдерами. После промпта режима добавляются до трёх меток `task.*`, когда их условия выполнены (каждая через пустую строку): `task.part`, когда ход отвечает на одну часть разделённого сообщения, или `task.queued`, когда у автора триггера есть другие ожидающие вызовы; затем `task.queuedOthers`, когда у других участников есть ожидающие вызовы в канале; затем `task.added`, когда поздние сообщения были вложены в этот вызов. См. `labels.task.*` ниже |
 
 Приоритет бюджета (секции обрезаются с конца этого списка): системный промпт + задача + часы + темп + восприятие
 (никогда не обрезаются) -> профиль вызвавшего с эпизодами -> lookup (сохраняется или отбрасывается целиком; может содержать веб-часть, серверную часть или обе) -> серверные привычки -> факты о себе -> лорбук -> карта каналов -> транскрипт (новейшие сначала) ->
@@ -285,6 +287,10 @@ recent.header                            REQUIRED {hours}: the block's first lin
 recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
 recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
 recent.episode                           OPTIONAL {date} {name} {what}: a moment the persona remembers with {name} on {date}; no quote, no feeling. Without it the block shows notes only
+task.part                                {index} {total} {part} {others}: this turn answers one part of a split message. {index} is 1-based, {part} is the text of this part, {others} lists the remaining parts and any queued calls as numbered items joined by `; `. Without this key the splitter is off even when the prompt file exists
+task.queued                              {others}: the trigger author has other calls waiting, listed as numbered items joined by `; `. Shown only when there is no `task.part` for this turn. Without this key the waiting calls are not named and the seen-in-history drop rule applies to them
+task.queuedOthers                        {others}: other members have calls waiting in this channel, listed as `<n>. <author>: <text>` items joined by `; `. Without this key those calls are not named
+task.added                               {added}: later messages from the author were folded into this call while it waited, joined by `; `. Without this key the folded messages are not named
 ```
 
 ## Вывод
@@ -667,6 +673,18 @@ recent.episode                           OPTIONAL {date} {name} {what}: a moment
 ### Ментор
 
 Песочница ментора выполняет один проход разнообразия на каждую ситуацию, за счёт токенового бюджета ментора (не из `llm.maxRequestsPerDay`). Песочница использует `variety.timeoutMs` как таймаут запроса (у неё нет следующего хода, который мог бы использовать поздний ответ). Приёмы сохраняются как `worn` в записи ситуации. Оценщик никогда не видит блок `<worn>`.
+
+## Разделитель задач
+
+Прямой вызов (упоминание, ответ, имя, продолжение, ЛС), достаточно длинный и структурированный (`split.minChars` символов без ссылок и токенов Discord, не менее двух рядов разделителей), отправляется классификатору (`prompts/split.md` на `classifier.text`, назначение `split`) параллельно с подготовкой хода. Классификатор читает короткий `<transcript>` из последних `split.contextMessages` сообщений, собственные строки персонажа отмечены `labels.self`, затем новое сообщение как `<candidate>` (`<имя автора>: <текст>`). Ответ: слово `one` или от 2 до `split.maxTasks` (по умолчанию 4) строк, каждая начинается с `- ` и содержит одну часть словами автора. Пустой, неразбираемый или запоздавший ответ (подготовка хода завершилась раньше) трактуется как одна просьба и логируется `split: failed`. Переключатель `features.splitTasks` (отсутствие = включён).
+
+Части становятся цепочкой обычных ходов на одном сообщении (`turn: part`). Помощники каждой части (классификатор поиска, recall, маршрут, повторный просмотр) оценивают текст этой части, а запрос называет часть и остальные (`labels.task.part` с `{index}`, `{total}`, `{part}`, `{others}`). Первая часть использует историю, загруженную ходом всего сообщения, и отвечает на него; последующие загружают историю заново и публикуются обычным текстом. У каждой части свой срок и планка отбрасывания; часть, которая не прошла или была отклонена, не останавливает следующую. Бросок игнорирования, дневной лимит ЛС и отметка в кольце считаются один раз на сообщение. Пауза или прогрев завершают цепочку перед следующей частью (`turn: chain stopped`). Пока цепочка идёт, её незапущенные части являются ожидающими элементами автора (`waitingParts` на runner хода); позднее сообщение автора, вложенное в одну из них (`addToPart`), попадает в запрос этой части как `tasks.added`. Внимание остаётся за цепочкой от первого хода до конца; уведомления о простое срабатывают один раз, в конце.
+
+Без `prompts/split.md` разделитель выключен (`split: skipped`, `no-prompt`). Без `labels.task.part` разделитель тоже выключен: разобранный ответ отбрасывается. Настройки: `split.minChars` (по умолчанию 80), `split.maxTasks` (по умолчанию 4), `split.contextMessages` (по умолчанию 6), `split.maxOutputTokens` (по умолчанию 300).
+
+## Классификатор объединения
+
+Когда приходит вызов от автора, у которого уже есть ожидающие элементы в этом канале (части разделённого сообщения, до которых цепочка не дошла, или вызовы в очереди отложенных), классификатор (`prompts/merge.md` на `classifier.text`, назначение `merge`) определяет, относится ли новое сообщение к одному из них. Классификатор читает блок `<waiting>` из нумерованных элементов (`1. <текст>`, по одному на ожидающий элемент) и новое сообщение как `<candidate>` (`<имя автора>: <текст>`). Ответ: одна строка: номер из списка или слово `new`. Вложенное сообщение никогда не получает собственного хода; оно появляется в ходе своего элемента через `labels.task.added` (`{added}`). Маршрутизированные вызовы никогда не вкладываются. Без файла промпта каждый вызов ставится в очередь как собственный элемент (`merge: failed`, `no-prompt`). Логируется как `merge: verdict` или `merge: failed`. Собственных настроек нет; лимит вывода берётся из `mention.followUpMaxOutputTokens`.
 
 ## Рисование
 
