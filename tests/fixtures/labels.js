@@ -89,6 +89,8 @@ export const labels = {
     privateAware: 'some people write to you privately; never repeat any of it here',
     customEmoji: 'this server has its own emoji, listed in <emoji>; write one as :name:',
     gifs: 'you can post one gif per turn from <gifs> by its handle',
+    channels: 'you see only the channels shown here',
+    elsewhere: 'read-only channels: read and react only; a call there is answered in #{destination}',
   },
   tempo: {
     counts: 'messages in the last 10 min: {last10min}, last hour: {lastHour}, last day: {lastDay}',
@@ -219,5 +221,21 @@ export const labels = {
   },
   address: {
     author: '{name} -- known as: {aliases}',
+  },
+  pull: {
+    header: 'channel #{channel}, messages from {from} to {to}, the last {ago} ago:',
+    olderNotShown: '(older messages not shown)',
+    picturesNotSeen: '({count} pictures not looked at)',
+    earlierPings: 'earlier calls to you there, from {date}:',
+    pingAnswered: '[called you, answered]',
+    pingUnanswered: '[called you, not answered]',
+    pingSkipped: '[called you, let pass]',
+  },
+  elsewhere: {
+    called: 'the call came from #{channel}, where you cannot write; you answer in #{destination}',
+    link: '{text}\n{link}',
+  },
+  room: {
+    focus: 'message {target} by {author} is put to everyone present',
   },
 };

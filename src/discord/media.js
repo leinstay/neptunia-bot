@@ -715,13 +715,21 @@ export function isDescribable(item) {
  * the TRIGGER's own message, at the same priority as its images -- never from
  * the message it replies to, nor from the "recent" tier, nor for a
  * spontaneous turn (no trigger at all).
+ *
+ * Only pictures of the channel the turn posts in are ever attached: a trigger
+ * that sits in another channel (a call from a read-only channel answered in
+ * the main one) gives neither its own pictures nor those of the message it
+ * replies to -- another channel is shown as captions only. That is decided
+ * when both `channelId` and the trigger's `channelId` are known and differ;
+ * without either, the trigger counts as being in the turn's channel.
  * @param {object} params
  * @param {object|null} params.trigger   Normalized trigger message, or null.
  * @param {object[]} params.history      Normalized channel messages, oldest first.
  * @param {{ maxImages: number, recentImages: number, recentImageMinutes: number }} params.visionCfg
  * @param {number} params.now
+ * @param {string|null} [params.channelId]  Id of the channel the turn posts in.
  */
-export function selectPictures({ trigger, history, visionCfg, now }) {
+export function selectPictures({ trigger, history, visionCfg, now, channelId = null }) {
   const maxImages = visionCfg?.maxImages ?? 0;
   if (maxImages <= 0) return [];
 
@@ -740,7 +748,8 @@ export function selectPictures({ trigger, history, visionCfg, now }) {
     }
   }
 
-  if (trigger) {
+  const triggerElsewhere = Boolean(channelId) && Boolean(trigger?.channelId) && trigger.channelId !== channelId;
+  if (trigger && !triggerElsewhere) {
     addFrom(trigger, { allowStickers: true });
     if (picked.length < maxImages && trigger.replyToId) {
       addFrom(history.find((message) => message.id === trigger.replyToId));

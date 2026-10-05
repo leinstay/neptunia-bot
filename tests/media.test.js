@@ -786,6 +786,34 @@ test('selectPictures: never picks the same item twice across tiers', () => {
   assert.deepEqual(picked.map((p) => p.itemId), ['shared']);
 });
 
+test('selectPictures: a trigger in another channel than the turn posts in gives no picture, nor does the message it replies to', () => {
+  const now = 1_000_000;
+  // Older than recentImageMinutes: only the replied-to tier could take it.
+  const replied = pictureMessage('r', now - 60 * MIN, 'replied');
+  const trigger = { ...pictureMessage('t', now, 'trig'), channelId: 'source', replyToId: 'r' };
+  const sticker = { ...stickerMessage('s', now, [{ id: 's1', name: 'gâteau', format: 1, url: 'https://media.discordapp.net/stickers/s1.png?size=160' }]), channelId: 'source' };
+  const local = { ...pictureMessage('m1', now - MIN, 'local'), channelId: 'dest' };
+  const visionCfg = { maxImages: 4, recentImages: 3, recentImageMinutes: 30 };
+
+  const picked = selectPictures({ trigger, history: [replied, local], visionCfg, now, channelId: 'dest' });
+  assert.deepEqual(picked.map((p) => p.itemId), ['local'], 'only the turn channel\'s own recent picture');
+  const here = { ...trigger, channelId: 'dest' };
+  const sameChannel = selectPictures({ trigger: here, history: [replied, local, here], visionCfg, now, channelId: 'dest' });
+  assert.deepEqual(sameChannel.map((p) => p.itemId), ['replied', 'local', 'trig'], 'the same trigger in the turn\'s channel gives both tiers');
+  assert.deepEqual(selectPictures({ trigger: sticker, history: [], visionCfg, now, channelId: 'dest' }), []);
+});
+
+test('selectPictures: a trigger in the turn\'s channel, or with either channel id unknown, keeps its pictures first', () => {
+  const now = 1_000_000;
+  const visionCfg = { maxImages: 4, recentImages: 3, recentImageMinutes: 30 };
+  const here = { ...pictureMessage('t', now, 'trig'), channelId: 'dest' };
+  assert.deepEqual(selectPictures({ trigger: here, history: [here], visionCfg, now, channelId: 'dest' }).map((p) => p.itemId), ['trig']);
+  const unknown = pictureMessage('u', now, 'trig-u');
+  assert.deepEqual(selectPictures({ trigger: unknown, history: [], visionCfg, now, channelId: 'dest' }).map((p) => p.itemId), ['trig-u']);
+  const elsewhere = { ...pictureMessage('e', now, 'trig-e'), channelId: 'source' };
+  assert.deepEqual(selectPictures({ trigger: elsewhere, history: [], visionCfg, now }).map((p) => p.itemId), ['trig-e'], 'no channelId: as before');
+});
+
 // --- stickerUrl / emojiUrl / linkThumbnailCacheKey ------------------------
 
 test('stickerUrl: PNG and APNG sizes to media.discordapp.net/.../<id>.png?size=160', () => {

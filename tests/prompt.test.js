@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { block, buildDrawPrompt, buildRequest, hasRequiredLabels, renderProfile, fillPromptTemplate } from '../src/behavior/prompt.js';
 import { estimateTokens } from '../src/llm/tokens.js';
-import { fill } from '../src/discord/format.js';
+import { fill, formatClock, formatDate, formatDuration } from '../src/discord/format.js';
 import { labels } from './fixtures/labels.js';
 
 const NOW = Date.UTC(2026, 8, 20, 10, 0, 0); // Sun 20 Sep 2026, 13:00 Moscow
@@ -536,8 +536,11 @@ test('buildRequest: idByIndex still covers messages later trimmed out of the ren
   for (let i = 1; i <= 10; i += 1) {
     history.push(makeMessage(i, NOW - (11 - i) * MIN, { content: 'word '.repeat(20) }));
   }
-  const config = fakeConfig({ llm: { maxRequestTokens: 340, safetyMargin: 1 } });
+  // 340 was tight enough before <senses> gained the channels line (part of
+  // the always-kept "fixed" section); 400 still trims the chat.
+  const config = fakeConfig({ llm: { maxRequestTokens: 400, safetyMargin: 1 } });
   const request = buildRequest(baseInput({ history, config }));
+  assert.ok(request.stats.chat.dropped > 0, 'the chat is trimmed');
   // idByIndex is built from the FULL transcript, before trimming.
   assert.equal(request.idByIndex.size, 10);
   assert.equal(request.idByIndex.get(1), 1);
@@ -2083,7 +2086,11 @@ test('renderSenses: shows drawSpentUser when the member\'s quota is spent', () =
 });
 
 test('renderSenses: an older labels set without senses.draw shows no draw line', () => {
-  const older = { ...labels, senses: { ...labels.senses, draw: undefined, drawSpent: undefined, drawSpentUser: undefined } };
+  // An older set has no channel lines either (they follow the files line).
+  const older = {
+    ...labels,
+    senses: { ...labels.senses, draw: undefined, drawSpent: undefined, drawSpentUser: undefined, channels: undefined, elsewhere: undefined },
+  };
   const senses = sensesOf(buildRequest(baseInput({ prompts: fakePrompts({ labels: older }), drawQuota: DRAW_OPEN }))).split('\n');
   assert.equal(senses[senses.length - 1], labels.senses.files);
 });
@@ -2232,8 +2239,456 @@ test('buildRequest: <senses> carries senses.privateAware outside a private chat 
 });
 
 test('buildRequest: an older labels.json without the private senses keys renders no extra line', () => {
-  const olderLabels = { ...labels, senses: { ...labels.senses, privateChat: undefined, privateAware: undefined } };
+  // Older than the channel lines too, which only a server turn would show.
+  const olderLabels = {
+    ...labels,
+    senses: { ...labels.senses, privateChat: undefined, privateAware: undefined, channels: undefined, elsewhere: undefined },
+  };
   const senses = sensesOf(buildRequest(privateScene({ prompts: fakePrompts({ labels: olderLabels, private: 'P' }) })));
   assert.ok(!senses.includes('undefined'));
   assert.equal(senses, sensesOf(buildRequest(baseInput({ prompts: fakePrompts({ labels: olderLabels }) }))));
+});
+
+// --- <channel_view>: another channel pulled into the turn ---------------------------
+
+const SRC = 'src';
+const DEST = 'dest';
+const HOUR = 60 * MIN;
+const TZ = 'Europe/Moscow';
+
+/** A line of the pulled channel (written by Zoé unless overridden). */
+function pulledMessage(id, ts, overrides = {}) {
+  return makeMessage(id, ts, { channelId: SRC, channelName: 'journal-de-zoé', authorId: 'w1', authorName: 'Zoé', ...overrides });
+}
+
+/** A line of the channel the turn posts in. */
+function destMessage(id, ts, overrides = {}) {
+  return makeMessage(id, ts, { channelId: DEST, channelName: 'général', ...overrides });
+}
+
+/** A pulled channel record, the shape src/discord/pull-fetch.js#fetchPull hands to buildRequest. */
+function pulledChannel(overrides = {}) {
+  const messages = overrides.messages ?? [
+    pulledMessage('p1', NOW - 130 * MIN, { content: 'πρώτη σελίδα' }),
+    pulledMessage('p2', NOW - 120 * MIN, { content: 'δεύτερη σελίδα' }),
+  ];
+  return {
+    channelId: SRC,
+    channelName: 'journal-de-zoé',
+    readOnly: false,
+    canReact: true,
+    reason: 'mention',
+    earlierPingIds: new Set(),
+    olderNotShown: false,
+    descriptions: new Map(),
+    picturesNotSeen: 0,
+    pingState: new Map(),
+    newestId: messages.at(-1).id,
+    newestTs: messages.at(-1).ts,
+    ...overrides,
+    messages,
+  };
+}
+
+/** The text part of a request's user message. */
+function userText(request) {
+  const content = request.messages[1].content;
+  return Array.isArray(content) ? content.find((part) => part.type === 'text').text : content;
+}
+
+/** The body of `<tag>` in `text`, or null when the block is absent. */
+function bodyOf(text, tag) {
+  const match = new RegExp(`<${tag}>\\n([\\s\\S]*?)\\n</${tag}>`).exec(text);
+  return match ? match[1] : null;
+}
+
+/** `{from}` / `{to}` of a pulled header: the date and the clock of `ts`. */
+function moment(ts) {
+  return `${formatDate(ts, TZ, labels.locale)}, ${formatClock(ts, TZ, labels.locale)}`;
+}
+
+/** A routed turn: a call in the pulled channel, answered in the destination. */
+function routedInput(overrides = {}) {
+  const trigger = pulledMessage('p3', NOW - 2 * MIN, { authorId: 'u7', authorName: 'Ana', content: 'tu as vu ça ?', mentionedUserIds: ['self'] });
+  const pulled = pulledChannel({
+    readOnly: true,
+    reason: 'routed',
+    messages: [pulledMessage('p1', NOW - 30 * MIN, { content: 'πρώτη σελίδα' }), pulledMessage('p2', NOW - 20 * MIN, { content: 'δεύτερη σελίδα' }), trigger],
+    pingState: new Map([['p3', 'unanswered']]),
+  });
+  return baseInput({
+    history: [destMessage(1, NOW - 15 * MIN), destMessage(2, NOW - 10 * MIN)],
+    trigger,
+    triggerKind: 'mention',
+    pulled: [pulled],
+    source: { channelId: SRC, reason: 'routed' },
+    currentChannelId: DEST,
+    ...overrides,
+  });
+}
+
+test('buildRequest: a pulled channel renders as channel_view after other_channels', () => {
+  const history = [destMessage(1, NOW - 5 * MIN), destMessage(2, NOW - MIN)];
+  const neighbors = [{ channelId: 'n1', channelName: 'random', messages: [makeMessage(9, NOW - 5 * MIN)] }];
+  const worn = [{ shape: 'a closing question', examples: ['ça va ?'] }];
+  const text = userText(buildRequest(baseInput({ history, neighbors, worn, pulled: [pulledChannel()], currentChannelId: DEST })));
+  const order = ['<other_channels>', '<channel_view>', '<worn>', '<chat>', '<task>'];
+  const positions = order.map((tag) => text.indexOf(tag));
+  assert.ok(positions.every((p) => p !== -1), JSON.stringify(positions));
+  for (let i = 1; i < positions.length; i += 1) assert.ok(positions[i - 1] < positions[i], `${order[i - 1]} before ${order[i]}`);
+  assert.deepEqual(bodyOf(text, 'channel_view').split('\n'), [
+    fill(labels.pull.header, { channel: 'journal-de-zoé', from: moment(NOW - 130 * MIN), to: moment(NOW - 120 * MIN), ago: formatDuration(120 * MIN, labels.units) }),
+    `#3 [${formatClock(NOW - 130 * MIN, TZ)}] Zoé: πρώτη σελίδα`,
+    `#4 [${formatClock(NOW - 120 * MIN, TZ)}] Zoé: δεύτερη σελίδα`,
+  ]);
+});
+
+test('buildRequest: the pulled header carries the read-only mark, older messages not shown and pictures not seen, in that order', () => {
+  const pulled = pulledChannel({ readOnly: true, olderNotShown: true, picturesNotSeen: 3 });
+  const view = bodyOf(userText(buildRequest(baseInput({ pulled: [pulled] }))), 'channel_view').split('\n');
+  assert.deepEqual(view.slice(1, 4), [labels.server.readOnly, labels.pull.olderNotShown, fill(labels.pull.picturesNotSeen, { count: 3 })]);
+  const plain = bodyOf(userText(buildRequest(baseInput({ pulled: [pulledChannel()] }))), 'channel_view');
+  for (const line of [labels.server.readOnly, labels.pull.olderNotShown, 'pictures not looked at']) assert.ok(!plain.includes(line), line);
+});
+
+test('buildRequest: pulled lines continue the chat\'s numbering and map back through idByIndex and pulledIds', () => {
+  const history = [destMessage('d1', NOW - 5 * MIN), destMessage('d2', NOW - MIN)];
+  const first = pulledChannel({
+    messages: [pulledMessage('p1', NOW - 30 * MIN), pulledMessage('p2', NOW - 25 * MIN, { replyToId: 'p1' })],
+  });
+  const second = pulledChannel({
+    channelId: 'other',
+    channelName: 'carnet-de-björn',
+    messages: [makeMessage('q1', NOW - 50 * MIN, { channelId: 'other', authorName: 'Björn' })],
+  });
+  const request = buildRequest(baseInput({ history, pulled: [first, second], currentChannelId: DEST }));
+  assert.deepEqual([...request.idByIndex], [[1, 'd1'], [2, 'd2'], [3, 'p1'], [4, 'p2'], [5, 'q1']]);
+  assert.deepEqual([...request.pulledIds], [['p1', SRC], ['p2', SRC], ['q1', 'other']]);
+  const view = bodyOf(userText(request), 'channel_view');
+  assert.ok(view.includes(`#4 [${formatClock(NOW - 25 * MIN, TZ)}] Zoé: content of message p2 ${fill(labels.transcript.replyTo, { index: 3 })}`), view);
+  assert.ok(view.includes('#5 ['));
+  assert.ok(view.indexOf('#journal-de-zoé') < view.indexOf('#carnet-de-björn'), 'channels in the order given');
+});
+
+test('buildRequest: no pulled input changes nothing', () => {
+  const trigger = destMessage(2, NOW - MIN, { authorName: 'Ana' });
+  const scene = {
+    history: [destMessage(1, NOW - 5 * MIN), trigger],
+    trigger,
+    triggerKind: 'mention',
+    currentChannelId: DEST,
+    channels: [fakeChannel(DEST, { name: 'général' })],
+    neighbors: [{ channelId: 'n1', channelName: 'random', messages: [makeMessage(9, NOW - 5 * MIN)] }],
+  };
+  const absent = buildRequest(baseInput(scene));
+  const empty = buildRequest(baseInput({ ...scene, pulled: [], source: null, focus: null, elsewhereDestination: null, readOnlyIds: new Set() }));
+  assert.deepEqual(empty.messages, absent.messages);
+  assert.deepEqual(empty.idByIndex, absent.idByIndex);
+  assert.deepEqual(absent.pulledIds, new Map());
+  assert.deepEqual(absent.pulledKept, []);
+  assert.deepEqual(absent.stats.pulled, { used: 0, kept: 0, dropped: 0, lines: 0, linesCut: 0 });
+
+  // Without the new label keys the request is the one built before pulled channels existed;
+  // with them, the only addition on a turn without a pull is the senses.channels line.
+  const { channels, elsewhere: elsewhereSense, ...olderSenses } = labels.senses;
+  assert.ok(channels && elsewhereSense);
+  const { pull, elsewhere, room, ...rest } = labels;
+  const older = { ...rest, senses: olderSenses };
+  const before = userText(buildRequest(baseInput({ ...scene, prompts: fakePrompts({ labels: older }) })));
+  assert.equal(userText(absent).replace(`\n${labels.senses.channels}`, ''), before);
+});
+
+test('buildRequest: a routed trigger targets its pulled index and appends labels.elsewhere.called', () => {
+  const request = buildRequest(routedInput());
+  const task = bodyOf(userText(request), 'task');
+  assert.equal(
+    task,
+    [
+      `Called by Ana, they ${labels.triggers.mention}. Answer #5 as Nept. Target: #5.`,
+      fill(labels.elsewhere.called, { channel: 'journal-de-zoé', destination: 'général' }),
+    ].join('\n\n'),
+  );
+  assert.equal(request.idByIndex.get(5), 'p3');
+  const view = bodyOf(userText(request), 'channel_view');
+  assert.ok(view.includes('Ana: tu as vu ça ?'));
+  assert.ok(!view.includes(labels.pull.pingUnanswered), 'the routed trigger itself carries no ping mark');
+});
+
+test('buildRequest: a routed turn without the called label, or whose source is not pulled, keeps the mode text alone', () => {
+  const { elsewhere, ...noCalled } = labels;
+  const plain = bodyOf(userText(buildRequest(routedInput({ prompts: fakePrompts({ labels: noCalled }) }))), 'task');
+  assert.equal(plain, `Called by Ana, they ${labels.triggers.mention}. Answer #5 as Nept. Target: #5.`);
+  const noSource = bodyOf(userText(buildRequest(routedInput({ pulled: [] }))), 'task');
+  assert.equal(noSource, `Called by Ana, they ${labels.triggers.mention}. Answer  as Nept. Target: .`);
+});
+
+test('buildRequest: the destination is named by the chat, then elsewhereDestination, then the channel map; nameless, no called text follows', () => {
+  const nameless = [destMessage(1, NOW - 15 * MIN, { channelName: undefined }), destMessage(2, NOW - 10 * MIN, { channelName: undefined })];
+  const prompts = fakePrompts({ reply: 'REPLY {{target}} to {{destination}}' });
+  const task = (overrides) => bodyOf(userText(buildRequest(routedInput({ prompts, ...overrides }))), 'task');
+  const called = (destination) => fill(labels.elsewhere.called, { channel: 'journal-de-zoé', destination });
+  const map = [fakeChannel(DEST, { name: 'carte-générale' })];
+  const given = { name: 'principal' };
+
+  assert.equal(task({ elsewhereDestination: given, channels: map }), ['REPLY #5 to général', called('général')].join('\n\n'), 'the name the chat\'s lines carry');
+  assert.equal(task({ history: nameless, elsewhereDestination: given, channels: map }), ['REPLY #5 to principal', called('principal')].join('\n\n'));
+  assert.equal(task({ history: nameless, elsewhereDestination: { name: '' }, channels: map }), ['REPLY #5 to carte-générale', called('carte-générale')].join('\n\n'));
+  assert.equal(task({ history: nameless }), 'REPLY #5 to ', 'no name anywhere: an empty destination and no called text');
+});
+
+test('buildRequest: a pulled record of the turn\'s own channel is ignored', () => {
+  const history = [destMessage('d1', NOW - 5 * MIN), destMessage('d2', NOW - MIN)];
+  const own = pulledChannel({ channelId: DEST, channelName: 'général', messages: history });
+  const request = buildRequest(baseInput({ history, pulled: [own], currentChannelId: DEST }));
+  assert.equal(bodyOf(userText(request), 'channel_view'), null);
+  assert.deepEqual(request.pulledIds, new Map());
+  assert.deepEqual([...request.idByIndex], [[1, 'd1'], [2, 'd2']]);
+  assert.deepEqual(request.pulledKept, []);
+  assert.deepEqual(request.stats.pulled, { used: 0, kept: 0, dropped: 0, lines: 0, linesCut: 0 });
+});
+
+test('buildRequest: tempo on a routed turn is measured to now and never says nobody answered the persona', () => {
+  const history = [destMessage(1, NOW - 15 * MIN), destMessage(2, NOW - 10 * MIN, { self: true })];
+  const request = buildRequest(routedInput({ history }));
+  assert.equal(request.tempo.hasTrigger, false);
+  assert.equal(request.tempo.silenceMs, 10 * MIN);
+  const tempo = bodyOf(userText(request), 'tempo');
+  assert.ok(tempo.includes(fill(labels.tempo.lastMessageAgo, { duration: formatDuration(10 * MIN, labels.units) })), tempo);
+  assert.ok(!tempo.includes(labels.tempo.ownUnanswered));
+  assert.ok(!tempo.includes('before the message that called you'));
+  // The same chat on a spontaneous turn does say it: the routed turn alone leaves it out.
+  const spontaneous = bodyOf(userText(buildRequest(baseInput({ history, mode: 'interject' }))), 'tempo');
+  assert.ok(spontaneous.includes(labels.tempo.ownUnanswered));
+});
+
+test('buildRequest: mode elsewhere uses prompts.elsewhere with channel and destination', () => {
+  const prompts = fakePrompts({ elsewhere: 'ELSEWHERE_TASK {{name}} read {{channel}} and may speak in {{destination}}' });
+  const request = buildRequest(
+    baseInput({
+      prompts,
+      mode: 'elsewhere',
+      history: [destMessage(1, NOW - 50 * MIN)],
+      currentChannelId: DEST,
+      pulled: [pulledChannel({ reason: 'noticed', readOnly: true })],
+      source: { channelId: SRC, reason: 'noticed' },
+      elsewhereDestination: { name: 'général' },
+    }),
+  );
+  assert.equal(bodyOf(userText(request), 'task'), 'ELSEWHERE_TASK Nept read journal-de-zoé and may speak in général');
+});
+
+test('buildRequest: a focus line appends labels.room.focus with its index', () => {
+  const history = [destMessage(1, NOW - 3 * MIN), destMessage(2, NOW - 2 * MIN, { authorName: 'Léa', content: 'qui vient ce soir ?' }), destMessage(3, NOW - MIN)];
+  const task = (overrides) => bodyOf(userText(buildRequest(baseInput({ history, mode: 'interject', ...overrides }))), 'task');
+  assert.equal(task({ focus: history[1] }), ['INTERJECT_TASK for Nept', fill(labels.room.focus, { author: 'Léa', target: '#2' })].join('\n\n'));
+  assert.equal(task({ focus: destMessage(99, NOW - 90 * MIN) }), 'INTERJECT_TASK for Nept', 'a focus outside the chat adds nothing');
+  const { room, ...noRoom } = labels;
+  assert.equal(task({ focus: history[1], prompts: fakePrompts({ labels: noRoom }) }), 'INTERJECT_TASK for Nept');
+});
+
+test('buildRequest: server lists the pulled channel and marks read-only channels', () => {
+  const channels = [
+    fakeChannel(DEST, { name: 'général' }),
+    fakeChannel('n1', { name: 'random' }),
+    fakeChannel('n2', { name: 'annonces' }),
+    fakeChannel(SRC, { name: 'journal-de-zoé' }),
+  ];
+  const neighbors = [
+    { channelId: 'n1', channelName: 'random', messages: [makeMessage(8, NOW - 5 * MIN)] },
+    { channelId: 'n2', channelName: 'annonces', messages: [makeMessage(9, NOW - 4 * MIN)] },
+  ];
+  const request = buildRequest(
+    baseInput({
+      history: [destMessage(1, NOW - MIN)],
+      channels,
+      neighbors,
+      currentChannelId: DEST,
+      pulled: [pulledChannel({ readOnly: true })],
+      readOnlyIds: new Set(['n2', DEST]),
+    }),
+  );
+  const entries = bodyOf(userText(request), 'server').split('\n\n');
+  assert.deepEqual(
+    entries.map((entry) => entry.split('\n')[0]),
+    [`# général${labels.server.currentMark}`, '# journal-de-zoé', '# random', '# annonces'],
+    'the current channel, then the pulled one, then the neighbours',
+  );
+  const marked = entries.filter((entry) => entry.includes(labels.server.readOnly)).map((entry) => entry.split('\n')[0]);
+  assert.deepEqual(marked, ['# journal-de-zoé', '# annonces'], 'never the current channel');
+});
+
+test('buildRequest: a pulled channel is left out of other_channels', () => {
+  const neighbors = [
+    { channelId: SRC, channelName: 'journal-de-zoé', messages: [pulledMessage('p2', NOW - 120 * MIN)] },
+    { channelId: 'n1', channelName: 'random', messages: [makeMessage(9, NOW - 5 * MIN)] },
+  ];
+  const text = userText(buildRequest(baseInput({ neighbors, pulled: [pulledChannel()] })));
+  const others = bodyOf(text, 'other_channels');
+  assert.ok(others.startsWith('# random'), others);
+  assert.ok(!others.includes('journal-de-zoé'));
+});
+
+test('buildRequest: senses carry the channels line on server turns and the elsewhere line only with a destination', () => {
+  const lines = (overrides) => sensesOf(buildRequest(baseInput(overrides))).split('\n');
+  const plain = lines({});
+  assert.equal(plain[plain.indexOf(labels.senses.files) + 1], labels.senses.channels, 'right after the files line');
+  assert.ok(!plain.some((line) => line.startsWith('read-only channels')));
+
+  const withDestination = lines({ elsewhereDestination: { name: 'général' }, config: fakeConfig({ features: { privateMessages: true } }) });
+  const at = withDestination.indexOf(labels.senses.channels);
+  assert.deepEqual(withDestination.slice(at, at + 3), [
+    labels.senses.channels,
+    fill(labels.senses.elsewhere, { destination: 'général' }),
+    labels.senses.privateAware,
+  ]);
+
+  const privateLines = sensesOf(buildRequest(privateScene({ elsewhereDestination: { name: 'général' } }))).split('\n');
+  assert.ok(!privateLines.includes(labels.senses.channels));
+  assert.ok(!privateLines.some((line) => line.startsWith('read-only channels')));
+
+  const { channels, elsewhere, ...olderSenses } = labels.senses;
+  const older = lines({ elsewhereDestination: { name: 'général' }, prompts: fakePrompts({ labels: { ...labels, senses: olderSenses } }) });
+  assert.equal(older.at(-1), labels.senses.files, 'an older labels.json adds no line');
+});
+
+test('buildRequest: a private chat ignores pulled input', () => {
+  const extra = {
+    pulled: [pulledChannel()],
+    source: { channelId: SRC, reason: 'routed' },
+    focus: makeMessage(1, NOW - MIN),
+    readOnlyIds: new Set([SRC]),
+  };
+  const plain = buildRequest(privateScene());
+  const pulled = buildRequest(privateScene(extra));
+  assert.deepEqual(pulled.messages, plain.messages);
+  assert.deepEqual(pulled.idByIndex, plain.idByIndex);
+  assert.deepEqual(pulled.pulledIds, new Map());
+  assert.ok(!userText(pulled).includes('<channel_view>'));
+});
+
+test('buildRequest: textFallback re-renders pulled lines without attachment markers', () => {
+  // The same sticker in the chat's trigger and in a pulled line: one item id (`sticker:s1`),
+  // attached for the chat, never marked attached on the pulled line.
+  const sticker = { id: 's1', name: 'gâteau', format: 1, url: 'https://media.discordapp.net/stickers/s1.png?size=160' };
+  const trigger = destMessage(1, NOW - MIN, { attachments: [{ id: 'i1', kind: 'image', url: 'https://cdn/i1.png', name: 'i1.png' }], stickers: [sticker] });
+  const pulled = pulledChannel({
+    messages: [
+      pulledMessage('p1', NOW - 30 * MIN, { attachments: [{ id: 'pi1', kind: 'image', url: 'https://cdn/pi1.png', name: 'pi1.png' }] }),
+      pulledMessage('p2', NOW - 20 * MIN, { attachments: [{ id: 'pi2', kind: 'image', url: 'https://cdn/pi2.png', name: 'pi2.png' }], stickers: [sticker] }),
+    ],
+    descriptions: new Map([['pi1', 'un chat endormi']]),
+  });
+  const config = fakeConfig({ context: { vision: { maxImages: 4, tokensPerImage: 400, imageSize: 512, recentImages: 3, recentImageMinutes: 60 } } });
+  const request = buildRequest(baseInput({ config, history: [trigger], trigger, triggerKind: 'mention', pulled: [pulled], currentChannelId: DEST }));
+  assert.deepEqual(request.pictures.map((picture) => picture.itemId), ['i1', 'sticker:s1'], 'only the chat\'s pictures are attached');
+  const stickerTag = fill(labels.transcript.sticker, { name: 'gâteau' });
+  const chat = bodyOf(userText(request), 'chat');
+  assert.ok(chat.includes(fill(labels.transcript.imageAttached, { n: 1 })), chat);
+  assert.ok(chat.includes(`${stickerTag} ${fill(labels.transcript.frameAttached, { n: 2 })}`), chat);
+  const view = bodyOf(userText(request), 'channel_view');
+  assert.ok(view.includes(fill(labels.transcript.imageDescribed, { text: 'un chat endormi' })), view);
+  assert.ok(view.split('\n').at(-1).endsWith(`Zoé: content of message p2 ${labels.transcript.image} ${stickerTag}`), view);
+  assert.ok(!view.includes('attached'), view);
+  assert.equal(bodyOf(request.textFallback, 'channel_view'), view);
+  assert.ok(!bodyOf(request.textFallback, 'chat').includes('attached'));
+});
+
+test('buildRequest: a routed trigger\'s pictures are not attached, nor any pulled picture', () => {
+  const picture = { id: 'tp1', kind: 'image', url: 'https://cdn/tp1.png', name: 'tp1.png' };
+  const config = fakeConfig({ context: { vision: { maxImages: 4, tokensPerImage: 400, imageSize: 512, recentImages: 3, recentImageMinutes: 60 } } });
+  const base = routedInput();
+  const trigger = { ...base.trigger, attachments: [picture] };
+  const pulled = { ...base.pulled[0], messages: [...base.pulled[0].messages.slice(0, -1), trigger], descriptions: new Map([['tp1', 'une affiche']]) };
+  const request = buildRequest({ ...base, config, trigger, pulled: [pulled] });
+  assert.equal(typeof request.messages[1].content, 'string', 'no image part at all');
+  assert.deepEqual(request.pictures, []);
+  assert.equal(request.stats.images, 0);
+  assert.ok(bodyOf(userText(request), 'channel_view').includes(fill(labels.transcript.imageDescribed, { text: 'une affiche' })));
+});
+
+test('buildRequest: ping marks come from pingState', () => {
+  const messages = ['p1', 'p2', 'p3', 'p4', 'p5'].map((id, i) => pulledMessage(id, NOW - (50 - i) * MIN, { content: `ligne ${id}` }));
+  const pingState = new Map([['p1', 'answered'], ['p2', 'unanswered'], ['p3', 'skipped'], ['p5', 'unanswered']]);
+  const trigger = messages[4];
+  const lineOf = (view, id) => view.split('\n').find((line) => line.includes(`ligne ${id}`));
+  const view = bodyOf(
+    userText(buildRequest(baseInput({ pulled: [pulledChannel({ messages, pingState })], trigger, triggerKind: 'mention', source: { channelId: SRC, reason: 'routed' } }))),
+    'channel_view',
+  );
+  assert.ok(lineOf(view, 'p1').endsWith(`ligne p1 ${labels.pull.pingAnswered}`));
+  assert.ok(lineOf(view, 'p2').endsWith(`ligne p2 ${labels.pull.pingUnanswered}`));
+  assert.ok(lineOf(view, 'p3').endsWith(`ligne p3 ${labels.pull.pingSkipped}`));
+  assert.ok(lineOf(view, 'p4').endsWith('ligne p4'));
+  assert.ok(lineOf(view, 'p5').endsWith('ligne p5'), 'never on the trigger');
+
+  const { pingSkipped, ...noSkipped } = labels.pull;
+  const older = bodyOf(userText(buildRequest(baseInput({ pulled: [pulledChannel({ messages, pingState })], prompts: fakePrompts({ labels: { ...labels, pull: noSkipped } }) }))), 'channel_view');
+  assert.ok(lineOf(older, 'p3').endsWith('ligne p3'), 'a skipped call without its label is never shown as unanswered');
+
+  // Only a Map is read (what src/discord/pull-fetch.js builds).
+  const plainObject = bodyOf(userText(buildRequest(baseInput({ pulled: [pulledChannel({ messages, pingState: Object.fromEntries(pingState) })] }))), 'channel_view');
+  for (const mark of [labels.pull.pingAnswered, labels.pull.pingUnanswered, labels.pull.pingSkipped]) assert.ok(!plainObject.includes(mark), mark);
+});
+
+test('buildRequest: earlier calls render under labels.pull.earlierPings ahead of the window, the header spanning the window', () => {
+  const earlier = pulledMessage('e1', NOW - 3 * 24 * HOUR, { authorId: 'u7', authorName: 'Ana', content: 'tu es là ?' });
+  const messages = [earlier, pulledMessage('p1', NOW - 30 * MIN), pulledMessage('p2', NOW - 20 * MIN)];
+  const pulled = pulledChannel({ messages, earlierPingIds: new Set(['e1']), pingState: new Map([['e1', 'unanswered']]) });
+  const request = buildRequest(baseInput({ pulled: [pulled] }));
+  const view = bodyOf(userText(request), 'channel_view').split('\n');
+  assert.equal(view[0], fill(labels.pull.header, { channel: 'journal-de-zoé', from: moment(NOW - 30 * MIN), to: moment(NOW - 20 * MIN), ago: formatDuration(20 * MIN, labels.units) }));
+  assert.equal(view[1], fill(labels.pull.earlierPings, { date: formatDate(NOW - 3 * 24 * HOUR, TZ, labels.locale) }));
+  assert.ok(view[2].startsWith('#2 [') && view[2].endsWith(`Ana: tu es là ? ${labels.pull.pingUnanswered}`), view[2]);
+  assert.ok(view.slice(3).join('\n').includes('#3 ['), 'the window follows, numbered on');
+  assert.deepEqual(request.pulledKept, [{ channelId: SRC, ids: ['e1', 'p1', 'p2'], newestId: 'p2', newestTs: NOW - 20 * MIN }]);
+});
+
+test('buildRequest: authors of pulled lines join <people> as asked-about profiles under context.askedAboutProfiles', () => {
+  const messages = [
+    pulledMessage('p1', NOW - 40 * MIN, { authorId: 'w1', authorName: 'Zoé' }),
+    pulledMessage('p2', NOW - 35 * MIN, { authorId: 'bot1', authorName: 'Robot', bot: true }),
+    pulledMessage('p3', NOW - 30 * MIN, { authorId: 'me', authorName: 'Nept', self: true }),
+    pulledMessage('p4', NOW - 20 * MIN, { authorId: 'w2', authorName: 'Björn' }),
+  ];
+  const zoe = { id: 'w1', names: ['Zoé'], character: 'rêveuse', style: 'ZOE_STYLE' };
+  const bjorn = { id: 'w2', names: ['Björn'], character: 'calme', style: 'BJORN_STYLE' };
+  const robot = { id: 'bot1', names: ['Robot'], character: 'ROBOT' };
+  const self = { id: 'me', names: ['Nept'], character: 'SELF' };
+  const people = (overrides) =>
+    bodyOf(
+      userText(buildRequest(baseInput({ pulled: [pulledChannel({ messages })], candidateProfiles: [zoe, bjorn, robot, self], ...overrides }))),
+      'people',
+    ) ?? '';
+
+  const shown = people({});
+  assert.ok(shown.includes('ZOE_STYLE') && shown.includes('BJORN_STYLE'), 'rendered in full');
+  assert.ok(shown.indexOf('## Björn') < shown.indexOf('## Zoé'), 'the newest line\'s author first');
+  assert.ok(!shown.includes('ROBOT') && !shown.includes('SELF'));
+
+  const capped = people({ config: fakeConfig({ context: { askedAboutProfiles: 1 } }) });
+  assert.ok(capped.includes('## Björn') && !capped.includes('## Zoé'));
+  assert.equal(people({ config: fakeConfig({ context: { askedAboutProfiles: 0 } }) }), '');
+
+  // A participant of the chat who also wrote there is promoted to a full profile; the interlocutor is never repeated.
+  const trigger = destMessage(1, NOW - MIN, { authorId: 'w1', authorName: 'Zoé' });
+  const promoted = people({ history: [destMessage(2, NOW - 2 * MIN, { authorId: 'w2' }), trigger], trigger, triggerKind: 'mention', interlocutor: zoe, otherProfiles: [bjorn] });
+  assert.equal((promoted.match(/## Zoé/g) ?? []).length, 1);
+  assert.ok(promoted.includes('BJORN_STYLE'));
+});
+
+test('buildRequest: missing pull labels degrade without throwing', () => {
+  const pulled = pulledChannel({ readOnly: true, olderNotShown: true, picturesNotSeen: 2, earlierPingIds: new Set(['p1']), pingState: new Map([['p2', 'answered']]) });
+  const { pull, ...noPull } = labels;
+  const none = buildRequest(baseInput({ pulled: [pulled], prompts: fakePrompts({ labels: noPull }) }));
+  assert.ok(!userText(none).includes('<channel_view>'));
+  assert.deepEqual(none.pulledIds, new Map());
+  assert.equal(none.idByIndex.size, 1);
+
+  const headerOnly = { ...labels, pull: { header: labels.pull.header }, server: { ...labels.server, readOnly: undefined } };
+  const view = bodyOf(userText(buildRequest(baseInput({ pulled: [pulled], prompts: fakePrompts({ labels: headerOnly }) }))), 'channel_view').split('\n');
+  assert.equal(view.length, 3, view.join('\n'));
+  assert.ok(view[0].startsWith('channel #journal-de-zoé'));
+  assert.ok(view[1].endsWith('Zoé: πρώτη σελίδα'), 'an earlier call without its heading');
+  assert.ok(view[2].endsWith('Zoé: δεύτερη σελίδα'), 'an answered call without its mark');
+  assert.ok(!view.join('\n').includes('undefined'));
 });
