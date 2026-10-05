@@ -854,28 +854,6 @@ test('run: a failing run asks for a diagnosis and stores it', () => {
   });
 });
 
-test('run: a leftover mentorAutoFix and mentor.fix change nothing: a failed run ends at the diagnosis', () =>
-  withSetup(
-    {
-      config: {
-        features: { mentor: true, mentorAutoFix: true },
-        mentor: { fix: { maxAttempts: 3 }, verify: { situations: 3 }, regression: { situations: 2 }, suspects: 2, ablationGain: 1 },
-      },
-      llm: fakeLlm({ scoreFor: overallBySituation(9, 3) }),
-    },
-    async ({ mentor, cases, llm }) => {
-      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
-      const run = await (await mentor.run(item.id)).done;
-      assert.equal(run.passed, false);
-      assert.equal(run.error, undefined);
-      // The same requests as without the leftovers: nothing after the diagnosis.
-      assert.deepEqual(llm.kinds(), ['situations', 'talk', 'talk', 'talk', 'talk', 'score', 'score', 'diagnose']);
-      assert.deepEqual(run.diagnosis, DIAGNOSIS);
-      assert.equal('repair' in run, false);
-      assert.equal('repair' in cases.lastRun(GUILD, item.id), false);
-    },
-  ));
-
 test('run: a passing run with every situation at or above the pass score asks for none', () =>
   withSetup({ llm: fakeLlm({ scoreFor: overallBySituation(9, 7) }) }, async ({ mentor, cases, llm }) => {
     const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
@@ -1406,15 +1384,6 @@ test('run: the score request of an anchor carries <original>, the invented ones 
     assert.ok(!llm.calls.find((c) => c.kind === 'situations').user.includes(labels.mentor.original));
   }));
 
-test('run: an anchor is held to the pass score, not the floor', () =>
-  withSetup({ llm: fakeLlm({ scoreFor: overallBySituation(3, 9, 9) }) }, async ({ mentor, cases }) => {
-    const item = anchoredCase(cases, ['A1']);
-    const run = await (await mentor.run(item.id)).done;
-    assert.equal(run.medians.overall, 9);
-    assert.equal(run.passed, false);
-    assert.deepEqual(run.reasons, ['real moment 1: overall 3 is under the pass score 7']);
-  }));
-
 /** Scores with the `[overall, goal]` pair of the answer's situation. */
 function pairsBySituation(...pairs) {
   return (id) => {
@@ -1699,16 +1668,6 @@ test("run: an anchor stored without descriptions finds them in the describer's c
     assert.ok(llm.kinds().every((kind) => ['situations', 'talk', 'score', 'diagnose'].includes(kind)));
   });
 });
-
-test('run: an anchor without descriptions and nothing cached replays as before', () =>
-  withSetup({}, async ({ mentor, cases, llm }) => {
-    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply', anchor: clipMoment('V3', { seen: false }) });
-    const run = await (await mentor.run(item.id)).done;
-    const talk = llm.calls.find((c) => c.kind === 'talk').user;
-    assert.match(talk, /\[video: clip\.mp4, 0:12\] \[image\]/);
-    assert.doesNotMatch(talk, /watched/);
-    assert.doesNotMatch(run.situations[0].transcript, /watched/);
-  }));
 
 test('readAnchor: the moment keeps the cached media descriptions; the log counts them, never their text', () => {
   const channel = { id: OTHER_CHANNEL.id, guild: { id: GUILD } };

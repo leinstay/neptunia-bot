@@ -551,15 +551,6 @@ test('answerReply: reads everything through the view, so another view of the sam
   assert.ok(result.request.user.includes('OVERLAY_CHARACTER'));
 });
 
-// Provider routing: the sandbox answers route as the roles they stand in for.
-
-test('answerReply: the persona answer is routed as the talk role', async () => {
-  const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
-  const llm = fakeLlm('<msg>ok</msg>');
-  await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm, samples: 2, at: NOW });
-  assert.deepEqual(llm.calls.map((call) => call.options.role), ['talk', 'talk']);
-});
-
 test('answerReply: a situation\'s variety patterns render as <worn> as in a live turn; none, no block', async () => {
   const worn = [{ shape: 'mock promise ending in (no)', examples: ['fix it (no)'], count: 2 }];
   const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });

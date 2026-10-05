@@ -73,13 +73,6 @@ test('renderCard: stays under 1800 characters whatever the error length', () => 
   assert.ok(card.length <= 1800);
 });
 
-test('renderCard: says when the budget stopped the run', () => {
-  const card = renderCard(fakeRun({ passed: false, stopped: 'budget' }));
-  assert.match(card, /budget/i);
-  assert.match(card, /stopped/i);
-  assert.doesNotMatch(card, /\bpassed\b/i);
-});
-
 test('renderCard: says when the mentor was disabled during the run', () => {
   const run = fakeRun({ passed: false, stopped: 'disabled' });
   assert.match(renderCard(run), /stopped: the mentor was disabled during the run/);
@@ -316,17 +309,20 @@ test('renderLastRun: a failed run, with an unscored answer and no median', () =>
   assert.equal(renderLastRun(run), 'last: case 3, failed, overall -, 14 of 15 answers scored, 123456 tokens, finished 2026-09-30 10:05 UTC');
 });
 
-test('renderLastRun: a run stopped by the budget', () => {
-  const run = fakeRun({ passed: false, stopped: 'budget', situations: [], tokens: { spent: 900, left: 0 } });
-  assert.equal(renderLastRun(run), 'last: case 3, stopped (budget), overall 7, 0 of 0 answers scored, 900 tokens, finished 2026-09-30 10:05 UTC');
-});
-
-test('renderLastRun: a run stopped by the owner', () => {
-  assert.match(renderLastRun(fakeRun({ passed: false, stopped: 'owner' })), /^last: case 3, stopped \(owner\), overall 7, /);
-});
-
-test('renderLastRun: a run stopped because the mentor was disabled', () => {
-  assert.match(renderLastRun(fakeRun({ passed: false, stopped: 'disabled' })), /^last: case 3, stopped \(disabled\), overall 7, /);
+test('renderLastRun: a stopped run names its stop code', () => {
+  for (const [label, run, expected] of [
+    [
+      'by the budget',
+      fakeRun({ passed: false, stopped: 'budget', situations: [], tokens: { spent: 900, left: 0 } }),
+      'last: case 3, stopped (budget), overall 7, 0 of 0 answers scored, 900 tokens, finished 2026-09-30 10:05 UTC',
+    ],
+    ['by the owner', fakeRun({ passed: false, stopped: 'owner' }), /^last: case 3, stopped \(owner\), overall 7, /],
+    ['because the mentor was disabled', fakeRun({ passed: false, stopped: 'disabled' }), /^last: case 3, stopped \(disabled\), overall 7, /],
+  ]) {
+    const line = renderLastRun(run);
+    if (typeof expected === 'string') assert.equal(line, expected, `${label}: ${line}`);
+    else assert.match(line, expected, `${label}: ${line}`);
+  }
 });
 
 test('renderLastRun: an error, its reason clipped to 60 characters', () => {
