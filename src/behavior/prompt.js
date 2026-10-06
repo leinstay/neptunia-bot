@@ -700,20 +700,50 @@ function gifItems(gifs, mediaCache, labels, gifsCfg, now) {
   const g = labels.gifs;
   if (!g?.header || !g.entryNoText) return [];
   const max = Number.isInteger(gifsCfg?.max) && gifsCfg.max >= 0 ? gifsCfg.max : 40;
-  const listChars = gifsCfg?.listChars ?? 70;
-  const ownMarkHours = gifsCfg?.ownMarkHours ?? 24;
-  const markOn = Boolean(g.ownMark && labels.units) && Number.isFinite(ownMarkHours) && ownMarkHours > 0;
+  const options = { listChars: gifsCfg?.listChars ?? 70, ownMarkHours: gifsCfg?.ownMarkHours ?? 24, now };
   const chosen = rankGifs(gifs, gifsCfg?.halfLifeDays ?? 30).slice(0, max);
   if (chosen.length === 0) return [];
-  const lines = chosen.map((entry) => {
-    const cached = mediaCache?.[entry.itemId];
-    const text = cached && !cached.miss && typeof cached.text === 'string' ? clampText(cached.text, listChars, { tolerance: 1 }) : '';
-    const line = text && g.entry ? fill(g.entry, { id: entry.id, text }) : fill(g.entryNoText, { id: entry.id });
-    const age = Math.max(0, now - entry.ownLast);
-    if (!markOn || !(entry.ownLast > 0) || age > ownMarkHours * HOUR_MS) return line;
-    return `${line} ${fill(g.ownMark, { ago: formatDuration(age, labels.units) })}`;
-  });
-  return [g.header, ...lines];
+  return [g.header, ...chosen.map((entry) => gifLine(entry, mediaCache, labels, options))];
+}
+
+/**
+ * The caption of a GIF library entry: the helper caption cached under its
+ * `itemId` (the describer's cache; a `miss` entry has none), cut to
+ * `listChars` (0 = whole) at a word boundary (src/memory/clamp.js#clampText,
+ * a hard limit); '' when there is none. Pure.
+ * @param {{ itemId: string }} entry
+ * @param {object|null} mediaCache  The describer cache (store.getMediaCache), read only.
+ * @param {number} listChars
+ * @returns {string}
+ */
+export function gifCaption(entry, mediaCache, listChars) {
+  const cached = mediaCache?.[entry?.itemId];
+  return cached && !cached.miss && typeof cached.text === 'string' ? clampText(cached.text, listChars, { tolerance: 1 }) : '';
+}
+
+/**
+ * One line of a GIF library entry, as the `<gifs>` section shows it (gifItems)
+ * and the GIF picker lists it (src/behavior/gif-pick.js#renderGifLibrary): its
+ * caption (gifCaption) through `labels.gifs.entry` (`{id}`/`{text}`), else
+ * `labels.gifs.entryNoText` (`{id}`); a GIF the persona itself posted
+ * (`ownLast`) no longer than `ownMarkHours` (0 = never) before `now` gets
+ * ` ` + `labels.gifs.ownMark` appended, `{ago}` = that time through
+ * formatDuration (`labels.units`); no mark without that label. The caller
+ * checks that `labels.gifs` carries `entryNoText`. Pure.
+ * @param {{ id: string, itemId: string, ownLast?: number }} entry
+ * @param {object|null} mediaCache
+ * @param {object} labels
+ * @param {{ listChars: number, ownMarkHours: number, now: number }} options
+ * @returns {string}
+ */
+export function gifLine(entry, mediaCache, labels, { listChars, ownMarkHours, now }) {
+  const g = labels.gifs;
+  const text = gifCaption(entry, mediaCache, listChars);
+  const line = text && g.entry ? fill(g.entry, { id: entry.id, text }) : fill(g.entryNoText, { id: entry.id });
+  const markOn = Boolean(g.ownMark && labels.units) && Number.isFinite(ownMarkHours) && ownMarkHours > 0;
+  const age = Math.max(0, now - entry.ownLast);
+  if (!markOn || !(entry.ownLast > 0) || age > ownMarkHours * HOUR_MS) return line;
+  return `${line} ${fill(g.ownMark, { ago: formatDuration(age, labels.units) })}`;
 }
 
 /**

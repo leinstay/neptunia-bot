@@ -27,6 +27,7 @@ import { DailyCapError, TokenLimitError } from '../src/llm/openrouter.js';
 import { createVarietyPass } from '../src/behavior/variety-pass.js';
 import { pingStatus } from '../src/behavior/elsewhere.js';
 import { PAGE } from '../src/discord/collect.js';
+import { findGif } from '../src/memory/gifs.js';
 
 function rngReturning(value) {
   return () => value;
@@ -7172,4 +7173,196 @@ test('runTurn: the judge runs alongside the first message\'s typing time, which 
   const waited = fast.sendTimes[0] - fast.of('pattern-check')[0].at;
   assert.ok(waited >= 140 && waited < 270, `the typing time, not more (${waited} ms)`);
   assert.equal(fast.channel.sent.length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// The GIF picker (src/behavior/gif-pick.js): a short reply is shown with the
+// WHOLE captioned library to one classifier request; a handle it names is
+// posted instead of the text.
+
+const GIF_PICK_PROMPT = 'Pick a GIF for what {{name}} wrote.';
+const PICK_LIBRARY_SIZE = 50;
+const PICK_SETTINGS = { maxChars: 20, contextMessages: 2, maxOutputTokens: 17 };
+
+/**
+ * A library of PICK_LIBRARY_SIZE link GIFs, every one captioned: g1 the most used, g50 used
+ * once long ago (it never makes a top slice), so a pick of g50 proves the whole library is shown.
+ */
+function pickLibrary() {
+  const entries = {};
+  const mediaCache = {};
+  for (let i = 1; i <= PICK_LIBRARY_SIZE; i += 1) {
+    entries[`k${i}`] = { id: `g${i}`, kind: 'link', url: `https://tenor.com/view/gif-${i}`, itemId: `item-${i}`, messageId: `m-${i}`, channelId: 'c1', count: PICK_LIBRARY_SIZE + 1 - i, last: NOW - i * 3_600_000 };
+    mediaCache[`item-${i}`] = { text: `λεζάντα ${i}` };
+  }
+  return { gifs: { nextId: PICK_LIBRARY_SIZE + 1, entries }, mediaCache };
+}
+
+/** fakeStore with pickLibrary (or `library`), the real findGif over it and the own-post stamps recorded. */
+function pickStore({ library = pickLibrary(), data = {} } = {}) {
+  const store = fakeStore({ mediaCache: library.mediaCache });
+  store.state = { data, markDirty() {} };
+  store.getGifs = () => library.gifs;
+  store.findGif = (guildId, handle) => findGif(library.gifs, handle);
+  store.ownGifs = [];
+  store.recordOwnGif = (guildId, key, ts) => store.ownGifs.push({ guildId, key, ts });
+  return store;
+}
+
+/** A fake LLM answering the turn with `reply` and the picker with `pick` (a function may wait or throw). */
+function pickLlm({ reply, pick = 'none' }) {
+  const calls = [];
+  return {
+    calls,
+    complete: async (messages, options) => {
+      calls.push({ messages, options });
+      const answer = options?.purpose === 'gif-pick' ? pick : reply;
+      return { text: typeof answer === 'function' ? await answer() : answer, usage: {}, estimated: 10 };
+    },
+  };
+}
+
+/** The two chat lines of a picker turn: an older one, then the trigger. */
+function pickHistory() {
+  return [rawMessage({ id: 'm0', ts: NOW - 5000, content: 'καλημέρα' }), rawMessage({ id: 'm1', ts: NOW - 1000, content: 'θα έρθεις απόψε;' })];
+}
+
+/** A hot config for the picker: its prompt, its own gifs values, the guard off unless `features` turns it on. */
+function pickHot({ features = {}, prompts = {}, pickSettings = PICK_SETTINGS, maxPerDay = 40, typing = null } = {}) {
+  const hot = fakeHot(
+    { typingSimulation: typing !== null, patternGuard: false, fillerGuard: false, ...features },
+    {},
+    {
+      gifs: { maxPerDay, listChars: 70, ownMarkHours: 24, halfLifeDays: 30, pick: pickSettings },
+      classifier: { text: 'cheap/classifier' },
+      ...(typing ? { typing: { reactionDelayMs: [0, 0], betweenMessagesMs: [0, 0], ...typing } } : {}),
+    },
+  );
+  Object.assign(hot.prompts, { 'gif-pick': GIF_PICK_PROMPT }, prompts);
+  for (const [name, text] of Object.entries(prompts)) if (text === null) delete hot.prompts[name];
+  return hot;
+}
+
+async function runPickTurn({ reply = '<msg reply="#2">ναι, φυσικά, έλα</msg>', pick = 'none', store = pickStore(), typing = null, ...hotOptions } = {}) {
+  const raws = pickHistory();
+  const channel = fakeTurnChannel({ historyMessages: raws });
+  const sendTimes = [];
+  const send = channel.send;
+  channel.send = async (payload) => {
+    sendTimes.push(Date.now());
+    return send(payload);
+  };
+  const llm = pickLlm({ reply, pick });
+  const turns = createTurnRunner({ hot: pickHot({ ...hotOptions, typing }), store, llm, calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW });
+  const { result, logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raws.at(-1)), triggerKind: 'mention' }));
+  const picks = llm.calls.filter((call) => call.options?.purpose === 'gif-pick');
+  const sent = () => channel.sent.map((payload) => payload.content);
+  return { result, logs, channel, picks, store, sent, sendTimes };
+}
+
+test('runTurn: a short reply is shown with the whole captioned library; a picked handle posts that GIF and no text', async () => {
+  const { result, logs, channel, picks, store, sent } = await runPickTurn({ pick: ' G50 ' });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(picks.length, 1, 'one pick request');
+  const [system, user] = picks[0].messages;
+  assert.deepEqual(system, { role: 'system', content: 'Pick a GIF for what Bot wrote.' });
+  const blocks = user.content.split('\n\n');
+  assert.equal(blocks.length, 3);
+  assert.match(blocks[0], /^<context>\n[\s\S]*καλημέρα[\s\S]*θα έρθεις απόψε;\n<\/context>$/, 'the last contextMessages lines as the transcript renders them');
+  assert.equal(blocks[1], '<reply>\nναι, φυσικά, έλα\n</reply>');
+  const gifLines = blocks[2].replace(/^<gifs>\n/, '').replace(/\n<\/gifs>$/, '').split('\n');
+  assert.equal(gifLines.length, PICK_LIBRARY_SIZE, 'the whole library, not a top slice');
+  assert.deepEqual([gifLines[0], gifLines.at(-1)], ['g1 -- λεζάντα 1', 'g50 -- λεζάντα 50'], 'in rank order');
+  const { options } = picks[0];
+  assert.deepEqual([options.role, options.purpose, options.maxOutputTokens, options.model, options.countAgainstDailyCap], ['classifier.text', 'gif-pick', 17, 'cheap/classifier', true]);
+
+  assert.deepEqual(sent(), ['https://tenor.com/view/gif-50'], 'the GIF, no text');
+  assert.equal(channel.sent[0].reply.messageReference, 'm1', 'replying where the first message would have');
+  assert.deepEqual(store.ownGifs, [{ guildId: 'g1', key: 'k50', ts: NOW }]);
+  assert.equal(store.state.data.gifCount, 1, 'counted against gifs.maxPerDay');
+  const picked = logs.find((entry) => entry.msg === 'gifs: picked');
+  assert.deepEqual([picked.channel, picked.handle, picked.library], ['c1', true, PICK_LIBRARY_SIZE]);
+  assert.equal(JSON.stringify(logs.filter((entry) => entry.msg.startsWith('gifs:'))).includes('λεζάντα'), false, 'counts only');
+});
+
+test('runTurn: the picker leaves out uncaptioned GIFs and acts only on a listed handle', async () => {
+  const library = pickLibrary();
+  delete library.mediaCache['item-7'];
+  const { picks, sent, logs } = await runPickTurn({ store: pickStore({ library }), pick: 'g7' });
+  assert.equal(picks[0].messages[1].content.includes('g7 --'), false, 'g7 has no caption');
+  assert.deepEqual(sent(), ['ναι, φυσικά, έλα'], 'an unlisted handle posts the text');
+  const picked = logs.find((entry) => entry.msg === 'gifs: picked');
+  assert.deepEqual([picked.handle, picked.library], [false, PICK_LIBRARY_SIZE - 1]);
+});
+
+test('runTurn: the picker answering none or something unreadable posts the text', async () => {
+  for (const pick of ['none', 'g3 maybe']) {
+    const { picks, sent, logs } = await runPickTurn({ pick });
+    assert.equal(picks.length, 1, pick);
+    assert.deepEqual(sent(), ['ναι, φυσικά, έλα'], pick);
+    assert.equal(logs.find((entry) => entry.msg === 'gifs: picked').handle, false, pick);
+  }
+});
+
+test('runTurn: a failed pick request logs gifs: pick failed and posts the text', async () => {
+  const { sent, logs } = await runPickTurn({
+    pick: () => {
+      throw Object.assign(new Error('upstream'), { statusCode: 503 });
+    },
+  });
+  assert.deepEqual(sent(), ['ναι, φυσικά, έλα']);
+  assert.equal(logs.find((entry) => entry.msg === 'gifs: pick failed').status, 503);
+});
+
+test('runTurn: no pick for a reply over maxChars or a turn posting its own GIF', async () => {
+  const long = await runPickTurn({ reply: '<msg>ναι, φυσικά, έλα απόψε</msg>', pick: 'g1' });
+  assert.equal(long.picks.length, 0, 'over maxChars');
+  assert.deepEqual(long.sent(), ['ναι, φυσικά, έλα απόψε']);
+  const wider = await runPickTurn({ reply: '<msg>ναι, φυσικά, έλα απόψε</msg>', pick: 'g1', pickSettings: { ...PICK_SETTINGS, maxChars: 30 } });
+  assert.equal(wider.picks.length, 1, 'maxChars read now');
+
+  const own = await runPickTurn({ reply: '<msg>χα</msg><gif>g2</gif>', pick: 'g1' });
+  assert.equal(own.picks.length, 0, 'the turn posts a GIF already');
+  assert.deepEqual(own.sent(), ['χα', 'https://tenor.com/view/gif-2']);
+});
+
+test('runTurn: no pick with the daily GIF cap spent, a switch off, no prompt or no captioned GIF', async () => {
+  const spent = await runPickTurn({ pick: 'g1', store: pickStore({ data: { gifDay: '2026-09-20', gifCount: 3 } }), maxPerDay: 3 });
+  assert.equal(spent.picks.length, 0, 'gifs.maxPerDay spent');
+  assert.deepEqual(spent.sent(), ['ναι, φυσικά, έλα']);
+  const room = await runPickTurn({ pick: 'g1', store: pickStore({ data: { gifDay: '2026-09-20', gifCount: 2 } }), maxPerDay: 3 });
+  assert.equal(room.picks.length, 1, 'one GIF left today');
+
+  const off = await runPickTurn({ pick: 'g1', features: { gifPicker: false } });
+  assert.equal(off.picks.length, 0, 'features.gifPicker false');
+  const gifsOff = await runPickTurn({ pick: 'g1', features: { gifs: false } });
+  assert.equal(gifsOff.picks.length, 0, 'features.gifs false');
+  const noPrompt = await runPickTurn({ pick: 'g1', prompts: { 'gif-pick': null } });
+  assert.equal(noPrompt.picks.length, 0, 'no prompts/gif-pick.md');
+  const empty = await runPickTurn({ pick: 'g1', store: pickStore({ library: { gifs: { nextId: 1, entries: {} }, mediaCache: {} } }) });
+  assert.equal(empty.picks.length, 0, 'no captioned GIF');
+});
+
+test('runTurn: a dry run asks the picker and logs the GIF it would post, posting nothing', async () => {
+  const { channel, picks, logs, store } = await runPickTurn({ pick: 'g50', features: { dryRun: true } });
+  assert.equal(picks.length, 1);
+  assert.equal(channel.sent.length, 0);
+  assert.equal(logs.some((entry) => entry.msg === 'dry-run: would send'), false, 'no text');
+  const gif = logs.find((entry) => entry.msg === 'dry-run: would send gif');
+  assert.deepEqual([gif.gif, gif.replyTo], ['g50', 'm1']);
+  assert.deepEqual([store.ownGifs, store.state.data.gifCount], [[], undefined], 'nothing counted or stamped');
+});
+
+test('runTurn: the picker runs alongside the first message\'s typing time', async () => {
+  let askedAt = null;
+  const pick = () => {
+    askedAt = Date.now();
+    return new Promise((resolve) => setTimeout(() => resolve('none'), 150));
+  };
+  const { sendTimes, sent } = await runPickTurn({ reply: '<msg>ναι</msg>', pick, typing: { msPerChar: [0, 0], minMs: 150, maxMs: 150 } });
+  assert.deepEqual(sent(), ['ναι']);
+  assert.ok(askedAt !== null && askedAt <= sendTimes[0], 'the picker is asked before the send');
+  const together = sendTimes[0] - askedAt;
+  assert.ok(together >= 140 && together < 270, `the picker and the typing ran together (${together} ms)`);
 });
