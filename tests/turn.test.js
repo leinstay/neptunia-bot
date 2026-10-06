@@ -6176,6 +6176,96 @@ test('runTurn: a search the classifier asks for moves the deadline to pace.prepa
   assert.equal(timings.stages.lookup, 500);
 });
 
+/**
+ * A mention whose search classifier answers `classifierText` only once `verdict` (a deferred)
+ * settles, under the test pace (prepareMs 1000, prepareSearchMs 3000) on a fake clock (`clock.t`).
+ */
+function slowClassifierScene(classifierText, verdict) {
+  const clock = { t: NOW };
+  const lookup = fakeLookup();
+  const base = lookupLlm(classifierText);
+  const llm = {
+    ...base,
+    complete: async (messages, options) => {
+      if (messages[0].content.startsWith('Decide whether')) await verdict.promise;
+      return base.complete(messages, options);
+    },
+  };
+  const hot = lookupHot();
+  hot.config.pace = { ...TEST_PACE };
+  const timers = fakeSchedule();
+  const trigger = rawMessage({ id: 'm1', ts: NOW - 1000, authorName: 'Zoë', content: 'ποιος κέρδισε τον τελικό;' });
+  const channel = fakeTurnChannel({ historyMessages: [trigger] });
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), lookup, now: () => clock.t, schedule: timers.schedule });
+  const params = { channel, mode: 'reply', trigger: normalizedTrigger(trigger), triggerKind: 'mention' };
+  return { clock, base, timers, turns, params };
+}
+
+/** Run the scene's turn up to the base deadline firing at pace.prepareMs; returns the running turn and the timer left. */
+async function pastBaseDeadline(scene) {
+  const running = withCapturedLogs(() => scene.turns.runTurn(scene.params));
+  await settleUntil(() => scene.timers.live().length > 0);
+  const [first] = scene.timers.live();
+  assert.equal(first.ms, TEST_PACE.prepareMs);
+  scene.clock.t = NOW + TEST_PACE.prepareMs;
+  scene.timers.fire(first);
+  await settleUntil();
+  assert.equal(scene.base.turnCalls.length, 0, 'no request while the classifier is still out');
+  const live = scene.timers.live();
+  assert.equal(live.length, 1, 'one deadline at a time');
+  assert.equal(live[0].ms, TEST_PACE.prepareSearchMs - TEST_PACE.prepareMs, 'held at most until pace.prepareSearchMs from the turn start');
+  return { running, first, held: live[0] };
+}
+
+test('runTurn: a search classifier slower than pace.prepareMs holds the deadline; its search lands in the request', async () => {
+  const verdict = deferred();
+  const scene = slowClassifierScene('champions final winner 2026', verdict);
+  const { running, first } = await pastBaseDeadline(scene);
+  scene.clock.t = NOW + 1500;
+  verdict.resolve();
+  const { result, logs } = await running;
+
+  assert.equal(result.outcome, 'spoke');
+  assert.ok(scene.base.turnCalls[0].messages[1].content.includes('ευρήματα'), 'the search arrived in time');
+  assert.deepEqual(logs.find((l) => l.msg === 'turn: timings').late, []);
+  assert.ok(!logs.some((l) => l.msg === 'turn: stage late' && l.stage === 'lookup'));
+  assert.ok(scene.timers.timers.every((timer) => !timer.fired || timer === first), 'only the base deadline fired');
+});
+
+test('runTurn: a slow search classifier answering no search lets the request go out at its verdict', async () => {
+  const verdict = deferred();
+  const scene = slowClassifierScene('none', verdict);
+  const { running, held } = await pastBaseDeadline(scene);
+  scene.clock.t = NOW + 1500;
+  verdict.resolve();
+  const { result, logs } = await running;
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(held.fired, false, 'not kept until pace.prepareSearchMs');
+  assert.equal(held.cancelled, true);
+  const timings = logs.find((l) => l.msg === 'turn: timings');
+  assert.equal(timings.prepareMs, 1500, 'the request is built when the verdict arrives');
+  assert.deepEqual(timings.late, []);
+  assert.ok(!scene.base.turnCalls[0].messages[1].content.includes('ευρήματα'));
+});
+
+test('runTurn: a search classifier slower than pace.prepareSearchMs is left out at pace.prepareSearchMs', async () => {
+  const verdict = deferred();
+  const scene = slowClassifierScene('champions final winner 2026', verdict);
+  const { running, held } = await pastBaseDeadline(scene);
+  scene.clock.t = NOW + TEST_PACE.prepareSearchMs;
+  scene.timers.fire(held);
+  const { result, logs } = await running;
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(scene.base.turnCalls.length, 1);
+  assert.ok(!scene.base.turnCalls[0].messages[1].content.includes('ευρήματα'), 'went out without the search');
+  const timings = logs.find((l) => l.msg === 'turn: timings');
+  assert.equal(timings.prepareMs, TEST_PACE.prepareSearchMs);
+  assert.deepEqual(timings.late, ['lookup']);
+  verdict.resolve();
+});
+
 const WATCHED_TEXT = 'ένα ποτάμι κάτω από τη γέφυρα';
 
 /**
