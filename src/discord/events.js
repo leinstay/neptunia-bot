@@ -65,15 +65,29 @@ function prefillPerMessage(value, fallback) {
 }
 
 /**
- * How strongly a call asks for an answer: a direct one (mention/reply) above
- * the persona's name, which is never queued and rolls
- * mention.nameTriggerChance. A settle wait never trades a call for a weaker one.
+ * How strongly a call asks for an answer: a tag (mention/reply) above the
+ * persona's name, which rolls mention.nameTriggerChance. A settle wait never
+ * trades a call for a weaker one.
  * @param {TriggerKind|undefined} triggerKind
  * @returns {number}
  */
 function callRank(triggerKind) {
   if (triggerKind === 'mention' || triggerKind === 'reply') return 2;
   return triggerKind === 'name' ? 1 : 0;
+}
+
+/**
+ * Whether the switch that lets a server call of `kind` through (onMessage
+ * step 8) is off in `features` now: features.replies for a reply,
+ * features.nameTriggers for a name, features.mentions for a mention.
+ * @param {TriggerKind} kind
+ * @param {object} features
+ * @returns {boolean}
+ */
+function callSwitchOff(kind, features) {
+  if (kind === 'reply') return features.replies === false;
+  if (kind === 'name') return features.nameTriggers === false;
+  return features.mentions === false;
 }
 
 // Discord's answers for a message that no longer exists: HTTP 404 with the
@@ -1103,7 +1117,7 @@ export function createMessageHandler({
   }
 
   // --- Pending direct pings ---------------------------------------------------
-  // A @mention or a reply to the persona that arrives while a turn is running
+  // A @mention, a reply to the persona or her name that arrives while a turn is running
   // in its own channel (mention.pendingSameChannel) or, with one attention
   // (mention.oneAtATime), in another channel is remembered here instead of
   // dropped, and answered once the turn frees up -- every one of them, in
@@ -1211,7 +1225,7 @@ export function createMessageHandler({
   }
 
   /**
-   * Remember a direct ping (mention/reply/private message) that arrived while
+   * Remember a direct ping (mention/reply/name/private message) that arrived while
    * a turn is running in its own channel or, with one attention, elsewhere --
    * or a routed call (`destination`: the channel its turn posts in) while a
    * turn runs there or, with one attention, anywhere. Every call waits, in
@@ -1454,7 +1468,8 @@ export function createMessageHandler({
    * the queue itself); a pause that lands during the switch pause drops the
    * ping in hand and ends the pass. A server ping is also dropped when its
    * channel is no longer allowed (bot.channels) or its switch
-   * (features.mentions / features.replies) was turned off while it waited.
+   * (features.mentions / features.replies / features.nameTriggers) was turned
+   * off while it waited (callSwitchOff).
    *
    * A routed call (one with a `destination`) goes through the same checks in
    * the channel it was written in, except the send permission: the
@@ -1573,7 +1588,7 @@ export function createMessageHandler({
 
         // The channel list and the ping's own switch are hot: either may have
         // changed while the ping waited.
-        const switchOff = ping.kind === 'reply' ? features.replies === false : features.mentions === false;
+        const switchOff = callSwitchOff(ping.kind, features);
         if (!channelAllowed(ping.channel, config.bot) || switchOff) {
           log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: switchOff ? 'off' : 'channel', ...routed });
           continue;
@@ -1629,7 +1644,7 @@ export function createMessageHandler({
    * and a routed one alike. `channel` is where the call was written,
    * `destination` the channel a routed call's turn posts in (null: the call's
    * own channel); busy and the pending rules are keyed by the channel the turn
-   * posts in. A direct call (mention/reply) that cannot be answered now is
+   * posts in. A direct call (mention/reply/name) that cannot be answered now is
    * remembered as pending instead of dropped, and answered by drainPending
    * once the turn frees up (the tag count and the ignore roll happen there):
    *  - a turn is running in that channel (mention.pendingSameChannel, default
@@ -1641,9 +1656,10 @@ export function createMessageHandler({
    * its author already waits for there (the merge classifier).
    * A routed call is held the same way, never folded: queued under the channel it was
    * written in (its source), carrying its destination, which the drain posts
-   * in, and the calls its settle wait took the place of. A name trigger is never queued: busy in that channel
-   * or elsewhere it is dropped here (`mention: dropped`, `busy`), and so is a
-   * direct call in a busy channel with pendingSameChannel off -- before it is
+   * in, and the calls its settle wait took the place of. A name call is held
+   * like a tag; its mention.nameTriggerChance roll is made at drain time, as
+   * the others' ignore roll is. With pendingSameChannel off, a call in a busy
+   * channel is dropped here (`mention: dropped`, `busy`) -- before it is
    * counted or rolled, so it neither adds to the spam count (tagHistory) nor
    * meets the ignore chance. A routed call dropped as busy stays unanswered
    * in the ring: busy is not the persona's choice, and only a call she chose
@@ -1663,7 +1679,7 @@ export function createMessageHandler({
   function answerCall({ channel, normalized, kind, config, destination = null, superseded = [] }) {
     const turnChannel = destination ?? channel;
     const routed = routedFields({ destination });
-    const direct = kind === 'mention' || kind === 'reply';
+    const direct = kind === 'mention' || kind === 'reply' || kind === 'name';
     const oneAtATime = config.mention.oneAtATime !== false;
     const dropBusy = () => log.info('mention: dropped', { channel: channel.id, kind, reason: 'busy', ...routed });
     const holdDirect = () => holdCall(channel, normalized, kind, destination, superseded);
@@ -1672,7 +1688,7 @@ export function createMessageHandler({
       holdDirect();
       return;
     }
-    // Not held: dropped before it is counted or rolled, like a call busy elsewhere.
+    // Not held (pendingSameChannel off): dropped before it is counted or rolled.
     if (sameChannelBusy) {
       dropBusy();
       return;
@@ -1925,12 +1941,7 @@ export function createMessageHandler({
       const config = hot.config;
       const features = config.features ?? {};
       // The switch that let this call through in onMessage step 8.
-      const switchOff =
-        triggerKind === 'reply'
-          ? features.replies === false
-          : triggerKind === 'name'
-            ? features.nameTriggers === false
-            : features.mentions === false;
+      const switchOff = callSwitchOff(triggerKind, features);
       if (switchOff || !channelAllowed(channel, config.bot)) {
         log.info('mention: dropped', { channel: sourceId, kind: triggerKind, reason: switchOff ? 'off' : 'channel' });
         return;

@@ -1124,27 +1124,51 @@ test('events: a direct ping elsewhere becomes pending and is answered after the 
   assert.deepEqual(sleepCalls, [5500], 'between(switchDelayMs=[2000,9000], rng=0.5) -- the human switch pause');
 });
 
-test('events: a name trigger elsewhere while busy is dropped, not deferred', async () => {
-  let called = false;
-  const turns = fakeTurns({
-    isBusy: () => false,
-    isAnyBusy: () => true,
-    runTurn: async () => {
-      called = true;
-      return { outcome: 'spoke' };
-    },
+for (const [roll, answered] of [[0.2, true], [0.7, false]]) {
+  test(`events: a name call elsewhere while busy is held under mention.oneAtATime and rolled when drained (roll ${roll})`, async () => {
+    const calls = [];
+    const turns = fakeTurns({
+      isBusy: () => false,
+      isAnyBusy: () => true,
+      runTurn: async (args) => {
+        calls.push(args);
+        return { outcome: 'spoke' };
+      },
+    });
+    const tagHistory = countingTagHistory();
+    const config = baseConfig({ bot: { nameTriggers: ['νεπτούνια'] }, mention: { nameTriggerChance: 0.5 } });
+    // Exactly two values: the switch pause and the name-trigger roll at drain time -- none on arrival.
+    const handler = makeHandler({ config, turns, tagHistory, sleep: async () => {}, rng: scripted([0.5, roll]) });
+
+    const guild = fakeGuild();
+    const channel = fakeChannelWithMessage('c1', guild, 'm1');
+    const { logs } = await withCapturedLogs(async () => {
+      await handler(fakeMessage({ id: 'm1', guild, channel, channelId: 'c1', cleanContent: 'γεια νεπτούνια όμορφη' }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    assert.equal(calls.length, 0, 'not run while the attention is taken');
+    assert.equal(tagHistory.hits, 0, 'counted at drain time, not on arrival');
+    assert.equal(logs.some((entry) => entry.msg === 'mention: decided'), false, 'not rolled on arrival');
+    assert.equal(logs.some((entry) => entry.msg === 'mention: dropped'), false, 'nothing dropped');
+    const deferred = logs.filter((entry) => entry.msg === 'mention: deferred');
+    assert.deepEqual(deferred.map(({ channel: id, kind, sameChannel }) => [id, kind, sameChannel]), [['c1', 'name', false]]);
+
+    const drained = await withCapturedLogs(() => handler.drainPending());
+    const decided = drained.logs.filter((entry) => entry.msg === 'mention: decided');
+    assert.deepEqual(
+      decided.map(({ kind, reason, deferred: held }) => [kind, reason, held]),
+      [['name', answered ? 'name' : 'name-unnoticed', true]],
+    );
+    assert.equal(tagHistory.hits, 1);
+    assert.equal(calls.length, answered ? 1 : 0);
+    if (answered) {
+      assert.equal(calls[0].channel, channel);
+      assert.equal(calls[0].trigger.id, 'm1');
+      assert.equal(calls[0].triggerKind, 'name');
+    }
   });
-  const config = baseConfig({ bot: { nameTriggers: ['νεπτούνια'] } });
-  // No rng value queued: a name trigger must never reach decideMention while busy elsewhere.
-  const handler = makeHandler({ config, turns, rng: scripted([]) });
-
-  const message = fakeMessage({ id: 'm1', cleanContent: 'γεια νεπτούνια όμορφη' });
-  await handler(message);
-  assert.equal(called, false);
-
-  await handler.drainPending();
-  assert.equal(called, false, 'nothing was queued for a name trigger');
-});
+}
 
 /**
  * Turns whose channel `c1` is busy until `.finish()`: runTurn answers 'busy' while it is, records
@@ -1223,12 +1247,12 @@ test('events: a reply to the persona in the channel whose turn is running is def
   assert.equal(turns.calls[0].triggerKind, 'reply');
 });
 
-test('events: a name trigger in the channel whose turn is running is not queued; the busy drop is logged', async () => {
+test('events: a name trigger in the channel whose turn is running is deferred and answered after it', async () => {
   const turns = busyChannelTurns();
   const tagHistory = countingTagHistory();
   const config = baseConfig({ bot: { nameTriggers: ['νεπτούνια'] } });
-  // No rng value queued: a call dropped as busy is never rolled.
-  const handler = makeHandler({ config, turns, tagHistory, sleep: async () => {}, rng: scripted([]) });
+  // Exactly two values: the switch pause and the name-trigger roll at drain time -- none on arrival.
+  const handler = makeHandler({ config, turns, tagHistory, sleep: async () => {}, rng: scripted([0.5, 0.2]) });
 
   const guild = fakeGuild();
   const channel = fakeChannelWithMessage('c1', guild, 'm1');
@@ -1237,18 +1261,23 @@ test('events: a name trigger in the channel whose turn is running is not queued;
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
-  assert.equal(turns.calls.length, 0, 'dropped before the dice: no turn is asked for');
-  assert.equal(tagHistory.hits, 0, 'a call dropped as busy is not counted toward spam');
-  assert.equal(logs.some((entry) => entry.msg === 'mention: decided'), false, 'no ignore roll');
-  const dropped = logs.find((entry) => entry.msg === 'mention: dropped' && entry.reason === 'busy');
-  assert.ok(dropped);
-  assert.equal(dropped.channel, 'c1');
-  assert.equal(dropped.kind, 'name');
-  assert.equal(logs.some((entry) => entry.msg === 'mention: deferred'), false);
+  assert.equal(turns.calls.length, 0, 'not run against the busy channel');
+  assert.equal(tagHistory.hits, 0, 'counted at drain time, not on arrival');
+  assert.equal(logs.some((entry) => entry.msg === 'mention: decided'), false, 'not rolled on arrival');
+  assert.equal(logs.some((entry) => entry.msg === 'mention: dropped'), false, 'nothing dropped');
+  const deferred = logs.filter((entry) => entry.msg === 'mention: deferred');
+  assert.deepEqual(deferred.map(({ channel: id, kind, sameChannel }) => [id, kind, sameChannel]), [['c1', 'name', true]]);
 
   turns.finish();
-  await handler.drainPending();
-  assert.equal(turns.calls.length, 0, 'nothing was queued');
+  const drained = await withCapturedLogs(() => handler.drainPending());
+
+  assert.equal(turns.calls.length, 1);
+  assert.equal(turns.calls[0].channel, channel);
+  assert.equal(turns.calls[0].trigger.id, 'm1');
+  assert.equal(turns.calls[0].triggerKind, 'name');
+  assert.equal(tagHistory.hits, 1);
+  const decided = drained.logs.filter((entry) => entry.msg === 'mention: decided');
+  assert.deepEqual(decided.map(({ kind, reason, deferred: held }) => [kind, reason, held]), [['name', 'name', true]]);
 });
 
 test('events: mention.pendingSameChannel=false restores the busy drop for a same-channel mention, read hot', async () => {
@@ -1269,6 +1298,34 @@ test('events: mention.pendingSameChannel=false restores the busy drop for a same
   assert.equal(tagHistory.hits, 0, 'not counted');
   assert.equal(logs.some((entry) => entry.msg === 'mention: decided'), false, 'no ignore roll');
   assert.ok(logs.some((entry) => entry.msg === 'mention: dropped' && entry.reason === 'busy' && entry.kind === 'mention'));
+
+  turns.finish();
+  await handler.drainPending();
+  assert.equal(turns.calls.length, 0, 'nothing was queued');
+});
+
+test('events: mention.pendingSameChannel=false drops a same-channel name call like a mention', async () => {
+  const turns = busyChannelTurns();
+  const tagHistory = countingTagHistory();
+  const config = baseConfig({ bot: { nameTriggers: ['νεπτούνια'] }, mention: { pendingSameChannel: false } });
+  // No rng value: the busy drop comes before the name-trigger roll; the drain must find nothing.
+  const handler = makeHandler({ config, turns, tagHistory, sleep: async () => {}, rng: scripted([]) });
+
+  const guild = fakeGuild();
+  const channel = fakeChannelWithMessage('c1', guild, 'm1');
+  const { logs } = await withCapturedLogs(async () => {
+    await handler(fakeMessage({ id: 'm1', guild, channel, channelId: 'c1', cleanContent: 'γεια νεπτούνια' }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  assert.equal(turns.calls.length, 0, 'dropped before it is decided: no turn is asked for');
+  assert.equal(tagHistory.hits, 0, 'not counted');
+  assert.equal(logs.some((entry) => entry.msg === 'mention: decided'), false, 'no roll');
+  assert.equal(logs.some((entry) => entry.msg === 'mention: deferred'), false, 'not held');
+  assert.deepEqual(
+    logs.filter((entry) => entry.msg === 'mention: dropped').map(({ channel: id, kind, reason }) => [id, kind, reason]),
+    [['c1', 'name', 'busy']],
+  );
 
   turns.finish();
   await handler.drainPending();
@@ -4277,6 +4334,29 @@ test('events: a queued mention or reply whose switch was turned off meanwhile is
   }
 });
 
+test('events: a queued name call answers to features.nameTriggers at drain time, not features.mentions', async () => {
+  for (const [switchName, answered] of [['nameTriggers', false], ['mentions', true]]) {
+    let busy = true;
+    const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => busy });
+    const config = baseConfig({ bot: { nameTriggers: ['νεπτούνια'] } });
+    const handler = makeHandler({ config, turns, sleep: async () => {}, rng: scripted(answered ? [0.5, 0.2] : [0.5]) });
+    const guild = fakeGuild();
+    const channel = fakeChannelWithMessage('c1', guild, 'm1');
+    await handler(fakeMessage({ id: 'm1', guild, channel, channelId: 'c1', cleanContent: 'γεια νεπτούνια' }));
+
+    config.features[switchName] = false;
+    busy = false;
+    const { logs } = await withCapturedLogs(() => handler.drainPending());
+    assert.equal(turns.calls.length, answered ? 1 : 0, switchName);
+    assert.deepEqual(
+      logs.filter((entry) => entry.msg === 'mention: dropped').map(({ kind, reason }) => [kind, reason]),
+      answered ? [] : [['name', 'off']],
+      switchName,
+    );
+    if (answered) assert.equal(turns.calls[0].triggerKind, 'name');
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Calls from a channel the persona can read but not write in (features.elsewhere): recorded in
 // the ring (state.json `elsewherePings`), answered in the main channel once the source settles.
@@ -5572,41 +5652,68 @@ test('events: a routed turn that ends while paused leaves the ring untouched', a
   assert.equal(scene.store.dirtyCount, dirty);
 });
 
-test('events: a routed name call while busy is dropped, never queued', async () => {
-  const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => true });
-  const scene = routeScene({ turns, rng: scripted([]) });
+test('events: a routed name call while busy is held and answered in the main channel once the attention frees', async () => {
+  let busy = true;
+  const turns = recordingTurns({ outcome: 'spoke', mode: 'reply', delivered: true }, { isAnyBusy: () => busy });
+  // Exactly two values: the switch pause and the name-trigger roll at drain time.
+  const scene = routeScene({ turns, rng: scripted([0.5, 0.2]) });
   await routeSend(scene, scene.source, 0, { id: 'm1', mention: false, content: 'νεπτούνια, δες εδώ' });
   const { logs } = await withCapturedLogs(() => routeFire(scene, 90));
 
-  assert.equal(turns.calls.length, 0);
-  const [dropped] = byMsg(logs, 'mention: dropped');
-  assert.equal(dropped.channel, 's1');
-  assert.equal(dropped.kind, 'name');
-  assert.equal(dropped.reason, 'busy');
-  assert.equal(dropped.destination, 'd1');
-  assert.equal(byMsg(logs, 'mention: deferred').length, 0);
+  assert.equal(turns.calls.length, 0, 'not run while the attention is taken');
+  assert.deepEqual(byMsg(logs, 'mention: dropped'), [], 'nothing dropped');
+  assert.equal(byMsg(logs, 'mention: decided').length, 0, 'not rolled on arrival');
+  assert.deepEqual(
+    byMsg(logs, 'mention: deferred').map(({ channel, kind, destination }) => [channel, kind, destination]),
+    [['s1', 'name', 'd1']],
+  );
+
+  busy = false;
+  const drained = await withCapturedLogs(() => scene.handler.drainPending());
+  assert.deepEqual(
+    byMsg(drained.logs, 'mention: decided').map(({ kind, reason, channel, destination }) => [kind, reason, channel, destination]),
+    [['name', 'name', 's1', 'd1']],
+  );
+  assert.equal(turns.calls.length, 1);
+  assert.equal(turns.calls[0].channel, scene.main);
+  assert.equal(turns.calls[0].triggerKind, 'name');
+  assert.deepEqual(turns.calls[0].source, { channelId: 's1', reason: 'routed' });
+  assert.deepEqual(ringStates(scene), { m1: 'answered' });
 });
 
-test('events: a routed name call whose main channel is busy is dropped before the dice and stays unanswered', async () => {
+test('events: a routed name call whose main channel is busy is held before the dice and rolled at drain time', async () => {
   // oneAtATime off: the turn running in the main channel is the one that holds the call back.
+  let busy = true;
   const tagHistory = countingTagHistory();
-  const turns = recordingTurns({ outcome: 'spoke' }, { isBusy: (id) => id === 'd1', isAnyBusy: () => true });
-  // No rng value: neither the name-trigger chance nor the ignore chance may be rolled.
-  const scene = routeScene({ turns, tagHistory, rng: scripted([]), config: { mention: { oneAtATime: false, nameTriggerChance: 0.5 } } });
+  const turns = recordingTurns({ outcome: 'spoke' }, { isBusy: (id) => busy && id === 'd1', isAnyBusy: () => busy });
+  // Exactly two values, both at drain time: the switch pause and the name-trigger roll (above the chance).
+  const scene = routeScene({ turns, tagHistory, rng: scripted([0.5, 0.7]), config: { mention: { oneAtATime: false, nameTriggerChance: 0.5 } } });
   await routeSend(scene, scene.source, 0, { id: 'm1', mention: false, content: 'νεπτούνια, δες εδώ' });
   const { logs } = await withCapturedLogs(() => routeFire(scene, 90));
 
   assert.equal(turns.calls.length, 0);
-  assert.equal(tagHistory.hits, 0, 'not counted');
-  assert.equal(byMsg(logs, 'mention: decided').length, 0, 'not rolled');
+  assert.equal(tagHistory.hits, 0, 'not counted on arrival');
+  assert.equal(byMsg(logs, 'mention: decided').length, 0, 'not rolled on arrival');
+  assert.deepEqual(byMsg(logs, 'mention: dropped'), [], 'nothing dropped');
   assert.deepEqual(
-    byMsg(logs, 'mention: dropped').map(({ channel, kind, reason, destination }) => [channel, kind, reason, destination]),
-    [['s1', 'name', 'busy', 'd1']],
+    byMsg(logs, 'mention: deferred').map(({ channel, kind, sameChannel, destination }) => [channel, kind, sameChannel, destination]),
+    [['s1', 'name', true, 'd1']],
   );
   assert.equal(byMsg(logs, 'elsewhere: settle failed').length, 0);
-  // Busy is not her choice: the call is neither answered nor skipped.
+  // Waiting is not her choice: the call is neither answered nor skipped yet.
   assert.deepEqual(ringStates(scene), { m1: 'unanswered' });
   assert.equal(byMsg(logs, 'elsewhere: marked').length, 0);
+
+  busy = false;
+  const drained = await withCapturedLogs(() => scene.handler.drainPending());
+  assert.equal(tagHistory.hits, 1, 'counted once, at drain time');
+  assert.deepEqual(
+    byMsg(drained.logs, 'mention: decided').map(({ kind, reason, deferred }) => [kind, reason, deferred]),
+    [['name', 'name-unnoticed', true]],
+  );
+  assert.equal(turns.calls.length, 0, 'the roll let it pass');
+  // Letting it pass is her choice: stamped skipped.
+  assert.deepEqual(ringStates(scene), { m1: 'skipped' });
 });
 
 test('events: a refused routed turn posts the notice in the destination, not as a reply', async () => {

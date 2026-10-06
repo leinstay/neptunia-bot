@@ -1,5 +1,5 @@
-// Pure queue of "pending" calls: a @mention or a reply to the persona that
-// arrived while a turn was running in its own channel
+// Pure queue of "pending" calls: a @mention, a reply or the persona's name
+// that arrived while a turn was running in its own channel
 // (config.mention.pendingSameChannel) or, with one attention
 // (config.mention.oneAtATime), somewhere else; a private message waiting for
 // the same reason; a call from a channel the persona cannot write in, routed
@@ -25,7 +25,7 @@
  * @property {string} channelId   the channel the call arrived in
  * @property {*} channel        the discord.js channel object the call arrived in
  * @property {object} trigger   the normalized message that called the persona
- * @property {'mention'|'reply'|'private'} kind
+ * @property {'mention'|'reply'|'name'|'private'} kind
  * @property {number} arrivedAt
  * @property {boolean} [decided] set on a re-queued server call whose ignore roll already said respond
  * @property {*} [destination]  a routed call only: the discord.js channel its turn posts in (the
