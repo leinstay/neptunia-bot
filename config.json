@@ -309,6 +309,7 @@
     "maxPerDay": 3,
     "maxPicturesPerDay": 2,
     "slotGraceMinutes": 30,
+    "forceWaitMs": 120000,
     "maxMessages": 3,
     "historyPosts": 150,
     "gistChars": 200,
