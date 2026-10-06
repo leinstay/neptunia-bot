@@ -121,14 +121,18 @@ export function appendPostLedger(ledger, entry, size) {
 }
 
 /** `pace` when a key is missing: config.json's values. */
-const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, dropAfterMs: 60000, replyHedgeMs: 20000, typingWhilePreparing: false, unpromptedWaits: true });
+const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, prepareMediaMs: 20000, dropAfterMs: 60000, replyHedgeMs: 20000, typingWhilePreparing: false, unpromptedWaits: true });
 
 /**
  * The pace of a turn's preparation, read from `config` (the live config):
  * `prepareMs`, how long everything before the reply request may take, counted
  * from the turn's start; `prepareSearchMs`, the longer limit once the search
  * classifier asked for a web or server search (never shorter than
- * `prepareMs`); `dropAfterMs`, the bar a turn's answer must be in hand by,
+ * `prepareMs`); `prepareMediaMs`, the longer limit of a direct call whose own
+ * message (or the message it replies to) brought a picture, a GIF or a video
+ * the turn describes or watches (never shorter than `prepareMs`; with both,
+ * the larger of the two; null = no such extension); `dropAfterMs`, the bar a
+ * turn's answer must be in hand by,
  * counted from the turn's start, past which the turn is dropped unposted;
  * `replyHedgeMs`, how long the reply request of a turn with a bar is given
  * before a second, identical one is sent (the first answer wins);
@@ -143,8 +147,8 @@ const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, d
  * it waits for every stage and posts once ready. Off, every turn keeps the same
  * deadline and bar.
  * @param {object} config
- * @returns {{ prepareMs: number|null, prepareSearchMs: number|null, dropAfterMs: number|null,
- *   replyHedgeMs: number|null, typingWhilePreparing: boolean, unpromptedWaits: boolean }}
+ * @returns {{ prepareMs: number|null, prepareSearchMs: number|null, prepareMediaMs: number|null,
+ *   dropAfterMs: number|null, replyHedgeMs: number|null, typingWhilePreparing: boolean, unpromptedWaits: boolean }}
  */
 export function paceSettings(config) {
   const pace = isPlainObject(config?.pace) ? config.pace : {};
@@ -155,6 +159,7 @@ export function paceSettings(config) {
   return {
     prepareMs: limit(pace.prepareMs, PACE_FALLBACK.prepareMs),
     prepareSearchMs: limit(pace.prepareSearchMs, PACE_FALLBACK.prepareSearchMs),
+    prepareMediaMs: limit(pace.prepareMediaMs, PACE_FALLBACK.prepareMediaMs),
     dropAfterMs: limit(pace.dropAfterMs, PACE_FALLBACK.dropAfterMs),
     replyHedgeMs: limit(pace.replyHedgeMs, PACE_FALLBACK.replyHedgeMs),
     typingWhilePreparing: pace.typingWhilePreparing === true,
@@ -604,6 +609,26 @@ function describableCandidates(history, picked, { includePicked = false } = {}) 
   return out;
 }
 
+/** The picture kinds (src/discord/media.js) that make a direct call's own media something to look at. */
+const LOOKED_AT_KINDS = new Set(['image', 'gif', 'video']);
+
+/**
+ * Whether `trigger` (a direct call) brought something to look at that this turn's stages work
+ * on: an item of `captionItems` (the caption stage's candidates) that is a picture, a GIF or a
+ * video -- attached or embedded; never a sticker, an emoji or a link's thumbnail -- or any item
+ * of `videoItems` (the video stage's candidates: an attached video, a video-site link), on the
+ * trigger's own message or on the message it replies to. Media of any other line does not count.
+ * @param {{ id: string, replyToId?: string|null }} trigger
+ * @param {object[]} captionItems
+ * @param {object[]} videoItems
+ * @returns {boolean}
+ */
+function triggerBringsMedia(trigger, captionItems, videoItems) {
+  const ids = new Set([trigger.id, trigger.replyToId].filter(Boolean));
+  const own = (item) => ids.has(item.messageId);
+  return videoItems.some(own) || captionItems.some((item) => own(item) && LOOKED_AT_KINDS.has(item.kind));
+}
+
 /**
  * Where the persona's words about a channel it cannot write in go (a call
  * from there, a remark on it), read from `config` (the live config) at the
@@ -786,7 +811,9 @@ function taskInput({ part, queued, added, labels, channelId }) {
  * variety pass) starts as soon as its inputs exist and runs alongside the
  * rest, under one deadline (paceSettings: `pace.prepareMs` from the turn's
  * start, `pace.prepareSearchMs` once the search classifier asked for a
- * search). A helper still running then contributes nothing to this turn --
+ * search, `pace.prepareMediaMs` for a direct call that brought media to look
+ * at; the larger of the two with both). A helper still running then
+ * contributes nothing to this turn --
  * its block is absent, as when it fails -- and keeps running for its cache.
  * A turn nobody waits for (unhurried, `pace.unpromptedWaits`) has no such
  * deadline and no bar: it waits for every helper. Every turn that reaches the reply request logs `turn: timings`.
@@ -2450,10 +2477,11 @@ export function createTurnRunner({
 
       // Everything below starts as soon as its inputs exist and runs alongside the rest; the turn
       // waits for all of it together, at most until the deadline (paceSettings, counted from the
-      // turn's start; longer once the search classifier asked for a search). A stage still running
-      // then contributes nothing -- its block is absent, as when it fails -- and keeps running for
-      // its cache; nothing it settles later reaches this turn. A stage whose inputs were not ready
-      // by then is never started. An unhurried turn has no deadline: it waits for every stage (a
+      // turn's start; longer once the search classifier asked for a search, or for a direct call
+      // that brought media to look at). A stage still running then contributes nothing -- its block
+      // is absent, as when it fails -- and keeps running for its cache; nothing it settles later
+      // reaches this turn. A stage whose inputs were not ready by then is never started. An
+      // unhurried turn has no deadline: it waits for every stage (a
       // search asked for leaves it so: extend never sets a limit on a deadline without one).
       deadline = createDeadline({ clock, startedAt, schedule, limitMs: waitsForAll ? null : pace.prepareMs });
       const stages = new Map();
@@ -2587,6 +2615,13 @@ export function createTurnRunner({
               .catch(chainFailed('rewatch'));
           }
         }
+      }
+      // A direct call that brought something to look at -- on its own message or the one it
+      // replies to, captioned or watched by the stages above -- is about that thing: its deadline
+      // grows to pace.prepareMediaMs (null: no extension). A search asked for later may grow it
+      // further; extend keeps the larger limit, and never sets one on a deadline without one.
+      if (trigger && DIRECT_CALLS.has(triggerKind) && pace.prepareMediaMs !== null && triggerBringsMedia(trigger, captionCandidates, videoCandidates)) {
+        deadline.extend(pace.prepareMediaMs);
       }
       // The video states a classifier's transcript shows: this turn's once they are done (with the
       // re-watch's answer when it is done too), else what the describer's cache holds.

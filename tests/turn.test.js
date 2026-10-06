@@ -5775,12 +5775,13 @@ const READ_SHOWN = fill(labels.transcript.linkRead, { text: 'une recette' });
 
 test('paceSettings: 0, a negative value or a non-number turns a limit off; a missing key keeps a positive limit', () => {
   const missing = paceSettings({});
-  assert.ok(missing.prepareMs > 0 && missing.prepareSearchMs > 0);
+  assert.ok(missing.prepareMs > 0 && missing.prepareSearchMs > 0 && missing.prepareMediaMs > 0);
   assert.equal(missing.typingWhilePreparing, false, 'the early indicator is opt-in');
   for (const off of [0, -5, '6000', null, Number.NaN, Infinity]) {
-    const pace = paceSettings({ pace: { prepareMs: off, prepareSearchMs: off } });
+    const pace = paceSettings({ pace: { prepareMs: off, prepareSearchMs: off, prepareMediaMs: off } });
     assert.equal(pace.prepareMs, null, String(off));
     assert.equal(pace.prepareSearchMs, null, String(off));
+    assert.equal(pace.prepareMediaMs, null, String(off));
   }
   assert.ok(missing.dropAfterMs > 0);
   assert.equal(paceSettings({ pace: { dropAfterMs: 0 } }).dropAfterMs, null);
@@ -5788,9 +5789,10 @@ test('paceSettings: 0, a negative value or a non-number turns a limit off; a mis
   for (const off of [0, -5, '500', null, Number.NaN, Infinity]) {
     assert.equal(paceSettings({ pace: { replyHedgeMs: off } }).replyHedgeMs, null, String(off));
   }
-  assert.deepEqual(paceSettings({ pace: { prepareMs: 2500, prepareSearchMs: 7000, dropAfterMs: 9000, replyHedgeMs: 4000, typingWhilePreparing: false, unpromptedWaits: false } }), {
+  assert.deepEqual(paceSettings({ pace: { prepareMs: 2500, prepareSearchMs: 7000, prepareMediaMs: 8000, dropAfterMs: 9000, replyHedgeMs: 4000, typingWhilePreparing: false, unpromptedWaits: false } }), {
     prepareMs: 2500,
     prepareSearchMs: 7000,
+    prepareMediaMs: 8000,
     dropAfterMs: 9000,
     replyHedgeMs: 4000,
     typingWhilePreparing: false,
@@ -6017,6 +6019,129 @@ test('runTurn: a search the classifier asks for moves the deadline to pace.prepa
   const timings = logs.find((l) => l.msg === 'turn: timings');
   assert.deepEqual(timings.late, []);
   assert.equal(timings.stages.lookup, 500);
+});
+
+const WATCHED_TEXT = 'ένα ποτάμι κάτω από τη γέφυρα';
+
+/**
+ * A mention with a video attachment (va, clip.mov): on the trigger itself (`where: 'trigger'`),
+ * on the older line the trigger replies to (`'replied'`), or on an older line only
+ * (`'history'`). The video describer watches it once `watch` (a deferred) settles; `hot`
+ * defaults to video vision on with the test pace and `pace` over it.
+ */
+function videoPaceScene({ pace = {}, where = 'trigger', watch = null, clock = () => NOW, hot = null, llm = fakeLlm('<msg>ok</msg>'), lookup = undefined, content = 'το βλέπεις;' } = {}) {
+  const turnHot = hot ?? fakeHot({ mediaDescriptions: true, videoDescriptions: true, vision: false }, {}, VIDEO_TURN_CONFIG);
+  turnHot.config.pace = { ...TEST_PACE, ...pace };
+  const older = where === 'trigger' ? rawMessage({ id: 'm1', ts: NOW - 9000, content: 'γεια' }) : videoAttachmentRaw('m1', NOW - 9000, 'va', 'clip.mov');
+  const trigger = where === 'trigger' ? videoAttachmentRaw('m2', NOW - 1000, 'va', 'clip.mov') : rawMessage({ id: 'm2', ts: NOW - 1000 });
+  trigger.cleanContent = content;
+  const channel = fakeTurnChannel({ historyMessages: [older, trigger] });
+  const describer = fakeVideoDescriber({});
+  describer.describeVideos = async (guildId, items, options) => {
+    describer.videoCalls.push({ guildId, items, options });
+    await watch?.promise;
+    return { videos: new Map([['va', { state: 'watched', text: WATCHED_TEXT }]]), newCount: 1 };
+  };
+  const timers = fakeSchedule();
+  const turns = createTurnRunner({ hot: turnHot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), describer, lookup, now: clock, schedule: timers.schedule });
+  const called = { ...normalizedTrigger(trigger), replyToId: where === 'replied' ? 'm1' : null };
+  const params = { channel, mode: 'reply', trigger: called, triggerKind: 'mention' };
+  return { turns, params, channel, llm, describer, timers };
+}
+
+test('runTurn: a video on the trigger moves the deadline to pace.prepareMediaMs; a watch at 3 s makes it into the request', async () => {
+  let t = NOW;
+  const watch = deferred();
+  const scene = videoPaceScene({ pace: { prepareMs: 1000, prepareMediaMs: 5000 }, watch, clock: () => t });
+
+  const running = withCapturedLogs(() => scene.turns.runTurn(scene.params));
+  await settleUntil(() => scene.describer.videoCalls.length > 0 && scene.timers.live().length > 0);
+  const [first] = scene.timers.timers;
+  assert.equal(first.ms, 1000);
+  assert.equal(first.cancelled, true, 'the first deadline is replaced');
+  assert.deepEqual(scene.timers.live().map((timer) => timer.ms), [5000]);
+  t = NOW + 3000;
+  watch.resolve();
+  const { result, logs } = await running;
+
+  assert.equal(result.outcome, 'spoke');
+  assert.ok(userText(scene.llm).includes(WATCHED_TEXT), 'the watched video is in the request');
+  const timings = logs.find((l) => l.msg === 'turn: timings');
+  assert.deepEqual(timings.late, []);
+  assert.equal(timings.stages.videos, 3000);
+});
+
+test('runTurn: pace.prepareMediaMs 0 leaves a video on the trigger under pace.prepareMs', async () => {
+  const watch = deferred();
+  const scene = videoPaceScene({ pace: { prepareMs: 1000, prepareMediaMs: 0 }, watch });
+
+  const running = withCapturedLogs(() => scene.turns.runTurn(scene.params));
+  await settleUntil(() => scene.describer.videoCalls.length > 0 && scene.timers.live().length > 0);
+  await settleUntil();
+  assert.deepEqual(scene.timers.timers.map((timer) => timer.ms), [1000], 'no extension');
+  scene.timers.fire(scene.timers.live()[0]);
+  const { result, logs } = await running;
+
+  assert.equal(result.outcome, 'spoke');
+  assert.ok(!userText(scene.llm).includes(WATCHED_TEXT), 'the late watch is absent');
+  assert.deepEqual(logs.find((l) => l.msg === 'turn: timings').late, ['videos']);
+  watch.resolve();
+});
+
+test('runTurn: a video only on an older line keeps pace.prepareMs; one on the line the trigger replies to extends it', async () => {
+  const watch = deferred();
+  const scene = videoPaceScene({ pace: { prepareMs: 1000, prepareMediaMs: 5000 }, where: 'history', watch });
+
+  const running = withCapturedLogs(() => scene.turns.runTurn(scene.params));
+  await settleUntil(() => scene.describer.videoCalls.length > 0 && scene.timers.live().length > 0);
+  await settleUntil();
+  assert.deepEqual(scene.timers.timers.map((timer) => timer.ms), [1000], 'an older video does not extend the deadline');
+  scene.timers.fire(scene.timers.live()[0]);
+  const { logs } = await running;
+  assert.deepEqual(logs.find((l) => l.msg === 'turn: timings').late, ['videos']);
+  watch.resolve();
+
+  const replied = videoPaceScene({ pace: { prepareMs: 1000, prepareMediaMs: 5000 }, where: 'replied' });
+  const { logs: repliedLogs } = await withCapturedLogs(() => replied.turns.runTurn(replied.params));
+  assert.deepEqual(replied.timers.timers.map((timer) => timer.ms), [1000, 5000], 'the replied-to video extends it');
+  assert.deepEqual(repliedLogs.find((l) => l.msg === 'turn: timings').late, []);
+});
+
+test('runTurn: a search and a video on the trigger both extend the deadline -- the larger limit wins', async () => {
+  for (const [searchMs, expected] of [
+    [3000, [1000, 5000]],
+    [8000, [1000, 5000, 7500]],
+  ]) {
+    let t = NOW;
+    const search = deferred();
+    const lookup = fakeLookup();
+    const searchOnce = lookup.search;
+    let searched = 0;
+    lookup.search = async (guildId, query) => {
+      searched += 1;
+      await search.promise;
+      return searchOnce(guildId, query);
+    };
+    const base = lookupLlm('champions final winner 2026');
+    const llm = {
+      ...base,
+      complete: async (messages, options) => {
+        if (messages[0].content.startsWith('Decide whether')) t = NOW + 500;
+        return base.complete(messages, options);
+      },
+    };
+    const hot = lookupHot({ mediaDescriptions: true, videoDescriptions: true });
+    const scene = videoPaceScene({ pace: { prepareMs: 1000, prepareSearchMs: searchMs, prepareMediaMs: 5000 }, hot, llm, lookup, clock: () => t, content: 'ποιος κέρδισε τον τελικό;' });
+
+    const running = withCapturedLogs(() => scene.turns.runTurn(scene.params));
+    await settleUntil(() => searched > 0);
+    assert.deepEqual(scene.timers.timers.map((timer) => timer.ms), expected, `prepareSearchMs ${searchMs}`);
+    assert.equal(scene.timers.live().length, 1, 'one deadline at a time');
+    assert.equal(scene.timers.live()[0].ms, expected.at(-1));
+    search.resolve();
+    const { logs } = await running;
+    assert.deepEqual(logs.find((l) => l.msg === 'turn: timings').late, []);
+  }
 });
 
 test('runTurn: turn: timings carries every stage, null for one that did not run', async () => {
