@@ -210,6 +210,7 @@
   "relationships": {
     "maxDeltaPerUpdate": 15,
     "historySize": 10,
+    "shownMoves": 4,
     "directTriggerCount": 6,
     "damping": true,
     "dampingPower": 1,

@@ -17,6 +17,7 @@ import {
   RELATIONSHIP_STALE_DEFAULTS,
   REASON_CHARS,
   deltaCapOf,
+  strongestMoves,
 } from '../src/memory/affinity.js';
 
 // --- affinityBand: every boundary from the contract ---------------------
@@ -607,4 +608,55 @@ test('relationshipStaleOf: now is the band of the current score for drift and mo
     now: 'devoted',
     cause: 'drift',
   });
+});
+
+// --- strongestMoves --------------------------------------------------------
+
+/** One stored history move, `day` days into 2026-03. */
+function move(day, delta, reason, appliedDelta = delta) {
+  return { ts: new Date(Date.UTC(2026, 2, day, 12)).toISOString(), delta, appliedDelta, score: 0, reason };
+}
+
+test('strongestMoves: the strongest by |appliedDelta| are chosen and returned oldest first', () => {
+  const history = [move(1, 2, 'α'), move(2, 6, 'β'), move(3, 1, 'γ'), move(4, 4, 'δ')];
+  assert.deepEqual(strongestMoves(history, { max: 2 }).map((m) => m.reason), ['β', 'δ']);
+});
+
+test('strongestMoves: a missing appliedDelta falls back to |delta|', () => {
+  const history = [{ ...move(1, 9, 'α'), appliedDelta: undefined }, move(2, 3, 'β')];
+  assert.deepEqual(strongestMoves(history, { max: 1 }).map((m) => m.reason), ['α']);
+});
+
+test('strongestMoves: an equal strength goes to the newer move', () => {
+  const history = [move(1, 3, 'α'), move(2, 3, 'β'), move(3, 3, 'γ')];
+  assert.deepEqual(strongestMoves(history, { max: 2 }).map((m) => m.reason), ['β', 'γ']);
+});
+
+test('strongestMoves: both signs are kept when both exist and the cap allows', () => {
+  const history = [move(1, -1, 'neg'), move(2, 5, 'α'), move(3, 4, 'β'), move(4, 3, 'γ')];
+  assert.deepEqual(strongestMoves(history, { max: 3 }).map((m) => m.reason), ['neg', 'α', 'β']);
+  const negatives = [move(1, -5, 'α'), move(2, -4, 'β'), move(3, 1, 'pos')];
+  assert.deepEqual(strongestMoves(negatives, { max: 2 }).map((m) => m.reason), ['α', 'pos']);
+});
+
+test('strongestMoves: a cap of one keeps the single strongest, whatever its sign', () => {
+  const history = [move(1, -1, 'neg'), move(2, 5, 'α')];
+  assert.deepEqual(strongestMoves(history, { max: 1 }).map((m) => m.reason), ['α']);
+});
+
+test('strongestMoves: an empty reason and the current reason are skipped', () => {
+  const history = [move(1, 9, ''), move(2, 8, '   '), move(3, 7, 'current'), move(4, 1, 'α')];
+  assert.deepEqual(strongestMoves(history, { max: 4, currentReason: 'current' }).map((m) => m.reason), ['α']);
+});
+
+test('strongestMoves: a move with an unreadable time or no size is skipped', () => {
+  const history = [{ ...move(1, 9, 'α'), ts: 'never' }, { ts: move(2, 0, '').ts, reason: 'β' }, move(3, 1, 'γ')];
+  assert.deepEqual(strongestMoves(history, { max: 4 }).map((m) => m.reason), ['γ']);
+});
+
+test('strongestMoves: a cap of 0, a bad cap or no history chooses nothing', () => {
+  const history = [move(1, 3, 'α')];
+  for (const max of [0, -1, 1.5, undefined, 'x']) assert.deepEqual(strongestMoves(history, { max }), [], String(max));
+  assert.deepEqual(strongestMoves(undefined, { max: 3 }), []);
+  assert.deepEqual(strongestMoves([null, 'x'], { max: 3 }), []);
 });

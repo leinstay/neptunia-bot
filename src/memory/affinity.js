@@ -13,6 +13,7 @@
 
 import { clampText } from './clamp.js';
 import { DAY_MS } from '../time.js';
+import { sortByRank } from './ranking.js';
 
 /** How long an attitude reason may be, in characters, before `memory.clampTolerance`. */
 export const REASON_CHARS = 200;
@@ -210,6 +211,51 @@ function dampedDelta(scoreBeforeDelta, delta, dampingPower) {
   if (!movingAway) return delta;
   const power = Number.isFinite(dampingPower) && dampingPower > 0 ? dampingPower : 1;
   return delta * (1 - Math.abs(scoreBeforeDelta) / 100) ** power;
+}
+
+/** How far one history move pushed the score: `appliedDelta`, falling back to `delta`; 0 when
+ * neither is a finite number. Its sign is the move's direction. */
+function moveSize(move) {
+  if (Number.isFinite(move?.appliedDelta)) return move.appliedDelta;
+  return Number.isFinite(move?.delta) ? move.delta : 0;
+}
+
+/**
+ * Which of the stored attitude moves (`affinity.history`) the persona is shown as the "why" behind
+ * its attitude, up to `max` of them, returned OLDEST first (the stored objects themselves).
+ * Skipped: anything that is not an object, a move with an empty reason, a move whose reason equals
+ * `currentReason` (the attitude line already shows that one), a move whose `ts` cannot be read and
+ * a move of size 0. The rest are ranked by strength, `|appliedDelta|` (falling back to `|delta|`),
+ * through the shared src/memory/ranking.js#sortByRank with no decay: the history only holds the
+ * last `relationships.historySize` moves, so recency breaks a tie in strength (the newer move
+ * wins) instead of weighing against it. With `max` of 2 or more and moves of both signs left, the
+ * pick holds at least one of each: when the top `max` are all one sign, the weakest of them gives
+ * way to the strongest move of the other sign. `max` not a non-negative integer counts as 0.
+ * @param {object[]|undefined} history  `affinity.history`.
+ * @param {{ max?: number, currentReason?: string }} [opts]
+ * @returns {object[]}
+ */
+export function strongestMoves(history, { max, currentReason } = {}) {
+  const cap = Number.isInteger(max) && max > 0 ? max : 0;
+  if (cap === 0 || !Array.isArray(history)) return [];
+  const current = typeof currentReason === 'string' ? currentReason.trim() : '';
+  const candidates = [];
+  history.forEach((move, index) => {
+    if (!move || typeof move !== 'object') return;
+    const reason = typeof move.reason === 'string' ? move.reason.trim() : '';
+    if (!reason || reason === current) return;
+    const ms = Date.parse(move.ts);
+    const size = moveSize(move);
+    if (!Number.isFinite(ms) || size === 0) return;
+    candidates.push({ move, index, ms, sign: Math.sign(size), weight: Math.abs(size), lastSeen: move.ts });
+  });
+  const ranked = sortByRank(candidates);
+  const chosen = ranked.slice(0, cap);
+  if (cap >= 2 && chosen.every((c) => c.sign === chosen[0]?.sign)) {
+    const other = ranked.find((c) => c.sign !== chosen[0]?.sign);
+    if (other) chosen[chosen.length - 1] = other;
+  }
+  return chosen.sort((a, b) => a.ms - b.ms || a.index - b.index).map((c) => c.move);
 }
 
 /**
