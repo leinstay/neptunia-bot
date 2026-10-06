@@ -44,9 +44,9 @@
 | `/nep lore list [query]` | 列出世界书条目 |
 | `/nep lore show <id>` | 显示世界书条目 |
 | `/nep lore remove <id>` | 移除世界书条目 |
-| `/nep gifs status` | 显示 GIF 库：大小，按排名前 10（含 handle、计数和说明或名称），历史回填时间，今日已发送 / `gifs.maxPerDay`，今日已观看 / `media.gif.maxPerDay`，以及 `captions:`（库条目中已观看 / 单帧 / 观看失败 / 无说明各多少） |
+| `/nep gifs status` | 显示 GIF 库：大小，按排名前 10（含 handle、计数和说明或名称），历史回填时间，今日已发送 / `gifs.maxPerDay`，今日已观看 / `media.gif.maxPerDay`，`captions:`（库条目中已观看 / 单帧 / 观看失败 / 无说明各多少），以及 `caption format:`（有字段的已观看 / 旧格式已观看待重新描述 / 未观看） |
 | `/nep gifs rescan` | 将使用计数归零并从频道历史重新统计；条目和 handle 保留，未找到的条目保留零计数直到被大小上限淘汰 |
-| `/nep gifs recache` | 删除库外的单帧 GIF 说明，然后在后台对最多 `gifs.recachePerRun` 个库 GIF 进行观看式重新描述。立即回复；通过 `/nep gifs status` 跟踪进度。暂停、预热期间或 GIF 未被观看时拒绝 |
+| `/nep gifs recache` | 删除库外的单帧 GIF 说明，将旧格式的已观看条目（无 `reaction` 字段）排入重新描述队列，然后在后台从最旧的开始观看最多 `gifs.recachePerRun` 个库 GIF。每日上限 `media.gif.maxPerDay` 与实时观看共享；300 个条目按每次 50 个需要 6 次命令，跨至少两个 UTC 日。立即回复；通过 `/nep gifs status` 跟踪进度。暂停、预热期间或 GIF 未被观看时拒绝 |
 | `/nep warmup run` | 启动或恢复完整运行：频道、人物、服务器 |
 | `/nep warmup users [member]` | 指定成员：为该成员生成或重新生成档案；不指定：为所有符合条件的成员重新生成 |
 | `/nep warmup channels [channel]` | 指定频道：描述或重新描述该频道；不指定：所有可读频道 |

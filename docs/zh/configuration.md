@@ -20,7 +20,7 @@
 | `seeReactions` | `true` | 在对话记录中显示消息上的反应。缺失的键视为开启。与 `reactions`（控制角色是否放置反应）不同，此项控制角色是否看到它们 |
 | `customEmoji` | `true` | 列出服务器自定义表情（按使用率排名），使角色可以通过 `:name:` 使用它们。缺失的键视为开启 |
 | `gifs` | `true` | 从成员分享的内容构建 GIF 库，让角色通过 handle 发送。缺失的键视为开启 |
-| `gifPicker` | `true` | 当角色写了一条短回复（不超过 `gifs.pick.maxChars` 个字符）且自己没选 GIF 时，分类器从完整库中挑选合适的 GIF。匹配时 GIF 替换文本发送。缺失的键视为开启。需要 `features.gifs` 开启且库非空 |
+| `gifPicker` | `true` | 当角色的第一条消息不超过 `gifs.pick.maxChars` 个字符且自己没选 GIF 时，分类器从完整库中挑选合适的 GIF。匹配时 GIF 替换第一条消息；其余消息照常发布。缺失的键视为开启。需要 `features.gifs` 开启且库非空 |
 | `multiMessage` | `true` | 允许连续发 2–3 条消息 |
 | `vision` | `true` | 处理附加图片 |
 | `mediaDescriptions` | `true` | 为图片、GIF、视频帧和链接缩略图生成单行描述 |
@@ -275,16 +275,16 @@ GIF 库（`features.gifs`）的设置。使用次数在每条消息到达时统�
 | `maxPerDay` | `40` | 角色每天可发送的 GIF 数 |
 | `backfillMessages` | `500` | 启动时从每个频道历史中读取的消息数以初始化库 |
 | `backfillDescribe` | `20` | 回填后立即获取说明的排名最高 GIF 数 |
-| `recachePerRun` | `50` | 每次 `/nep gifs recache` 运行时重新描述的库 GIF 数量。库外的单帧说明立即删除；然后在后台从最旧的开始观看最多此数量的库条目 |
+| `recachePerRun` | `50` | 每次 `/nep gifs recache` 运行时重新描述的库 GIF 数量。库外的单帧说明立即删除；旧格式的已观看条目（无 `reaction` 字段）与未完成的一起排队，从最旧的开始。每次运行最多观看此数量，受 `media.gif.maxPerDay` 限制 |
 | `ownMarkHours` | `24` | 角色发送 GIF 后该条目在 `<gifs>` 列表中显示标记的时间（小时）。`0` 关闭标记 |
 
 ### `gifs.pick`
 
-GIF 挑选器（`features.gifPicker`）的设置。当角色写了一条短回复且自己没选 GIF 时，分类器（`classifier.text`，提示 `prompts/gif-pick.md`）接收最近几行聊天（标明所回复的消息）、回复以及带说明的完整库（每条记录附说明，适用时附自用标记），返回一个 handle 或 `none`。返回 handle 时 GIF 替换第一条发出消息；否则文本照常发布。分类器在第一条消息的打字模拟期间运行；每日 GIF 限额 `gifs.maxPerDay` 生效。
+GIF 挑选器（`features.gifPicker`）的设置。当角色的第一条发出消息较短（不超过 `gifs.pick.maxChars` 个字符）且自己没选 GIF 时，分类器（`classifier.text`，提示 `prompts/gif-pick.md`）接收最近几行聊天（标明所回复的消息）、该第一条消息以及带说明的完整库（每条记录附说明，适用时附自用标记），返回一个 handle 或 `none`。返回 handle 时 GIF 替换第一条消息；其余消息按原顺序跟随。分类器在第一条消息的打字模拟期间运行；每日 GIF 限额 `gifs.maxPerDay` 生效。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `maxChars` | `160` | 回复长度上限：角色文本不超过此字符数时挑选器才运行 |
+| `maxChars` | `160` | 第一条消息上限：角色的第一条发出消息不超过此字符数时挑选器才运行 |
 | `contextMessages` | `4` | 与回复和库一起发送给分类器的近期聊天行数 |
 | `maxOutputTokens` | `60` | 挑选器分类器的最大输出 token 数 |
 

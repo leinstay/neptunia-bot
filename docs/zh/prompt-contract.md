@@ -105,7 +105,7 @@
 近期记事（上限 `context.caps.recent`）->
 其他档案 -> attitudes（上限 `context.caps.attitudes`）-> worn（整体保留或丢弃）-> 相邻频道 -> 表情符号（从底部删除条目，然后删除整个块；`context.caps.emoji`）-> GIF（同样的裁剪；`context.caps.gifs`）。
 
-GIF 挑选器（`features.gifPicker`，默认开启）。当角色写了一条短回复（不超过 `gifs.pick.maxChars` 个字符，默认 160）且自己没选 GIF 时，分类器（`classifier.text`，purpose `gif-pick`，`gifs.pick.maxOutputTokens` 60，提示 `prompts/gif-pick.md`）接收最近 `gifs.pick.contextMessages`（默认 4）行聊天（标明所回复的消息）、回复及带说明的完整库（每条记录附说明，角色最近发送过的附自用标记）。分类器返回一个 handle 或 `none`。返回 handle 时 GIF 替换第一条发出消息；否则文本照常发布。分类器在第一条消息的打字模拟期间运行；每日 GIF 限额 `gifs.maxPerDay` 生效。日志：`gifs: picked`（handle true/false，库大小）或 `gifs: pick failed`。
+GIF 挑选器（`features.gifPicker`，默认开启）。当角色写了一条短回复（不超过 `gifs.pick.maxChars` 个字符，默认 160）且自己没选 GIF 时，分类器（`classifier.text`，purpose `gif-pick`，`gifs.pick.maxOutputTokens` 60，提示 `prompts/gif-pick.md`）接收最近 `gifs.pick.contextMessages`（默认 4）行聊天（标明所回复的消息）、角色的第一条消息及带说明的完整库（每条记录附说明，角色最近发送过的附自用标记）。分类器返回一个 handle 或 `none`。返回 handle 时 GIF 替换第一条发出消息并以其原本的回复方式发送；其余消息按原顺序跟随。GIF 发送失败时，所有消息照常发布。分类器在第一条消息的打字模拟期间运行；每日 GIF 限额 `gifs.maxPerDay` 生效。日志：`gifs: picked`（handle true/false，库大小）或 `gifs: pick failed`。
 
 对话记录行中的媒体，使用可用的最具信息量的形式：附加在当前请求上的图片 →
 `transcript.imageAttached`（按图片在文本后的顺序编号）；已描述的 →
@@ -133,7 +133,7 @@ GIF 挑选器（`features.gifPicker`，默认开启）。当角色写了一条�
 
 图片的静帧条目保留其自身的 `<itemId>` 键。同一个条目可以同时存在两者。
 
-已观看的 GIF 缓存在 GIF 自身的 `<itemId>` 键下（无 `video:` 前缀）：`{ text, ts, watched: true, gif: true }`。单帧说明存储为 `{ text, ts, gif: true }`（尝试观看失败时附加 `watchFailed`）。两者与图片描述位于同一缓存中。
+已观看的 GIF 缓存在 GIF 自身的 `<itemId>` 键下（无 `video:` 前缀）：`{ text, reaction, action, screen, ts, watched: true, gif: true }`；`text` 为一行动作描述（无动作行时为反应或屏幕文字）。`gifs.reactionChars` 在列表中截断 `reaction` 和 `screen`，`gifs.actionChars` 截断 `action` 和旧格式的一行说明；`0` = 不截断。单帧说明存储为 `{ text, ts, gif: true }`（尝试观看失败时附加 `watchFailed`）。两者与图片描述位于同一缓存中。
 
 网络查询结果缓存在同一个 `data/guilds/<id>/media.json` 中，与视频和图片条目并列：
 
