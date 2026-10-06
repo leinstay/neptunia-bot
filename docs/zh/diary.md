@@ -12,7 +12,7 @@
 
 `/nep diary off` 清除频道。历史文件保留，重新启用时保持对过去帖子的记忆。
 
-`/nep diary post [kind]` 在计划外立即强制发布一篇帖子。如有回合正在运行，命令等待 `diary.forceWaitMs`（120000 ms，两分钟）至其完成；超时后回复 `busy`。日次上限仍然适用。可选种类键（如 `selfPicture`, `thought`）覆盖计划器的选择；未知种类会列出所有种类后拒绝。
+`/nep diary post [kind] [topic]` 在计划外立即强制发布一篇帖子。如有回合正在运行，命令等待 `diary.forceWaitMs`（120000 ms，两分钟）至其完成；超时后回复 `busy`。日次上限仍然适用。可选种类键（如 `selfPicture`, `thought`）覆盖计划器的选择；未知种类会列出所有种类后拒绝。可选自由文本主题将帖子引向该题材。
 
 ## 窗口
 

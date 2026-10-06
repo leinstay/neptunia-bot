@@ -47,8 +47,8 @@
 | `read-link.md` | 否 | 角色外提示，用于链接阅读器（`features.webLookup`，`web.links.enabled`）：将获取的页面浓缩为一个段落。接收页面标题和正文。不接收角色卡 | `{{today}}` `{{maxChars}}` |
 | `search-summary.md` | 否 | 角色外提示，用于搜索浓缩器（`features.webLookup`，`web.search.enabled`）：将编号的搜索结果浓缩为带内联来源的笔记。不接收角色卡 | `{{today}}` `{{query}}` `{{maxChars}}` |
 | `private.md` | 否 | 追加在模式提示（`reply.md`）之后、`forced.md` 之前，仅在 DM 中使用（`features.privateMessages`）。这是一段私聊：此处所说的一切留在此处；角色保留其公共知识。文件不存在则不追加任何内容 | `{{name}}` `{{author}}` |
-| `diary.md` | 是 | 任务：写日记帖子。角色自己的频道，无人请求。计划的种类和概要、过去的帖子、可选的世界和搜索结果在用户消息块中。输出：`<msg>`（1 至 `diary.maxMessages`）、`<draw>` 或 `<skip/>`；`<react>` 和 `<gif>` 被丢弃。无回复属性，无链接，不对读者说话 | `{{name}}` |
-| `diary-plan.md` | 是 | 计划器：选择种类、概要、是否搜索和绘画。在 `classifier.text` 上运行，无角色卡。接收 `<now>`、`<server>`、`<about_chat>`、`<recent>`、`<lore>`、`<world>`、`<diary>`、`<kinds>`、`<seeds>`。回答一个 JSON 对象 | `{{name}}` |
+| `diary.md` | 是 | 任务：写日记帖子。角色自己的频道，无人请求。计划的种类和概要、过去的帖子、可选的世界和搜索结果在用户消息块中。输出：`<msg>`（1 至 `diary.maxMessages`）、`<draw>` 或 `<skip/>`；`<react>` 和 `<gif>` 被丢弃。无回复属性，无链接 | `{{name}}` |
+| `diary-plan.md` | 是 | 计划器：选择种类、概要、是否搜索和绘画。在 `classifier.text` 上运行，无角色卡。接收 `<now>`、`<server>`、`<about_chat>`、`<recent>`、`<lore>`、`<world>`、`<diary>`、`<kinds>`、`<seeds>`、`<topic>`。回答一个 JSON 对象 | `{{name}}` |
 | `world.md` | 否 | 角色的虚拟世界：聊天之外的场所和日常。仅在日记的计划和生成请求中渲染为 `<world>` 块，且仅当 `diary.world === true`。普通回合中不使用。无文件或开关关闭则无块 | `{{name}}` |
 | `diary-seeds.md` | 否 | 日记计划器的随机种子族。`# name` 标题开始一个族；代码从每族选一行，组成 `diary.seedSets` 个组合。文件不存在或 `seedSets` = 0 时省略 | 无 |
 | `draw.md` | 是 | 绘画子进程的角色外提示（`features.imageGeneration`）：根据场景描述生成一张图片。仅接收外貌和请求，不接收角色卡 | `{{name}}` `{{appearance}}` `{{request}}` `{{when}}` |
@@ -103,10 +103,11 @@
 | `<tempo>` | 10 分钟 / 1 小时 / 1 天的消息计数，不同人数，沉默时长，一个判定（活跃 / 缓慢 / 沉寂） |
 | `<world>` | 角色的虚拟世界（`prompts/world.md`，`{{name}}` 已填充）。仅在日记帖子（`mode === 'diary'`）且 `diary.world === true` 时出现。预算压力下整体丢弃。无文件或开关关闭则不添加 |
 | `<diary>` | 过去的日记帖子，从旧到新：`labels.diary.intro`，然后每篇帖子一行 `labels.diary.line`。在计划和生成请求中均展示。预算压力下最旧的行先被截断 |
-| `<plan>` | 本篇日记帖子的计划：`labels.diary.plan`，然后一行 JSON `{"kind","brief","picture"}`。不会被截断 |
+| `<plan>` | 本篇日记帖子的计划：`labels.diary.plan`，然后一行 JSON `{"kind","brief","picture"}`，拥有者通过 `/nep diary post` 指定时附带 `"topic"`。不会被截断 |
 | `<found>` | 日记搜索结果：`labels.diary.found`，然后搜索结果文本。仅在计划请求了搜索且有结果时出现。预算中紧随 `<lookup>` 之后 |
 | `<kinds>` | 帖子种类与权重和使用次数：`labels.diary.kinds`，然后每个正权重种类一行 `labels.diary.kindLine`。不会被截断 |
 | `<seeds>` | 随机种子组合：`labels.diary.seeds`，然后每组一行 `- a; b; c`。仅在计划请求中。文件不存在或 `diary.seedSets` = 0 时省略。不会被截断 |
+| `<topic>` | 拥有者的强制帖子主题（`/nep diary post [kind] [topic]`）：`labels.diary.topic`，然后主题一行，最多 300 个字符。仅在计划请求中，紧随 `<seeds>` 之后，仅当指定了主题时出现。不会被截断 |
 | `<task>` | `reply` / `interject` / `initiate` / `overheard`（当 `overheard.md` 存在时）/ `elsewhere`（当 `elsewhere.md` 存在时，用于 noticed 评论）/ `diary`（当 `diary.md` 存在时，用于日记帖子），占位符已填充。模式提示之后，当条件满足时最多追加三个 `task.*` 标签（各以空行分隔）：回合回答分拆消息的一个部分时为 `task.part`，或触发作者有其他呼叫等候时为 `task.queued`；频道中其他成员有呼叫等候时为 `task.queuedOthers`；稍后的消息被折叠进此呼叫时为 `task.added`。参见下方 `labels.task.*` |
 
 预算优先级（区块从此列表的底部开始裁剪）：系统提示 + 任务 + 时钟 + 节奏 + 感知
@@ -114,7 +115,7 @@
 拉取的频道（`<channel_view>`，上限 `context.caps.pulled`；回答只读频道呼叫的回合中拉取块在对话记录之前而非之后）->
 近期记事（上限 `context.caps.recent`）->
 其他档案 -> attitudes（上限 `context.caps.attitudes`）-> worn（整体保留或丢弃）->
-仅日记模式：`<found>`（紧随 `<lookup>` 之后）、`<world>`（整体，`<worn>` 之后）、`<diary>`（最旧的行先被截断）、`<plan>` + `<kinds>` + `<seeds>`（不会被截断）->
+仅日记模式：`<found>`（紧随 `<lookup>` 之后）、`<world>`（整体，`<worn>` 之后）、`<diary>`（最旧的行先被截断）、`<plan>` + `<kinds>` + `<seeds>` + `<topic>`（不会被截断）->
 相邻频道 -> 表情符号（从底部删除条目，然后删除整个块；`context.caps.emoji`）-> GIF（同样的裁剪；`context.caps.gifs`）。
 
 GIF 挑选器（`features.gifPicker`，默认开启）。当角色写了一条短回复（不超过 `gifs.pick.maxChars` 个字符，默认 160）且自己没选 GIF 时，分类器（`classifier.text`，purpose `gif-pick`，`gifs.pick.maxOutputTokens` 60，提示 `prompts/gif-pick.md`）接收最近 `gifs.pick.contextMessages`（默认 4）行聊天（标明所回复的消息）、角色的第一条消息及带说明的完整库（每条记录附说明，角色最近发送过的附自用标记）。分类器返回一个 handle 或 `none`。返回 handle 时 GIF 替换第一条发出消息并以其原本的回复方式发送；其余消息按原顺序跟随。GIF 发送失败时，所有消息照常发布。分类器在第一条消息的打字模拟期间运行；每日 GIF 限额 `gifs.maxPerDay` 生效。日志：`gifs: picked`（handle true/false，库大小）或 `gifs: pick failed`。
@@ -288,6 +289,7 @@ diary.kindLine                           {key} {weight} {count} {window}: 一种
 diary.plan                               `<plan>` 块的第一行
 diary.found                              `<found>` 块的第一行
 diary.seeds                              `<seeds>` 块的第一行
+diary.topic                              `<topic>` 块的第一行（拥有者的强制帖子主题）
 memory.privateNote                       the <private> block content in a private analyzer batch: marks the batch as a private conversation, constrains output to users for the partner's id only
 memory.privateChannel                    heading used in place of a channel name for the <new_messages> section in a private batch
 limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
