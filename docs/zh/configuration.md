@@ -27,6 +27,7 @@
 | `attachedDescriptions` | `true` | 描述器同时为附加到请求的图片运行。角色仍然直接看到图片；辅助的注释帮助发现一眼容易错过的内容。需要同时开启 `vision` 和 `mediaDescriptions` |
 | `videoDescriptions` | `false` | 通过支持视频的模型观看短视频片段；需同时开启 `mediaDescriptions`。在 `config.local.json` 中开启；还需要支持视频的模型，以及站点链接需要 `yt-dlp`/`ffmpeg` |
 | `videoRewatch` | `true` | 被呼叫时重看视频以回答相关问题；需要 `videoDescriptions` |
+| `imageRelook` | `true` | 被呼叫时再看一次图片以回答问题或核实被声称的细节；需要 `vision`。与视频重看共享每日 `media.video.rewatch.maxPerDay` 计数器。缺失的键视为开启 |
 | `webLookup` | `false` | 阅读聊天中发布的链接并在被问到事实性问题时搜索网络。与其他功能不同，缺失的键视为关闭。搜索需要 `.env` 中的 `BRAVE_SEARCH_API_KEY`；没有密钥时只有链接阅读可用。参见[媒体：链接与搜索](media.md#链接) |
 | `imageGeneration` | `false` | 允许角色通过绘画子进程绘制图片。缺失的键视为开启。在 `config.local.json` 中启用；需要 `image.model` 中配置支持图像生成的模型。参见[媒体：绘画](media.md#绘画) |
 | `privateMessages` | `false` | 回复公会成员的私信。需要已存储的公共档案且 `affinity.score >= private.minAffinity`。参见[消息与记忆：私有层](messages-and-memory.md#私有层) |
@@ -45,6 +46,7 @@
 | `varietyPrecompute` | `true` | 角色发布文本后立即启动多样性过程，使下一回合可以直接使用结果。关闭时过程仅在回合时运行，但迟到的结果仍会保存。缺失的键视为开启 |
 | `fillerGuard` | `true` | 阻止角色过度使用的词语和短语在回复中重复，直到冷却结束。多样性过程自动填充列表；所有者可通过 `/nep variety add type:filler` 固定条目。当回复包含冷却中的条目时，一次重写请求将其替换。缺失的键视为开启 |
 | `patternGuard` | `true` | 发布前将回复与当前已磨损的手法列表比对，发现匹配则重写。缺失的键视为开启 |
+| `stickyGuard` | `true` | 每次发帖后查找角色卡住的短语（在 3+ 条近期消息中重复，在旧消息中罕见），作为填充词条目添加，使填充词守卫在下次使用时重写。无需模型。缺失的键视为开启 |
 | `splitTasks` | `true` | 将长且有结构的直接呼叫拆分为多个部分，每个部分在自己的回合中回答。缺失的键视为开启。需要 `prompts/split.md` 和 `labels.task.part` |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
@@ -629,6 +631,21 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `max` | `12` | 列表保留的条目数；满时淘汰排名最低的条目 |
 | `halfLifeDays` | `14` | 条目排名的时间衰减半衰期（天）；与兴趣相同的衰减公式 |
 | `maxOutputTokens` | `400` | 重写请求的最大输出 token 数 |
+
+### `variety.sticky`
+
+机械粘滞 token 检测器（`features.stickyGuard`）的设置。角色每次发帖后（或短多样性过程完成时），代码扫描两个窗口：角色最近 `lines` 条自己的消息（近期窗口）和环的较旧部分（至 `variety.longLines`，基线）。由 1 到 `maxWords` 个词组成的短语，当出现在至少 `minRepeats` 条近期消息中且在不超过 `baselineMax` 条旧消息中时，被判定为粘滞，因此角色一直使用的日常词汇不会命中。单词短语需要 `minChars` 个字符，含数字时至少 2 个字符。旧消息少于 `baselineMin` 条时，单词仅在含数字时计入。`ignore` 列表中的词不计入。重叠短语中最长的胜出。每个匹配项成为精确填充词条目，权重等于其计数，冷却已经开始，使填充词守卫在下次使用时重写。日志：`fillers: sticky`。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `minRepeats` | `3` | 短语被计入所需的最少近期消息条数 |
+| `minRepeatsWord` | `4` | 不含数字的单个词需要出现在这么多近期行中才算作粘滞。两个及以上词的短语和含数字的标记使用 `minRepeats` |
+| `lines` | `40` | 扫描的近期自身消息条数 |
+| `maxWords` | `3` | 一个短语的最大词数 |
+| `minChars` | `4` | 不含数字的单词短语的最小字符数 |
+| `baselineMax` | `1` | 短语被判定为粘滞时在旧环中的最大出现次数 |
+| `baselineMin` | `100` | 旧消息少于此数时，单词仅在含数字时计入 |
+| `ignore` | `[]` | 永远不作为粘滞 token 计数的词 |
 
 ### `variety.patternCheck`
 

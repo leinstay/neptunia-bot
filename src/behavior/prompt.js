@@ -1574,6 +1574,8 @@ function pulledAuthors(pulledFits) {
  *   `descriptions`. Omitted -> a neighbour picture shows a caption only when `descriptions` has one.
  * @param {Map<string, object>} [input.videos]  Item id -> video state from the video describer
  *   (src/memory/describe.js#describeVideos), passed to formatTranscript.
+ * @param {Map<string, { question: string, text: string }>|null} [input.imageAnswers]  Picture id ->
+ *   a second look on a question (src/memory/describe.js#relookImage), passed to formatTranscript.
  * @param {Map<string, string>} [input.reads]  Link id -> the excerpt the web lookup read from that
  *   page (src/web/lookup.js#readLinks), passed to formatTranscript.
  * @param {{ query?: string, text?: string, sources?: object[], cached?: boolean,
@@ -1697,7 +1699,7 @@ function pulledAuthors(pulledFits) {
  *   counts the items, not the header.
  */
 export function buildRequest(input) {
-  const { config, prompts, calibrator, mode, forced = false, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null, descriptions, videos, reads, lookup = null } = input;
+  const { config, prompts, calibrator, mode, forced = false, now, selfName, history, neighbors, trigger, triggerKind, channels = [], currentChannelId = null, descriptions, videos, imageAnswers, reads, lookup = null } = input;
   const labels = requireLabels(prompts);
   const privateChat = Boolean(input.privateChat);
   const interlocutor = privateChat ? mergeProfiles(input.interlocutor, input.privateProfile) : input.interlocutor;
@@ -1729,6 +1731,8 @@ export function buildRequest(input) {
     descriptions,
     videos,
     reads,
+    // A picture's second look on a question renders under its tag.
+    imageAnswers,
     // A GIF the library knows carries its handle in the transcript.
     gifHandles: gifsOn ? gifHandleMap(gifLibrary) : undefined,
   };

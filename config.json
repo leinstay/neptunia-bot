@@ -22,6 +22,7 @@
     "attachedDescriptions": true,
     "videoDescriptions": false,
     "videoRewatch": true,
+    "imageRelook": true,
     "webLookup": false,
     "recall": true,
     "imageGeneration": false,
@@ -32,6 +33,7 @@
     "varietyPrecompute": true,
     "fillerGuard": true,
     "patternGuard": true,
+    "stickyGuard": true,
     "gifPicker": true,
     "portraitRefresh": true,
     "recent": true,
@@ -288,7 +290,7 @@
     "google": { "resolution": "1K" }
   },
   "gifs": { "max": 40, "listChars": 70, "ownMarkHours": 24, "storeMax": 300, "halfLifeDays": 30, "maxPerDay": 40, "backfillMessages": 500, "backfillDescribe": 20, "recachePerRun": 50, "pick": { "maxChars": 60, "contextMessages": 4, "maxOutputTokens": 60 } },
-  "variety": { "window": 16, "recentMinutes": 180, "minLines": 3, "contextChars": 120, "maxPatterns": 4, "shapeChars": 140, "maxOutputTokens": 500, "timeoutMs": 8000, "requestTimeoutMs": 30000, "history": 20, "longLines": 300, "longEveryHours": 6, "longMinLines": 60, "longMaxPatterns": 3, "fillers": { "cooldownHours": 36, "cooldownMessages": 300, "maxOutputTokens": 400, "max": 12, "halfLifeDays": 14 }, "patternCheck": { "minChars": 15, "maxOutputTokens": 200 } },
+  "variety": { "window": 16, "recentMinutes": 180, "minLines": 3, "contextChars": 120, "maxPatterns": 4, "shapeChars": 140, "maxOutputTokens": 500, "timeoutMs": 8000, "requestTimeoutMs": 30000, "history": 20, "longLines": 300, "longEveryHours": 6, "longMinLines": 60, "longMaxPatterns": 3, "fillers": { "cooldownHours": 36, "cooldownMessages": 300, "maxOutputTokens": 400, "max": 12, "halfLifeDays": 14 }, "patternCheck": { "minChars": 15, "maxOutputTokens": 200 }, "sticky": { "minRepeats": 3, "minRepeatsWord": 4, "lines": 40, "maxWords": 3, "minChars": 4, "baselineMax": 1, "baselineMin": 100, "ignore": [] } },
   "private": { "minAffinity": 5, "maxPerUserPerDay": 100, "maxPerOwnerPerDay": 200, "purgeMaxMessages": 5000 },
   "mentor": {
     "model": null,

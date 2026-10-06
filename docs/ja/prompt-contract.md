@@ -35,8 +35,8 @@
 | `describe.md` | はい | メディア説明モデルのアウトオブキャラクタープロンプト（`features.mediaDescriptions`）: 画像 1 枚を入力、プレーンテキスト 1 行を出力: 写っているもの、要点、判読可能なテキストは元のスクリプトで引用。常に英語。意見なし、道徳的判断なし、マークダウンなし | `{{today}}` `{{maxChars}}`（オプション） |
 | `describe-video.md` | はい | 動画説明モデルのアウトオブキャラクタープロンプト（`features.videoDescriptions`）: 動画クリップ 1 本（音声付き）を入力、設定可能な長さの完全な説明を出力: 誰が登場するか、何が言われるか（重要なフレーズを引用）、画面上のテキスト、視覚的に何が起きるか、音楽/効果音。常に英語。発話、字幕、画面上のテキストは元の言語で引用。キャラクターカードなし | `{{today}}` `{{maxChars}}` |
 | `describe-gif.md` | いいえ | GIF 説明モデルのアウトオブキャラクタープロンプト（`media.gif.watch`）: 短い無音クリップを入力、1 行のコンパクトな説明を出力: アクション、表現する内容、可視テキスト。常に英語。キャラクターカードなし。ファイルがない場合は `describe-video.md` にフォールバック | `{{today}}` `{{maxChars}}` `{{seconds}}` |
-| `rewatch.md` | はい | 分類器: ペルソナが動画を再視聴する必要があるか、または読み込めなかった動画をリトライする必要があるか（`features.videoRewatch`）。番号付きの最近の動画リストとステータス、および新しいメッセージを受け取る。出力は 1 行: `<number> \| <question>`、`<number> \| retry` または `none` | `{{name}}` |
-| `rewatch-answer.md` | はい | 再視聴のアウトオブキャラクタープロンプト: 動画モデルがクリップを再度視聴し、質問の言語で 1 つの質問に回答。キャラクターカードなし | `{{today}}` `{{question}}` `{{maxChars}}` |
+| `rewatch.md` | はい | 分類器: ペルソナが動画を再視聴するか、読み込めなかった動画をリトライするか、画像をもう一度見る必要があるか（`features.videoRewatch`、`features.imageRelook`）。番号付きの最近のメディアリスト（動画と画像）を種類・ステータスと共に受け取る。出力は 1 行: `<number> \| <question>`、`<number> \| retry` または `none` | `{{name}}` |
+| `rewatch-answer.md` | はい | セカンドルックのアウトオブキャラクタープロンプト: ビジョンまたは動画モデルがアイテムをもう一度見て、質問の言語で 1 つの質問に回答。種類を問わず（動画と画像の両方に対応）。キャラクターカードなし | `{{today}}` `{{question}}` `{{maxChars}}` |
 | `address.md` | はい | 分類器: タグなしメッセージがペルソナ宛か、ペルソナについてか、どちらでもないか。出力は 1 語: `yes`、`overheard` または `no` | `{{name}}` |
 | `overheard.md` | いいえ | タスク: メッセージがペルソナについて話しているが、ペルソナに話しかけてはいない。トリガー種別が `overheard` でファイルが存在し空でない場合、モードプロンプトの代わりに使用。ファイルが存在しないか空の場合はモードプロンプトにフォールバック（劣化） | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
 | `lookup.md` | いいえ | 分類器: ペルソナが何かを調べる必要があるか（`features.webLookup`、`features.recall`）。短いトランスクリプトと `<candidate>` ブロックを受け取る。出力は `none`、または最大 4 行のラベル付き行: `web:` ウェブクエリ、`server:` サーバーのメッセージを検索するワードフォーム、`who:` 人物を見つけるネームフォーム、`when:` 日付範囲。ラベルなしの 1 行（旧フォーマット）はウェブクエリとして読み取られる | `{{name}}` `{{today}}` |
@@ -173,6 +173,7 @@ transcript.videoWatched                  {name} {duration} {text}: first-hand, t
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
 transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
+transcript.imageAnswered                {question} {text}: extra tag under the picture's line; the persona looked at the picture again for this question
 transcript.videoReason.length | size | daily | error | pending    human phrases for the five reason codes; pending = the clip was still loading when the request went out
 transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
 transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
@@ -409,38 +410,40 @@ task.added                               {added}: later messages from the author
 ## 再視聴分類器
 
 ペルソナに直接話しかけられた（リプライターン、`overheard` や自発的ターンではない）とき、チャンネルの直近 `media.video.rewatch.recentMessages`（デフォルト
-60）件のメッセージに動画がある場合、分類器がそのメッセージがそれらの動画について質問しているか、または読み込めなかった
-動画のリトライを求めているかを判定します。候補は視聴済み動画とエラー状態の動画（リクエストされたリトライはターンの `media.video.maxPerTurn` 試行とは独立した
-専用スロットを使用します）です。分類器には最大
-`media.video.rewatch.maxCandidates`（デフォルト 6）件の動画が新しい順に渡されます。コードは `rewatch.md` を
+60）件のメッセージに動画や画像がある場合、分類器がそのメッセージがそれらのアイテムについて質問しているか、画像の具体的な詳細を主張しているか、または読み込めなかった
+動画のリトライを求めているかを判定します。候補: 視聴済み動画、エラー状態の動画、説明済み画像（添付画像、ペルソナ自身のアップロードを含む。貼り付けられた画像リンクは除外）。画像は `features.vision` がオンの場合のみ提供されます。分類器には最大
+`media.video.rewatch.maxCandidates`（デフォルト 6）件のアイテムが渡されます。動画が先、画像が後、各種類内で新しい順です。コードは `rewatch.md` を
 システムプロンプトとして `classifier.text` モデルロール（デフォルト `anthropic/claude-sonnet-4.6`）に送信し、
-ユーザーメッセージに 3 つのブロックを含めます: チャンネルの直近数件のメッセージを含む短い `<transcript>`（ペルソナ自身の行は `labels.self` でマーク、分類器が候補の返信先を把握できるようにする）、続いて動画リストと候補:
+ユーザーメッセージに 3 つのブロックを含めます: チャンネルの直近数件のメッセージを含む短い `<transcript>`（ペルソナ自身の行は `labels.self` でマーク、分類器が候補の返信先を把握できるようにする）、続いてメディアリストと候補:
 
 ```
 <transcript>
 ...
 </transcript>
-<videos>
-<number> | <name> | <status> | <説明の冒頭>
+<media>
+<number> | <kind> | <name> | <status> | <キャプションまたは説明の冒頭>
 ...
-</videos>
+</media>
 <candidate>
 <著者名>: <トリガーテキスト>
 </candidate>
 ```
 
-各 `<videos>` 行には `|` 区切りの 4 列: 連番（1 = 最新の動画）、動画名、ステータス（`watched` または `not loaded`）、
-サマリーの先頭 200 文字（読み込めなかった動画は空）。名前とサマリーは空白が正規化されて 1 行に。トリガーテキストは
+各 `<media>` 行には `|` 区切りの 5 列: 連番（1 = 種類グループ内で最新のアイテム）、種類（`video` または `picture`）、アイテム名、
+ステータス（動画の場合 `watched` または `not loaded`、画像の場合 `described`）、サマリーまたはキャプションの先頭 200 文字（読み込めなかった動画は空）。名前とサマリーは空白が正規化されて 1 行に。トリガーテキストは
 `context.maxMessageChars` で切り詰め。出力は 1 行:
 
-- `<number> | <question>`: メッセージが視聴済み動画について質問しており、説明でカバーされていない詳細を必要とする。番号はリストからそのままコピーする。
-- `<number> | retry`: メッセージが読み込めなかった動画について、再試行を求めるかその内容を質問している。番号はリストからそのままコピーする。
+- `<number> | <question>`: メッセージが視聴済み動画または説明済み画像について質問しており（確認が必要な主張された詳細を含む）、説明でカバーされていない詳細を必要とする。番号はリストからそのままコピーする。
+- `<number> | retry`: メッセージが読み込めなかった動画について、再試行を求めるかその内容を質問している。番号はリストからそのままコピーする。リトライは動画のみに適用。
 - `none`: 再視聴もリトライも不要。
 
-質問でヒットした場合、動画モデルが `rewatch-answer.md`（`{{question}}` と `{{maxChars}}` =
+動画の質問でヒットした場合、動画モデルが `rewatch-answer.md`（`{{question}}` と `{{maxChars}}` =
 `rewatch.answerChars`、デフォルト 1200）でクリップを再度視聴し、回答は `transcript.videoAnswered`（`{question}`、
-`{text}`）として視聴済みタグの後にトランスクリプトに追加されます。`<senses>` ブロックには機能が有効な場合に
-`senses.videoRewatch` が含まれます。
+`{text}`）として視聴済みタグの後にトランスクリプトに追加されます。
+
+画像の質問でヒットした場合、ビジョンモデル（`classifier.media`、`purpose: relook`、プロンプト `rewatch-answer.md`、種類を問わず共用）がその質問で画像をもう一度見ます。回答はキャプションとして保存されず（1 時間キャッシュ）、トランスクリプトは画像の行の下に `transcript.imageAnswered`（`{question}`、`{text}`）を運びます。
+
+`<senses>` ブロックには機能が有効な場合に `senses.videoRewatch` が含まれます。
 
 リトライでヒットした場合、動画モデルが `force`（エラーキャッシュを無視）でクリップを視聴します。初回視聴と同じ
 `describeVideo` パスを使用します。リトライが成功すると、動画のステータスがエラーから視聴済みに変わり、トランスクリプト
@@ -449,8 +452,8 @@ task.added                               {added}: later messages from the author
 
 制限: ターンあたり最大 1 回の再視聴またはリトライ。分類器と再視聴はそれぞれ `llm.maxRequestsPerDay` にカウントされ
 ます。再視聴は `media.video.maxPerDay` にもカウントされます。`media.video.rewatch.maxPerDay`（デフォルト 20）は
-再視聴を個別に制限します。回答は質問ごとに 1 時間キャッシュされます（上記の動画キャッシュセクションを参照）。スイッチ
-`features.videoRewatch`（未設定 = オン、`videoDescriptions` が必要）。
+動画再視聴と画像リルックの両方を制限します（共有カウンター）。回答は質問ごとに 1 時間キャッシュされます（上記の動画キャッシュセクションを参照）。スイッチ
+`features.videoRewatch`（未設定 = オン、`videoDescriptions` が必要）。スイッチ `features.imageRelook`（未設定 = オン、`vision` が必要）。
 
 ## 検索およびリコール分類器
 
@@ -530,7 +533,7 @@ Mentor サンドボックスは、状況ごとに 1 回の多様性パスを実�
 
 ボイスモデルが返答を書いた後、投稿前にペルソナの言語的習慣を検出する 2 つのポストジェネレーションレール。
 
-**フィラーガード**（`features.fillerGuard`、未設定 = オン）。ペルソナが多用する語句のランク付きリスト。主に多様性パスが供給します（パスが見つけた語タイプの習慣がそのカウントに等しいウェイトのエントリになります）。オーナーは `/nep variety add type:filler` でフォールバックとしてエントリを固定できます。エントリには 2 種類: PREFIX エントリは `*` で終わり（最低 3 文字）、語境界でそのプレフィックスで始まるすべての語に一致します（任意のスクリプト）。EXACT エントリ（`*` なし）は語またはフレーズ全体に一致します。エントリは `variety.fillers.cooldownHours`（デフォルト 36）時間 OR `variety.fillers.cooldownMessages`（デフォルト 300）ペルソナ自身の投稿メッセージ数の先に来た方が過ぎるまで再使用できません。使用すると両カウンターがリセットされます。リストはランキングと削除で管理: 容量 `variety.fillers.max`（デフォルト 12）、時間減衰付きウェイト（`variety.fillers.halfLifeDays`、デフォルト 14）、満杯時に最弱を削除。オーナー追加のエントリは固定（削除・減衰なし）。クールダウン中のエントリを含む返答があると、発話モデル（`llm.model`、目的 `reword`、`variety.fillers.maxOutputTokens` 400、プロンプト `prompts/reword.md`）がそのエントリなしに返答を書き直します。メインのペルソナリクエストはフィラーリストを見ません。ギルドメモリ内の状態: `fillers` と `ownMessageCount`。ログ: `fillers: reworded`、`fillers: reword failed`、`fillers: reword skipped`。
+**フィラーガード**（`features.fillerGuard`、未設定 = オン）。ペルソナが多用する語句のランク付きリスト。主に多様性パスが供給します（パスが見つけた語タイプの習慣がそのカウントに等しいウェイトのエントリになります）。機械的検出器（`features.stickyGuard`）も投稿ごとにリストを供給し、3+ 件の直近行で繰り返されるが古いリングでは稀なフレーズを見つけ、既に開始されたクールダウン付きの正確なエントリとして追加します（ログ `fillers: sticky`）。オーナーは `/nep variety add type:filler` でフォールバックとしてエントリを固定できます。エントリには 2 種類: PREFIX エントリは `*` で終わり（最低 3 文字）、語境界でそのプレフィックスで始まるすべての語に一致します（任意のスクリプト）。EXACT エントリ（`*` なし）は語またはフレーズ全体に一致します。エントリは `variety.fillers.cooldownHours`（デフォルト 36）時間 OR `variety.fillers.cooldownMessages`（デフォルト 300）ペルソナ自身の投稿メッセージ数の先に来た方が過ぎるまで再使用できません。使用すると両カウンターがリセットされます。リストはランキングと削除で管理: 容量 `variety.fillers.max`（デフォルト 12）、時間減衰付きウェイト（`variety.fillers.halfLifeDays`、デフォルト 14）、満杯時に最弱を削除。オーナー追加のエントリは固定（削除・減衰なし）。クールダウン中のエントリを含む返答があると、発話モデル（`llm.model`、目的 `reword`、`variety.fillers.maxOutputTokens` 400、プロンプト `prompts/reword.md`）がそのエントリなしに返答を書き直します。メインのペルソナリクエストはフィラーリストを見ません。ギルドメモリ内の状態: `fillers` と `ownMessageCount`。ログ: `fillers: reworded`、`fillers: reword failed`、`fillers: reword skipped`。
 
 **パターンガード**（`features.patternGuard`、未設定 = オン）。投稿前に、返答が `variety.patternCheck.minChars`（デフォルト 15）文字以上で使い古しリストが空でない場合、分類器（`classifier.text`、目的 `pattern-check`、`variety.patternCheck.maxOutputTokens` 40、プロンプト `prompts/pattern-check.md`）が返答がどの使い古し手法（短いリストと長いリスト）に該当するかを判定します。一致した場合、同じ書き直しリクエストがその手法なしに返答を書き直します。分類器は最初のメッセージのタイピングシミュレーション中に実行されるため、目に見える遅延を追加しません。書き直しのみが遅延を追加します。ログ: `patterns: checked`、`patterns: check failed`。
 

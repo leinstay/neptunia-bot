@@ -60,7 +60,12 @@
 // `rewatch-answer` prompt. It has its own daily counter
 // (`state.data.rewatchDay` / `rewatchCount`, `media.video.rewatch.maxPerDay`)
 // on top of the ordinary video one; its answer is cached for an hour under
-// `video:<itemId>:q:<hash of the question>`, failures never.
+// `video:<itemId>:q:<hash of the question>`, failures never. `relookImage()`
+// is the same second look at a picture (features.imageRelook): the picture
+// downloaded as for a caption, the question asked through the same prompt on
+// the media model. It takes the same re-watch counter (one counter for both
+// kinds), never a video slot, and its answer is cached apart from the
+// picture's caption, under `image:<itemId>:q:<hash>`.
 //
 // A GIF is watched, not described from one still frame (`media.gif.watch`,
 // a missing key counts as on, plus video vision on and the describe-gif or
@@ -112,7 +117,7 @@ const REWATCH_TTL_MS = 60 * MINUTE_MS;
 const PERMANENT_VIDEO_MISSES = new Set(['length', 'size']);
 /** The state.json fields of the daily video counter (every watch and every re-watch attempt). */
 const VIDEO_DAILY = Object.freeze({ dayKey: 'videoDay', countKey: 'videoCount' });
-/** The state.json fields of the daily re-watch counter. */
+/** The state.json fields of the daily second-look counter: a video re-watch and a picture relook alike. */
 const REWATCH_DAILY = Object.freeze({ dayKey: 'rewatchDay', countKey: 'rewatchCount' });
 /** What cachedPicture returns for a picture whose recent failure is still remembered. */
 const FRESH_MISS = Symbol('fresh-miss');
@@ -150,12 +155,30 @@ function positiveOr(value, fallback) {
 }
 
 /**
- * The cache key of one question's answer: `video:<itemId>:q:` and the sha1
- * prefix of the question lower-cased and whitespace-collapsed (the search
- * cache's normalisation).
+ * The cache key of one question's answer: `<prefix>:<itemId>:q:` (`video`
+ * for a re-watch, `image` for a picture's second look) and the sha1 prefix
+ * of the question lower-cased and whitespace-collapsed (the search cache's
+ * normalisation).
  */
-function questionKey(itemId, question) {
-  return hashedKey(`video:${itemId}:q`, normalizeQuery(question));
+function questionKey(itemId, question, prefix = 'video') {
+  return hashedKey(`${prefix}:${itemId}:q`, normalizeQuery(question));
+}
+
+/**
+ * The URL a picture is downloaded from for the vision model: a sticker or
+ * emoji URL as it is (already sized by its own builder; the proxy must never
+ * touch either), every other kind through the media proxy at
+ * `media.imageSize` -- a video poster as webp, a gif as one still png frame
+ * (as webp the proxy serves the whole animation, often above
+ * `context.vision.maxBytes`), anything else as webp. A no-op for a
+ * non-Discord host such as a YouTube thumbnail's i.ytimg.com.
+ */
+function pictureImageUrl(item, mediaCfg) {
+  if (item.kind === 'sticker' || item.kind === 'emoji') return item.url;
+  const sized = { width: mediaCfg.imageSize, height: mediaCfg.imageSize };
+  if (item.kind === 'video') return mediaProxyUrl(item.url, { format: 'webp' });
+  if (item.kind === 'gif') return mediaProxyUrl(item.url, { ...sized, format: 'png', animated: false });
+  return mediaProxyUrl(item.url, { ...sized, format: 'webp' });
 }
 
 /** A stand-in for the persistent state when none is wired (tests, tools): the daily count lives in memory. */
@@ -373,22 +396,9 @@ export function createDescriber({
 
     // A sticker/emoji URL is already fully sized by its own pure builder
     // (stickerUrl/emojiUrl -- `size=`, not width/height/format, and the
-    // emoji CDN host is deliberately not media.discordapp.net): the proxy
-    // must never touch either. Every other kind (image/gif/video/link) goes
-    // through it -- a no-op for a non-Discord host such as a YouTube
-    // thumbnail's i.ytimg.com. A gif asks for one still png frame: as webp
-    // the proxy serves the whole animation, often above context.vision.maxBytes.
-    let imageUrl;
-    if (item.kind === 'sticker' || item.kind === 'emoji') {
-      imageUrl = item.url;
-    } else {
-      const sized = { width: mediaCfg.imageSize, height: mediaCfg.imageSize };
-      let proxyOptions;
-      if (item.kind === 'video') proxyOptions = { format: 'webp' };
-      else if (item.kind === 'gif') proxyOptions = { ...sized, format: 'png', animated: false };
-      else proxyOptions = { ...sized, format: 'webp' };
-      imageUrl = mediaProxyUrl(item.url, proxyOptions);
-    }
+    // emoji CDN host is deliberately not media.discordapp.net); every other
+    // kind goes through the media proxy (pictureImageUrl).
+    const imageUrl = pictureImageUrl(item, mediaCfg);
 
     const recordMiss = () => {
       touchKey(cache, item.itemId, { miss: true, ts: now() });
@@ -756,7 +766,8 @@ export function createDescriber({
    * The video slots left today, read only (the counters are never rolled
    * over or written here): `video` under `media.video.maxPerDay` (a watch, a
    * retry and a re-watch each take one) and `rewatch` under
-   * `media.video.rewatch.maxPerDay` (a re-watch also needs a `video` slot).
+   * `media.video.rewatch.maxPerDay` (a re-watch also needs a `video` slot; a
+   * picture's second look, relookImage, takes a `rewatch` slot only).
    * A cap that is not a number leaves its rail unlimited (Infinity), as the
    * watch itself reads it. For a turn that skips a classifier whose action
    * could not run.
@@ -1171,6 +1182,110 @@ export function createDescriber({
     return { question: asked, text };
   }
 
+  /**
+   * The second look at a picture on a question (features.imageRelook and
+   * features.vision, a missing key counts as on): download `item` the way a
+   * caption does (pictureImageUrl, `context.vision.maxBytes`) and ask the
+   * media model (`classifier.media`, a helper request, `purpose: 'relook'`,
+   * output capped at `media.video.rewatch.maxOutputTokens`) `question`
+   * through the `rewatch-answer` prompt (`{{question}}`, `{{maxChars}}` =
+   * `media.video.rewatch.answerChars`). Only an `image` item with a URL and a
+   * non-empty question. It shares the one second-look counter with
+   * rewatchVideo (`media.video.rewatch.maxPerDay`, `state.data.rewatchDay` /
+   * `rewatchCount`), reserved before the download and kept on failure; it
+   * never takes a video slot. The answer is NOT the picture's caption: it is
+   * cached for an hour under `image:<itemId>:q:<hash>`, failures never. With
+   * `llm.maxRequestsPerDay` spent nothing is downloaded and no slot is taken.
+   * The question and the answer are data: never logged.
+   * @param {string} guildId
+   * @param {object} item  One collectPictures item of kind `image`.
+   * @param {string} question
+   * @returns {Promise<{ question: string, text: string }|null>}
+   */
+  async function relookImage(guildId, item, question) {
+    const features = hot.config.features ?? {};
+    if (features.imageRelook === false || features.vision === false) return null;
+    const promptText = hot.prompts?.['rewatch-answer'];
+    const asked = String(question ?? '').trim();
+    if (!promptText || item?.kind !== 'image' || !item.itemId || !item.url || !asked) return null;
+
+    const mediaCfg = hot.config.media ?? {};
+    const rewatchCfg = mediaCfg.video?.rewatch ?? {};
+    const answerChars = positiveOr(rewatchCfg.answerChars, REWATCH_ANSWER_CHARS_FALLBACK);
+    const report = (outcome, extra = {}) => {
+      log.info('describe: relook', {
+        source: item.source ?? null,
+        state: outcome,
+        reason: extra.reason ?? null,
+        cached: extra.cached ?? false,
+      });
+    };
+
+    const cache = store.getMediaCache(guildId);
+    const key = questionKey(item.itemId, asked, 'image');
+    const hit = cache[key];
+    if (hit && typeof hit.answer === 'string') {
+      if (now() - hit.ts < REWATCH_TTL_MS) {
+        touchKey(cache, key, hit);
+        store.markMediaCacheDirty(guildId);
+        report('answered', { cached: true });
+        return { question: hit.question ?? asked, text: hit.answer };
+      }
+      delete cache[key];
+      store.markMediaCacheDirty(guildId);
+    }
+
+    // The request would be refused: no download, no slot.
+    if (capSpent()) {
+      report('limit', { reason: 'daily-cap' });
+      return null;
+    }
+    // The one second-look counter, reserved synchronously before any await.
+    const lookedToday = countToday(REWATCH_DAILY.dayKey, REWATCH_DAILY.countKey);
+    if (lookedToday >= (rewatchCfg.maxPerDay ?? Infinity)) {
+      report('limit', { reason: 'daily' });
+      return null;
+    }
+    state.data.rewatchCount = lookedToday + 1;
+    state.markDirty();
+
+    const visionCfg = hot.config.context?.vision ?? {};
+    const downloaded = await imageFetcher.fetchAsDataUrl(pictureImageUrl(item, mediaCfg), {
+      maxBytes: visionCfg.maxBytes,
+      timeoutMs: visionCfg.fetchTimeoutMs,
+    });
+    if (!downloaded) {
+      report('error', { reason: 'download' });
+      return null;
+    }
+
+    let completion;
+    try {
+      completion = await llm.complete(
+        [
+          { role: 'system', content: fillPromptTemplate(promptText, { question: asked, maxChars: answerChars, today: todayDate() }) },
+          { role: 'user', content: [{ type: 'image_url', image_url: { url: downloaded.dataUrl } }] },
+        ],
+        {
+          model: classifierMediaModel(hot.config),
+          ...helperRequestOptions(hot.config, { role: 'classifier.media', maxOutputTokens: rewatchCfg.maxOutputTokens, purpose: 'relook' }),
+        },
+      );
+    } catch (err) {
+      report('error', { reason: requestFailureReason(err) });
+      return null;
+    }
+
+    const text = cleanVideoText(completion.text, answerChars);
+    if (!text) {
+      report('error', { reason: 'empty' });
+      return null;
+    }
+    putVideoEntry(guildId, key, { answer: text, question: asked, ts: now() });
+    report('answered');
+    return { question: asked, text };
+  }
+
   // Which link of the YouTube duration chain works on this host (src/memory/youtube-check.js):
   // the same fetcher and key as a real link, no LLM call, nothing cached.
   const checkYoutube = createYoutubeCheck({ hot, videoFetcher, youtubeApiKey });
@@ -1183,6 +1298,7 @@ export function createDescriber({
     describeVideos,
     cachedVideos,
     rewatchVideo,
+    relookImage,
     videoCapsLeft,
     watchGif,
     gifWatchBlocker,

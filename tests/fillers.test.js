@@ -235,6 +235,14 @@ test('learnFillers: past max the weakest unpinned entry is evicted, a newcomer t
   assert.deepEqual([keys(none.list), none.added], [['ένα', 'δύο', 'τρία'], 0], 'no room beside the pins');
 });
 
+test('learnFillers: an exact pattern adds an exact entry even for a long single word, and is covered like any other', () => {
+  const out = learnFillers([], [{ count: 4, word: 'Φεγγάρι', exact: true }, { count: 3, word: '551 κομμάτια', exact: true }], { now: NOW, ...RANK });
+  assert.deepEqual(out.list.map(fillerKey), ['φεγγάρι', '551 κομμάτια']);
+  assert.deepEqual(out.list.map((e) => e.weight), [4, 3]);
+  const covered = learnFillers([entry('φεγγ*', { weight: 1 })], [{ count: 2, word: 'φεγγάρι', exact: true }], { now: NOW, ...RANK });
+  assert.deepEqual([covered.added, covered.bumped, keys(covered.list), covered.list[0].weight], [0, 1, ['φεγγ*'], 3]);
+});
+
 // ---- the rewrite --------------------------------------------------------------------
 
 const MESSAGES = [

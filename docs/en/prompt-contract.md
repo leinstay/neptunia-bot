@@ -35,8 +35,8 @@ All instructions are English in both layers; a character's speech samples may be
 | `describe.md` | yes | Out-of-character prompt of the media describer (`features.mediaDescriptions`): one picture in, one plain line out: the action and the point, legible text quoted in its original script. Always English. No commentary, no moralising, no markdown | `{{today}}` `{{maxChars}}` (optional) |
 | `describe-video.md` | yes | Out-of-character prompt of the video describer (`features.videoDescriptions`): one video clip in (with sound), a full ordered account out: who appears, what is said (key phrases quoted), text on screen, what happens visually, music/sound when relevant. Configurable length. Always English; speech, captions and on-screen text quoted in their original language. No character card | `{{today}}` `{{maxChars}}` |
 | `describe-gif.md` | no | Out-of-character prompt for the GIF describer (`media.gif.watch`): a short silent clip in, one compact line out: the action, what it expresses, visible text. Always English. No character card. Falls back to `describe-video.md` when absent | `{{today}}` `{{maxChars}}` `{{seconds}}` |
-| `rewatch.md` | yes | Classifier: does this message need the persona to re-watch a video or retry one that did not load (`features.videoRewatch`). Receives a numbered list of recent videos with their status and the new message. Output is ONE line: `<number> \| <question>`, `<number> \| retry` or `none` | `{{name}}` |
-| `rewatch-answer.md` | yes | Out-of-character prompt for the re-watch answer: the video model watches a clip again and answers one question in the language of the question. No character card | `{{today}}` `{{question}}` `{{maxChars}}` |
+| `rewatch.md` | yes | Classifier: does this message need the persona to re-watch a video, retry one that did not load, or look at a picture again (`features.videoRewatch`, `features.imageRelook`). Receives a numbered list of recent media (videos and pictures) with their kind, status and the new message. Output is ONE line: `<number> \| <question>`, `<number> \| retry` or `none` | `{{name}}` |
+| `rewatch-answer.md` | yes | Out-of-character prompt for the second-look answer: the vision or video model looks at the item again and answers one question in the language of the question. Kind-neutral (serves both videos and pictures). No character card | `{{today}}` `{{question}}` `{{maxChars}}` |
 | `address.md` | yes | Classifier: is this untagged message addressed to the persona, about them, or neither. Output is one word: `yes`, `overheard` or `no` | `{{name}}` |
 | `overheard.md` | no | Task: the message talks about the persona, not to them. Used INSTEAD of the mode prompt when the trigger kind is `overheard` and the file is present and non-blank; missing or blank falls back to the mode prompt (degraded) | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
 | `lookup.md` | no | Classifier: does the persona need to look something up (`features.webLookup`, `features.recall`). Receives a short transcript and a `<candidate>` block. Output is `none`, or up to four labelled lines: `web:` a web query, `server:` word forms to search in the server's messages, `who:` name forms to find a person, `when:` a date range. A single unlabelled line is still read as a web query | `{{name}}` `{{today}}` |
@@ -180,6 +180,7 @@ transcript.videoWatched                  {name} {duration} {text}: first-hand, t
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
 transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
+transcript.imageAnswered                {question} {text}: extra tag under the picture's line; the persona looked at the picture again for this question
 transcript.videoReason.length | size | daily | error | pending    human phrases for the five reason codes; pending = the clip was still loading when the request went out
 transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
 transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
@@ -630,41 +631,43 @@ The window state survives a restart: active windows are saved in `data/state.jso
 
 ## Re-watch classifier
 
-When the persona is directly addressed (a reply turn, not an overheard or spontaneous turn) and a video sits in the last `media.video.rewatch.recentMessages`
-(default 60) messages of the channel, a classifier decides whether the message asks about one of those videos or asks
-to retry one that did not load. Candidates are watched videos and error-state videos (a requested retry uses its own slot, independent of the turn's
-`media.video.maxPerTurn` attempts). At most `media.video.rewatch.maxCandidates` (default 6) are
-offered to the classifier, newest-message first. Code sends `rewatch.md` as the system prompt on the
+When the persona is directly addressed (a reply turn, not an overheard or spontaneous turn) and a video or picture sits in the last `media.video.rewatch.recentMessages`
+(default 60) messages of the channel, a classifier decides whether the message asks about one of those items, asserts a concrete detail about a picture, or asks
+to retry a video that did not load. Candidates: watched videos, error-state videos, and described pictures (attached pictures, including the persona's own uploads; pasted image links are excluded). Pictures are offered only when `features.vision` is on. At most `media.video.rewatch.maxCandidates` (default 6) items are
+offered to the classifier, videos first then pictures, newest-message first within each kind. Code sends `rewatch.md` as the system prompt on the
 `classifier.text` model role (default `anthropic/claude-sonnet-4.6`) with a user message
 containing three blocks: a short `<transcript>` of the last few channel messages with the persona's own lines marked
-with `labels.self` (so the classifier sees what the candidate replies to), then the video list and the candidate:
+with `labels.self` (so the classifier sees what the candidate replies to), then the media list and the candidate:
 
 ```
 <transcript>
 ...
 </transcript>
-<videos>
-<number> | <name> | <status> | <beginning of the account>
+<media>
+<number> | <kind> | <name> | <status> | <beginning of the caption or account>
 ...
-</videos>
+</media>
 <candidate>
 <author name>: <trigger text>
 </candidate>
 ```
 
-Each `<videos>` line carries four pipe-separated columns: a sequential number (1 = newest video), the video name,
-a status (`watched` or `not loaded`), and the first 200 characters of the summary (empty for not-loaded videos).
+Each `<media>` line carries five pipe-separated columns: a sequential number (1 = newest item in its kind group), kind (`video` or `picture`), the item name,
+a status (`watched` or `not loaded` for videos, `described` for pictures), and the first 200 characters of the summary or caption (empty for not-loaded videos).
 Names and summaries are whitespace-collapsed to one line. The trigger text is cut at `context.maxMessageChars`.
 Output is ONE line:
 
-- `<number> | <question>`: the message asks about a watched video and needs a detail the account does not cover. The number is copied from the list.
-- `<number> | retry`: the message is about a not-loaded video and asks to try again or asks about its content. The number is copied from the list.
+- `<number> | <question>`: the message asks about a watched video or a described picture (including a claimed detail that needs checking) and needs a detail the account does not cover. The number is copied from the list.
+- `<number> | retry`: the message is about a not-loaded video and asks to try again or asks about its content. The number is copied from the list. Retry applies to videos only.
 - `none`: no second look or retry needed.
 
-On a question hit, the video model watches the clip again with `rewatch-answer.md` (`{{question}}` and `{{maxChars}}`
+On a question hit for a video, the video model watches the clip again with `rewatch-answer.md` (`{{question}}` and `{{maxChars}}`
 = `rewatch.answerChars`, default 1200) and the answer is appended to the transcript as `transcript.videoAnswered`
-(`{question}`, `{text}`) after the watched tag. The `<senses>` block includes `senses.videoRewatch` when the feature
-is on.
+(`{question}`, `{text}`) after the watched tag.
+
+On a question hit for a picture, the vision model (`classifier.media`, `purpose: relook`, prompt `rewatch-answer.md`, which is kind-neutral) looks at the picture again with that question. The answer is not stored as the caption (cached one hour) and the transcript carries `transcript.imageAnswered` (`{question}`, `{text}`) under the picture's line.
+
+The `<senses>` block includes `senses.videoRewatch` when the feature is on.
 
 On a retry hit, the video model watches the clip with `force` (ignoring the error cache), using the same
 `describeVideo` path as a first watch. If the retry succeeds, the video's state changes from error to watched and the
@@ -673,9 +676,9 @@ transcript shows the summary as first-hand. A retry counts as a new video attemp
 
 Rails: at most one re-watch or retry per turn; the classifier and the second look each count against
 `llm.maxRequestsPerDay`; the second look also counts against `media.video.maxPerDay`;
-`media.video.rewatch.maxPerDay` (default 20) caps the re-watches separately. Answers are cached for one hour per
+`media.video.rewatch.maxPerDay` (default 20) caps both video re-watches and picture relooks (shared counter). Answers are cached for one hour per
 question (see the video cache section above). Switch `features.videoRewatch` (missing = on, needs
-`videoDescriptions` on).
+`videoDescriptions` on). Switch `features.imageRelook` (missing = on, needs `vision` on).
 
 ## Search and recall classifier
 
@@ -780,7 +783,7 @@ The mentor sandbox runs one variety pass per situation, charged to the mentor's 
 
 Two post-generation rails that catch the persona's verbal tics after the voice model writes a reply, before posting.
 
-**Filler guard** (`features.fillerGuard`, missing = on). A ranked list of words and phrases the persona overuses, fed mainly by the variety passes (a word-type habit the pass finds becomes an entry with weight equal to its count); the owner can pin entries with `/nep variety add type:filler` as a fallback. Two kinds of entry: a PREFIX entry ends with `*` (at least 3 letters) and matches every word starting with that prefix on a word boundary, in any script; an EXACT entry (no `*`) matches the word or phrase whole. An entry may be used again only after `variety.fillers.cooldownHours` (default 36) hours OR `variety.fillers.cooldownMessages` (default 300) of the persona's own posted messages since its last use, whichever comes first; a use resets both counters. The list is ranked with eviction like interests: capacity `variety.fillers.max` (default 12), weight with recency decay (`variety.fillers.halfLifeDays`, default 14), the weakest evicted when full; owner-added entries are pinned (never evicted or decayed). When a fresh reply holds an entry on cooldown, one rewrite request on the speaking model (`llm.model`, purpose `reword`, `variety.fillers.maxOutputTokens` 400, prompt `prompts/reword.md`) rewrites the reply without it. The main persona request never sees the filler list. State in guild memory: `fillers` and `ownMessageCount`. Logs: `fillers: reworded`, `fillers: reword failed`, `fillers: reword skipped`.
+**Filler guard** (`features.fillerGuard`, missing = on). A ranked list of words and phrases the persona overuses, fed mainly by the variety passes (a word-type habit the pass finds becomes an entry with weight equal to its count). A mechanical detector (`features.stickyGuard`) also feeds the list after each post, finding phrases that recur in 3+ recent lines but rarely in the older ring, and adding each as an exact entry with cooldown already started (log `fillers: sticky`). The owner can pin entries with `/nep variety add type:filler` as a fallback. Two kinds of entry: a PREFIX entry ends with `*` (at least 3 letters) and matches every word starting with that prefix on a word boundary, in any script; an EXACT entry (no `*`) matches the word or phrase whole. An entry may be used again only after `variety.fillers.cooldownHours` (default 36) hours OR `variety.fillers.cooldownMessages` (default 300) of the persona's own posted messages since its last use, whichever comes first; a use resets both counters. The list is ranked with eviction like interests: capacity `variety.fillers.max` (default 12), weight with recency decay (`variety.fillers.halfLifeDays`, default 14), the weakest evicted when full; owner-added entries are pinned (never evicted or decayed). When a fresh reply holds an entry on cooldown, one rewrite request on the speaking model (`llm.model`, purpose `reword`, `variety.fillers.maxOutputTokens` 400, prompt `prompts/reword.md`) rewrites the reply without it. The main persona request never sees the filler list. State in guild memory: `fillers` and `ownMessageCount`. Logs: `fillers: reworded`, `fillers: reword failed`, `fillers: reword skipped`.
 
 **Pattern guard** (`features.patternGuard`, missing = on). Before posting, when the reply has at least `variety.patternCheck.minChars` (default 15) characters and the worn lists are not empty, a classifier (`classifier.text`, purpose `pattern-check`, `variety.patternCheck.maxOutputTokens` 40, prompt `prompts/pattern-check.md`) says which of the current worn patterns (the short and the long list) the reply falls into. On a match the same reword request rewrites the reply without that pattern. The classifier runs during the typing simulation of the first message, so it adds no visible delay; only a rewrite does. Logs: `patterns: checked`, `patterns: check failed`.
 

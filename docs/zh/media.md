@@ -8,6 +8,8 @@
 
 `features.vision` 将呼叫消息、被回复消息以及频道中最新的几张图片作为图像附加到 LLM 请求中，通过 Discord 的媒体代理缩小。机器人自行下载每张图片并以内联数据发送，因为 Discord 拒绝来自模型提供商的下载请求。超过 `context.vision.maxBytes` 或下载时间超过 `context.vision.fetchTimeoutMs` 的图片会被跳过。角色直接看到这些图片，无需辅助工具。
 
+当 `features.imageRelook` 开启（默认）且有人向角色提出关于图片的问题或声称了某张图片的具体细节时，重看分类器会在视频旁边提供近期图片，视觉模型会带着该问题再看一次图片。回答出现在对话记录中图片行的下方。图片二次查看与视频重看共享每日 `media.video.rewatch.maxPerDay` 计数器。重试仅适用于视频。
+
 `features.mediaDescriptions`（默认开启）运行 `classifier.media` 模型为图片、GIF 帧、视频封面、贴纸、自定义表情和链接缩略图生成单行描述。每个附件只描述一次并缓存在 `data/guilds/<id>/media.json` 中。描述提供给对话记录、记忆分析器和预热。描述器的提示是 `prompts/describe.md`。
 
 贴纸和自定义表情经常重复出现，因此按 id 缓存，首次描述后几乎没有开销。启用 `features.vision` 时，呼叫消息的贴纸会作为图片附加。Discord 内置的动态贴纸是 Lottie 动画而非图片，因此只能显示名称。

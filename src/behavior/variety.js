@@ -26,6 +26,7 @@ import { fillPromptTemplate } from './prompt.js';
 import { clampChars, oneLine } from '../memory/clamp.js';
 import { HOUR_MS, MINUTE_MS } from '../time.js';
 import { FILLERS_DEFAULTS, PATTERN_CHECK_DEFAULTS, fillersSettings, patternCheckSettings } from './fillers.js';
+import { STICKY_DEFAULTS, stickySettings } from './sticky.js';
 
 /**
  * Defaults of the `variety` config block (config.json carries the same values).
@@ -55,6 +56,8 @@ export const VARIETY_DEFAULTS = Object.freeze({
   // The reply guard's groups (src/behavior/fillers.js), read there with their own fallbacks.
   fillers: FILLERS_DEFAULTS,
   patternCheck: PATTERN_CHECK_DEFAULTS,
+  // The sticky-phrase detector (src/behavior/sticky.js), read there with its own fallbacks.
+  sticky: STICKY_DEFAULTS,
 });
 
 // Fixed by the prompt contract, not by config: an example is a short verbatim
@@ -83,8 +86,10 @@ function intAtLeast(value, fallback, min) {
  *   requestTimeoutMs: number, history: number, longLines: number, longEveryHours: number,
  *   longMinLines: number, longMaxPatterns: number, fillers: { cooldownHours: number, cooldownMessages: number,
  *   maxOutputTokens: number, max: number, halfLifeDays: number }, patternCheck: { minChars: number,
- *   maxOutputTokens: number } }}  `fillers` and `patternCheck`: the reply guard's groups
- *   (src/behavior/fillers.js#fillersSettings, #patternCheckSettings).
+ *   maxOutputTokens: number }, sticky: { minRepeats: number, minRepeatsWord: number, lines: number, maxWords: number, minChars: number,
+ *   baselineMax: number, baselineMin: number, ignore: string[] } }}  `fillers` and `patternCheck`: the reply guard's groups
+ *   (src/behavior/fillers.js#fillersSettings, #patternCheckSettings); `sticky`: the sticky-phrase
+ *   detector's (src/behavior/sticky.js#stickySettings).
  */
 export function varietySettings(config) {
   const v = config?.variety ?? {};
@@ -106,6 +111,7 @@ export function varietySettings(config) {
     longMaxPatterns: intAtLeast(v.longMaxPatterns, d.longMaxPatterns, 0),
     fillers: fillersSettings(config),
     patternCheck: patternCheckSettings(config),
+    sticky: stickySettings(config),
   };
 }
 

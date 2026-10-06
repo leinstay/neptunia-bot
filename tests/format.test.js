@@ -972,6 +972,38 @@ test('formatTranscript: labels without videoAnswered render an answered video ex
   assert.ok(!withAnswers[0].text.includes('κόκκινο'));
 });
 
+// --- formatTranscript: a second look at a picture (imageAnswers -> imageAnswered) ---
+
+const pictureMsg = () => msg('a', T0, { content: '', attachments: [{ id: 'p1', kind: 'image', name: 'singes.png' }] });
+
+test('formatTranscript: a picture with an answer renders imageAnswered right after its own tag, attached or not', () => {
+  const imageAnswers = new Map([['p1', answered]]);
+  const descriptions = new Map([['p1', 'deux singes']]);
+  const plain = videoTranscript([pictureMsg()], { imageAnswers, descriptions });
+  assert.ok(plain[0].text.endsWith('[image: deux singes] [picture checked again for "τι χρώμα είναι;": κόκκινο]'), plain[0].text);
+  const attached = videoTranscript([pictureMsg()], { imageAnswers, attachedIndex: new Map([['p1', 1]]) });
+  assert.ok(attached[0].text.endsWith(`${fill(labels.transcript.imageAttached, { n: 1 })} [picture checked again for "τι χρώμα είναι;": κόκκινο]`));
+});
+
+test('formatTranscript: an attached captioned picture keeps its answer when imageAttachedDescribed is blanked', () => {
+  const oldLabels = { ...labels, transcript: { ...labels.transcript, imageAttachedDescribed: undefined } };
+  const items = videoTranscript([pictureMsg()], {
+    labels: oldLabels,
+    imageAnswers: new Map([['p1', answered]]),
+    descriptions: new Map([['p1', 'deux singes']]),
+    attachedIndex: new Map([['p1', 1]]),
+  });
+  assert.ok(items[0].text.endsWith(`${fill(labels.transcript.imageAttached, { n: 1 })} [picture checked again for "τι χρώμα είναι;": κόκκινο]`));
+});
+
+test('formatTranscript: labels without imageAnswered render an answered picture exactly as a plain one', () => {
+  const oldLabels = { ...labels, transcript: { ...labels.transcript, imageAnswered: undefined } };
+  const descriptions = new Map([['p1', 'deux singes']]);
+  const plain = videoTranscript([pictureMsg()], { labels: oldLabels, descriptions });
+  const withAnswer = videoTranscript([pictureMsg()], { labels: oldLabels, descriptions, imageAnswers: new Map([['p1', answered]]) });
+  assert.deepEqual(withAnswer, plain);
+});
+
 // --- formatTranscript: a link page read by the web lookup (reads -> linkRead)
 
 test('formatTranscript: reads appends linkRead after the link tag and its other extras', () => {
