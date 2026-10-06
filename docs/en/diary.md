@@ -12,7 +12,7 @@ The persona posts in one channel on its own, at random times, without anyone ask
 
 `/nep diary off` clears the channel. The history file stays, so re-enabling keeps the persona's memory of what it posted.
 
-`/nep diary post [kind]` forces one post now, outside the plan. It still obeys the daily caps. An optional kind key (e.g. `selfPicture`, `thought`) overrides the planner's choice; an unknown kind is refused with the full list.
+`/nep diary post [kind]` forces one post now, outside the plan. When a turn is running, the command waits up to `diary.forceWaitMs` (120000 ms, two minutes) for it to finish; if the wait runs out it answers `busy`. It still obeys the daily caps. An optional kind key (e.g. `selfPicture`, `thought`) overrides the planner's choice; an unknown kind is refused with the full list.
 
 ## Windows
 
@@ -54,6 +54,7 @@ Every model request in a diary post counts against `llm.maxRequestsPerDay`. With
 | `picture` | 2 | A drawing without the persona: a place, an animal, something about a person here |
 | `meme` | 1 | A meme the persona drew |
 | `thought` | 2 | A longer reflection, a review, an opinion |
+| `people` | 2 | A post about one person on the server: what they did or said lately, how the persona feels about them |
 | `news` | 2 | Something found on the internet that the server's people care about |
 | `facts` | 1 | A curious fact, an iceberg entry, a conspiracy theory told as such |
 | `status` | 3 | One short line: mood, a plan, boredom |

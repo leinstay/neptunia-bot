@@ -41,6 +41,7 @@ Every key in `config.json` with its default, grouped by section.
 | `recall` | `true` | Search the server's own message history beside the web search when a question calls for it. A missing key counts as on. See [Media: Search](media.md#search) and `recall.*` |
 | `recent` | `true` | Show a `<recent>` block of what happened on the server in the last few days. A missing key counts as on. See `memory.recentHours` and `context.caps.recent` |
 | `channelRoute` | `true` | A classifier picks a channel the conversation is about before a turn, so the channel can be pulled into the request. A missing key counts as on. See `route.*` |
+| `channelLinks` | `true` | When the persona writes `#channel-name` of a server channel in a message, the sent message carries a real channel link instead of the literal text. Names are matched longest first; an existing link stays. Off: text goes as written. A missing key counts as on |
 | `pauseNotice` | `true` | Post a short notice when the persona is called while paused. A missing key counts as on. See `mention.pauseNoticeMinutes` and `labels.limits.paused` |
 | `diary` | `true` | The persona posts in one owner-chosen channel on its own, on a random schedule. A missing key counts as on; with no `diary.channelId` set, nothing happens. See [Diary](diary.md) |
 | `variety` | `true` | A model pass names the devices the persona is overusing in their own recent lines. The result becomes a `<worn>` block in the turn's request. A missing key counts as on |
@@ -626,11 +627,12 @@ Settings for the diary channel (`features.diary`). The persona posts in one owne
 | `maxPerDay` | `3` | Maximum posts per day. When the planner draws more slots than this, extras are dropped at random. The daily count also gates `/nep diary post` |
 | `maxPicturesPerDay` | `2` | Maximum diary pictures per day. Shared with `image.maxPerDay`: whichever cap runs out first wins. When spent, the plan's `picture` is forced false and the senses say no drawing |
 | `slotGraceMinutes` | `30` | Minutes after a planned slot during which it still fires. A slot missed by more than this while the bot was down is dropped, not fired late |
+| `forceWaitMs` | `120000` | Milliseconds `/nep diary post` waits for a running turn to finish before posting. When the wait runs out the command answers `busy`. Scheduled posts are not affected |
 | `maxMessages` | `3` | Maximum `<msg>` messages per diary post. Excess messages are trimmed |
 | `historyPosts` | `150` | Past posts kept in `diary.json` and shown to the planner and the composer in the `<diary>` block. The oldest are dropped when the cap is exceeded |
 | `gistChars` | `200` | Characters kept per post gist and per picture scene in the diary history |
 | `seedSets` | `2` | Random seed combinations drawn from `prompts/diary-seeds.md` and shown to the planner in the `<seeds>` block. `0` omits the block |
-| `kinds` | `{ "selfPicture": 3, "picture": 2, "meme": 1, "thought": 2, "news": 2, "facts": 1, "status": 3 }` | Post kinds with their weights. A kind with weight 0 is never chosen. The planner sees these weights and how many recent posts used each kind. Hot-reloaded, so the owner can steer the mix at any time |
+| `kinds` | `{ "selfPicture": 3, "picture": 2, "meme": 1, "thought": 2, "people": 2, "news": 2, "facts": 1, "status": 3 }` | Post kinds with their weights. A kind with weight 0 is never chosen. The planner sees these weights and how many recent posts used each kind. Hot-reloaded, so the owner can steer the mix at any time |
 | `searchKinds` | `["news", "facts"]` | Kinds that may trigger a web search. The planner writes a query only for these kinds |
 | `pictureKinds` | `["selfPicture", "picture", "meme"]` | Kinds that carry a drawing by default when the planner falls back to a random kind |
 | `planMaxOutputTokens` | `300` | Max output tokens for the plan request |

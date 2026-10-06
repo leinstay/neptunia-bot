@@ -344,6 +344,7 @@ Only these tags are acted on:
 - `<draw self="yes" reply="#87">scene</draw>` a picture for the drawing sub-process. One per turn, first non-empty wins, clamped to 800 chars. `self="yes"` adds the persona's appearance; `reply="#87"` works like on `<msg>`. May appear alongside `<msg>` and `<react>`.
 - `<skip/>` stay silent.
 - `@nick` exactly as in the transcript becomes a real mention.
+- `#channel-name` of a server channel in `<msg>` text becomes a real channel link (`<#id>`) when `features.channelLinks` is on (default true, missing = on). Names are matched longest first; an existing link is left alone.
 - `:name:` of a known server custom emoji becomes the real emoji in `<msg>` and `<react>`; an unknown name stays as plain text.
 
 `features.reactions: false` drops `<react>`, `features.multiMessage: false` keeps the first `<msg>`;

@@ -371,7 +371,7 @@ function diaryChannelFake({ send = true, attach = true, guildId = 'g1' } = {}) {
   };
 }
 
-function diaryHarness({ diary = {}, features = {}, data = {}, posts = [], channel = diaryChannelFake(), outcomes = [], backfill = null, warming = false } = {}) {
+function diaryHarness({ diary = {}, features = {}, data = {}, posts = [], channel = diaryChannelFake(), outcomes = [], backfill = null, warming = false, turnsExtra = {}, delay } = {}) {
   let clock = D_NOW;
   const turnCalls = [];
   const hot = {
@@ -408,6 +408,7 @@ function diaryHarness({ diary = {}, features = {}, data = {}, posts = [], channe
       turnCalls.push({ params, done: [...(store.state.data.diary?.g1?.done ?? [])] });
       return outcomes.shift() ?? { outcome: 'spoke', diary: { kind: 'status', picture: false, search: false, messages: 1 } };
     },
+    ...turnsExtra,
   };
   const diaryFactory = createDiary({
     hot,
@@ -419,6 +420,7 @@ function diaryHarness({ diary = {}, features = {}, data = {}, posts = [], channe
     backfill,
     rng: () => 0.5,
     now: () => clock,
+    ...(delay ? { delay } : {}),
   });
   return { hot, store, turnCalls, diary: diaryFactory, setNow: (t) => (clock = t) };
 }
@@ -608,4 +610,90 @@ test('status: the channel, the day plan, the counts of today and the history siz
   const h = diaryHarness({ posts: [{}, {}], data: { diaryDay: '2026-10-06', diaryPosts: 1, diaryPicturesDay: '2026-10-06', diaryPictures: 1 } });
   await h.diary.tick();
   assert.deepEqual(h.diary.status(), { channelId: 'd1', day: '2026-10-06', slots: [SLOT], done: [], quiet: false, posts: 1, pictures: 1, history: 2 });
+});
+
+/** A turn runner that is busy until `release()`: `waitIdle` resolves then, `isAnyBusy` follows it. */
+function busyTurns() {
+  let busy = true;
+  let resolveIdle;
+  const idle = new Promise((resolve) => {
+    resolveIdle = resolve;
+  });
+  const waits = [];
+  return {
+    waits,
+    turnsExtra: {
+      isAnyBusy: () => busy,
+      waitIdle: () => {
+        waits.push(true);
+        return idle;
+      },
+    },
+    release() {
+      busy = false;
+      resolveIdle();
+    },
+  };
+}
+
+/** A controllable delay: each call records its ms and resolves on `fire()`. */
+function manualDelay() {
+  const calls = [];
+  const fires = [];
+  return {
+    calls,
+    delay: (ms) =>
+      new Promise((resolve) => {
+        calls.push(ms);
+        fires.push(resolve);
+      }),
+    fire() {
+      for (const resolve of fires.splice(0)) resolve();
+    },
+  };
+}
+
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+test('force: waits for the running turn and then posts', async () => {
+  const running = busyTurns();
+  const timer = manualDelay();
+  const h = diaryHarness({ diary: { forceWaitMs: 5000 }, turnsExtra: running.turnsExtra, delay: timer.delay });
+  const pending = h.diary.force({ kind: 'meme' });
+  await flush();
+  assert.equal(running.waits.length, 1, 'waits for the one attention');
+  assert.deepEqual(timer.calls, [5000], 'the wait is capped by diary.forceWaitMs');
+  assert.equal(h.turnCalls.length, 0, 'no post while the other turn runs');
+
+  running.release();
+  const result = await pending;
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(h.turnCalls.length, 1);
+  assert.deepEqual(h.turnCalls[0].params.diary, { kind: 'meme', forced: true });
+});
+
+test('force: gives up as busy after forceWaitMs', async () => {
+  const running = busyTurns();
+  const timer = manualDelay();
+  const h = diaryHarness({ diary: { forceWaitMs: 5000 }, turnsExtra: running.turnsExtra, delay: timer.delay });
+  const pending = h.diary.force({});
+  await flush();
+  timer.fire();
+  const result = await pending;
+  assert.deepEqual(result, { outcome: 'busy' });
+  assert.equal(h.turnCalls.length, 0, 'never posted');
+});
+
+test('force: a busy outcome from the turn waits once and posts again', async () => {
+  const timer = manualDelay();
+  let idle = 0;
+  const h = diaryHarness({
+    outcomes: [{ outcome: 'busy' }],
+    turnsExtra: { isAnyBusy: () => false, waitIdle: async () => void idle++ },
+    delay: timer.delay,
+  });
+  const result = await h.diary.force({});
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(idle, 1);
+  assert.equal(h.turnCalls.length, 2);
 });

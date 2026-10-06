@@ -27,6 +27,7 @@ export const DIARY_PICTURES_DAILY = { dayKey: 'diaryPicturesDay', countKey: 'dia
 const BRIEF_CHARS = 300;
 const DEFAULT_GRACE_MINUTES = 30; // diary.slotGraceMinutes
 const DEFAULT_MAX_PER_DAY = 3; // diary.maxPerDay
+const DEFAULT_FORCE_WAIT_MS = 120000; // diary.forceWaitMs
 const DEFAULT_HISTORY_POSTS = 150; // diary.historyPosts
 const DEFAULT_GIST_CHARS = 200; // diary.gistChars
 const DEFAULT_SEARCH_KINDS = ['news', 'facts']; // diary.searchKinds
@@ -408,17 +409,21 @@ function writable(channel) {
  * (`diary: due`, then `diary: post` with the outcome). A `busy` outcome
  * un-marks the slot, so the next tick retries it within the grace. One post
  * at a time. `force({ kind })` runs one post now, outside the plan and the
- * quiet day, under the same rails. Hot values are read at every call.
+ * quiet day, under the same rails; while another turn holds the one attention
+ * (`turns.isAnyBusy()`, or a `busy` outcome) it waits for `turns.waitIdle()`
+ * at most `diary.forceWaitMs` and posts then, `{ outcome: 'busy' }` when the
+ * turn still runs. Hot values are read at every call.
  * @param {{ hot: object, store: object, client: object, turns: object, getGuildId: () => (string|null),
  *   isWarmingUp?: () => boolean, backfill?: ((args: object) => Promise<number>)|null,
- *   rng?: () => number, now?: () => number }} deps
+ *   rng?: () => number, now?: () => number, delay?: (ms: number) => Promise<void> }} deps
+ *   `delay`: resolves after `ms` (a timer that never holds the process open); injected by tests.
  *   `backfill`: src/behavior/diary.js#backfillDiary's shape (`{ store, channel, guildId, selfId,
  *   config, labels }` -> the count written); null skips the backfill.
  * @returns {{ tick: () => Promise<void>, force: (opts?: { kind?: string|null }) => Promise<object>,
  *   status: () => { channelId: string, day: string|null, slots: number[], done: number[], quiet: boolean,
  *   posts: number, pictures: number, history: number }, stop: () => void }}
  */
-export function createDiary({ hot, store, client, turns, getGuildId, isWarmingUp = () => false, backfill = null, rng = Math.random, now = Date.now }) {
+export function createDiary({ hot, store, client, turns, getGuildId, isWarmingUp = () => false, backfill = null, rng = Math.random, now = Date.now, delay = unrefDelay }) {
   let stopped = false;
   let inFlight = false;
   // reason -> the local day it was last logged on: one `diary: skip` per reason and day.
@@ -583,7 +588,25 @@ export function createDiary({ hot, store, client, turns, getGuildId, isWarmingUp
     }
     if (block) return { outcome: 'not-now', reason: block };
     await backfillOnce(channel, guildId, config);
-    return post(channel, guildId, { kind: typeof kind === 'string' && kind ? kind : null, forced: true });
+    const params = { kind: typeof kind === 'string' && kind ? kind : null, forced: true };
+    // One attention: a running turn is waited for (diary.forceWaitMs at most), once.
+    let waited = false;
+    if (turns.isAnyBusy?.() === true) {
+      waited = true;
+      if (!(await waitIdle(config))) return { outcome: 'busy' };
+    }
+    const result = await post(channel, guildId, params);
+    if (result?.outcome !== 'busy' || waited) return result;
+    if (!(await waitIdle(config))) return { outcome: 'busy' };
+    return post(channel, guildId, params);
+  }
+
+  /** Whether the turn runner went idle within `diary.forceWaitMs` (read from `config`, the live one). */
+  async function waitIdle(config) {
+    if (typeof turns.waitIdle !== 'function') return false;
+    const cap = config.diary?.forceWaitMs ?? DEFAULT_FORCE_WAIT_MS;
+    const idle = await Promise.race([turns.waitIdle().then(() => true), delay(cap).then(() => false)]);
+    return idle && turns.isAnyBusy?.() !== true;
   }
 
   function status() {
@@ -646,4 +669,12 @@ export async function backfillDiary({ store, channel, guildId, selfId, config, l
   store.setDiaryPosts(guildId, posts, { max });
   log.info('diary: backfill', { count: posts.length });
   return posts.length;
+}
+
+/** A delay whose timer never keeps the process alive (createDiary's default `delay`). */
+function unrefDelay(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }

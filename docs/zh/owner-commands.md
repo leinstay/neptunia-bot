@@ -38,7 +38,7 @@
 | `/nep diary set <channel>` | 将日记指向此频道。机器人需具有查看、发送、读取历史和附件权限。将 `diary.channelId` 写入 `config.local.json`。日记历史为空时，从角色在该频道的过去帖子中回填。返回频道名、回填数量和今日计划 |
 | `/nep diary show` | 显示日记频道、今日时间槽和完成标记（`bot.timezone`）、今日已用帖子和图片数、历史大小 |
 | `/nep diary off` | 清除 `diary.channelId`。日记历史文件保留 |
-| `/nep diary post [kind]` | 立即强制发布一篇帖子。可选种类键（如 `selfPicture`, `thought`）；未知种类会列出所有种类后拒绝。受日次上限限制。dry-run 模式下仅镜像 |
+| `/nep diary post [kind]` | 立即强制发布一篇帖子。如有回合正在运行，等待 `diary.forceWaitMs` 至其完成；超时后回复 `busy`。可选种类键（如 `selfPicture`, `thought`）；未知种类会列出所有种类后拒绝。受日次上限限制。dry-run 模式下仅镜像 |
 | `/nep alias add <user> <name>` | 添加聊天别名；立即确认 |
 | `/nep alias remove <user> <name>` | 移除聊天别名 |
 | `/nep learned list` | 列出所学内容（含 ID、教授者、观察次数） |

@@ -325,6 +325,7 @@ task.added                               {added}: later messages from the author
 - `<draw self="yes" reply="#87">scene</draw>` 提交给绘画子进程的图片。每回合一个，首个非空优先，截断至 800 字符。`self="yes"` 添加角色外貌；`reply="#87"` 与 `<msg>` 用法相同。可与 `<msg>` 和 `<react>` 同时出现。
 - `<skip/>` 保持沉默。
 - `@nick` 与对话记录中完全一致时转换为真实的提及。
+- `#频道名` 为服务器频道时，`<msg>` 文本中会转换为真实的频道链接（`<#id>`）（`features.channelLinks` 开启时，默认 true，缺失 = 开）。名称按最长匹配。已有的链接保持不变。
 
 `features.reactions: false` 移除 `<react>`，`features.multiMessage: false` 仅保留第一个 `<msg>`；
 `features.gifs: false` 或空库移除 `<gif>`；`features.imageGeneration: false` 或无图像客户端时移除 `<draw>`；`drawFailed` 回合中 `<draw>` 也被移除。提示无需知道这些。

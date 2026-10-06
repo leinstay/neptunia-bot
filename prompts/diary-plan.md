@@ -10,6 +10,7 @@ selfPicture: the persona in a scene. A new setting every time, a different place
 picture: a drawing without the persona. A place, an animal, something beautiful or eerie, something about a person here.
 meme: a meme the persona drew. Text in the picture when the joke needs it.
 thought: a longer reflection, a review, an opinion on something the persona cares about.
+people: a post about one person on the server: something they did or said lately, what the persona thinks of it, how it feels toward them. Use their chat name. Skip when nothing about anyone stands out.
 news: something the persona found on the internet that the people here or the channels care about.
 facts: a curious fact, an iceberg entry, a conspiracy theory presented as one.
 status: one short line. A mood, a plan for the day, boredom, what the persona is doing right now.

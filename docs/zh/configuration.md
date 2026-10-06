@@ -41,6 +41,7 @@
 | `recall` | `true` | 当问题需要时，在网络搜索之外同时搜索服务器自身的消息历史。缺失的键视为开启。参见[媒体：搜索](media.md#搜索)和 `recall.*` |
 | `recent` | `true` | 在请求中显示一个 `<recent>` 块，呈现服务器最近几天发生的事情。缺失的键视为开启。参见 `memory.recentHours` 和 `context.caps.recent` |
 | `channelRoute` | `true` | 分类器在回合前选出对话中提及的频道，以便将其拉入请求。缺失的键视为开启。参见 `route.*` |
+| `channelLinks` | `true` | 角色在消息中写服务器频道的 `#频道名` 时，发送的消息包含真实的频道链接而非文字。名称按最长匹配；已有的链接保持不变。关闭时文本原样发送。缺失的键视为开启 |
 | `pauseNotice` | `true` | 角色在暂停时被呼叫会发布一条简短通知。缺失的键视为开启。参见 `mention.pauseNoticeMinutes` 和 `labels.limits.paused` |
 | `diary` | `true` | 角色在拥有者选择的频道中按随机时间表自发发帖。缺失的键视为开启。未设置 `diary.channelId` 时不生效。参见[日记](diary.md) |
 | `variety` | `true` | 模型过程识别角色在近期消息中过度使用的表达手法。结果作为 `<worn>` 块包含在回合请求中。缺失的键视为开启 |
@@ -626,11 +627,12 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `maxPerDay` | `3` | 每天最大帖子数。计划器抽出超过此数的时间槽时，随机丢弃多余的。日次计数也限制 `/nep diary post` |
 | `maxPicturesPerDay` | `2` | 每天日记图片最大数。与 `image.maxPerDay` 共享: 先用完的那个生效。用完后计划的 `picture` 强制为 false，感知提示不可绘画 |
 | `slotGraceMinutes` | `30` | 计划时间槽过后仍可触发的宽限时间（分钟）。机器人关机期间超过此时间的时间槽被丢弃，不会延迟触发 |
+| `forceWaitMs` | `120000` | `/nep diary post` 等待正在运行的回合完成的毫秒数。等待超时后命令回复 `busy`。不影响定时帖子 |
 | `maxMessages` | `3` | 每篇日记帖子的最大 `<msg>` 消息数。超出部分被截断 |
 | `historyPosts` | `150` | `diary.json` 中保留并在 `<diary>` 块中展示给计划器和生成器的历史帖子数。超出上限时最旧的被删除 |
 | `gistChars` | `200` | 日记历史中每篇帖子摘要和图片场景的字符数 |
 | `seedSets` | `2` | 从 `prompts/diary-seeds.md` 抽取并在 `<seeds>` 块中展示给计划器的随机种子组合数。`0` 省略该块 |
-| `kinds` | `{ "selfPicture": 3, "picture": 2, "meme": 1, "thought": 2, "news": 2, "facts": 1, "status": 3 }` | 帖子种类与权重。权重为 0 的种类永不被选择。计划器看到权重和最近帖子中每种类型的使用次数。热重载，拥有者可随时调整 |
+| `kinds` | `{ "selfPicture": 3, "picture": 2, "meme": 1, "thought": 2, "people": 2, "news": 2, "facts": 1, "status": 3 }` | 帖子种类与权重。权重为 0 的种类永不被选择。计划器看到权重和最近帖子中每种类型的使用次数。热重载，拥有者可随时调整 |
 | `searchKinds` | `["news", "facts"]` | 可触发网络搜索的种类。计划器仅为这些种类编写搜索查询 |
 | `pictureKinds` | `["selfPicture", "picture", "meme"]` | 计划器回退到随机种类时默认带图的种类 |
 | `planMaxOutputTokens` | `300` | 计划请求的最大输出 token 数 |
