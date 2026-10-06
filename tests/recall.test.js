@@ -139,8 +139,14 @@ test('searchPlan: content forms round-robin server and who forms up to maxForms,
     plan.map((q) => q.content ?? q.authorId),
     ['α', 'δ', 'β', 'γ', 'u1', 'u2'],
   );
-  assert.deepEqual(plan.map((q) => q.kind), ['content', 'content', 'content', 'content', 'author', 'author']);
   assert.ok(plan.every((q) => q.minId === null && q.maxId === null));
+});
+
+test('searchPlan: each content query carries its kind, form for a server form and who for a name form', () => {
+  const plan = searchPlan({ forms: ['α', 'β', 'γ'], who: ['δ', 'α'], memberIds: ['u1', 'u1', 'u2'], maxForms: 4 });
+  assert.deepEqual(plan.map((q) => q.kind), ['form', 'who', 'form', 'form', 'author', 'author']);
+  const shared = searchPlan({ forms: ['β', 'α'], who: ['α'], maxForms: 4 });
+  assert.deepEqual(shared.map((q) => [q.content, q.kind]), [['β', 'form'], ['α', 'form']], 'a form in both lists is a server form');
 });
 
 test('searchPlan: the range bounds every query; the turn\'s own chat caps the end', () => {
@@ -207,51 +213,94 @@ function found(id, ts, keys, channelId = 'c1') {
   return { id, channelId, ts, queries: keys };
 }
 
-test('queryKey: one key per search query, every sampled page of a range under one', () => {
-  assert.equal(queryKey({ kind: 'content', content: 'κουνέλι', minId: null, maxId: null }), 'content:κουνέλι');
+test('queryKey: one key per search query by kind, every sampled page of a range under one', () => {
+  assert.equal(queryKey({ kind: 'form', content: 'κουνέλι', minId: null, maxId: null }), 'form:κουνέλι');
+  assert.equal(queryKey({ kind: 'who', content: 'éloïse', minId: null, maxId: null }), 'who:éloïse');
   assert.equal(queryKey({ kind: 'author', authorId: 'u7', minId: null, maxId: null }), 'author:u7');
+  assert.equal(queryKey({ kind: 'range', minId: '1', maxId: '2' }), 'range');
   assert.equal(queryKey({ kind: 'range', minId: '1', maxId: '2' }), queryKey({ kind: 'range', minId: '1', maxId: '2', offset: 528 }));
-  assert.notEqual(queryKey({ kind: 'content', content: 'u7' }), queryKey({ kind: 'author', authorId: 'u7' }));
+  assert.notEqual(queryKey({ kind: 'form', content: 'u7' }), queryKey({ kind: 'author', authorId: 'u7' }));
+  assert.notEqual(queryKey({ kind: 'form', content: 'ana' }), queryKey({ kind: 'who', content: 'ana' }));
 });
 
-test('clusterHits: clusters rank by distinct queries, then the newest; the kept ones stay newest first', () => {
+test('clusterHits: clusters rank by distinct form queries, then all distinct queries, then the newest; the kept ones stay newest first', () => {
   const t = Date.UTC(2026, 9, 1, 8);
   const hits = [
-    found('n1', t + 10 * HOUR, ['content:a']),
-    found('n2', t + 12 * HOUR, ['content:a']),
-    found('n3', t + 14 * HOUR, ['content:a']),
-    found('d1', t - 400 * HOUR, ['content:a', 'content:b']),
-    found('d2', t - 400 * HOUR + 5 * MINUTE, ['content:c']),
-    found('w1', t, ['content:a', 'author:u2'], 'c2'),
+    found('n1', t + 10 * HOUR, ['form:a']),
+    found('n2', t + 12 * HOUR, ['form:a']),
+    found('n3', t + 14 * HOUR, ['form:a']),
+    found('d1', t - 400 * HOUR, ['form:a', 'form:b']),
+    found('d2', t - 400 * HOUR + 5 * MINUTE, ['form:c']),
+    found('w1', t, ['form:a', 'author:u2'], 'c2'),
   ];
   const clusters = clusterHits(hits, { gapMinutes: 30, maxClusters: 3, keepOldest: 0 });
   assert.deepEqual(
-    clusters.map((c) => [c.middleId, c.queries]),
+    clusters.map((c) => [c.middleId, c.forms, c.queries]),
     [
-      ['n3', 1],
-      ['w1', 2],
-      ['d2', 3],
+      ['n3', 1, 1],
+      ['w1', 1, 2],
+      ['d2', 3, 3],
     ],
-    'the densest two, then the newest of the one-query clusters; shown newest first',
+    'the three-form cluster, the one form with an author, then the newest of the one-form clusters; shown newest first',
   );
   assert.deepEqual(clusterHits(hits, { gapMinutes: 30, maxClusters: 9, keepOldest: 0 }).map((c) => c.middleId), ['n3', 'n2', 'n1', 'w1', 'd2'], 'a one-hit cluster still counts');
 });
 
 test('clusterHits: a message found by two queries counts both; hits without queries count none', () => {
   const t = Date.UTC(2026, 9, 1, 8);
-  const [one] = clusterHits([found('x', t, ['content:a']), found('x', t, ['content:b', 'content:a'])], { gapMinutes: 30 });
-  assert.deepEqual([one.ids, one.queries], [['x'], 2]);
+  const [one] = clusterHits([found('x', t, ['form:a']), found('x', t, ['who:b', 'form:a'])], { gapMinutes: 30 });
+  assert.deepEqual([one.ids, one.forms, one.queries], [['x'], 1, 2]);
   const [bare] = clusterHits([{ id: 'y', channelId: 'c1', ts: t }], { gapMinutes: 30 });
-  assert.equal(bare.queries, 0);
+  assert.deepEqual([bare.forms, bare.queries], [0, 0]);
+});
+
+test('clusterHits: a recent cluster of name and author hits loses to an older cluster of two forms', () => {
+  const t = Date.UTC(2026, 9, 1, 8);
+  const hits = [
+    found('p1', t, ['who:éloïse', 'author:u3']),
+    found('p2', t + 5 * MINUTE, ['author:u3']),
+    found('o1', Date.UTC(2025, 2, 1, 20), ['form:κουνέλι']),
+    found('o2', Date.UTC(2025, 2, 1, 20, 4), ['form:σκελετός']),
+  ];
+  assert.deepEqual(clusterHits(hits, { gapMinutes: 30, maxClusters: 1, keepOldest: 0 }).map((c) => c.middleId), ['o2']);
+});
+
+test('clusterHits: one form hit outranks a cluster of name and author hits only', () => {
+  const t = Date.UTC(2026, 9, 1, 8);
+  const hits = [
+    found('p1', t, ['who:éloïse', 'author:u3']),
+    found('o1', Date.UTC(2024, 5, 1), ['form:κουνέλι'], 'c2'),
+  ];
+  assert.deepEqual(clusterHits(hits, { gapMinutes: 30, maxClusters: 1, keepOldest: 0 }).map((c) => c.middleId), ['o1']);
+});
+
+test('clusterHits: on equal forms the cluster with more distinct queries wins, then the newer', () => {
+  const t = Date.UTC(2026, 9, 1, 8);
+  const older = found('o1', t - 100 * HOUR, ['form:a', 'who:éloïse']);
+  const newer = found('n1', t, ['form:b']);
+  assert.deepEqual(clusterHits([older, newer], { gapMinutes: 30, maxClusters: 1, keepOldest: 0 }).map((c) => c.middleId), ['o1'], 'more keys');
+  const tie = found('n2', t, ['form:b', 'author:u3']);
+  assert.deepEqual(clusterHits([older, tie], { gapMinutes: 30, maxClusters: 1, keepOldest: 0 }).map((c) => c.middleId), ['n2'], 'same keys: the newer');
+});
+
+test('clusterHits: keepOldest needs two distinct form queries, name and author hits do not count', () => {
+  const t = Date.UTC(2026, 9, 1, 8);
+  const newer = Array.from({ length: 3 }, (_, i) => found(`n${i}`, t + i * 2 * HOUR, ['form:a', 'form:b']));
+  const named = found('w', Date.UTC(2020, 4, 1), ['form:a', 'who:éloïse', 'author:u3']);
+  const topical = found('f', Date.UTC(2022, 4, 1), ['form:a', 'form:c']);
+  const ids = (hits) => clusterHits(hits, { gapMinutes: 30, maxClusters: 2, keepOldest: 1 }).map((c) => c.middleId);
+  assert.deepEqual(ids([...newer, named, topical]), ['n2', 'f'], 'the oldest cluster has one form only');
+  const singles = Array.from({ length: 3 }, (_, i) => found(`s${i}`, t + i * 2 * HOUR, ['form:a', 'author:u3']));
+  assert.deepEqual(ids([...singles, named]), ['s2', 'w'], 'no cluster of two forms: the slot goes by rank');
 });
 
 test('clusterHits: an old single-hit cluster loses to a dense old cluster', () => {
   const t = Date.UTC(2026, 9, 1, 8);
-  const recent = Array.from({ length: 5 }, (_, i) => found(`r${i}`, t + i * 2 * HOUR, ['content:word']));
-  const ancient = found('z', Date.UTC(2020, 4, 1, 12), ['content:word']);
+  const recent = Array.from({ length: 5 }, (_, i) => found(`r${i}`, t + i * 2 * HOUR, ['form:word']));
+  const ancient = found('z', Date.UTC(2020, 4, 1, 12), ['form:word']);
   const dense = [
-    found('o1', Date.UTC(2026, 8, 28, 20), ['content:coined']),
-    found('o2', Date.UTC(2026, 8, 28, 20, 3), ['content:pun', 'content:word']),
+    found('o1', Date.UTC(2026, 8, 28, 20), ['form:coined']),
+    found('o2', Date.UTC(2026, 8, 28, 20, 3), ['form:pun', 'form:word']),
   ];
   for (const keepOldest of [0, 1]) {
     const kept = clusterHits([...recent, ancient, ...dense], { gapMinutes: 30, maxClusters: 5, keepOldest }).map((c) => c.middleId);
@@ -261,15 +310,15 @@ test('clusterHits: an old single-hit cluster loses to a dense old cluster', () =
 
 test('clusterHits: keepOldest takes the oldest clusters of at least two queries from the rest, never a single-hit one', () => {
   const t = Date.UTC(2026, 9, 1, 8);
-  const newer = Array.from({ length: 4 }, (_, i) => found(`n${i}`, t + i * 2 * HOUR, ['content:a', 'content:b']));
-  const older = [found('o1', Date.UTC(2021, 2, 1), ['content:a', 'content:c']), found('o2', Date.UTC(2022, 2, 1), ['content:b', 'content:c'])];
-  const single = found('z', Date.UTC(2020, 4, 1), ['content:a']);
+  const newer = Array.from({ length: 4 }, (_, i) => found(`n${i}`, t + i * 2 * HOUR, ['form:a', 'form:b']));
+  const older = [found('o1', Date.UTC(2021, 2, 1), ['form:a', 'form:c']), found('o2', Date.UTC(2022, 2, 1), ['form:b', 'form:c'])];
+  const single = found('z', Date.UTC(2020, 4, 1), ['form:a']);
   const ids = (hits, keepOldest) => clusterHits(hits, { gapMinutes: 30, maxClusters: 3, keepOldest }).map((c) => c.middleId);
   const all = [...newer, ...older, single];
   assert.deepEqual(ids(all, 1), ['n3', 'n2', 'o1'], 'the oldest two-query cluster, not the older single hit');
   assert.deepEqual(ids(all, 2), ['n3', 'o2', 'o1']);
   assert.deepEqual(ids(all, 0), ['n3', 'n2', 'n1'], '0 reserves nothing');
-  const singles = Array.from({ length: 4 }, (_, i) => found(`s${i}`, t + i * 2 * HOUR, ['content:a']));
+  const singles = Array.from({ length: 4 }, (_, i) => found(`s${i}`, t + i * 2 * HOUR, ['form:a']));
   assert.deepEqual(ids([...singles, single], 1), ['s3', 's2', 's1'], 'no eligible cluster in the rest: the slot goes by rank');
   assert.deepEqual(ids(all, 9), ['n0', 'o2', 'o1'], 'never more than maxClusters');
 });
@@ -277,8 +326,8 @@ test('clusterHits: keepOldest takes the oldest clusters of at least two queries 
 test('clusterHits: a missing keepOldest falls back to the shipped config value', () => {
   const t = Date.UTC(2026, 9, 1, 8);
   const hits = [
-    ...Array.from({ length: 4 }, (_, i) => found(`n${i}`, t + i * 2 * HOUR, ['content:a', 'content:b'])),
-    found('o1', Date.UTC(2021, 2, 1), ['content:a', 'content:c']),
+    ...Array.from({ length: 4 }, (_, i) => found(`n${i}`, t + i * 2 * HOUR, ['form:a', 'form:b'])),
+    found('o1', Date.UTC(2021, 2, 1), ['form:a', 'form:c']),
   ];
   const shipped = SHIPPED_CONFIG.recall.keepOldest;
   assert.equal(RECALL_DEFAULTS.keepOldest, shipped);

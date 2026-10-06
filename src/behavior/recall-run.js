@@ -336,7 +336,8 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
         stats.failed += 1;
         continue;
       }
-      // A message several queries find is one hit carrying every key: clusterHits ranks by them.
+      // A message several queries find is one hit carrying every key, each by the query's kind
+      // (form / who / author / range): clusterHits ranks by the topic (form) keys first.
       const key = queryKey(query);
       for (const raw of page.hits) {
         if (!hits.has(raw.id)) hits.set(raw.id, hitFrom(raw));

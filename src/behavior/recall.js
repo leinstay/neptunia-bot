@@ -57,8 +57,10 @@ export const MAX_SEARCH_OFFSET = 9975;
 /** The structural mark that opens a line the search matched, in `<found>` and in the stretch. */
 export const HIT_MARK = '>> ';
 
-/** The fewest distinct queries a cluster needs to take a keepOldest slot (clusterHits). */
-const OLDEST_MIN_QUERIES = 2;
+/** The fewest distinct `form:` queries a cluster needs to take a keepOldest slot (clusterHits). */
+const OLDEST_MIN_FORMS = 2;
+/** The prefix of a query key that names the topic (a `server:` form), see queryKey. */
+const FORM_KEY = 'form:';
 /** The most messages one window may ask for (one page of a channel's history). */
 const MAX_WINDOW_MESSAGES = 100;
 /** A web query is cut to this many characters (as the old single-line answer was). */
@@ -308,6 +310,8 @@ export function snowflakeAt(ms) {
  * The ordered search queries of one server search, newest first each:
  * - content queries: the `forms` and the `who` forms taken round-robin
  *   (form 1, name 1, form 2, name 2, ...), de-duplicated, at most `maxForms`;
+ *   each `kind: 'form'` when it is one of `forms` (the topic), else
+ *   `kind: 'who'` (a name form: it locates the person, not the topic);
  * - one author query per id of `memberIds`;
  * - with none of those and a range: one query over the range alone
  *   (`kind: 'range'`), which the runner samples (sampleOffsets).
@@ -317,7 +321,7 @@ export function snowflakeAt(ms) {
  * list when nothing is asked, or when the range ends before it starts.
  * @param {{ forms?: string[], who?: string[], memberIds?: string[], from?: number|null, to?: number|null,
  *   maxForms?: number, before?: number|null }} params
- * @returns {{ kind: 'content'|'author'|'range', content?: string, authorId?: string, minId: string|null,
+ * @returns {{ kind: 'form'|'who'|'author'|'range', content?: string, authorId?: string, minId: string|null,
  *   maxId: string|null }[]}
  */
 export function searchPlan({ forms = [], who = [], memberIds = [], from = null, to = null, maxForms, before = null } = {}) {
@@ -337,7 +341,7 @@ export function searchPlan({ forms = [], who = [], memberIds = [], from = null, 
   }
   const authors = [...new Set((Array.isArray(memberIds) ? memberIds : []).filter((id) => typeof id === 'string' && id))];
   const plan = [
-    ...contents.map((content) => ({ kind: 'content', content, ...range })),
+    ...contents.map((content) => ({ kind: a.includes(content) ? 'form' : 'who', content, ...range })),
     ...authors.map((authorId) => ({ kind: 'author', authorId, ...range })),
   ];
   if (plan.length === 0 && (Number.isFinite(from) || Number.isFinite(to))) plan.push({ kind: 'range', ...range });
@@ -346,13 +350,16 @@ export function searchPlan({ forms = [], who = [], memberIds = [], from = null, 
 
 /**
  * The key a search query's hits are tagged with (clusterHits counts the
- * distinct keys of a cluster): `content:<form>`, `author:<id>`, or `range`
- * for a date range alone -- every sampled page of it is one query.
+ * distinct keys of a cluster, the `form:` ones first): `form:<form>` for a
+ * server form (the topic), `who:<form>` for a name form, `author:<id>` for
+ * an author search, or `range` for a date range alone -- every sampled page
+ * of it is one query.
  * @param {{ kind: string, content?: string, authorId?: string }} query  A searchPlan entry.
  * @returns {string}
  */
 export function queryKey(query) {
-  if (query?.kind === 'content') return `content:${query.content}`;
+  if (query?.kind === 'form') return `${FORM_KEY}${query.content}`;
+  if (query?.kind === 'who') return `who:${query.content}`;
   if (query?.kind === 'author') return `author:${query.authorId}`;
   return 'range';
 }
@@ -380,24 +387,28 @@ export function sampleOffsets(total, samples) {
 /**
  * Hits grouped into clusters: per channel, hits sorted by time; a hit less
  * than `gapMinutes` after the previous one joins its cluster. Each cluster:
- * `{ channelId, ids (oldest first), startTs, endTs, middleId, queries }`,
+ * `{ channelId, ids (oldest first), startTs, endTs, middleId, queries, forms }`,
  * `middleId` the hit at the middle of its list, `queries` how many distinct
  * query keys (queryKey) its hits carry -- a hit found by two queries counts
- * both, a hit without `queries` counts none. With more than `maxClusters`
- * clusters, they rank by `queries` (more first), then the newer `endTs`
- * (channel id on a tie): the dense stretch where several forms meet outranks
- * a retelling or a stray old hit, and a one-hit cluster still counts, below
- * the denser ones. The top `maxClusters - keepOldest` are kept; each of the
- * `keepOldest` slots (at most `maxClusters`) then goes to the oldest
- * cluster of the rest with at least OLDEST_MIN_QUERIES queries -- where a
- * running thing started, never a single generic hit -- and a slot no such
- * cluster takes goes on by rank. `keepOldest` 0 reserves nothing. The kept
+ * both, a hit without `queries` counts none -- and `forms` how many of
+ * them are `form:` keys (the topic). With more than `maxClusters`
+ * clusters, they rank by `forms` (more first), then `queries` (more
+ * first), then the newer `endTs` (channel id on a tie): the dense stretch
+ * where several topic forms meet outranks a retelling or a stray old hit,
+ * name and author hits only locate the person -- a cluster of them alone
+ * ranks below any with one topic hit -- and a one-hit cluster still counts,
+ * below the denser ones. The top `maxClusters - keepOldest` are kept; each
+ * of the `keepOldest` slots (at most `maxClusters`) then goes to the
+ * oldest cluster of the rest with at least OLDEST_MIN_FORMS `form:` keys --
+ * where a running thing started, never a single generic hit -- and a slot no
+ * such cluster takes goes on by rank. `keepOldest` 0 reserves nothing. The kept
  * ones are returned newest first by `endTs` (channel id on a tie). Hits
  * without an id, a channel or a finite `ts` are ignored; a repeated id is one
  * hit with the queries of every copy.
  * @param {{ id: string, channelId: string, ts: number, queries?: Iterable<string> }[]} hits
  * @param {{ gapMinutes?: number, maxClusters?: number, keepOldest?: number }} [options]
- * @returns {{ channelId: string, ids: string[], startTs: number, endTs: number, middleId: string, queries: number }[]}
+ * @returns {{ channelId: string, ids: string[], startTs: number, endTs: number, middleId: string, queries: number,
+ *   forms: number }[]}
  */
 export function clusterHits(hits, { gapMinutes, maxClusters, keepOldest } = {}) {
   const gapMs = numberAtLeast(gapMinutes, RECALL_DEFAULTS.clusterGapMinutes, 0) * MINUTE_MS;
@@ -432,14 +443,15 @@ export function clusterHits(hits, { gapMinutes, maxClusters, keepOldest } = {}) 
       clusters.push(current);
     }
   }
+  for (const cluster of clusters) cluster.forms = [...cluster.keys].filter((key) => key.startsWith(FORM_KEY)).length;
   const newestFirst = (x, y) => y.endTs - x.endTs || (x.channelId < y.channelId ? -1 : 1);
-  const ranked = clusters.sort((x, y) => y.keys.size - x.keys.size || newestFirst(x, y));
+  const ranked = clusters.sort((x, y) => y.forms - x.forms || y.keys.size - x.keys.size || newestFirst(x, y));
   let kept = ranked;
   if (ranked.length > keep) {
     kept = ranked.slice(0, keep - oldest);
     const rest = ranked.slice(keep - oldest);
     const reserved = rest
-      .filter((cluster) => cluster.keys.size >= OLDEST_MIN_QUERIES)
+      .filter((cluster) => cluster.forms >= OLDEST_MIN_FORMS)
       .sort((x, y) => -newestFirst(x, y))
       .slice(0, oldest);
     const taken = new Set(reserved);
@@ -447,7 +459,7 @@ export function clusterHits(hits, { gapMinutes, maxClusters, keepOldest } = {}) 
   }
   return [...kept]
     .sort(newestFirst)
-    .map(({ keys, ...cluster }) => ({ ...cluster, middleId: cluster.ids[Math.floor(cluster.ids.length / 2)], queries: keys.size }));
+    .map(({ keys, forms, ...cluster }) => ({ ...cluster, middleId: cluster.ids[Math.floor(cluster.ids.length / 2)], queries: keys.size, forms }));
 }
 
 /**

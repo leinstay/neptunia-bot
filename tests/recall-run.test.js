@@ -512,6 +512,23 @@ test('recall: each hit carries the queries that found it; the cluster two forms 
   await withCapturedLogs(() => plain.recaller.run({ ...plain.args, server: RABBIT_SERVER }));
   assert.deepEqual(plain.fetches.map((f) => f.around), ['g9'], 'one form each: the newer cluster wins the tie');
 });
+test('recall: name and author queries locate the person, the forms rank: an older two-form cluster beats a newer one of the person', async () => {
+  const answers = (route, query) => {
+    if (route.endsWith('/members/search')) return [];
+    if (query.content === 'κουνέλι') return { total_results: 2, messages: [[rawHit('c1', RABBIT_LINES[3])], [rawHit('c1', RABBIT_LINES[2])]] };
+    if (query.content === 'κουνελιού') return { total_results: 1, messages: [[rawHit('c1', RABBIT_LINES[2])]] };
+    if (query.content === 'éloïse' || query.author_id === 'u3') return { total_results: 1, messages: [[rawHit('c2', GARDEN_AGAIN)]] };
+    return { total_results: 0, messages: [] };
+  };
+  const s = scene({ lines: RANKED_LINES, answers, recall: { maxClusters: 1 }, profiles: [{ id: 'u3', names: ['Éloïse'] }] });
+  await withCapturedLogs(() => s.recaller.run({ ...s.args, server: { ...RABBIT_SERVER, who: ['éloïse'] } }));
+  assert.deepEqual(
+    searches(s.calls).map((c) => c.query.content ?? c.query.author_id),
+    ['κουνέλι', 'éloïse', 'κουνελιού', 'u3'],
+    'server and name forms round-robin, then the author',
+  );
+  assert.deepEqual(s.fetches.map((f) => f.around), ['r3'], 'the newer cluster has a name and an author hit, no form');
+});
 const RANKED_STRETCH = [
   '[18:38] Βασίλης: πάμε κυνήγι',
   '[18:40] Ana: bang [image]',
