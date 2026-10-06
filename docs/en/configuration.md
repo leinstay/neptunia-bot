@@ -479,6 +479,7 @@ Settings for stage B of the two-stage analyzer (`features.memoryTwoStage`). Stag
 | `dampingPower` | `1` | Exponent of the damping factor; higher values make the ends of the scale harder to reach |
 | `maxDeltaPerUpdate` | `15` | Max score change per update |
 | `historySize` | `10` | Attitude changes kept per member |
+| `shownMoves` | `4` | Attitude moves shown after the score in the profile, strongest by absolute delta first. `0` hides them |
 | `directTriggerCount` | `6` | Direct interactions that force early update |
 | `decayPerDay` | `0.04` | Daily drift toward zero; per day the score loses `decayPerDay * |score| * (|score| / 100) ^ decayPower`. `0` or missing = off |
 | `decayPower` | `1` | Exponent of the decay curve; higher values make scores close to zero decay slower. Not a positive number = 1 |

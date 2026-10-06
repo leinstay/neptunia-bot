@@ -118,6 +118,7 @@
     "unknown": "You don't know anything about this person yet.",
     "messageCount": "Messages seen: {count}",
     "affinity": "Your attitude: {score} ({band}) — {reason}",
+    "affinityMove": "{delta} on {date}: {reason}",
     "episodes": "Moments you remember with this person:",
     "episode": "{date}: {what} — \"{quote}\" — felt: {feeling}",
     "episodeNoQuote": "{date}: {what} — felt: {feeling}"
