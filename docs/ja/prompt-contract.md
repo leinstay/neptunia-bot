@@ -57,6 +57,7 @@
 | `variety-long.md` | いいえ | 長い多様性パス: 全チャンネルにわたるペルソナ自身の行のリング全体での使い回し手法を特定（`features.variety`、`variety.longLines`）。プレースホルダー、`<lines>` ブロック、回答フォーマットは `variety.md` と同じ。`classifier.text` モデルを使用。キャラクターカードなし。ファイルがない場合、長いパスは実行されない | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `reword.md` | いいえ | フィラーガードとパターンガード用の書き直しリクエスト: クールダウン中の語句を置換し、使い古し手法に一致する習慣を言い換える。返答をユーザーメッセージとして受け取る。キャラクターカードなし | `{{name}}` `{{words}}` `{{patterns}}` |
 | `pattern-check.md` | いいえ | `classifier.text` リクエスト: 返答が現在の使い古し手法のいずれかに該当するか確認（`features.patternGuard`）。番号付き手法と返答を受け取る。キャラクターカードなし | `{{name}}` |
+| `gif-pick.md` | いいえ | 分類器: 短いテキスト返答の代わりにライブラリから GIF を選ぶ（`features.gifPicker`）。直近の `gifs.pick.contextMessages` チャット行、ペルソナの返答、キャプション付きのフルライブラリを受け取る。出力はライブラリのハンドル 1 つまたは `none`。キャラクターカードなし | `{{name}}` |
 | `split.md` | いいえ | 分類器: 直接呼びかけに複数の独立したリクエストが含まれるか（`features.splitTasks`）。短い `<transcript>` と新しいメッセージを `<candidate>` として受け取る。出力は `one` という語、または 2 行から `{{maxTasks}}` 行で各行 `- ` で始まり著者自身の言葉でパートを示す。キャラクターカードなし。このファイルがない場合スプリッターはオフ | `{{name}}` `{{maxTasks}}` |
 | `merge.md` | いいえ | 分類器: 待機中の項目を持つ著者からの新しいメッセージがそのいずれかに属するか。番号付き `<waiting>` リストと新しいメッセージを `<candidate>` として受け取る。出力は 1 行: リストの番号または `new` という語。キャラクターカードなし。このファイルがない場合、新しい呼びかけは常に独自の項目としてキューされる | `{{name}}` |
 | `labels.json` | はい | コードがプロンプトに挿入するすべての文字列。キーは以下で固定、値はライターが記述する | 以下参照 |
@@ -105,6 +106,8 @@
 pulled（`<channel_view>`、`context.caps.pulled` で制限。読み取り専用チャンネルからの呼びかけに応答するターンでは、プルされたブロックは chat の後ではなく前に配置）->
 recent（`context.caps.recent` で制限）->
 他のプロファイル -> attitudes（`context.caps.attitudes` で制限）-> worn（全体として保持または削除）-> other channels -> 絵文字（下からエントリを削除、次にブロック全体; `context.caps.emoji`）-> GIF（同じトリム; `context.caps.gifs`）。
+
+GIF ピッカー（`features.gifPicker`、デフォルトオン）。ペルソナが短い返答（最大 `gifs.pick.maxChars` 文字、デフォルト 60）を書き、自分で GIF を選ばなかった場合、分類器（`classifier.text`、purpose `gif-pick`、`gifs.pick.maxOutputTokens` 60、プロンプト `prompts/gif-pick.md`）が直近の `gifs.pick.contextMessages`（デフォルト 4）チャット行、返答、キャプション付きのフルライブラリ（各エントリにキャプション、ペルソナが最近投稿した場合は自分マーク付き）を受け取ります。分類器はハンドル 1 つまたは `none` を返します。ハンドルが返されると GIF がテキストの代わりに投稿され、そうでなければテキストがそのまま投稿されます。分類器は最初のメッセージのタイピングシミュレーション中に実行され、日次 GIF 制限 `gifs.maxPerDay` が適用されます。ログ: `gifs: picked`（handle true/false、ライブラリサイズ）または `gifs: pick failed`。
 
 トランスクリプト行のメディア（利用可能な最も情報量の多い形式）: このリクエストに添付された画像 →
 `transcript.imageAttached`（画像がテキストの後に並ぶ順にナンバリング）、説明済み →

@@ -57,6 +57,7 @@
 | `variety-long.md` | 否 | 长多样性过程：在全部消息环中识别手法（`features.variety`、`variety.longLines`）。与 `variety.md` 相同的占位符、`<lines>` 块和回答格式。使用 `classifier.text` 模型。不接收角色卡。文件不存在则无长过程 | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `reword.md` | 否 | 填充词守卫和手法守卫的重写请求：替换冷却中的词语和短语，改写匹配已磨损手法的习惯。将回复作为用户消息接收。不接收角色卡 | `{{name}}` `{{words}}` `{{patterns}}` |
 | `pattern-check.md` | 否 | `classifier.text` 请求：检查回复是否落入当前已磨损手法（`features.patternGuard`）。接收编号的手法和回复。不接收角色卡 | `{{name}}` |
+| `gif-pick.md` | 否 | 分类器：从库中挑选 GIF 替代短文本回复（`features.gifPicker`）。接收最近 `gifs.pick.contextMessages` 行聊天、角色的回复及带说明的完整库。输出为库中的一个 handle 或 `none`。不接收角色卡 | `{{name}}` |
 | `split.md` | 否 | 分类器：直接呼叫是否包含多个独立请求（`features.splitTasks`）。接收一段短 `<transcript>` 和新消息作为 `<candidate>`。输出为 `one`，或 2 到 `{{maxTasks}}` 行，每行以 `- ` 开头，用作者自己的话表述一个部分。不接收角色卡。没有此文件时分拆器关闭 | `{{name}}` `{{maxTasks}}` |
 | `merge.md` | 否 | 分类器：已有等候条目的作者的新消息是否属于其中一个。接收编号的 `<waiting>` 列表和新消息作为 `<candidate>`。输出为一行：列表中的一个编号或 `new`。不接收角色卡。没有此文件时新呼叫始终作为独立条目排队 | `{{name}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
@@ -105,6 +106,8 @@
 拉取的频道（`<channel_view>`，上限 `context.caps.pulled`；回答只读频道呼叫的回合中拉取块在对话记录之前而非之后）->
 近期记事（上限 `context.caps.recent`）->
 其他档案 -> attitudes（上限 `context.caps.attitudes`）-> worn（整体保留或丢弃）-> 相邻频道 -> 表情符号（从底部删除条目，然后删除整个块；`context.caps.emoji`）-> GIF（同样的裁剪；`context.caps.gifs`）。
+
+GIF 挑选器（`features.gifPicker`，默认开启）。当角色写了一条短回复（不超过 `gifs.pick.maxChars` 个字符，默认 60）且自己没选 GIF 时，分类器（`classifier.text`，purpose `gif-pick`，`gifs.pick.maxOutputTokens` 60，提示 `prompts/gif-pick.md`）接收最近 `gifs.pick.contextMessages`（默认 4）行聊天、回复及带说明的完整库（每条记录附说明，角色最近发送过的附自用标记）。分类器返回一个 handle 或 `none`。返回 handle 时 GIF 替换文本发送；否则文本照常发布。分类器在第一条消息的打字模拟期间运行；每日 GIF 限额 `gifs.maxPerDay` 生效。日志：`gifs: picked`（handle true/false，库大小）或 `gifs: pick failed`。
 
 对话记录行中的媒体，使用可用的最具信息量的形式：附加在当前请求上的图片 →
 `transcript.imageAttached`（按图片在文本后的顺序编号）；已描述的 →
