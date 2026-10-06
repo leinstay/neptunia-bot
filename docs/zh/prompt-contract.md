@@ -109,7 +109,7 @@
 `imageDescribed` / `gifDescribed` / `videoDescribed`；其他情况使用盲形式 `image` / `gif` / `video`。
 当视频视觉开启时（`features.mediaDescriptions` 和 `features.videoDescriptions` 同时启用），视频或视频站点链接
 会获得一个状态：`videoWatched`（亲自观看，看到并听到）、`videoNotWatchedFrame`（未观看但静帧已描述）或
-`videoNotWatched`（未观看，无帧）。原因代码（`length` / `size` / `daily` / `error`）在进入对话记录前会被替换
+`videoNotWatched`（未观看，无帧）。原因代码（`length` / `size` / `daily` / `error` / `pending`）在进入对话记录前会被替换
 为 `transcript.videoReason.*` 中的人类可读短语。链接保留其基础标签（`link` / `linkText`）并添加视频附加标签：
 `linkWatched`、`linkNotWatchedFrame` 或 `linkNotWatched`。当静帧作为图片附加时，还会添加 `frameAttached`。
 链接使用 `link` / `linkText`，取自 Discord 的嵌入（站点、标题、摘要）；当 `features.webLookup` 开启且链接已被阅读时，`linkRead` 追加在链接的其他附加标签（视频、缩略图）之后。文本文件通过 `filePreview` 显示开头
@@ -168,7 +168,7 @@ transcript.videoWatched                  {name} {duration} {text}: first-hand, t
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
 transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
-transcript.videoReason.length | size | daily | error    human phrases for the four reason codes
+transcript.videoReason.length | size | daily | error | pending    human phrases for the five reason codes; pending = the clip was still loading when the request went out
 transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
 transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
 transcript.linkNotWatchedFrame           {reason} {text}: extra tag after a link tag, not watched but preview described

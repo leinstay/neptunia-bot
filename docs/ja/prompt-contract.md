@@ -109,7 +109,7 @@ recent（`context.caps.recent` で制限）->
 `imageDescribed` / `gifDescribed` / `videoDescribed`、それ以外はブラインド形式 `image` / `gif` / `video`。
 動画ビジョンが有効な場合（`features.mediaDescriptions` かつ `features.videoDescriptions`）、動画または動画サイトのリンクは
 状態を持ちます: `videoWatched`（一次情報、映像と音声を視聴済み）、`videoNotWatchedFrame`（未視聴だが静止フレームの説明あり）、
-`videoNotWatched`（未視聴、フレームなし）。理由コード（`length` / `size` / `daily` / `error`）はトランスクリプトに届く前に
+`videoNotWatched`（未視聴、フレームなし）。理由コード（`length` / `size` / `daily` / `error` / `pending`）はトランスクリプトに届く前に
 `transcript.videoReason.*` の人間向けフレーズに置換されます。リンクはベースタグ（`link` / `linkText`）を維持し、動画のエクストラ
 （`linkWatched`、`linkNotWatchedFrame`、`linkNotWatched`）を追加します。静止フレームが画像として添付されている場合、
 `frameAttached` も追加されます。リンクは Discord の埋め込みから構築された `link` / `linkText`（サイト、タイトル、スニペット）を
@@ -168,7 +168,7 @@ transcript.videoWatched                  {name} {duration} {text}: first-hand, t
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
 transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
-transcript.videoReason.length | size | daily | error    human phrases for the four reason codes
+transcript.videoReason.length | size | daily | error | pending    human phrases for the five reason codes; pending = the clip was still loading when the request went out
 transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
 transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
 transcript.linkNotWatchedFrame           {reason} {text}: extra tag after a link tag, not watched but preview described

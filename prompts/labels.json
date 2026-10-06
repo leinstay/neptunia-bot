@@ -33,7 +33,8 @@
       "length": "over length limit",
       "size": "file too large",
       "daily": "daily limit reached",
-      "error": "could not load"
+      "error": "could not load",
+      "pending": "still loading"
     },
     "voice": "[voice message, {duration}]",
     "audio": "[audio: {name}, {duration}]",

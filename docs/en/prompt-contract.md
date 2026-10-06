@@ -110,7 +110,7 @@ the helper captioned it (numbered in the order the pictures follow the text); a 
 `imageDescribed` / `gifDescribed` / `videoDescribed`; otherwise the blind forms `image` / `gif` / `video`.
 When video vision is on (`features.mediaDescriptions` AND `features.videoDescriptions`), a video or video-site link
 gains a state: `videoWatched` (first-hand, seen and heard), `videoNotWatchedFrame` (not watched but a still frame was
-described), or `videoNotWatched` (not watched, no frame). The reason code (`length` / `size` / `daily` / `error`) is
+described), or `videoNotWatched` (not watched, no frame). The reason code (`length` / `size` / `daily` / `error` / `pending`) is
 swapped for the human phrase from `transcript.videoReason.*` before it reaches the transcript. Links keep their base
 tag (`link` / `linkText`) and add a video extra: `linkWatched`, `linkNotWatchedFrame` or `linkNotWatched`. When a still
 frame is attached as a picture, `frameAttached` is added as well. Links use `link` / `linkText` built from Discord's
@@ -175,7 +175,7 @@ transcript.videoWatched                  {name} {duration} {text}: first-hand, t
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
 transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
-transcript.videoReason.length | size | daily | error    human phrases for the four reason codes
+transcript.videoReason.length | size | daily | error | pending    human phrases for the five reason codes; pending = the clip was still loading when the request went out
 transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
 transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
 transcript.linkNotWatchedFrame           {reason} {text}: extra tag after a link tag, not watched but preview described

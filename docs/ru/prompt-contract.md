@@ -111,7 +111,7 @@ recent (лимит `context.caps.recent`) ->
 Когда зрение видео включено (`features.mediaDescriptions` И `features.videoDescriptions`), видео или ссылка на
 видеосайт получает состояние: `videoWatched` (из первых рук, видел и слышал), `videoNotWatchedFrame` (не просмотрено,
 но описан стоп-кадр) или `videoNotWatched` (не просмотрено, без кадра). Код причины (`length` / `size` / `daily` /
-`error`) заменяется человекочитаемой фразой из `transcript.videoReason.*`, прежде чем попадает в транскрипт. Ссылки
+`error` / `pending`) заменяется человекочитаемой фразой из `transcript.videoReason.*`, прежде чем попадает в транскрипт. Ссылки
 сохраняют свой базовый тег (`link` / `linkText`) и получают видеодополнение: `linkWatched`, `linkNotWatchedFrame` или
 `linkNotWatched`. Если стоп-кадр прикреплён как картинка, добавляется также `frameAttached`. Ссылки используют
 `link` / `linkText`, построенные из эмбеда Discord (сайт, заголовок, фрагмент); когда `features.webLookup` включён и ссылка была прочитана, `linkRead` добавляется после остальных дополнений ссылки (видео, превью). Текстовые файлы показывают начало через
@@ -174,7 +174,7 @@ transcript.videoWatched                  {name} {duration} {text}: first-hand, t
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
 transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
-transcript.videoReason.length | size | daily | error    human phrases for the four reason codes
+transcript.videoReason.length | size | daily | error | pending    human phrases for the five reason codes; pending = the clip was still loading when the request went out
 transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
 transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
 transcript.linkNotWatchedFrame           {reason} {text}: extra tag after a link tag, not watched but preview described
