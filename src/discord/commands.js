@@ -469,8 +469,11 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'post',
-              description: 'Post one diary entry now.',
-              options: [{ type: STRING, name: 'kind', description: 'Post kind.', required: false }],
+              description: 'Post one entry now.',
+              options: [
+                { type: STRING, name: 'kind', description: 'Kind.', required: false },
+                { type: STRING, name: 'topic', description: 'Topic.', required: false, max_length: 300 },
+              ],
             },
           ],
         },
@@ -898,7 +901,10 @@ const OPTION_MAPPERS = {
   'diary.set': (options) => ({ channelId: options.getChannel('channel', true).id }),
   'diary.show': () => ({}),
   'diary.off': () => ({}),
-  'diary.post': (options) => ({ kind: options.getString('kind') ?? undefined }),
+  'diary.post': (options) => {
+    const topic = options.getString('topic');
+    return { kind: options.getString('kind') ?? undefined, ...(topic != null ? { topic } : {}) };
+  },
   'alias.add': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),
   'alias.remove': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),
   'lore.add': (options) => ({

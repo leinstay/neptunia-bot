@@ -203,6 +203,27 @@ test('diary post: forces one post with the kind and reports the outcome', async 
   assert.deepEqual(calls[1], { kind: undefined });
 });
 
+test('diary post: passes the topic to force', async () => {
+  const calls = [];
+  const diary = { force: async (args) => { calls.push(args); return 'spoke'; } };
+  const { admin } = makeAdmin({ diary });
+  await admin.run('diary.post', { kind: 'thought', topic: '  le marché du dimanche  ' }, owner);
+  await admin.run('diary.post', { topic: 'ένα ταξίδι' }, owner);
+  assert.deepEqual(calls, [
+    { kind: 'thought', topic: 'le marché du dimanche' },
+    { kind: undefined, topic: 'ένα ταξίδι' },
+  ]);
+});
+
+test('diary post: an empty topic is none', async () => {
+  const calls = [];
+  const diary = { force: async (args) => { calls.push(args); return 'spoke'; } };
+  const { admin } = makeAdmin({ diary });
+  await admin.run('diary.post', { kind: 'thought', topic: '   ' }, owner);
+  await admin.run('diary.post', { topic: '' }, owner);
+  assert.deepEqual(calls, [{ kind: 'thought' }, { kind: undefined }]);
+});
+
 test('diary post: an unknown kind or one with weight 0 is refused with the list of kinds', async () => {
   const calls = [];
   const diary = { force: async (args) => { calls.push(args); return 'spoke'; } };
@@ -287,11 +308,13 @@ test('diary commands: the options reach admin.run as channelId and kind', async 
   await handler(interaction('set', { channel: { id: 'd1' } }));
   await handler(interaction('post', { kind: 'news' }));
   await handler(interaction('post', {}));
+  await handler(interaction('post', { topic: 'la pluie' }));
   await handler(interaction('show', {}));
   assert.deepEqual(runCalls, [
     ['diary.set', { channelId: 'd1' }],
     ['diary.post', { kind: 'news' }],
     ['diary.post', { kind: undefined }],
+    ['diary.post', { kind: undefined, topic: 'la pluie' }],
     ['diary.show', {}],
   ]);
 });

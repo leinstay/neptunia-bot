@@ -282,5 +282,6 @@ export const labels = {
     plan: 'Plan for this post:',
     found: 'What the search found. Retell it in your own words; no links, no quoting.',
     seeds: 'Random seeds (place; setting; detail; activity; subject; twist):',
+    topic: 'Topic the owner asked for:',
   },
 };

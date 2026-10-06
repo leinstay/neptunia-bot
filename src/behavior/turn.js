@@ -29,10 +29,12 @@ import { block, buildDiaryPlanRequest, buildDrawPrompt, buildRequest, classifier
 import {
   DIARY_DAILY,
   DIARY_PICTURES_DAILY,
+  diaryTopic,
   gistOf,
   parseSeedFamilies,
   pickSeeds,
   renderSeedsBlock,
+  renderTopicBlock,
   stripUrls,
   validatePlan,
 } from './diary.js';
@@ -2261,8 +2263,10 @@ export function createTurnRunner({
    * own cap not spent), then the plan request (src/behavior/prompt.js#buildDiaryPlanRequest:
    * prompts/diary-plan.md on the classifier model, `diary.planMaxOutputTokens`
    * (300), `diary.planTimeoutMs` (20000), usage purpose `diary-plan`) with
-   * `<seeds>` drawn from prompts/diary-seeds.md (`diary.seedSets`, 2). The
-   * answer goes through parseJsonObject and src/behavior/diary.js#validatePlan
+   * `<seeds>` drawn from prompts/diary-seeds.md (`diary.seedSets`, 2) and,
+   * with an owner's topic (`params.topic`, src/behavior/diary.js#diaryTopic),
+   * a `<topic>` block after them; the topic also rides on the plan as its
+   * `topic` field (the `<plan>` block of the post). The answer goes through parseJsonObject and src/behavior/diary.js#validatePlan
    * (a weighted random kind when it is missing, broken or names no weighted
    * kind; `diary.searchKinds`, `diary.pictureKinds`). A forced kind
    * (`params.kind`) is the only kind offered and replaces the answer's kind,
@@ -2272,7 +2276,7 @@ export function createTurnRunner({
    * or token cap on the plan request throws (the turn is refused); any other
    * failure of it falls back. Settings come from `config`, the turn's live config.
    * @returns {Promise<{ posts: object[], plan: { kind: string|null, brief: string, search: string,
-   *   picture: boolean, fallback: boolean }, found: string|null, pictureAllowed: boolean }>}
+   *   picture: boolean, fallback: boolean, topic?: string }, found: string|null, pictureAllowed: boolean }>}
    */
   async function prepareDiary({ config, guildId, channel, selfName, history, now, params, memoryOn }) {
     const prompts = hot.prompts;
@@ -2281,6 +2285,7 @@ export function createTurnRunner({
     const stored = typeof store.getDiary === 'function' ? store.getDiary(guildId) : null;
     const posts = Array.isArray(stored?.posts) ? stored.posts : [];
     const forcedKind = typeof params?.kind === 'string' && params.kind ? params.kind : null;
+    const topic = diaryTopic(params?.topic);
     const kinds = forcedKind ? { [forcedKind]: 1 } : (diaryCfg.kinds ?? {});
 
     const imageQuota = images && typeof images.quota === 'function' ? images.quota({}) : null;
@@ -2315,6 +2320,7 @@ export function createTurnRunner({
         posts,
         kinds,
         seedsText,
+        topicText: renderTopicBlock(topic, labels),
       });
       let completion = null;
       try {
@@ -2342,7 +2348,9 @@ export function createTurnRunner({
       log.warn('diary: plan failed', { channel: channel.id, reason: 'no-prompt', status: null });
     }
     if (forcedKind && answer && typeof answer === 'object' && !Array.isArray(answer)) answer = { ...answer, kind: forcedKind };
-    const plan = validatePlan(answer, kinds, { pictureAllowed, searchKinds: diaryCfg.searchKinds, pictureKinds: diaryCfg.pictureKinds }, rng);
+    const validated = validatePlan(answer, kinds, { pictureAllowed, searchKinds: diaryCfg.searchKinds, pictureKinds: diaryCfg.pictureKinds }, rng);
+    // The owner's topic reaches the post even when the planner ignored it.
+    const plan = topic ? { ...validated, topic } : validated;
 
     let found = null;
     if (plan.search && typeof lookup?.search === 'function') {
@@ -2638,10 +2646,11 @@ export function createTurnRunner({
    *   named and the old rule holds for it.
    * @param {{ id: string, text: string, ts: number }[]|null} [params.added]  Later messages of the
    *   author folded into this call (src/discord/events.js): `labels.task.added` names them.
-   * @param {{ kind?: string|null, forced?: boolean }|null} [params.diary]  With `mode: 'diary'`
+   * @param {{ kind?: string|null, topic?: string|null, forced?: boolean }|null} [params.diary]  With `mode: 'diary'`
    *   (src/behavior/diary.js, in the diary channel, no trigger): the post is planned first
    *   (prepareDiary: the plan request, then the search it asks for; `kind` forces the kind,
-   *   `forced` also appends prompts.forced to the task), then composed with `prompts.diary` as
+   *   `topic` is the owner's topic for the planner and the plan, `forced` also appends
+   *   prompts.forced to the task), then composed with `prompts.diary` as
    *   the task and the `<world>`, `<diary>`, `<plan>` and `<found>` blocks. Its output keeps only
    *   `<msg>` (every reply attribute dropped, links removed, at most `diary.maxMessages` (3), a
    *   message left empty not posted), `<draw>` (only while the plan's picture check allowed it)

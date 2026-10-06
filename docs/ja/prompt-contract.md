@@ -47,8 +47,8 @@
 | `read-link.md` | いいえ | リンク読み取りのアウトオブキャラクタープロンプト（`features.webLookup`、`web.links.enabled`）: フェッチしたページを 1 段落に要約する。ページのタイトルと本文を受け取る。キャラクターカードなし | `{{today}}` `{{maxChars}}` |
 | `search-summary.md` | いいえ | 検索要約のアウトオブキャラクタープロンプト（`features.webLookup`、`web.search.enabled`）: 番号付き検索結果をインラインソース付きの 1 つのノートに要約する。キャラクターカードなし | `{{today}}` `{{query}}` `{{maxChars}}` |
 | `private.md` | いいえ | モードプロンプト（`reply.md`）の後、`forced.md` の前に追加。DM（`features.privateMessages`）のみ。プライベートな会話: ここで話されたことはここに留まる。ペルソナは公開知識を保持する。ファイルがなければ何も追加されない | `{{name}}` `{{author}}` |
-| `diary.md` | はい | タスク: 日記投稿を書く。ペルソナ自身のチャンネル、誰にも頼まれていない。計画の種類と概要、過去の投稿、オプションのワールドと検索結果がユーザーメッセージブロックに含まれる。出力: `<msg>`（1〜`diary.maxMessages`）、`<draw>`、または `<skip/>`。`<react>` と `<gif>` は削除。返信属性なし、リンクなし、読者への呼びかけなし | `{{name}}` |
-| `diary-plan.md` | はい | プランナー: 種類、概要、検索と描画の有無を選択。`classifier.text` で動作、キャラクターカードなし。`<now>`、`<server>`、`<about_chat>`、`<recent>`、`<lore>`、`<world>`、`<diary>`、`<kinds>`、`<seeds>` を受け取る。JSON オブジェクト 1 つで回答 | `{{name}}` |
+| `diary.md` | はい | タスク: 日記投稿を書く。ペルソナ自身のチャンネル、誰にも頼まれていない。計画の種類と概要、過去の投稿、オプションのワールドと検索結果がユーザーメッセージブロックに含まれる。出力: `<msg>`（1〜`diary.maxMessages`）、`<draw>`、または `<skip/>`。`<react>` と `<gif>` は削除。返信属性なし、リンクなし | `{{name}}` |
+| `diary-plan.md` | はい | プランナー: 種類、概要、検索と描画の有無を選択。`classifier.text` で動作、キャラクターカードなし。`<now>`、`<server>`、`<about_chat>`、`<recent>`、`<lore>`、`<world>`、`<diary>`、`<kinds>`、`<seeds>`、`<topic>` を受け取る。JSON オブジェクト 1 つで回答 | `{{name}}` |
 | `world.md` | いいえ | ペルソナの仮想世界: チャット外の場所と日常。日記の計画・生成リクエストでのみ `<world>` ブロックとしてレンダリング、`diary.world === true` の場合のみ。通常のターンでは使用されない。ファイルなしまたはスイッチオフはブロックなし | `{{name}}` |
 | `diary-seeds.md` | いいえ | 日記プランナー用ランダムシードファミリー。`# name` ヘッダーがファミリーを開始。コードが各ファミリーから 1 行選び `diary.seedSets` 組み合わせを作成。ファイルなしまたは `seedSets` = 0 で省略 | なし |
 | `draw.md` | はい | 描画サブプロセスのアウトオブキャラクタープロンプト（`features.imageGeneration`）: シーン説明から画像 1 枚を生成する。外見とリクエストのみを受け取り、キャラクターカードは受け取らない | `{{name}}` `{{appearance}}` `{{request}}` `{{when}}` |
@@ -103,10 +103,11 @@
 | `<tempo>` | 10 分 / 1 時間 / 1 日のカウント、参加人数、沈黙時間、判定（live / slow / dead） |
 | `<world>` | ペルソナの仮想世界（`prompts/world.md`、`{{name}}` 補完済み）。日記投稿（`mode === 'diary'`）かつ `diary.world === true` の場合のみ。予算圧迫で丸ごと削除。ファイルなしまたはスイッチオフは何も追加しない |
 | `<diary>` | 過去の日記投稿、古い順: `labels.diary.intro`、次に投稿ごとに `labels.diary.line`。計画・生成両方のリクエストに表示。予算圧迫では古い行から先にカット |
-| `<plan>` | この日記投稿の計画: `labels.diary.plan`、次に JSON 1 行 `{"kind","brief","picture"}`。カットされない |
+| `<plan>` | この日記投稿の計画: `labels.diary.plan`、次に JSON 1 行 `{"kind","brief","picture"}`、オーナーが `/nep diary post` で指定した場合は `"topic"` も含む。カットされない |
 | `<found>` | 日記の検索結果: `labels.diary.found`、次に検索結果テキスト。計画が検索を要求し結果があった場合のみ。予算では `<lookup>` の直後 |
 | `<kinds>` | 投稿種類と重み・使用回数: `labels.diary.kinds`、次に正の重みを持つ種類ごとに `labels.diary.kindLine`。カットされない |
 | `<seeds>` | ランダムシード組み合わせ: `labels.diary.seeds`、次にセットごとに `- a; b; c`。計画リクエストのみ。ファイルなしまたは `diary.seedSets` = 0 で省略。カットされない |
+| `<topic>` | オーナーの強制投稿の題材（`/nep diary post [kind] [topic]`）: `labels.diary.topic`、次にトピック 1 行、最大 300 文字。計画リクエストのみ、`<seeds>` の直後、トピック指定時のみ。カットされない |
 | `<task>` | `reply` / `interject` / `initiate` / `overheard`（`overheard.md` が存在する場合）/ `elsewhere`（`elsewhere.md` が存在する場合、注目コメント用）/ `diary`（`diary.md` が存在する場合、日記投稿用）、プレースホルダー補完済み。モードプロンプトの後、条件が成立する場合に最大 3 つの `task.*` ラベルが追加（それぞれ空行で区切り）: 分割メッセージの 1 パートに応答するターンでは `task.part`、またはトリガー著者が他の呼びかけを待機中なら `task.queued`。次に他のメンバーがチャンネルで呼びかけを待機中なら `task.queuedOthers`。次に後のメッセージがこの呼びかけに統合されていれば `task.added`。`labels.task.*` を参照 |
 
 バジェットの優先順位（このリストの下からセクションがトリムされる）: system + task + clock + tempo + senses
@@ -114,7 +115,7 @@
 pulled（`<channel_view>`、`context.caps.pulled` で制限。読み取り専用チャンネルからの呼びかけに応答するターンでは、プルされたブロックは chat の後ではなく前に配置）->
 recent（`context.caps.recent` で制限）->
 他のプロファイル -> attitudes（`context.caps.attitudes` で制限）-> worn（全体として保持または削除）->
-日記モードのみ: `<found>`（`<lookup>` の直後）、`<world>`（丸ごと、`<worn>` の後）、`<diary>`（古い行から先にカット）、`<plan>` + `<kinds>` + `<seeds>`（カットされない）->
+日記モードのみ: `<found>`（`<lookup>` の直後）、`<world>`（丸ごと、`<worn>` の後）、`<diary>`（古い行から先にカット）、`<plan>` + `<kinds>` + `<seeds>` + `<topic>`（カットされない）->
 other channels -> 絵文字（下からエントリを削除、次にブロック全体; `context.caps.emoji`）-> GIF（同じトリム; `context.caps.gifs`）。
 
 GIF ピッカー（`features.gifPicker`、デフォルトオン）。ペルソナが短い返答（最大 `gifs.pick.maxChars` 文字、デフォルト 160）を書き、自分で GIF を選ばなかった場合、分類器（`classifier.text`、purpose `gif-pick`、`gifs.pick.maxOutputTokens` 60、プロンプト `prompts/gif-pick.md`）が直近の `gifs.pick.contextMessages`（デフォルト 4）チャット行（応答先メッセージを明示）、ペルソナの最初のメッセージ、キャプション付きのフルライブラリ（各エントリにキャプション、ペルソナが最近投稿した場合は自分マーク付き）を受け取ります。分類器はハンドル 1 つまたは `none` を返します。ハンドルが返されると GIF が最初の送信メッセージを置換し、元のメッセージと同じ送信先にリプライします。残りのメッセージは順番に続きます。GIF の送信に失敗した場合、すべてのメッセージがそのまま投稿されます。分類器は最初のメッセージのタイピングシミュレーション中に実行され、日次 GIF 制限 `gifs.maxPerDay` が適用されます。ログ: `gifs: picked`（handle true/false、ライブラリサイズ）または `gifs: pick failed`。
@@ -300,6 +301,7 @@ diary.kindLine                           {key} {weight} {count} {window}: 種類
 diary.plan                               `<plan>` ブロックの最初の行
 diary.found                              `<found>` ブロックの最初の行
 diary.seeds                              `<seeds>` ブロックの最初の行
+diary.topic                              `<topic>` ブロックの最初の行（オーナーの強制投稿の題材）
 memory.privateNote                       the <private> block content in a private analyzer batch: marks the batch as a private conversation, constrains output to users for the partner's id only
 memory.privateChannel                    heading used in place of a channel name for the <new_messages> section in a private batch
 limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers

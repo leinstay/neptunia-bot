@@ -2308,7 +2308,7 @@ export function createAdmin({
     return `Diary off ${reloadNote(ok)}; its memory file is kept.`;
   }
 
-  /** `/nep diary post [kind]`: one forced post now; an unknown kind is refused with the list. */
+  /** `/nep diary post [kind] [topic]`: one forced post now; an unknown kind is refused with the list. */
   async function cmdDiaryPost(args) {
     assertNotPaused();
     if (typeof diary?.force !== 'function') throw new Error('diary not running');
@@ -2317,7 +2317,9 @@ export function createAdmin({
     if (kind !== undefined && !kinds.includes(kind)) {
       throw new Error(`unknown kind: ${kind} (kinds: ${kinds.join(', ')})`);
     }
-    const outcome = await diary.force({ kind });
+    // The owner's topic nudges the post's subject; blank is none (src/behavior/diary.js#diaryTopic clamps it).
+    const topic = String(args?.topic ?? '').trim();
+    const outcome = await diary.force(topic ? { kind, topic } : { kind });
     const text = typeof outcome === 'string' ? outcome : (outcome?.outcome ?? JSON.stringify(outcome) ?? 'ok');
     const reason = outcome && typeof outcome === 'object' && outcome.reason ? ` (${outcome.reason})` : '';
     return `diary post${kind ? ` ${kind}` : ''}: ${text}${reason}`;

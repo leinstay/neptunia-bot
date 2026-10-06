@@ -25,6 +25,7 @@ export const DIARY_DAILY = { dayKey: 'diaryDay', countKey: 'diaryPosts' };
 export const DIARY_PICTURES_DAILY = { dayKey: 'diaryPicturesDay', countKey: 'diaryPictures' };
 
 const BRIEF_CHARS = 300;
+const TOPIC_CHARS = 300;
 const DEFAULT_GRACE_MINUTES = 30; // diary.slotGraceMinutes
 const DEFAULT_MAX_PER_DAY = 3; // diary.maxPerDay
 const DEFAULT_FORCE_WAIT_MS = 120000; // diary.forceWaitMs
@@ -335,6 +336,31 @@ export function renderSeedsBlock(sets, labels) {
 }
 
 /**
+ * The owner's topic for a forced post (`/nep diary post topic`): one line,
+ * cut at a word boundary to at most 300 characters. Null for a missing,
+ * non-string or blank topic.
+ * @param {unknown} text
+ * @returns {string|null}
+ */
+export function diaryTopic(text) {
+  if (typeof text !== 'string') return null;
+  return clampText(oneLine(text), TOPIC_CHARS, { tolerance: 1 }) || null;
+}
+
+/**
+ * The body of the plan request's `<topic>` block: `labels.diary.topic`, then
+ * the topic (diaryTopic). '' without a topic.
+ * @param {unknown} topic
+ * @param {object} labels
+ * @returns {string}
+ */
+export function renderTopicBlock(topic, labels) {
+  const text = diaryTopic(topic);
+  if (!text) return '';
+  return [labels?.diary?.topic, text].filter(Boolean).join('\n');
+}
+
+/**
  * `text` with every http(s) URL removed (an `<url>` wrapper included) and the
  * spaces the removal leaves collapsed; lines are kept. Text with no URL is
  * returned as it is.
@@ -408,8 +434,10 @@ function writable(channel) {
  * `turns.runTurn({ channel, mode: 'diary', diary: { kind, forced } })`
  * (`diary: due`, then `diary: post` with the outcome). A `busy` outcome
  * un-marks the slot, so the next tick retries it within the grace. One post
- * at a time. `force({ kind })` runs one post now, outside the plan and the
- * quiet day, under the same rails; while another turn holds the one attention
+ * at a time. `force({ kind, topic })` runs one post now, outside the plan and
+ * the quiet day, under the same rails; a topic (diaryTopic: one line, 300
+ * characters at most; blank is none) reaches the turn as `diary.topic`, and
+ * no topic leaves the field out; while another turn holds the one attention
  * (`turns.isAnyBusy()`, or a `busy` outcome) it waits for `turns.waitIdle()`
  * at most `diary.forceWaitMs` and posts then, `{ outcome: 'busy' }` when the
  * turn still runs. Hot values are read at every call.
@@ -419,7 +447,7 @@ function writable(channel) {
  *   `delay`: resolves after `ms` (a timer that never holds the process open); injected by tests.
  *   `backfill`: src/behavior/diary.js#backfillDiary's shape (`{ store, channel, guildId, selfId,
  *   config, labels }` -> the count written); null skips the backfill.
- * @returns {{ tick: () => Promise<void>, force: (opts?: { kind?: string|null }) => Promise<object>,
+ * @returns {{ tick: () => Promise<void>, force: (opts?: { kind?: string|null, topic?: string|null }) => Promise<object>,
  *   status: () => { channelId: string, day: string|null, slots: number[], done: number[], quiet: boolean,
  *   posts: number, pictures: number, history: number }, stop: () => void }}
  */
@@ -506,8 +534,9 @@ export function createDiary({ hot, store, client, turns, getGuildId, isWarmingUp
   }
 
   /** One post through the turn runner, logged with its outcome. */
-  async function post(channel, guildId, { kind, forced }) {
-    const result = await turns.runTurn({ channel, mode: 'diary', diary: { kind: kind ?? null, forced } });
+  async function post(channel, guildId, { kind, topic = null, forced }) {
+    const diary = { kind: kind ?? null, ...(topic ? { topic } : {}), forced };
+    const result = await turns.runTurn({ channel, mode: 'diary', diary });
     log.info('diary: post', {
       guildId,
       channelId: channel.id,
@@ -572,7 +601,7 @@ export function createDiary({ hot, store, client, turns, getGuildId, isWarmingUp
     }
   }
 
-  async function force({ kind = null } = {}) {
+  async function force({ kind = null, topic = null } = {}) {
     const config = hot.config;
     const t = now();
     const blocked = gate(config);
@@ -588,7 +617,7 @@ export function createDiary({ hot, store, client, turns, getGuildId, isWarmingUp
     }
     if (block) return { outcome: 'not-now', reason: block };
     await backfillOnce(channel, guildId, config);
-    const params = { kind: typeof kind === 'string' && kind ? kind : null, forced: true };
+    const params = { kind: typeof kind === 'string' && kind ? kind : null, topic: diaryTopic(topic), forced: true };
     // One attention: a running turn is waited for (diary.forceWaitMs at most), once.
     let waited = false;
     if (turns.isAnyBusy?.() === true) {

@@ -269,6 +269,34 @@ test('diary turn: a forced kind skips the planner\'s choice', async () => {
   assert.equal(store.appended[0].post.kind, 'selfPicture');
 });
 
+test('diary turn: a topic becomes a <topic> block in the plan request and a field of <plan>', async () => {
+  const llm = fakeLlm({ kind: 'status', brief: 'harbour at dusk', search: '', picture: false }, '<msg>brume</msg>');
+  await runner({ llm }).runTurn({ channel: diaryChannel(), mode: 'diary', diary: { kind: null, topic: '  le vieux  port\n ', forced: true } });
+  const planUser = userOf(llm.calls[0]);
+  const topicBlock = `<topic>\n${labels.diary.topic}\nle vieux port\n</topic>`;
+  assert.ok(planUser.includes(topicBlock), 'the plan request carries the topic block');
+  assert.ok(planUser.indexOf('<seeds>') < planUser.indexOf('<topic>'), 'the topic follows the seeds');
+  assert.ok(planUser.trimEnd().endsWith('</topic>'), 'the topic is the last block');
+  const composeUser = userOf(llm.calls[1]);
+  assert.ok(
+    composeUser.includes(`<plan>\n${labels.diary.plan}\n${JSON.stringify({ kind: 'status', brief: 'harbour at dusk', picture: false, topic: 'le vieux port' })}\n</plan>`),
+    'the plan carries the topic',
+  );
+});
+
+test('diary turn: no topic leaves the requests unchanged', async () => {
+  const answer = { kind: 'status', brief: 'harbour at dusk', search: '', picture: false };
+  const plain = fakeLlm(answer, '<msg>brume</msg>');
+  await runner({ llm: plain }).runTurn({ channel: diaryChannel(), mode: 'diary', diary: { kind: null, forced: true } });
+  for (const topic of [undefined, null, '', '   ']) {
+    const llm = fakeLlm(answer, '<msg>brume</msg>');
+    await runner({ llm }).runTurn({ channel: diaryChannel(), mode: 'diary', diary: { kind: null, topic, forced: true } });
+    assert.deepEqual(llm.calls, plain.calls, `topic ${JSON.stringify(topic)}: byte-identical requests`);
+  }
+  assert.ok(!userOf(plain.calls[0]).includes('<topic>'));
+  assert.ok(!userOf(plain.calls[1]).includes('"topic"'));
+});
+
 test('diary turn: searches when the plan asks and passes the summary as found', async () => {
   const llm = fakeLlm({ kind: 'news', brief: 'a comet', search: 'comet tonight', picture: false }, '<msg>une comète</msg>');
   const lookup = fakeLookup({ query: 'comet tonight', text: 'A comet is visible tonight.', sources: [] });
