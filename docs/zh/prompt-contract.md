@@ -197,7 +197,7 @@ senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
-senses.recall                            shown right after the search line on a server turn when the server-history search is available (never in a private chat); tells the persona that a search of the server's old messages either ran before the reply or did not, that its part of `<lookup>` is what the history holds (a helper's summary or a verbatim stretch), and that without it nothing was looked up there. An older labels file without the key renders nothing
+senses.recall                            shown right after the search line when the server-history search is available: on every server turn, and in a private chat when `features.privateLikeServer` is on (the default). Tells the persona that a search of the server's old messages either ran before the reply or did not, that its part of `<lookup>` is what the history holds (a helper's summary or a verbatim stretch), and that without it nothing was looked up there. An older labels file without the key renders nothing
 senses.customEmoji                       shown when features.customEmoji is on and the server has at least one custom emoji; tells the persona they can use server custom emoji by writing :name:
 senses.gifs                              shown when features.gifs is on and the library is not empty; tells the persona they can post one GIF per turn by handle from the list
 senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona they can draw
@@ -702,6 +702,7 @@ Mentor 沙盒为每个场景执行一次多样性过程，计入 mentor 的 toke
 ### DM 回合的内容和省略
 
 - `<server>`（频道地图）和 `<other_channels>` 被省略。
+- 当 `features.privateLikeServer` 开启时（默认 `true`，缺失键 = 开），频道路由分类器、频道拉取和服务器搜索（recall）均在 DM 中运行。仅当 DM 伙伴对该频道拥有 View Channel 权限时，频道才会被拉入 DM（`context.pull.sameAudience` 不会放宽此限制）。recall 搜索对每个频道应用相同的伙伴规则。DM 中提及的成员会显示其回忆（`context.askedAboutEpisodes`）。DM 拉取的内容不会在服务器上标记为已读或已回答。关闭此开关时，无路由、无拉取、无 recall、无被问及成员的回忆。
 - `prompts.private`（如果存在）追加在模式提示（`reply.md`）之后、`forced.md` 之前，填充 `{{name}}` 和 `{{author}}`。
 - `{{trigger}}` 取自 `labels.triggers.private`。
 - `<senses>` 包含 `senses.privateChat`。

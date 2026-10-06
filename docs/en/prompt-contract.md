@@ -206,7 +206,7 @@ senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results and that no search can happen during the reply itself
-senses.recall                            shown right after the search line on a server turn when the server-history search is available (never in a private chat); tells the persona that a search of the server's old messages either ran before the reply or did not, that its part of `<lookup>` is what the history holds (a helper's summary or a verbatim stretch), and that without it nothing was looked up there. An older labels file without the key renders nothing
+senses.recall                            shown right after the search line when the server-history search is available: on every server turn, and in a private chat when `features.privateLikeServer` is on (the default). Tells the persona that a search of the server's old messages either ran before the reply or did not, that its part of `<lookup>` is what the history holds (a helper's summary or a verbatim stretch), and that without it nothing was looked up there. An older labels file without the key renders nothing
 senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona they can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
@@ -871,6 +871,7 @@ Anything that fails is dropped silently, except step 5: when the daily cap is re
 ### What a DM turn contains and omits
 
 - The `<server>` block (channel map) and `<other_channels>` are omitted.
+- When `features.privateLikeServer` is on (default `true`, missing key = on), the channel route classifier, channel pull and server search (recall) run in a DM. A pulled channel enters the DM only when the DM partner has View Channel permission on it (`context.pull.sameAudience` does not relax this). The recall search applies the same partner rule per channel. Members named in the DM show their episodes (`context.askedAboutEpisodes`). Nothing a DM pulls is marked seen or answered on the server. With the switch off, no route, no pull, no recall, no asked-about episodes.
 - `prompts.private` (when present) is appended after the mode prompt (`reply.md`), before `forced.md`, with
   `{{name}}` and `{{author}}` filled.
 - `{{trigger}}` comes from `labels.triggers.private`.

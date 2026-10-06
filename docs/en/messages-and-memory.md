@@ -32,7 +32,7 @@ When `features.pauseNotice` is on (the default), a call that arrives while the p
 
 ### Timing
 
-Everything that runs before the voice request (history, captions, the variety pass, the route and search classifiers) has a deadline: `pace.prepareMs` (default 6 s), extended to `pace.prepareSearchMs` (default 12 s) once a search is in flight. A helper that misses its deadline is dropped and the turn continues without it (logged as `turn: stage late` or `turn: stage failed`). The finished answer itself must arrive within `pace.dropAfterMs` (default 60 s) from the turn's start; past that, the turn is dropped unposted (logged as `turn: dropped`). Every turn logs the time of each stage in `turn: timings`.
+Everything that runs before the voice request (history, captions, the variety pass, the route and search classifiers) has a deadline: `pace.prepareMs` (default 6 s), extended to `pace.prepareSearchMs` (default 12 s) once a search is in flight or to `pace.prepareMediaMs` (default 20 s) when the trigger carries media the describer or video stage will process; when both apply, the larger limit wins. A helper that misses its deadline is dropped and the turn continues without it (logged as `turn: stage late` or `turn: stage failed`). The finished answer itself must arrive within `pace.dropAfterMs` (default 60 s) from the turn's start; past that, the turn is dropped unposted (logged as `turn: dropped`). Every turn logs the time of each stage in `turn: timings`.
 
 Requests on the roles listed in `llm.hedge.roles` (default: `classifier.text`) are hedged: a second attempt starts `llm.hedge.afterMs` (default 2.5 s) after the first, and the first to finish wins. Both are aborted at `llm.hedge.timeoutMs` (default 8 s) from the start. `llm.helperTimeoutMs` (default 30 s) caps the route classifier, the search classifier and the recall summary individually.
 
@@ -93,7 +93,7 @@ The analyzer also records things people taught the persona directly (words and e
 
 ## Private layer
 
-When `features.privateMessages` is on, members who pass the gate (guild membership, a stored profile, public affinity at or above `private.minAffinity`, today's reply count under the cap) can write to the persona in Discord DMs. The persona is the same character with the same public memory; what is said in a DM stays in a per-member private layer.
+When `features.privateMessages` is on, members who pass the gate (guild membership, a stored profile, public affinity at or above `private.minAffinity`, today's reply count under the cap) can write to the persona in Discord DMs. The persona is the same character with the same public memory; what is said in a DM stays in a per-member private layer. With `features.privateLikeServer` on (the default), a DM works like a server channel: the route classifier, channel pull, server search and asked-about episodes are all available, restricted to channels the DM partner can view.
 
 Only bot owners can inspect a member's private layer (`/nep private show`); this command cannot be granted to other users.
 

@@ -199,7 +199,7 @@ senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results and that no search can happen during the reply itself
-senses.recall                            shown right after the search line on a server turn when the server-history search is available (never in a private chat); tells the persona that a search of the server's old messages either ran before the reply or did not, that its part of `<lookup>` is what the history holds (a helper's summary or a verbatim stretch), and that without it nothing was looked up there. An older labels file without the key renders nothing
+senses.recall                            shown right after the search line when the server-history search is available: on every server turn, and in a private chat when `features.privateLikeServer` is on (the default). Tells the persona that a search of the server's old messages either ran before the reply or did not, that its part of `<lookup>` is what the history holds (a helper's summary or a verbatim stretch), and that without it nothing was looked up there. An older labels file without the key renders nothing
 senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona they can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
@@ -603,6 +603,7 @@ DM は以下のすべてが満たされた場合にのみ応答されます（�
 ### DM ターンの内容と省略
 
 - `<server>`（チャンネルマップ）と `<other_channels>` は省略。
+- `features.privateLikeServer` がオン（デフォルト `true`、キー欠落 = オン）の場合、チャンネルルート分類器、チャンネルプル、サーバー検索（recall）が DM で動作する。チャンネルは DM パートナーがそのチャンネルの View Channel 権限を持つ場合のみプルされる（`context.pull.sameAudience` はこれを緩和しない）。recall 検索もチャンネルごとに同じパートナールールを適用する。DM で言及されたメンバーのエピソードが表示される（`context.askedAboutEpisodes`）。DM にプルされたものはサーバー上で既読や回答済みにならない。スイッチがオフの場合、ルート、プル、recall、言及メンバーのエピソードなし。
 - `prompts.private`（存在する場合）がモードプロンプト（`reply.md`）の後、`forced.md` の前に追加。`{{name}}` と `{{author}}` が設定される。
 - `{{trigger}}` は `labels.triggers.private` から取得。
 - `<senses>` に `senses.privateChat` が含まれる。

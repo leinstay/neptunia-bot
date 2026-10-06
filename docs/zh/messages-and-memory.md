@@ -32,7 +32,7 @@
 
 ### 时机
 
-voice 请求之前运行的所有任务（历史、说明、多样性过程、路由和搜索分类器）有一个截止时间：`pace.prepareMs`（默认 6 秒），搜索发起后延长到 `pace.prepareSearchMs`（默认 12 秒）。超时的辅助任务被丢弃，回合在没有其结果的情况下继续（记录为 `turn: stage late` 或 `turn: stage failed`）。完成的回答本身必须在回合开始后 `pace.dropAfterMs`（默认 60 秒）内到达；超时后回合被丢弃不发布（记录为 `turn: dropped`）。每个回合在 `turn: timings` 中记录各阶段的耗时。
+voice 请求之前运行的所有任务（历史、说明、多样性过程、路由和搜索分类器）有一个截止时间：`pace.prepareMs`（默认 6 秒），搜索发起后延长到 `pace.prepareSearchMs`（默认 12 秒），当触发消息包含描述器或视频阶段将处理的媒体时延长到 `pace.prepareMediaMs`（默认 20 秒）；两者同时适用时取较大值。超时的辅助任务被丢弃，回合在没有其结果的情况下继续（记录为 `turn: stage late` 或 `turn: stage failed`）。完成的回答本身必须在回合开始后 `pace.dropAfterMs`（默认 60 秒）内到达；超时后回合被丢弃不发布（记录为 `turn: dropped`）。每个回合在 `turn: timings` 中记录各阶段的耗时。
 
 `llm.hedge.roles`（默认 `classifier.text`）中列出的角色的请求会被对冲：第二次尝试在第一次之后 `llm.hedge.afterMs`（默认 2.5 秒）启动，先完成的获胜。两者在 `llm.hedge.timeoutMs`（默认 8 秒）后中止。`llm.helperTimeoutMs`（默认 30 秒）分别限制路由分类器、搜索分类器和 recall 摘要。
 
@@ -93,7 +93,7 @@ voice 请求之前运行的所有任务（历史、说明、多样性过程、�
 
 ## 私有层
 
-当 `features.privateMessages` 开启时，通过门控（公会成员身份、已存储档案、公共好感度不低于 `private.minAffinity`、今日回复数未超限）的成员可以在 Discord 私信中与角色交谈。角色不变，公共记忆不变；私信中说的话存储在每成员的私有层中。
+当 `features.privateMessages` 开启时，通过门控（公会成员身份、已存储档案、公共好感度不低于 `private.minAffinity`、今日回复数未超限）的成员可以在 Discord 私信中与角色交谈。角色不变，公共记忆不变；私信中说的话存储在每成员的私有层中。当 `features.privateLikeServer` 开启时（默认），DM 像服务器频道一样运作：路由分类器、频道拉取、服务器搜索和被问及成员的回忆均可用，仅限 DM 伙伴可查看的频道。
 
 只有机器人所有者可以查看成员的私有层（`/nep private show`）；此命令不可授权给其他用户。
 
