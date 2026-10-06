@@ -3,12 +3,17 @@
 // word of an old joke -- and drops it into reply after reply, off topic. The
 // variety pass reads too short a stretch and is told to leave a topic one
 // conversation keeps returning to, so it never names such a token. This
-// module counts instead: every phrase of one to `variety.sticky.maxWords`
-// words that occurs in at least `variety.sticky.minRepeats` of the persona's
-// last `variety.sticky.lines` own lines is sticky. The wiring
-// (src/behavior/turn.js#notePosted) adds each one to the filler list as an
-// exact entry already on its cooldown, so the filler guard rewrites its next
-// use (src/behavior/fillers.js). Pure: no I/O, no clock, no model, no wording.
+// module counts instead, looking for a burst: a phrase of one to
+// `variety.sticky.maxWords` words is sticky when it occurs in at least
+// `variety.sticky.minRepeats` of the persona's last `variety.sticky.lines`
+// own lines (the recent window) and in at most `variety.sticky.baselineMax`
+// of the older lines before them (the baseline) -- ordinary vocabulary is
+// frequent in both, a stuck token only lately. While the baseline is shorter
+// than `variety.sticky.baselineMin` lines (a young ring) a single word counts
+// only with a digit in it. The wiring (src/behavior/turn.js#notePosted) adds
+// each sticky phrase to the filler list as an exact entry already on its
+// cooldown, so the filler guard rewrites its next use
+// (src/behavior/fillers.js). Pure: no I/O, no clock, no model, no wording.
 
 import { isPlainObject } from '../config.js';
 import { FILLER_MAX_CHARS } from './fillers.js';
@@ -19,6 +24,8 @@ export const STICKY_DEFAULTS = Object.freeze({
   lines: 40,
   maxWords: 3,
   minChars: 4,
+  baselineMax: 1,
+  baselineMin: 100,
   ignore: Object.freeze([]),
 });
 
@@ -49,20 +56,26 @@ function readGroup(group) {
     lines: intAtLeast(group.lines, 1, d.lines),
     maxWords: intAtLeast(group.maxWords, 1, d.maxWords),
     minChars: intAtLeast(group.minChars, 0, d.minChars),
+    baselineMax: intAtLeast(group.baselineMax, 0, d.baselineMax),
+    baselineMin: intAtLeast(group.baselineMin, 0, d.baselineMin),
     ignore: ignoreList(group.ignore),
   };
 }
 
 /**
  * The `variety.sticky` settings of the live config, key by key: `minRepeats`
- * (in how many distinct lines a phrase must occur; an integer >= 2),
- * `lines` (how many of the persona's newest own lines are read; >= 1),
- * `maxWords` (the longest phrase, in words; >= 1), `minChars` (a word with
- * fewer letters and no digit is weak; >= 0) and `ignore` (words that are
- * always weak, folded; not an array -> []). A missing or unusable key takes
- * config.json's value (STICKY_DEFAULTS).
+ * (in how many distinct recent lines a phrase must occur; an integer >= 2),
+ * `lines` (the recent window: how many of the persona's newest own lines;
+ * >= 1), `maxWords` (the longest phrase, in words; >= 1), `minChars` (a word
+ * with fewer letters is weak unless it holds a digit and is at least two
+ * characters long; >= 0), `baselineMax` (in how many older lines a sticky
+ * phrase may occur; >= 0), `baselineMin` (the fewest older lines that make a
+ * baseline; >= 0) and `ignore` (words that are always weak, folded; not an
+ * array -> []). A missing or unusable key takes config.json's value
+ * (STICKY_DEFAULTS).
  * @param {object} config  The whole live config.
- * @returns {{ minRepeats: number, lines: number, maxWords: number, minChars: number, ignore: string[] }}
+ * @returns {{ minRepeats: number, lines: number, maxWords: number, minChars: number, baselineMax: number,
+ *   baselineMin: number, ignore: string[] }}
  */
 export function stickySettings(config) {
   return readGroup(isPlainObject(config?.variety?.sticky) ? config.variety.sticky : {});
@@ -71,6 +84,11 @@ export function stickySettings(config) {
 /** `features.stickyGuard` (a missing key counts as on). */
 export function stickyOn(config) {
   return config?.features?.stickyGuard !== false;
+}
+
+/** Whether `word` holds a digit and is at least two characters long (`551`, not `2`). */
+function hasDigit(word) {
+  return /\p{N}/u.test(word) && [...word].length >= 2;
 }
 
 /** How many letters `word` holds, in any script. */
@@ -87,7 +105,7 @@ function letters(word) {
 function phrasesOf(line, { maxWords, minChars }, ignore) {
   const text = folded(line);
   const words = [...text.matchAll(WORD)].map((match) => ({ word: match[0], start: match.index, end: match.index + match[0].length }));
-  const weak = words.map(({ word }) => ignore.has(word) || (letters(word) < minChars && !/\p{N}/u.test(word)));
+  const weak = words.map(({ word }) => ignore.has(word) || (letters(word) < minChars && !hasDigit(word)));
   const out = new Map();
   for (let from = 0; from < words.length; from += 1) {
     for (let to = from + 1; to <= Math.min(words.length, from + maxWords); to += 1) {
@@ -102,19 +120,34 @@ function phrasesOf(line, { maxWords, minChars }, ignore) {
   return out;
 }
 
+/** A line's text: the string itself or a ring entry's `text`; null for anything else. */
+function textOf(line) {
+  const text = typeof line === 'string' ? line : line?.text;
+  return typeof text === 'string' ? text : null;
+}
+
 /**
  * The phrases the persona keeps reusing in its own recent lines. `lines`
- * (newest last; strings or ring entries with a `text`) is cut to its newest
- * `settings.lines`; each line is folded (NFC, lowercase) and split on Unicode
- * word boundaries; a phrase is 1..`maxWords` consecutive words with only
- * whitespace between them. A phrase counts once per line and is sticky in at
- * least `minRepeats` distinct lines. A word is weak when it is in `ignore`, or
- * has fewer than `minChars` letters and no digit (`551` is never weak); a
- * phrase of weak words only never counts. Among overlapping sticky phrases
- * the longest wins: a shorter one is dropped when every occurrence of it is
- * inside a longer sticky phrase (`551` goes when it only ever appears as `551
- * commits`, stays when it also appears alone). Strongest first (line count,
- * then more words); `count` is the number of lines.
+ * (newest last; strings or ring entries with a `text`; the whole ring) is
+ * split into the recent window, its newest `settings.lines`, and the
+ * baseline, every older line. Each line is folded (NFC, lowercase) and split
+ * on Unicode word boundaries; a phrase is 1..`maxWords` consecutive words
+ * with only whitespace between them, counted once per line. A word is weak
+ * when it is in `ignore`, or has fewer than `minChars` letters unless it
+ * holds a digit and is at least two characters long (`551` is never weak,
+ * `2` is); a phrase of weak words only never counts.
+ *
+ * A phrase is sticky when it occurs in at least `minRepeats` recent lines
+ * and -- with at least `baselineMin` baseline lines holding text -- in at
+ * most `baselineMax` baseline lines: a burst, not the persona's ordinary
+ * vocabulary. With a shorter baseline (a young ring) the baseline is not
+ * read and a single word is sticky only when it holds a digit (as above); a
+ * phrase of several words is judged as before. Among overlapping sticky
+ * phrases the longest wins: a shorter one is dropped when every recent
+ * occurrence of it is inside a longer sticky phrase (`551` goes when it only
+ * ever appears as `551 commits`, stays when it also appears alone).
+ * Strongest first (recent line count, then more words); `count` is the
+ * number of recent lines.
  * @param {unknown[]} lines
  * @param {object} settings  stickySettings' shape; a missing or unusable key takes its default.
  * @returns {{ text: string, count: number }[]}
@@ -122,10 +155,11 @@ function phrasesOf(line, { maxWords, minChars }, ignore) {
 export function stickyPhrases(lines, settings) {
   const s = readGroup(isPlainObject(settings) ? settings : {});
   const ignore = new Set(s.ignore);
-  const recent = (Array.isArray(lines) ? lines : []).slice(-s.lines);
-  const perLine = recent.map((line) => {
-    const text = typeof line === 'string' ? line : line?.text;
-    return typeof text === 'string' ? phrasesOf(text, s, ignore) : new Map();
+  const all = Array.isArray(lines) ? lines : [];
+  const split = Math.max(0, all.length - s.lines);
+  const perLine = all.slice(split).map((line) => {
+    const text = textOf(line);
+    return text === null ? new Map() : phrasesOf(text, s, ignore);
   });
   const counts = new Map();
   for (const phrases of perLine) {
@@ -135,8 +169,21 @@ export function stickyPhrases(lines, settings) {
       counts.set(phrase, seen);
     }
   }
-  const candidates = [...counts]
-    .filter(([, { count }]) => count >= s.minRepeats)
+  const frequent = [...counts].filter(([, { count }]) => count >= s.minRepeats);
+  const older = all.slice(0, split).map(textOf).filter((text) => text !== null);
+  const young = older.length < s.baselineMin;
+  // The baseline: in how many older lines each frequent phrase occurs (read only for a grown ring).
+  const baseline = new Map();
+  if (!young && frequent.length > 0) {
+    const wanted = new Set(frequent.map(([text]) => text));
+    for (const text of older) {
+      for (const phrase of phrasesOf(text, s, ignore).keys()) {
+        if (wanted.has(phrase)) baseline.set(phrase, (baseline.get(phrase) ?? 0) + 1);
+      }
+    }
+  }
+  const candidates = frequent
+    .filter(([text, { words }]) => (young ? words > 1 || hasDigit(text) : (baseline.get(text) ?? 0) <= s.baselineMax))
     .map(([text, { count, words }]) => ({ text, count, words }))
     .sort((a, b) => b.words - a.words);
   const kept = [];
