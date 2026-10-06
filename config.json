@@ -138,6 +138,7 @@
     "liveMinMessages": 4,
     "deadAfterMinutes": 90,
     "initiateChance": 0.35,
+    "initiateCooldownHours": [6, 12],
     "eavesdropChance": 0.02,
     "roomQuestionChance": 0.04,
     "eavesdropDelayMs": [5000, 40000],

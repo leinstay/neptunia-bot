@@ -379,6 +379,7 @@ Follow-up windows are persisted in `data/state.json` under `followUpWindows` and
 | `channels` | `[]` | Allowed channels |
 | `maxChannelSilenceHours` | `72` | Channel silence that blocks spontaneous messages (hours); 0 = no limit |
 | `someoneAroundMinutes` | `120` | No spontaneous turn when every readable channel's last message is older than this (minutes). The persona's own last post in a channel does not count; another bot's does. `0` = no gate |
+| `initiateCooldownHours` | `[6, 12]` | Cooldown after starting a topic (hours); no further topic starts until it expires. Interjecting, room questions, eavesdrop, noticed comments and `/nep initiate` are not affected. Stored in `state.json`; `/nep status` shows the end while active. `[0, 0]` = no cooldown |
 | `minIntervalMinutes` | `25` | Min check interval (min) |
 | `maxIntervalMinutes` | `420` | Max check interval (min) |
 | `burstChance` | `0.15` | Burst follow-up chance |
