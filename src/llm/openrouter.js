@@ -116,7 +116,8 @@ const HELPER_TIMEOUT_MS_FALLBACK = 30000;
  * (`{ model, ...helperRequestOptions(config, { ... }) }`). The set carries the
  * helper mark `helper: true` (never sent): only a marked request on a role
  * `llm.hedge.roles` lists is hedged by `complete` (see `hedgeSettings`), so the
- * reply, the memory wording, the analyzer, the describers and the mentor never are.
+ * memory wording, the analyzer, the describers and the mentor never are; the
+ * reply only through an explicit `options.hedge` (see `complete`).
  * Pure; `config` is the live config read at the moment of use.
  * @param {object|null|undefined} config  The whole live config.
  * @param {object} [request]
@@ -180,10 +181,18 @@ export function hedgeSettings(config) {
   };
 }
 
-// The hedge of one request, or null to send it as ever: only a helper's set (`options.helper ===
-// true`, from `helperRequestOptions`) on a role `llm.hedge.roles` lists, with `afterMs` above 0.
-// `timeoutMs` is the limit of this call: `longTimeoutMs` for a set marked `long`.
+// The hedge of one request, or null to send it as ever. An explicit `options.hedge` (a plain
+// object whose `afterMs` and `timeoutMs` are finite numbers above 0; never sent) wins, whatever
+// the request: the reply of a turn with a bar carries one (`pace.replyHedgeMs`). Else only a
+// helper's set (`options.helper === true`, from `helperRequestOptions`) on a role
+// `llm.hedge.roles` lists, with `afterMs` above 0. `timeoutMs` is the limit of this call:
+// `longTimeoutMs` for a set marked `long`.
 function hedgeOf(config, options) {
+  const explicit = options.hedge;
+  const positive = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0;
+  if (isPlainObject(explicit) && positive(explicit.afterMs) && positive(explicit.timeoutMs)) {
+    return { afterMs: explicit.afterMs, timeoutMs: explicit.timeoutMs };
+  }
   if (options.helper !== true || typeof options.role !== 'string') return null;
   const hedge = hedgeSettings(config);
   if (!hedge || hedge.afterMs <= 0 || !hedge.roles.includes(options.role)) return null;
@@ -896,6 +905,13 @@ export function createLlm({
    * it. The winner's usage line adds `hedged` (whether attempt 2 was sent) and
    * `attempt` (1 or 2, the winner); `ms` still runs from attempt 1's start.
    * `options.timeoutMs` still cuts each attempt on its own.
+   * `options.hedge` — an explicit hedge for this one call, `{ afterMs, timeoutMs }` (both finite
+   * numbers above 0; never sent): any request carrying one is hedged as above, with attempt 2
+   * at its `afterMs` and the whole call cut at its `timeoutMs`, whatever its role and with or
+   * without the helper mark or an `llm.hedge` group; the rails, the counting of attempt 2 and
+   * the cache marker (the same body twice) are as above. Anything else leaves the helper rule
+   * in charge. Exists for the reply of a turn with a bar (`pace.replyHedgeMs`): a provider stall
+   * must not let a direct call pass its bar unanswered.
    * `options.purpose` — what the request is for, a kebab-case code (`reply`,
    * `memory-voice`, `address`, `variety`, `rewatch`, `lookup`, `read-link`,
    * `search-summary`, `describe`, ...): the requests that share one role are told
@@ -1048,7 +1064,8 @@ export function createLlm({
       return { text: typeof text === 'string' ? text : '', usage, estimated, finishReason, provider: json.provider, promptTokens };
     };
 
-    // A helper request on a hedged role: two attempts at most, never the retry loop below.
+    // A helper request on a hedged role, or a request with an explicit hedge: two attempts at most,
+    // never the retry loop below.
     const hedge = hedgeOf(getConfig(), options);
     if (hedge) {
       if (options.signal?.aborted) throw options.signal.reason ?? new Error('request aborted');
