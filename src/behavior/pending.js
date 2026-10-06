@@ -2,11 +2,13 @@
 // that arrived while a turn was running in its own channel
 // (config.mention.pendingSameChannel) or, with one attention
 // (config.mention.oneAtATime), somewhere else; a private message waiting for
-// the same reason; a call from a channel the persona cannot write in, routed
+// the same reason; a follow-up the address classifier said `yes` to, the
+// same way; a call from a channel the persona cannot write in, routed
 // to the main channel (its `destination`), whose turn found the attention
 // taken. Every call waits for its own answer: the queue keeps them all in
 // arrival order, several per channel and per author, and a newer call never
-// takes an older one's place. At most mention.maxPending entries overall; the
+// takes an older one's place (a deferred follow-up excepted: one per channel,
+// replaced in src/discord/events.js). At most mention.maxPending entries overall; the
 // single oldest entry, of any channel, is evicted when full. A routed call
 // keeps the calls its settle wait grouped with it (`superseded`), so whatever
 // ends it -- the ignore roll letting it pass -- ends those too. A later message
@@ -25,7 +27,7 @@
  * @property {string} channelId   the channel the call arrived in
  * @property {*} channel        the discord.js channel object the call arrived in
  * @property {object} trigger   the normalized message that called the persona
- * @property {'mention'|'reply'|'name'|'private'} kind
+ * @property {'mention'|'reply'|'name'|'private'|'followUp'} kind  `followUp`: an address-classifier `yes` that found the attention taken (one per channel, events.js#deferFollowUp)
  * @property {number} arrivedAt
  * @property {boolean} [decided] set on a re-queued server call whose ignore roll already said respond
  * @property {*} [destination]  a routed call only: the discord.js channel its turn posts in (the

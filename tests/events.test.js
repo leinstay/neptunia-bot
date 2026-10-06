@@ -3644,7 +3644,7 @@ test('follow-up: with mention.oneAtATime off, a turn in another channel does not
   await p;
 });
 
-test('follow-up: a "yes" that finds a turn started elsewhere runs no turn; the drop and the held message say busy', async () => {
+test('follow-up: a "yes" that finds a turn started elsewhere runs no turn now: it is deferred, and the held message says busy', async () => {
   const llm = fakeFollowUpLlm();
   let anyBusy = false;
   const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => anyBusy });
@@ -3665,13 +3665,163 @@ test('follow-up: a "yes" that finds a turn started elsewhere runs no turn; the d
 
   assert.equal(turns.calls.length, 0, 'no turn while another one is running');
   assert.equal(llm.calls.length, 1, 'the held message is not classified either');
-  const dropped = logs.find((l) => l.msg === 'follow-up: dropped');
-  assert.ok(dropped, 'the lost "yes" is logged');
-  assert.equal(dropped.reason, 'busy');
-  assert.equal(dropped.channel, 'c1');
-  assert.equal(dropped.message, 'm1');
+  assert.equal(logs.some((l) => l.msg === 'follow-up: dropped'), false, 'the "yes" is not lost');
+  const deferred = logs.find((l) => l.msg === 'follow-up: deferred');
+  assert.ok(deferred, 'the "yes" waits in the pending queue');
+  assert.equal(deferred.channel, 'c1');
+  assert.equal(deferred.message, 'm1');
   const held = logs.find((l) => l.msg === 'follow-up: held message dropped');
   assert.equal(held?.reason, 'busy', 'no turn ran, so the held message is not dropped as "turn"');
+});
+
+// ---------------------------------------------------------------------------
+// A follow-up "yes" that found the attention taken waits in the pending
+// queue like a direct call, and is picked up when the running turn ends.
+
+/**
+ * Turns whose attention is taken in `busyIn` while `.busy` is true: runTurn records every call and
+ * answers 'spoke'; busyChannels names the running turn's channel.
+ */
+function attentionTurns(busyIn = 'c9') {
+  const calls = [];
+  const turns = fakeTurns({
+    isBusy: (id) => turns.busy && id === busyIn,
+    isAnyBusy: () => turns.busy,
+    runTurn: async (args) => {
+      calls.push(args);
+      return { outcome: 'spoke' };
+    },
+  });
+  turns.busy = false;
+  turns.busyChannels = () => (turns.busy ? [busyIn] : []);
+  turns.calls = calls;
+  return turns;
+}
+
+const FOLLOW_UP_T0 = 1_000_000;
+
+/**
+ * A follow-up window opened in c1 at FOLLOW_UP_T0, then one message per answer in `answers`
+ * (`m1`, `m2`, ... by u1, a second apart), each classified while a turn starts in `busyIn`: the
+ * attention is free when the message arrives and taken before the verdict comes back.
+ * `beforeAnswer` runs right before each answer.
+ */
+async function deferredFollowUps({ answers = ['yes'], busyIn = 'c9', config = baseConfig(), beforeAnswer, tagHistory } = {}) {
+  const clock = mutableNow(FOLLOW_UP_T0);
+  const llm = fakeFollowUpLlm();
+  const turns = attentionTurns(busyIn);
+  const handler = makeHandler({ config, turns, llm, tagHistory, now: clock, sleep: async () => {}, rng: () => 0.5, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: FOLLOW_UP_T0 });
+  const { logs } = await withCapturedLogs(async () => {
+    for (const [i, answer] of answers.entries()) {
+      const id = `m${i + 1}`;
+      const ts = FOLLOW_UP_T0 + (i + 1) * 1000;
+      clock.set(ts);
+      channel.messages.cache.set(id, {});
+      turns.busy = false;
+      const p = handler(plainFollowUpMessage({ id, guild, channel, content: 'and then?', authorId: 'u1', authorName: 'Élodie', ts }));
+      await tick();
+      turns.busy = true; // the turn started while the classifier was thinking
+      beforeAnswer?.();
+      llm.respond(answer);
+      await p;
+      await tick();
+    }
+  });
+  return { clock, llm, turns, handler, guild, channel, logs };
+}
+
+/** The running turn ends and the drain runs (onIdle): resolves the drain's log lines. */
+async function endTurnAndDrain(scene) {
+  scene.turns.busy = false;
+  const { logs } = await withCapturedLogs(() => scene.handler.drainPending());
+  return logs;
+}
+
+test('follow-up: a "yes" during a turn elsewhere is deferred, then picked up and answered once the turn ends', async () => {
+  const tagHistory = countingTagHistory();
+  const scene = await deferredFollowUps({ tagHistory });
+  assert.equal(scene.turns.calls.length, 0, 'no turn while the attention is taken');
+  assert.equal(tagHistory.hits, 0, 'counted when picked up, not on deferral');
+  const deferred = scene.logs.filter((l) => l.msg === 'follow-up: deferred');
+  assert.deepEqual(
+    deferred.map(({ channel, author, message, runningIn, sameChannel }) => [channel, author, message, runningIn, sameChannel]),
+    [['c1', 'u1', 'm1', 'c9', false]],
+  );
+
+  const logs = await endTurnAndDrain(scene);
+  assert.deepEqual(
+    logs.filter((l) => l.msg === 'follow-up: picked up').map((l) => [l.channel, l.kind, l.message]),
+    [['c1', 'followUp', 'm1']],
+  );
+  assert.equal(logs.some((l) => l.msg === 'mention: decided'), false, 'a follow-up is never rolled for the ignore chance');
+  assert.equal(scene.turns.calls.length, 1);
+  const [call] = scene.turns.calls;
+  assert.equal(call.channel, scene.channel);
+  assert.equal(call.mode, 'reply');
+  assert.equal(call.triggerKind, 'followUp');
+  assert.equal(call.trigger.id, 'm1');
+  assert.equal(tagHistory.hits, 1);
+});
+
+test('follow-up: a "yes" during a spontaneous turn in its own channel that ends not-now is answered after it', async () => {
+  const scene = await deferredFollowUps({ busyIn: 'c1' });
+  const deferred = scene.logs.find((l) => l.msg === 'follow-up: deferred');
+  assert.equal(deferred?.runningIn, 'c1');
+  assert.equal(deferred.sameChannel, true);
+  assert.equal(scene.turns.calls.length, 0);
+
+  // The spontaneous turn ends not-now: nothing was posted, the window is as it was.
+  const logs = await endTurnAndDrain(scene);
+  assert.deepEqual(followUpDropped(logs), []);
+  assert.equal(scene.turns.calls.length, 1);
+  assert.equal(scene.turns.calls[0].trigger.id, 'm1');
+  assert.equal(scene.turns.calls[0].triggerKind, 'followUp');
+});
+
+test('follow-up: a deferred "yes" is dropped as answered when the persona posted in its channel after it', async () => {
+  const scene = await deferredFollowUps();
+  await openFollowUpWindow(scene.handler, { guild: scene.guild, channel: scene.channel, ts: FOLLOW_UP_T0 + 5000 });
+  const logs = await endTurnAndDrain(scene);
+  assert.equal(scene.turns.calls.length, 0, 'not answered a second time');
+  assert.deepEqual(followUpDropped(logs), [['m1', 'answered']]);
+});
+
+test('follow-up: a deferred "yes" is dropped when its window closed while it waited', async () => {
+  const config = baseConfig({ mention: { followUpMinutes: 5, pendingMinutes: 10 } });
+  const scene = await deferredFollowUps({ config });
+  scene.clock.set(FOLLOW_UP_T0 + 6 * 60_000); // past the window, not past pendingMinutes
+  const logs = await endTurnAndDrain(scene);
+  assert.equal(scene.turns.calls.length, 0);
+  assert.deepEqual(followUpDropped(logs), [['m1', 'closed']]);
+});
+
+test('follow-up: a newer deferred "yes" in the same channel replaces the older one', async () => {
+  const scene = await deferredFollowUps({ answers: ['yes', 'yes'] });
+  assert.deepEqual(scene.logs.filter((l) => l.msg === 'follow-up: deferred').map((l) => l.message), ['m1', 'm2']);
+  assert.deepEqual(followUpDropped(scene.logs), [['m1', 'newer']]);
+
+  await endTurnAndDrain(scene);
+  assert.deepEqual(scene.turns.calls.map((c) => c.trigger.id), ['m2']);
+});
+
+test('follow-up: with features.followUp turned off before the "yes" meets the running turn, nothing is deferred', async () => {
+  const config = baseConfig();
+  const scene = await deferredFollowUps({ config, beforeAnswer: () => (config.features.followUp = false) });
+  assert.equal(scene.logs.some((l) => l.msg === 'follow-up: deferred'), false);
+  assert.deepEqual(followUpDropped(scene.logs), [['m1', 'busy']]);
+  await endTurnAndDrain(scene);
+  assert.equal(scene.turns.calls.length, 0);
+});
+
+test('follow-up: an "overheard" answer that meets the running turn is not deferred, dropped as busy as before', async () => {
+  const scene = await deferredFollowUps({ answers: ['overheard'] });
+  assert.equal(scene.logs.some((l) => l.msg === 'follow-up: deferred'), false);
+  assert.deepEqual(followUpDropped(scene.logs), [['m1', 'busy']]);
+  await endTurnAndDrain(scene);
+  assert.equal(scene.turns.calls.length, 0);
 });
 
 // ---------------------------------------------------------------------------
