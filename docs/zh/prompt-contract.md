@@ -35,8 +35,8 @@
 | `describe.md` | 是 | 角色外提示，用于媒体描述器（`features.mediaDescriptions`）：输入一张图片，输出一行描述：图中内容、可辨认的文字，使用聊天所用的语言。无评论，无 markdown | 无 |
 | `describe-video.md` | 是 | 角色外提示，用于视频描述器（`features.videoDescriptions`）：输入一个视频片段（含声音），输出可配置长度的完整有序描述：谁出现了、说了什么（关键短语引用）、屏幕上的文字、视觉上发生了什么、音乐/音效。不接收角色卡 | `{{maxChars}}` |
 | `describe-gif.md` | 否 | 角色外提示，用于 GIF 描述器（`media.gif.watch`）：输入一段短无声片段，输出一行紧凑描述：动作、表达的含义、可见文字。始终英语。不接收角色卡。不存在时代码回退到 `describe-video.md` | `{{today}}` `{{maxChars}}` `{{seconds}}` |
-| `rewatch.md` | 是 | 分类器：角色是否需要重看视频或重试未加载的视频（`features.videoRewatch`）。接收带状态的编号近期视频列表和新消息。输出为一行：`<number> \| <question>`、`<number> \| retry` 或 `none` | `{{name}}` |
-| `rewatch-answer.md` | 是 | 角色外提示，用于重看回答：视频模型再次观看片段并回答一个问题。语言和限制规则与 `describe-video.md` 相同。不接收角色卡 | `{{question}}` `{{maxChars}}` |
+| `rewatch.md` | 是 | 分类器：角色是否需要重看视频、重试未加载的视频或再看一次图片（`features.videoRewatch`、`features.imageRelook`）。接收带类型和状态的编号近期媒体列表（视频和图片）和新消息。输出为一行：`<number> \| <question>`、`<number> \| retry` 或 `none` | `{{name}}` |
+| `rewatch-answer.md` | 是 | 角色外提示，用于二次查看回答：视觉或视频模型再次查看该项目并回答一个问题。类型无关（同时服务于视频和图片）。不接收角色卡 | `{{today}}` `{{question}}` `{{maxChars}}` |
 | `address.md` | 是 | 分类器：未标记的消息是否在对角色说话、在谈论角色还是两者都不是。输出为一个词：`yes`、`overheard` 或 `no` | `{{name}}` |
 | `overheard.md` | 否 | 任务：消息在谈论角色，而不是在对角色说话。触发类型为 `overheard` 且文件存在且非空时，代替模式提示使用；文件缺失或为空时回退到模式提示（降级） | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
 | `lookup.md` | 否 | 分类器：角色是否需要查询某些内容（`features.webLookup`、`features.recall`）。接收一段短对话记录和一个 `<candidate>` 块。输出为 `none`，或最多四行标注行：`web:` 网络查询，`server:` 在服务器消息中搜索的词形，`who:` 找人的名称词形，`when:` 日期范围。单行无标注仍被读取为网络查询 | `{{name}}` `{{today}}` |
@@ -173,6 +173,7 @@ transcript.videoWatched                  {name} {duration} {text}: first-hand, t
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
 transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
+transcript.imageAnswered                {question} {text}: extra tag under the picture's line; the persona looked at the picture again for this question
 transcript.videoReason.length | size | daily | error | pending    human phrases for the five reason codes; pending = the clip was still loading when the request went out
 transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
 transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
@@ -508,44 +509,46 @@ task.added                               {added}: later messages from the author
 
 ## 重看分类器
 
-当角色被直接呼叫（回复回合，非 `overheard` 或自发回合）且频道最近 `media.video.rewatch.recentMessages`（默认 60）条消息中有视频时，分类器判断
-该消息是否在询问其中某个视频，或请求重试一个未加载的视频。候选包括已观看视频和错误状态视频（请求的重试使用独立于回合 `media.video.maxPerTurn`
-尝试次数的专用槽位）。分类器最多收到 `media.video.rewatch.maxCandidates`（默认 6）个视频，按最新
+当角色被直接呼叫（回复回合，非 `overheard` 或自发回合）且频道最近 `media.video.rewatch.recentMessages`（默认 60）条消息中有视频或图片时，分类器判断
+该消息是否在询问其中某个项目、声称了某张图片的具体细节，或请求重试一个未加载的视频。候选包括已观看视频、错误状态视频和已描述图片（附件图片，包括角色自己的上传；粘贴的图片链接不在范围内）。图片仅在 `features.vision` 开启时提供。分类器最多收到 `media.video.rewatch.maxCandidates`（默认 6）个项目，视频在前图片在后，各类型内按最新
 消息优先排列。代码将 `rewatch.md` 作为系统提示发送到 `classifier.text` 模型角色（默认 `anthropic/claude-sonnet-4.6`），
-用户消息包含三个块：一个短的 `<transcript>` 包含频道最近几条消息，角色自身的行以 `labels.self` 标记（使分类器能看到候选消息回复的对象），然后是视频列表和候选：
+用户消息包含三个块：一个短的 `<transcript>` 包含频道最近几条消息，角色自身的行以 `labels.self` 标记（使分类器能看到候选消息回复的对象），然后是媒体列表和候选：
 
 ```
 <transcript>
 ...
 </transcript>
-<videos>
-<number> | <name> | <status> | <描述的开头>
+<media>
+<number> | <kind> | <name> | <status> | <说明或描述的开头>
 ...
-</videos>
+</media>
 <candidate>
 <作者名>: <触发文本>
 </candidate>
 ```
 
-每行 `<videos>` 包含四个 `|` 分隔的列：序号（1 = 最新视频）、视频名称、状态（`watched` 或 `not loaded`）和摘要的
-前 200 个字符（未加载的视频为空）。名称和摘要的空白合并为一行。触发文本在 `context.maxMessageChars` 处截断。输出
+每行 `<media>` 包含五个 `|` 分隔的列：序号（1 = 类型组内最新项目）、类型（`video` 或 `picture`）、项目名称、
+状态（视频为 `watched` 或 `not loaded`，图片为 `described`）和摘要或说明的前 200 个字符（未加载的视频为空）。名称和摘要的空白合并为一行。触发文本在 `context.maxMessageChars` 处截断。输出
 为一行：
 
-- `<number> | <question>`：消息询问已观看视频，需要描述未涵盖的细节。编号从列表原样复制。
-- `<number> | retry`：消息关于未加载的视频，请求再试或询问其内容。编号从列表原样复制。
+- `<number> | <question>`：消息询问已观看视频或已描述图片（包括需要核实的声称细节），需要描述未涵盖的细节。编号从列表原样复制。
+- `<number> | retry`：消息关于未加载的视频，请求再试或询问其内容。编号从列表原样复制。重试仅适用于视频。
 - `none`：不需要重看或重试。
 
-问题命中时，视频模型使用 `rewatch-answer.md`（`{{question}}` 和 `{{maxChars}}` = `rewatch.answerChars`，默认
-1200）再次观看片段，回答以 `transcript.videoAnswered`（`{question}`、`{text}`）的形式追加在已观看标签之后。当功能
-开启时，`<senses>` 块包含 `senses.videoRewatch`。
+视频的问题命中时，视频模型使用 `rewatch-answer.md`（`{{question}}` 和 `{{maxChars}}` = `rewatch.answerChars`，默认
+1200）再次观看片段，回答以 `transcript.videoAnswered`（`{question}`、`{text}`）的形式追加在已观看标签之后。
+
+图片的问题命中时，视觉模型（`classifier.media`，`purpose: relook`，提示 `rewatch-answer.md`，类型无关）带着该问题再次查看图片。回答不存储为说明（缓存一小时），对话记录在图片行下方携带 `transcript.imageAnswered`（`{question}`、`{text}`）。
+
+当功能开启时，`<senses>` 块包含 `senses.videoRewatch`。
 
 重试命中时，视频模型使用 `force`（忽略错误缓存）观看片段，使用与首次观看相同的 `describeVideo` 路径。如果重试成功，
 视频状态从错误变为已观看，对话记录中显示的摘要为第一手内容。重试计为 `media.video.maxPerTurn` 和
 `media.video.maxPerDay` 的新视频尝试。
 
 限制：每回合最多一次重看或重试；分类器和重看各自计入 `llm.maxRequestsPerDay`；重看还计入
-`media.video.maxPerDay`；`media.video.rewatch.maxPerDay`（默认 20）单独限制重看次数。回答按问题缓存一小时（参见
-上方视频缓存部分）。开关 `features.videoRewatch`（缺失 = 开启，需要 `videoDescriptions`）。
+`media.video.maxPerDay`；`media.video.rewatch.maxPerDay`（默认 20）同时限制视频重看和图片二次查看（共享计数器）。回答按问题缓存一小时（参见
+上方视频缓存部分）。开关 `features.videoRewatch`（缺失 = 开启，需要 `videoDescriptions`）。开关 `features.imageRelook`（缺失 = 开启，需要 `vision`）。
 
 ## 搜索与 recall 分类器
 

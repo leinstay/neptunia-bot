@@ -27,6 +27,7 @@
 | `attachedDescriptions` | `true` | 描述器同时为附加到请求的图片运行。角色仍然直接看到图片；辅助的注释帮助发现一眼容易错过的内容。需要同时开启 `vision` 和 `mediaDescriptions` |
 | `videoDescriptions` | `false` | 通过支持视频的模型观看短视频片段；需同时开启 `mediaDescriptions`。在 `config.local.json` 中开启；还需要支持视频的模型，以及站点链接需要 `yt-dlp`/`ffmpeg` |
 | `videoRewatch` | `true` | 被呼叫时重看视频以回答相关问题；需要 `videoDescriptions` |
+| `imageRelook` | `true` | 被呼叫时再看一次图片以回答问题或核实被声称的细节；需要 `vision`。与视频重看共享每日 `media.video.rewatch.maxPerDay` 计数器。缺失的键视为开启 |
 | `webLookup` | `false` | 阅读聊天中发布的链接并在被问到事实性问题时搜索网络。与其他功能不同，缺失的键视为关闭。搜索需要 `.env` 中的 `BRAVE_SEARCH_API_KEY`；没有密钥时只有链接阅读可用。参见[媒体：链接与搜索](media.md#链接) |
 | `imageGeneration` | `false` | 允许角色通过绘画子进程绘制图片。缺失的键视为开启。在 `config.local.json` 中启用；需要 `image.model` 中配置支持图像生成的模型。参见[媒体：绘画](media.md#绘画) |
 | `privateMessages` | `false` | 回复公会成员的私信。需要已存储的公共档案且 `affinity.score >= private.minAffinity`。参见[消息与记忆：私有层](messages-and-memory.md#私有层) |
@@ -638,6 +639,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `minRepeats` | `3` | 短语被计入所需的最少近期消息条数 |
+| `minRepeatsWord` | `4` | 不含数字的单个词需要出现在这么多近期行中才算作粘滞。两个及以上词的短语和含数字的标记使用 `minRepeats` |
 | `lines` | `40` | 扫描的近期自身消息条数 |
 | `maxWords` | `3` | 一个短语的最大词数 |
 | `minChars` | `4` | 不含数字的单词短语的最小字符数 |

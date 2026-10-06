@@ -10,6 +10,8 @@ Transcript lines carry media markers in brackets: pictures, GIFs, videos, sticke
 
 When `features.attachedDescriptions` is on (the default), the describer also runs for attached pictures. The persona still sees the picture directly; the helper's note catches what is easy to miss at a glance (who the characters are, what happened, what the joke is). The helper can be wrong, so the persona's own eyes come first. Needs both `vision` and `mediaDescriptions` on. Each attached picture costs one extra describer request within `media.maxPerTurn`.
 
+When `features.imageRelook` is on (the default) and someone addresses the persona with a question or a concrete claim about a picture, the re-watch classifier offers recent pictures alongside videos and the vision model looks at the picture again with that question. The answer appears in the transcript under the picture's line. Picture relooks share the daily `media.video.rewatch.maxPerDay` counter with video re-watches. Retry applies to videos only.
+
 `features.mediaDescriptions` (on by default) runs the `classifier.media` model to write a one-line description for pictures, GIF frames, video posters, stickers, custom emoji and link thumbnails. Each attachment is described once and cached in `data/guilds/<id>/media.json`. Descriptions feed the chat transcript, the memory analyzer and the warmup. The describer's prompt is `prompts/describe.md`.
 
 Stickers and custom emoji recur constantly, so they are cached by id and cost nearly nothing after the first description. With `features.vision`, the sticker of the calling message is attached as a picture. Discord's built-in animated stickers are Lottie animations, not images, so they are never more than a name.

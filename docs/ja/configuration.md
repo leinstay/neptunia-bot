@@ -27,6 +27,7 @@
 | `attachedDescriptions` | `true` | 添付画像に対しても説明モデルを実行する。ペルソナは引き続き画像を直接見るが、ヘルパーのノートが一目ではわかりにくい点を補足。`vision` と `mediaDescriptions` の両方が必要。キー欠落 = オン |
 | `videoDescriptions` | `false` | 動画対応モデルで短い動画クリップを視聴。`mediaDescriptions` も有効にする必要がある。`config.local.json` で有効化。動画対応モデルが必要で、サイトリンクには `yt-dlp`/`ffmpeg` も必要 |
 | `videoRewatch` | `true` | 話しかけられた時に動画を再視聴して質問に回答。`videoDescriptions` が必要 |
+| `imageRelook` | `true` | 話しかけられた時に画像をもう一度見て質問に回答、または主張された詳細を確認。`vision` が必要。日次 `media.video.rewatch.maxPerDay` カウンターを動画再視聴と共有。未設定 = オン |
 | `webLookup` | `false` | チャットに投稿されたリンクを読み取り、事実に関する質問にウェブ検索で回答。他の機能と異なり、キーが存在しない場合はオフとして扱われる。検索には `.env` に `BRAVE_SEARCH_API_KEY` が必要。キーがない場合はリンク読み取りのみ動作する。[メディア: リンクと検索](media.md#リンク)を参照 |
 | `imageGeneration` | `false` | ペルソナが描画サブプロセスを通じて画像を描くことを許可。キーが存在しない場合はオンとして扱われる。`config.local.json` で有効化。`image.model` に画像生成対応モデルが必要。[メディア: 描画](media.md#描画)を参照 |
 | `privateMessages` | `false` | ギルドメンバーのダイレクトメッセージに応答。保存された公開プロファイルと `affinity.score >= private.minAffinity` が必要。[メッセージとメモリ: プライベートレイヤー](messages-and-memory.md#プライベートレイヤー)を参照 |
@@ -638,6 +639,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | キー | デフォルト | 説明 |
 |---|---|---|
 | `minRepeats` | `3` | フレーズがカウントされるために必要な最小直近行数 |
+| `minRepeatsWord` | `4` | 数字を含まない単一語がスティッキーと判定されるために必要な直近行数。2 語以上のフレーズと数字を含むトークンは `minRepeats` を使用 |
 | `lines` | `40` | スキャンされる直近の自分の行数 |
 | `maxWords` | `3` | 1 フレーズの最大語数 |
 | `minChars` | `4` | 数字を含まない場合の 1 語フレーズの最小文字数 |

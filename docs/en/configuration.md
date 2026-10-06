@@ -27,6 +27,7 @@ Every key in `config.json` with its default, grouped by section.
 | `attachedDescriptions` | `true` | Run the describer for pictures that are also attached to the request. Without this, attached pictures carry no helper's caption. A missing key counts as on. Needs both `vision` and `mediaDescriptions` on; one extra describer request per new picture, within `media.maxPerTurn` |
 | `videoDescriptions` | `false` | Watch short video clips through a video-capable model; needs `mediaDescriptions` on as well. Turn on in `config.local.json`; still needs a video-capable model and, for site links, `yt-dlp`/`ffmpeg` |
 | `videoRewatch` | `true` | When addressed, re-watch a video to answer a question about it; needs `videoDescriptions` on |
+| `imageRelook` | `true` | When addressed, look at a picture again to answer a question or check a claimed detail about it; needs `vision` on. Shares the daily `media.video.rewatch.maxPerDay` counter with video re-watches. A missing key counts as on |
 | `webLookup` | `false` | Read links posted in chat and search the web when asked a factual question. Unlike other features, a missing key counts as OFF. Needs `BRAVE_SEARCH_API_KEY` in `.env` for search; without it only link reading works. See [Media: Links and search](media.md#links) |
 | `imageGeneration` | `false` | Let the persona draw pictures through a drawing sub-process. A missing key counts as on. Turn on in `config.local.json`; needs an image-capable model in `image.model`. See [Media: Drawing](media.md#drawing) |
 | `privateMessages` | `false` | Answer direct messages from guild members. Needs a stored public profile and `affinity.score >= private.minAffinity`. See [Messages and memory: Private layer](messages-and-memory.md#private-layer) |
@@ -638,6 +639,7 @@ Settings for the mechanical sticky-token detector (`features.stickyGuard`). Afte
 | Key | Default | Meaning |
 |---|---|---|
 | `minRepeats` | `3` | Minimum recent lines a phrase must appear in to count |
+| `minRepeatsWord` | `4` | A single word without a digit must appear in this many recent lines to count as sticky. Phrases of two or more words and digit tokens use `minRepeats` |
 | `lines` | `40` | Recent own lines scanned |
 | `maxWords` | `3` | Maximum words in one phrase |
 | `minChars` | `4` | Minimum characters for a one-word phrase unless it contains a digit |
