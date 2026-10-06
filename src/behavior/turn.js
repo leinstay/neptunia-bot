@@ -65,6 +65,7 @@ import { fill, formatNow, replyMarker } from '../discord/format.js';
 import { log } from '../log.js';
 import { clampChars, countDashes, oneLine, stripDashes } from '../memory/clamp.js';
 import { gifPostsToday } from '../memory/gif-watch.js';
+import { linkChannels } from '../memory/mentions.js';
 import { rankGifs } from '../memory/gifs.js';
 import { liveRecent, recentSettings } from '../memory/recent.js';
 import { isVideoVisionOn } from '../memory/youtube-check.js';
@@ -947,6 +948,23 @@ export function createTurnRunner({
   // (src/discord/events.js) skips a ping such a turn already had in view.
   const spokeSaw = new Map();
 
+  /**
+   * `text` with every `#name` of one of the guild's text channels turned into its `<#id>` link
+   * (src/memory/mentions.js#linkChannels): features.channelLinks on (read now; a missing key counts
+   * as on) and a guild channel -- a private chat has no guild, its text is returned as is.
+   */
+  function withChannelLinks(channel, text) {
+    if (hot.config.features?.channelLinks === false) return text;
+    const cache = channel?.guild?.channels?.cache;
+    if (!cache || typeof cache.values !== 'function') return text;
+    const channels = [];
+    for (const ch of cache.values()) {
+      const textBased = typeof ch?.isTextBased === 'function' ? ch.isTextBased() : ch?.type === 0;
+      if (textBased) channels.push({ id: ch.id, name: ch.name });
+    }
+    return linkChannels(text, channels);
+  }
+
   /** The custom emoji lookup, or null when there is no index or features.customEmoji is off (read now). */
   function emojiLookup() {
     return emoji && hot.config.features?.customEmoji !== false ? emoji.byName : null;
@@ -1084,7 +1102,7 @@ export function createTurnRunner({
       const to = answeredId ? ` · to ${authorNameFor(lines, answeredId) ?? '—'}` : '';
       const link = linkFor(pulledId);
       // Same deliberate exception as above: the persona's own output, dry-run only.
-      const text = withLink(renderCustomEmoji(resolveMentions(message.text, lines, knownNames).text, emojiLookup()), link, labels);
+      const text = withLink(withChannelLinks(channel, renderCustomEmoji(resolveMentions(message.text, lines, knownNames).text, emojiLookup())), link, labels);
       log.info('dry-run: would send', { channel: channel.id, channelName, mode, trigger: triggerKind ?? null, replyTo: replyId, link, text });
       // The mirror shows @name as the model wrote it: resolving it to a real
       // mention here would ping someone in a channel meant to be invisible to them.
@@ -1688,7 +1706,8 @@ export function createTurnRunner({
       const { userIds } = mentioned;
       // Custom emoji after the mentions: `<@id>` has no `:name:` in it to break.
       const spoken = renderCustomEmoji(mentioned.text, emojiLookup());
-      const text = withLink(spoken, link, hot.prompts?.labels);
+      // Channel links on the text sent; the typing time stays on the text as written.
+      const text = withLink(withChannelLinks(channel, spoken), link, hot.prompts?.labels);
       // The first message was typed alongside the GIF picker, above.
       if (typingOn && !typedAbove(index)) await typeFor(spoken);
 

@@ -24,6 +24,9 @@
 // thing, one rule for both analyzer modes (src/memory/update.js#parseLearnedOps
 // and src/memory/voice.js#splitDecision), so switching modes never changes a
 // lesson's teacher.
+//
+// Channels go the same way back out: `linkChannels` turns the `#name` the
+// persona writes into the `<#id>` link the chat shows as a channel.
 
 /**
  * The digits of a Discord member id, as a regex source: the one id range every
@@ -224,4 +227,47 @@ export function occursAsWholeWord(haystackLower, needleLower) {
     if (!isWordChar(before) && !isWordChar(after)) return true;
     from = at + 1;
   }
+}
+
+/**
+ * Turn every `#name` of a known channel in the persona's outgoing `text` into
+ * the real channel link `<#id>` -- incoming `<#id>` mentions reach the model as
+ * `#name` (src/discord/collect.js), so this is the way back out. Exact,
+ * case-sensitive names, the longest first (a name may be a prefix of another);
+ * a match counts only when the character before `#` is not a word character
+ * and the one after the name is not a word character either (or the end). An
+ * existing `<#id>` link is left alone; text without `#` comes back unchanged.
+ * @param {string} text
+ * @param {Iterable<{ id: string, name: string }>} channels  The served guild's text channels.
+ * @returns {string}
+ */
+export function linkChannels(text, channels) {
+  if (typeof text !== 'string' || !text.includes('#') || !channels) return text;
+  const known = [];
+  for (const channel of channels) {
+    if (typeof channel?.id === 'string' && channel.id && typeof channel.name === 'string' && channel.name) known.push(channel);
+  }
+  if (known.length === 0) return text;
+  known.sort((a, b) => b.name.length - a.name.length);
+
+  let result = '';
+  let index = 0;
+  while (index < text.length) {
+    const at = text.indexOf('#', index);
+    if (at === -1) break;
+    result += text.slice(index, at);
+    const before = text[at - 1];
+    let linked = null;
+    if (before !== '<' && !isWordChar(before)) {
+      linked = known.find(({ name }) => text.startsWith(name, at + 1) && !isWordChar(text[at + 1 + name.length])) ?? null;
+    }
+    if (linked) {
+      result += `<#${linked.id}>`;
+      index = at + 1 + linked.name.length;
+    } else {
+      result += '#';
+      index = at + 1;
+    }
+  }
+  return result + text.slice(index);
 }

@@ -39,6 +39,7 @@
     "promptCache": false,
     "channelPull": true,
     "channelRoute": true,
+    "channelLinks": true,
     "elsewhere": true,
     "diary": true,
     "typingSimulation": true,

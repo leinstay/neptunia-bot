@@ -2,7 +2,7 @@
 // id-token round trip) and teacherToken (the lesson teacher rule). Pure, no I/O.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TEACHER_TOKEN_RE, isWordChar, toTokens, fromTokens, occursAsWholeWord, teacherToken } from '../src/memory/mentions.js';
+import { TEACHER_TOKEN_RE, isWordChar, linkChannels, toTokens, fromTokens, occursAsWholeWord, teacherToken } from '../src/memory/mentions.js';
 
 const ID_A = '123456789012345678';
 const ID_B = '223456789012345678';
@@ -190,4 +190,39 @@ test('TEACHER_TOKEN_RE: exactly one <@id> token, the form a teacher is stored in
     assert.equal(TEACHER_TOKEN_RE.test(value), false, value);
   }
   assert.equal(TEACHER_TOKEN_RE.global, false, 'no g flag: a shared pattern keeps no lastIndex between calls');
+});
+
+// ---- linkChannels -----------------------------------------------------------
+
+const CHANNEL_A = '323456789012345678';
+const CHANNEL_B = '423456789012345678';
+const CHANNEL_C = '523456789012345678';
+
+test('linkChannels: #name of a known channel becomes its <#id> link, every occurrence', () => {
+  const channels = [{ id: CHANNEL_A, name: 'γενικά' }];
+  assert.equal(linkChannels('δες στο #γενικά, ναι #γενικά', channels), `δες στο <#${CHANNEL_A}>, ναι <#${CHANNEL_A}>`);
+});
+
+test('linkChannels: a longer name is matched before a name that is its prefix', () => {
+  const channels = [{ id: CHANNEL_A, name: 'art' }, { id: CHANNEL_B, name: 'art-τέχνη' }];
+  assert.equal(linkChannels('#art-τέχνη και #art', channels), `<#${CHANNEL_B}> και <#${CHANNEL_A}>`);
+});
+
+test('linkChannels: no link inside a word or when the name runs on into a word', () => {
+  const channels = [{ id: CHANNEL_A, name: 'art' }];
+  assert.equal(linkChannels('a#art #artistic #art_x', channels), 'a#art #artistic #art_x');
+  assert.equal(linkChannels('(#art)', channels), `(<#${CHANNEL_A}>)`);
+});
+
+test('linkChannels: names with emoji and Greek letters link; an existing <#id> is left alone', () => {
+  const channels = [{ id: CHANNEL_A, name: '🎮παιχνίδια' }, { id: CHANNEL_C, name: 'μουσική' }];
+  assert.equal(linkChannels('#🎮παιχνίδια ή <#999999999999999999>', channels), `<#${CHANNEL_A}> ή <#999999999999999999>`);
+  assert.equal(linkChannels(`<#${CHANNEL_C}> #μουσική`, channels), `<#${CHANNEL_C}> <#${CHANNEL_C}>`);
+});
+
+test('linkChannels: text without # comes back unchanged', () => {
+  const channels = [{ id: CHANNEL_A, name: 'γενικά' }];
+  assert.equal(linkChannels('γενικά χωρίς σύνδεσμο', channels), 'γενικά χωρίς σύνδεσμο');
+  assert.equal(linkChannels('', channels), '');
+  assert.equal(linkChannels('#γενικά', []), '#γενικά');
 });
