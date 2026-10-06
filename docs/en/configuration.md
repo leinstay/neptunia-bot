@@ -268,7 +268,8 @@ Settings for the GIF library (`features.gifs`). Uses are counted as each message
 | Key | Default | Meaning |
 |---|---|---|
 | `max` | `40` | GIFs shown in the `<gifs>` block, ranked by recency-weighted use |
-| `listChars` | `70` | Characters kept per caption in the `<gifs>` list, cut at a word boundary. `0` shows the whole caption |
+| `reactionChars` | `40` | Characters kept per reaction label in the `<gifs>` list. `0` shows the whole label |
+| `actionChars` | `70` | Characters kept per action line in the `<gifs>` list, cut at a word boundary. `0` shows the whole line |
 | `storeMax` | `300` | GIFs kept in the library; the top `max` are shown |
 | `halfLifeDays` | `30` | Recency half-life for the usage ranking (days); same formula as custom emoji |
 | `maxPerDay` | `40` | GIFs the persona may post per day |
@@ -279,11 +280,11 @@ Settings for the GIF library (`features.gifs`). Uses are counted as each message
 
 ### `gifs.pick`
 
-Settings for the GIF picker (`features.gifPicker`). After the persona writes a short reply and chose no GIF herself, a classifier (`classifier.text`, prompt `prompts/gif-pick.md`) receives the last few chat lines, the reply and the whole captioned library (every entry with its caption, each carrying the own-mark when applicable), and answers one handle or `none`. On a handle the GIF is posted instead of the text; otherwise the text goes as written. The classifier runs during the first message's typing simulation; the daily GIF rail `gifs.maxPerDay` applies.
+Settings for the GIF picker (`features.gifPicker`). After the persona writes a short reply and chose no GIF herself, a classifier (`classifier.text`, prompt `prompts/gif-pick.md`) receives the last few chat lines with the answered message named, the reply and the whole captioned library (every entry with its caption, each carrying the own-mark when applicable), and answers one handle or `none`. On a handle the GIF replaces the first outgoing message; otherwise the text goes as written. The classifier runs during the first message's typing simulation; the daily GIF rail `gifs.maxPerDay` applies.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `maxChars` | `60` | Reply length ceiling: the picker runs only when the persona's text is at most this many characters |
+| `maxChars` | `160` | Reply length ceiling: the picker runs only when the persona's text is at most this many characters |
 | `contextMessages` | `4` | Recent chat lines sent to the classifier alongside the reply and the library |
 | `maxOutputTokens` | `60` | Max output tokens for the picker classifier |
 

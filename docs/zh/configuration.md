@@ -268,7 +268,8 @@ GIF 库（`features.gifs`）的设置。使用次数在每条消息到达时统�
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `max` | `40` | `<gifs>` 块中显示的 GIF 数，按近期加权使用排名 |
-| `listChars` | `70` | `<gifs>` 列表中每条说明保留的字符数，在词边界处截断。`0` 显示完整说明 |
+| `reactionChars` | `40` | `<gifs>` 列表中每条反应标签保留的字符数。`0` 显示完整标签 |
+| `actionChars` | `70` | `<gifs>` 列表中每条动作行保留的字符数，在词边界处截断。`0` 显示完整行 |
 | `storeMax` | `300` | 库中保留的 GIF 数；显示排名前 `max` 个 |
 | `halfLifeDays` | `30` | 使用排名的近期半衰期（天）；与自定义表情使用相同公式 |
 | `maxPerDay` | `40` | 角色每天可发送的 GIF 数 |
@@ -279,11 +280,11 @@ GIF 库（`features.gifs`）的设置。使用次数在每条消息到达时统�
 
 ### `gifs.pick`
 
-GIF 挑选器（`features.gifPicker`）的设置。当角色写了一条短回复且自己没选 GIF 时，分类器（`classifier.text`，提示 `prompts/gif-pick.md`）接收最近几行聊天、回复以及带说明的完整库（每条记录附说明，适用时附自用标记），返回一个 handle 或 `none`。返回 handle 时 GIF 替换文本发送；否则文本照常发布。分类器在第一条消息的打字模拟期间运行；每日 GIF 限额 `gifs.maxPerDay` 生效。
+GIF 挑选器（`features.gifPicker`）的设置。当角色写了一条短回复且自己没选 GIF 时，分类器（`classifier.text`，提示 `prompts/gif-pick.md`）接收最近几行聊天（标明所回复的消息）、回复以及带说明的完整库（每条记录附说明，适用时附自用标记），返回一个 handle 或 `none`。返回 handle 时 GIF 替换第一条发出消息；否则文本照常发布。分类器在第一条消息的打字模拟期间运行；每日 GIF 限额 `gifs.maxPerDay` 生效。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `maxChars` | `60` | 回复长度上限：角色文本不超过此字符数时挑选器才运行 |
+| `maxChars` | `160` | 回复长度上限：角色文本不超过此字符数时挑选器才运行 |
 | `contextMessages` | `4` | 与回复和库一起发送给分类器的近期聊天行数 |
 | `maxOutputTokens` | `60` | 挑选器分类器的最大输出 token 数 |
 

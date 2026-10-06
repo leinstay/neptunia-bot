@@ -63,8 +63,8 @@
     "imageSee": "Pictures marked as attached you see yourself; they may also carry a helper's note on what is easy to miss (who is there, what the joke is), but the helper can be wrong.",
     "imageDescribed": "Other pictures come with a short description from a helper; you did not see them yourself.",
     "imageBlind": "Pictures not marked as attached appear as a label — you cannot see what is on them.",
-    "gifDescribed": "GIFs come with a one-line description of a frame — you did not watch them.",
-    "gifWatched": "GIFs come with a short account of what happens in them, as you saw it. They have no sound. A GIF without an account is one you have not seen.",
+    "gifDescribed": "GIFs come with a one-line description of a single frame from a helper. They have no sound. Without a description, do not infer what the GIF shows.",
+    "gifWatched": "GIFs come with a description of their visible content from a helper. They have no sound. Without a description, do not infer what the GIF shows.",
     "gifBlind": "GIFs appear in the transcript but you cannot see them.",
     "videoDescribed": "Videos show a name, a duration and a description of a single still frame — you have never watched or heard any video.",
     "videoBlind": "Videos show a name and a duration — you have never watched or heard any video.",
@@ -84,7 +84,7 @@
     "stickerBlind": "Stickers and custom emoji appear as a name — you cannot see what they depict.",
     "lottie": "Discord's built-in animated stickers are Lottie animations, not pictures — they are always only a name.",
     "customEmoji": "You can use this server's custom emoji by writing :name: exactly as they appear in the chat or the emoji list. The engine turns a known name into the real emoji; an unknown name stays as plain text.",
-    "gifs": "You can post one GIF per turn from the list, by handle. The list comes from what members share most. The captions describe what each clip shows; when one carries the reaction or gesture you were about to type, send the GIF instead of the line. A GIF you posted recently is a repeat; you see your own recent messages in the chat, and a mark next to ones you sent within the last day. An unknown handle posts nothing.",
+    "gifs": "You can post one GIF per turn by handle from the list or the transcript. Entries give the reaction, the visible action and the on-screen text when known. Recent-use marks show your own posts. Use only listed or transcript handles; an unknown handle posts nothing.",
     "draw": "You can draw — hand a scene to your drawing sub-process and it produces a picture. Whether to draw is your call; you can refuse. You never see the result while it works, and you barely control the look: the style is the sub-process's own. The sub-process already knows what you look like, so when you are in the picture just mark it in the format — do not describe your own appearance. A drawing takes a while and is posted on its own after your words.",
     "drawSpent": "Your daily picture quota is spent. You cannot draw until tomorrow.",
     "drawSpentUser": "This person has used up their pictures for today.",
@@ -135,8 +135,9 @@
     "seenInChat": "Also in this conversation:"
   },
   "gifs": {
-    "header": "GIFs the chat uses:",
-    "entry": "{id} — {text}",
+    "header": "GIF library. Each entry: the reply it expresses, visible action, on-screen text.",
+    "entry": "{id}: {text}",
+    "entryFields": "{id}: {reaction}; {action}; \"{text}\"",
     "entryNoText": "{id}",
     "ownMark": "(you, {ago})"
   },
