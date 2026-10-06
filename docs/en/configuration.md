@@ -383,6 +383,7 @@ At most one re-watch or retry per turn. Answers are cached for one hour per ques
 | `affinityLikeBonus` | `0.08` | Max reduced ignore at affinity +100 |
 | `oneAtATime` | `true` | One reply at a time across the server |
 | `pendingSameChannel` | `true` | Hold a direct ping in the same channel while a turn is running there; answered after the turn with the usual ignore chance. Missing key = on |
+| `classifyWhileBusy` | `true` | Classify a follow-up candidate while a turn is running. The candidate passes the same window, no-streak and pre-filter gates; at most one classifier call per channel at a time, newer candidate replaces the one waiting. A `yes` at a busy attention waits in the pending queue (one per channel); an `overheard` is dropped as `busy`. With the switch off, the candidate is skipped without a call. Also skipped when `mention.pendingSameChannel` is off and the candidate's own channel is busy. Each call is one `classifier.text` request under `llm.maxRequestsPerDay`. Missing key = on |
 | `maxPending` | `6` | Total pending calls held across all channels and authors. The single oldest is evicted when full (`mention: dropped`, reason `full`) |
 | `pendingMinutes` | `10` | Minutes before a held ping expires |
 | `switchDelayMs` | `[2000, 9000]` | Pause before answering in the next channel (ms) |
