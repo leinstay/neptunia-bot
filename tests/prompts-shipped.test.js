@@ -18,7 +18,8 @@ import { fileURLToPath } from 'node:url';
 import { SnowflakeUtil } from 'discord.js';
 import { deepMerge, isPlainObject } from '../src/config.js';
 import { DAY_MS, HOUR_MS, MINUTE_MS, utcDay, zonedDay } from '../src/time.js';
-import { buildDrawPrompt, buildRequest, hasRequiredLabels } from '../src/behavior/prompt.js';
+import { buildDiaryPlanRequest, buildDrawPrompt, buildRequest, hasRequiredLabels } from '../src/behavior/prompt.js';
+import { parseSeedFamilies, pickSeeds, renderSeedsBlock } from '../src/behavior/diary.js';
 import { fill, formatDate } from '../src/discord/format.js';
 import { buildVarietyRequest, selectLongLines, selectOwnLines } from '../src/behavior/variety.js';
 import { createTurnRunner } from '../src/behavior/turn.js';
@@ -83,6 +84,9 @@ const NOT_BUILT = {
   // Built inside the createMessageHandler closure of src/discord/events.js (buildFollowUpRequest),
   // which fetches its own history: no seam reaches it (mentor-05, owner decision O-9).
   address: 'built inside the src/discord/events.js closure (mentor-05, O-9)',
+  // Split into families and drawn from line by line (src/behavior/diary.js#pickSeeds): the plan
+  // request carries a few random lines in <seeds>, never the file whole.
+  'diary-seeds': 'drawn from line by line into <seeds> (src/behavior/diary.js#pickSeeds), never sent whole',
 };
 
 /**
@@ -124,6 +128,8 @@ const LOADS = {
   routed: [...SYSTEM, 'reply'],
   noticed: [...SYSTEM, 'elsewhere'],
   draw: ['draw', 'appearance'],
+  diary: [...SYSTEM, 'diary', 'world'],
+  diaryPlan: ['diary-plan', 'world'],
   memory: ['memory', ...CHARACTER],
   memoryDecide: ['memory-decide', ...CHARACTER],
   voice: ['memory-voice', ...CHARACTER],
@@ -667,6 +673,51 @@ test('buildDrawPrompt: draw.md and appearance.md are filled for a picture the pe
   assertFilled([{ role: 'user', content: prompt }], { files: LOADS.draw }, 'draw');
   const without = buildDrawPrompt({ prompts: SHIPPED.prompts, selfName: SELF_NAME, request: 'a frozen balcony', self: false });
   assertFilled([{ role: 'user', content: without }], { files: ['draw'] }, 'draw without the persona');
+  const timed = buildDrawPrompt({ prompts: SHIPPED.prompts, selfName: SELF_NAME, request: 'a frozen balcony', self: false, when: 'Mon 5 Oct, 23:10' });
+  const text = assertFilled([{ role: 'user', content: timed }], { files: ['draw'] }, 'draw with the local time');
+  assert.ok(text.includes(fill(LABELS.draw.when, { when: 'Mon 5 Oct, 23:10' })), 'draw.when fills {{when}}');
+});
+
+// ---- the diary ----------------------------------------------------------------------
+
+/** Two past diary posts, one with a picture. */
+const DIARY_POSTS = [
+  { at: NOW - 2 * DAY_MS, kind: 'status', gist: 'pluie toute la journée', picture: null, messageIds: [], search: null },
+  { at: NOW - DAY_MS, kind: 'selfPicture', gist: 'sur le toit', picture: 'a rooftop at dusk', messageIds: [], search: null },
+];
+
+test('buildRequest: a diary post fills system-prompt, character-card, rules, format, diary.md and world.md', async () => {
+  const input = await turnInput({ mode: 'diary', trigger: null, triggerKind: null, interlocutor: null, currentChannelId: DIARY });
+  input.config = shippedConfig({ diary: { world: true, channelId: DIARY } });
+  const plan = { kind: 'selfPicture', brief: 'a pier in the fog', picture: true };
+  const request = buildRequest({ ...input, diaryChannel: 'journal', diary: { posts: DIARY_POSTS, plan, found: 'Une comète passe ce soir.' } });
+  const text = assertFilled(request.messages, { files: LOADS.diary, blocks: ['senses', 'world', 'diary', 'plan', 'found', 'chat', 'task'] }, 'diary');
+  assert.ok(text.includes(fill(LABELS.senses.diary, { channel: 'journal' })), 'senses.diary names the channel');
+});
+
+test('buildDiaryPlanRequest: diary-plan.md and world.md fill the plan request with its blocks', async () => {
+  const config = shippedConfig({ diary: { world: true, channelId: DIARY } });
+  const seeds = renderSeedsBlock(pickSeeds(parseSeedFamilies(SHIPPED.prompts['diary-seeds']), config.diary.seedSets, () => 0.5), LABELS);
+  const request = buildDiaryPlanRequest({
+    config,
+    prompts: SHIPPED.prompts,
+    calibrator: createCalibrator(),
+    now: NOW,
+    selfName: SELF_NAME,
+    history: [],
+    guildMemory: GUILD_MEMORY,
+    channels: CHANNELS,
+    loreEntries: LORE,
+    currentChannelId: DIARY,
+    recentLines: RECENT_LINES,
+    recentAudience: () => true,
+    candidateProfiles: Object.values(PROFILES),
+    nameOf,
+    posts: DIARY_POSTS,
+    kinds: config.diary.kinds,
+    seedsText: seeds,
+  });
+  assertFilled(request.messages, { files: LOADS.diaryPlan, blocks: ['now', 'server', 'about_chat', 'world', 'diary', 'kinds', 'seeds'] }, 'diary plan');
 });
 
 // ---- the stream analyzer --------------------------------------------------------------

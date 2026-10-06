@@ -25,7 +25,17 @@ import {
   withTextPreviews,
 } from '../discord/collect.js';
 import { audienceAllows, captionPulled, checkPull, fetchPull } from '../discord/pull-fetch.js';
-import { block, buildDrawPrompt, buildRequest, classifierTranscript, fillPromptTemplate, gifFieldChars } from './prompt.js';
+import { block, buildDiaryPlanRequest, buildDrawPrompt, buildRequest, classifierTranscript, fillPromptTemplate, gifFieldChars } from './prompt.js';
+import {
+  DIARY_DAILY,
+  DIARY_PICTURES_DAILY,
+  gistOf,
+  parseSeedFamilies,
+  pickSeeds,
+  renderSeedsBlock,
+  stripUrls,
+  validatePlan,
+} from './diary.js';
 import { channelPullOn, pullSettings, pullTargets } from './pull.js';
 import { audienceCovers, markSeen, messageLink, resolveDestination, stampPings } from './elsewhere.js';
 import { classifierTextModel } from './mention.js';
@@ -35,7 +45,7 @@ import { fillerKey, fillersSettings, findFillers } from './fillers.js';
 import { stickyOn, stickyPhrases, stickySettings } from './sticky.js';
 import { captionedEntries, gifPickSettings, parseGifPick, pickCandidates, pickContext, renderGifLibrary } from './gif-pick.js';
 import { turnRequestInput } from './turn-input.js';
-import { parseOutput } from '../llm/parse.js';
+import { parseJsonObject, parseOutput } from '../llm/parse.js';
 import { DailyCapError, REPLY_REQUEST, TokenLimitError, RETRY_STATUS, helperRequestOptions, railReason, sleep } from '../llm/openrouter.js';
 import { ImageCapError, ImageGenError } from '../llm/images.js';
 import { isLimitNotice, limitOf, mirrorChannelLabel, mirrorDryRun, postLimitNotice } from './limits.js';
@@ -51,14 +61,14 @@ import {
 } from '../discord/media.js';
 import { avatarReference, createImageFetcher } from '../discord/fetch-image.js';
 import { renderCustomEmoji, resolveReactionEmoji } from '../discord/emoji.js';
-import { fill, replyMarker } from '../discord/format.js';
+import { fill, formatNow, replyMarker } from '../discord/format.js';
 import { log } from '../log.js';
 import { clampChars, countDashes, oneLine, stripDashes } from '../memory/clamp.js';
 import { gifPostsToday } from '../memory/gif-watch.js';
 import { rankGifs } from '../memory/gifs.js';
 import { liveRecent, recentSettings } from '../memory/recent.js';
 import { isVideoVisionOn } from '../memory/youtube-check.js';
-import { bumpDaily, utcDay, zonedDay } from '../time.js';
+import { bumpDaily, countToday, utcDay, zonedDay } from '../time.js';
 import { isPlainObject } from '../config.js';
 
 /**
@@ -942,6 +952,18 @@ export function createTurnRunner({
     return emoji && hot.config.features?.customEmoji !== false ? emoji.byName : null;
   }
 
+  /**
+   * The bare name of the diary channel (`diary.channelId`, in `config`: the turn's live config)
+   * for `<senses>`: null with no channel set, `features.diary` off, or a channel the served
+   * guild's cache (else the client's) does not know by name.
+   */
+  function diaryChannelName(guildId, config) {
+    const id = config.diary?.channelId;
+    if (!id || config.features?.diary === false) return null;
+    const found = client.guilds?.cache?.get?.(guildId)?.channels?.cache?.get?.(id) ?? client.channels?.cache?.get?.(id) ?? null;
+    return typeof found?.name === 'string' && found.name ? found.name : null;
+  }
+
   /** One dry-run mirror message (src/behavior/limits.js#mirrorDryRun), `bot.dryRunChannelId` read now. */
   function mirror(header, body) {
     return mirrorDryRun({ client, dryRunChannelId: hot.config.bot?.dryRunChannelId || '', header, body });
@@ -1015,7 +1037,7 @@ export function createTurnRunner({
    *   channels, then this chat's history (names and authors); `knownNames`: the stored names
    *   `@name` resolves by too (storedNames).
    */
-  async function dryAct({ channel, guildId, parsed, idByIndex, history = [], mode, triggerKind, trigger = null, plain, selfName, pulledIds, lines, knownNames, linkFor, part = null }) {
+  async function dryAct({ channel, guildId, parsed, idByIndex, history = [], mode, triggerKind, trigger = null, plain, selfName, pulledIds, lines, knownNames, linkFor, part = null, gifPick = true }) {
     const channelName = channel.name ?? null;
     const where = mirrorChannelLabel(channel);
     // Every triggered turn shares the mode `reply`: the header names its
@@ -1051,7 +1073,7 @@ export function createTurnRunner({
       lastPostAt.set(channel.id, clock());
     };
 
-    const picked = await pickGifSafely({ channelId: channel.id, guildId, messages: parsed.messages, gif: parsed.gif, history, selfName, idByIndex, trigger });
+    const picked = gifPick ? await pickGifSafely({ channelId: channel.id, guildId, messages: parsed.messages, gif: parsed.gif, history, selfName, idByIndex, trigger }) : null;
     // A picked GIF would be posted in place of the first message; the rest follow as written.
     if (picked) await dryGif(picked);
     const messages = picked ? parsed.messages.slice(1) : parsed.messages;
@@ -1091,13 +1113,19 @@ export function createTurnRunner({
     }
   }
 
-  /** The image prompt for `draw` (parsed.draw): prompts read now, the request clamped to image.maxPromptChars. */
+  /**
+   * The image prompt for `draw` (parsed.draw): prompts read now, the request clamped to
+   * image.maxPromptChars, the local date and time now (`bot.timezone`, read now) as its
+   * `{{when}}` -- every picture, so its light and season follow the clock.
+   */
   function drawPromptFor(selfName, draw) {
+    const timezone = hot.config.bot?.timezone;
     return buildDrawPrompt({
       prompts: hot.prompts,
       selfName,
       request: clampChars(draw.text, hot.config.image?.maxPromptChars),
       self: draw.self === true,
+      when: timezone ? formatNow(clock(), timezone, hot.prompts?.labels?.locale) : '',
     });
   }
 
@@ -1565,9 +1593,13 @@ export function createTurnRunner({
    *   `knownNames`: the stored names `@name` resolves by too (storedNames);
    *   `sourceId`: the channel the turn is about (its `source`), logged on every message sent;
    *   with it a refused drawing's limit notice quotes nothing (the trigger of a routed turn
-   *   lives in that channel).
+   *   lives in that channel); `gifPick`: false keeps the GIF picker from replacing the first
+   *   message (a diary post).
+   * Resolves `delivered`, `answered`, `messageIds` (the ids of the messages and the picture
+   * posted, in order), `texts` (the messages posted, as the persona wrote them), `drew` (the
+   * picture was posted) and `drawFailed` when the picture failed.
    */
-  async function act({ channel, guildId, privateChat, parsed, idByIndex, history, startedAt, mode, triggerKind, plain, trigger, selfName, pulledIds, lines, knownNames, linkFor, sourceId }) {
+  async function act({ channel, guildId, privateChat, parsed, idByIndex, history, startedAt, mode, triggerKind, plain, trigger, selfName, pulledIds, lines, knownNames, linkFor, sourceId, gifPick = true }) {
     const cfg = hot.config.typing;
     const typingOn = hot.config.features?.typingSimulation !== false;
     // The typing imitation of one message: the indicator, then the time its text takes to type.
@@ -1621,7 +1653,9 @@ export function createTurnRunner({
     const postedTexts = [];
     let sendFailed = false;
     // The GIF picker starts first (its request is sent at once), then the first message's typing.
-    const picking = pickGifSafely({ channelId: channel.id, guildId, messages: parsed.messages, gif: parsed.gif, history, selfName, idByIndex, trigger });
+    const picking = gifPick
+      ? pickGifSafely({ channelId: channel.id, guildId, messages: parsed.messages, gif: parsed.gif, history, selfName, idByIndex, trigger })
+      : Promise.resolve(null);
     if (typingOn && parsed.messages.length > 0) {
       const first = renderCustomEmoji(resolveMentions(parsed.messages[0].text, lines, knownNames).text, emojiLookup());
       await typeFor(first);
@@ -1709,7 +1743,9 @@ export function createTurnRunner({
     }
     notePosted(guildId, postedTexts);
     startAhead({ guildId, channelId: channel.id, history, posted: ownPosted, selfName, privateChat });
-    if (sendFailed) return { delivered, answered };
+    const messageIds = ownPosted.map((line) => line.id).filter((id) => typeof id === 'string' && id);
+    const posted = { messageIds, texts: postedTexts, drew: false };
+    if (sendFailed) return { delivered, answered, ...posted };
 
     // The turn's own GIF right after the messages.
     if (gif) {
@@ -1718,13 +1754,15 @@ export function createTurnRunner({
     }
 
     // The picture comes last, once every message is out.
-    if (!parsed.draw) return { delivered, answered };
+    if (!parsed.draw) return { delivered, answered, ...posted };
     const drawn = await draw({ channel, parsed, idByIndex, pulledIds, linkFor, trigger, triggerKind, plain, selfName, sourceId });
     if (drawn.posted === true) {
       if (drawn.pulledId) answered.add(drawn.pulledId);
       record(drawn.message);
+      if (typeof drawn.message?.id === 'string' && drawn.message.id) messageIds.push(drawn.message.id);
+      posted.drew = true;
     }
-    return { delivered: delivered || drawn.posted === true, answered, ...(drawn.drawFailed ? { drawFailed: drawn.drawFailed } : {}) };
+    return { delivered: delivered || drawn.posted === true, answered, ...posted, ...(drawn.drawFailed ? { drawFailed: drawn.drawFailed } : {}) };
   }
 
   /**
@@ -2197,6 +2235,152 @@ export function createTurnRunner({
   }
 
   /**
+   * A diary post's first step (mode `diary`), before its request is built:
+   * the post history (store.getDiary), whether it may carry a picture (the
+   * image client, `features.imageGeneration`, Attach Files here, the day's
+   * diary pictures under `diary.maxPicturesPerDay` (2) and the image client's
+   * own cap not spent), then the plan request (src/behavior/prompt.js#buildDiaryPlanRequest:
+   * prompts/diary-plan.md on the classifier model, `diary.planMaxOutputTokens`
+   * (300), `diary.planTimeoutMs` (20000), usage purpose `diary-plan`) with
+   * `<seeds>` drawn from prompts/diary-seeds.md (`diary.seedSets`, 2). The
+   * answer goes through parseJsonObject and src/behavior/diary.js#validatePlan
+   * (a weighted random kind when it is missing, broken or names no weighted
+   * kind; `diary.searchKinds`, `diary.pictureKinds`). A forced kind
+   * (`params.kind`) is the only kind offered and replaces the answer's kind,
+   * its brief kept. Then the search the plan asks for (lookup.search, its own
+   * switch, cache and daily cap): its text is `found`; a failure or nothing
+   * found logs `diary: search failed` and the post goes without it. A request
+   * or token cap on the plan request throws (the turn is refused); any other
+   * failure of it falls back. Settings come from `config`, the turn's live config.
+   * @returns {Promise<{ posts: object[], plan: { kind: string|null, brief: string, search: string,
+   *   picture: boolean, fallback: boolean }, found: string|null, pictureAllowed: boolean }>}
+   */
+  async function prepareDiary({ config, guildId, channel, selfName, history, now, params, memoryOn }) {
+    const prompts = hot.prompts;
+    const labels = prompts?.labels;
+    const diaryCfg = config.diary ?? {};
+    const stored = typeof store.getDiary === 'function' ? store.getDiary(guildId) : null;
+    const posts = Array.isArray(stored?.posts) ? stored.posts : [];
+    const forcedKind = typeof params?.kind === 'string' && params.kind ? params.kind : null;
+    const kinds = forcedKind ? { [forcedKind]: 1 } : (diaryCfg.kinds ?? {});
+
+    const imageQuota = images && typeof images.quota === 'function' ? images.quota({}) : null;
+    const picturesToday = countToday(store.state.data, DIARY_PICTURES_DAILY, now);
+    const pictureAllowed =
+      Boolean(imageQuota) &&
+      config.features?.imageGeneration !== false &&
+      canAttach(channel) &&
+      picturesToday < (diaryCfg.maxPicturesPerDay ?? 2) &&
+      imageQuota.used < imageQuota.cap;
+
+    let answer = null;
+    const planPrompt = prompts?.['diary-plan'];
+    if (typeof planPrompt === 'string' && planPrompt.trim() && labels) {
+      const recent = memoryOn ? recentInput({ channel, guildId, isPrivate: false, config, now }) : NO_RECENT;
+      const seedsText = renderSeedsBlock(pickSeeds(parseSeedFamilies(prompts['diary-seeds']), diaryCfg.seedSets ?? 2, rng), labels);
+      const request = buildDiaryPlanRequest({
+        config,
+        prompts,
+        calibrator,
+        now,
+        selfName,
+        history,
+        guildMemory: memoryOn ? store.getGuild(guildId) : null,
+        channels: memoryOn ? store.listChannels(guildId) : [],
+        loreEntries: memoryOn ? store.getLore(guildId) : [],
+        currentChannelId: channel.id,
+        recentLines: recent.lines ?? null,
+        recentAudience: recent.audience ?? null,
+        candidateProfiles: memoryOn ? store.listUserProfiles(guildId) : [],
+        nameOf: memoryOn ? (id) => store.getUser(guildId, id)?.names?.[0] ?? null : null,
+        posts,
+        kinds,
+        seedsText,
+      });
+      let completion = null;
+      try {
+        completion = await llm.complete(request.messages, {
+          model: classifierTextModel(config),
+          ...helperRequestOptions(config, {
+            role: 'classifier.text',
+            maxOutputTokens: diaryCfg.planMaxOutputTokens ?? 300,
+            purpose: 'diary-plan',
+            timeoutMs: diaryCfg.planTimeoutMs ?? 20000,
+          }),
+        });
+      } catch (err) {
+        if (err instanceof DailyCapError || err instanceof TokenLimitError) throw err;
+        log.warn('diary: plan failed', { channel: channel.id, reason: railReason(err), status: err?.statusCode ?? null });
+      }
+      if (completion) {
+        try {
+          answer = parseJsonObject(completion.text);
+        } catch {
+          log.warn('diary: plan failed', { channel: channel.id, reason: 'unparsed', status: null });
+        }
+      }
+    } else {
+      log.warn('diary: plan failed', { channel: channel.id, reason: 'no-prompt', status: null });
+    }
+    if (forcedKind && answer && typeof answer === 'object' && !Array.isArray(answer)) answer = { ...answer, kind: forcedKind };
+    const plan = validatePlan(answer, kinds, { pictureAllowed, searchKinds: diaryCfg.searchKinds, pictureKinds: diaryCfg.pictureKinds }, rng);
+
+    let found = null;
+    if (plan.search && typeof lookup?.search === 'function') {
+      try {
+        const result = await lookup.search(guildId, plan.search);
+        found = typeof result?.text === 'string' && result.text.trim() ? result.text.trim() : null;
+        if (found === null) log.info('diary: search failed', { channel: channel.id, reason: result ? 'nothing' : 'refused' });
+      } catch (err) {
+        log.warn('diary: search failed', { channel: channel.id, reason: 'error', error: err });
+      }
+    }
+    log.info('diary: planned', {
+      channel: channel.id,
+      kind: plan.kind,
+      fallback: plan.fallback,
+      picture: plan.picture,
+      search: Boolean(plan.search),
+      found: found !== null,
+      forced: params?.forced === true,
+    });
+    return { posts, plan, found, pictureAllowed };
+  }
+
+  /**
+   * A diary post's last step, once it reached the chat: the post recorded in
+   * diary.json (store.appendDiaryPost, the newest `diary.historyPosts` (150)
+   * kept) with its gist and its picture's scene cut to `diary.gistChars` (200),
+   * its message ids and its search query; the day's diary post counted and,
+   * when the picture was posted, the day's diary picture. Settings come from
+   * `config`, the turn's live config. Returns the outcome's `diary` field.
+   */
+  function recordDiaryPost({ config, guildId, now, plan, parsed, acted }) {
+    const diaryCfg = config.diary ?? {};
+    const gistChars = diaryCfg.gistChars ?? 200;
+    const texts = Array.isArray(acted.texts) ? acted.texts : [];
+    const drew = acted.drew === true;
+    if (typeof store.appendDiaryPost === 'function') {
+      store.appendDiaryPost(
+        guildId,
+        {
+          at: now,
+          kind: plan.kind,
+          gist: gistOf(texts.join(' '), gistChars),
+          picture: drew && parsed.draw ? gistOf(parsed.draw.text, gistChars) : null,
+          messageIds: Array.isArray(acted.messageIds) ? acted.messageIds : [],
+          search: plan.search || null,
+        },
+        { max: diaryCfg.historyPosts ?? 150 },
+      );
+    }
+    bumpDaily(store.state.data, DIARY_DAILY, now);
+    if (drew) bumpDaily(store.state.data, DIARY_PICTURES_DAILY, now);
+    store.state.markDirty();
+    return { kind: plan.kind, picture: drew, search: Boolean(plan.search), messages: texts.length };
+  }
+
+  /**
    * The other channels a server turn shows in `<channel_view>`, each fetched
    * by fetchPull, in the order of src/behavior/pull.js#pullTargets: the
    * turn's `source` first and alone -- a turn about it does not go on
@@ -2435,6 +2619,16 @@ export function createTurnRunner({
    *   named and the old rule holds for it.
    * @param {{ id: string, text: string, ts: number }[]|null} [params.added]  Later messages of the
    *   author folded into this call (src/discord/events.js): `labels.task.added` names them.
+   * @param {{ kind?: string|null, forced?: boolean }|null} [params.diary]  With `mode: 'diary'`
+   *   (src/behavior/diary.js, in the diary channel, no trigger): the post is planned first
+   *   (prepareDiary: the plan request, then the search it asks for; `kind` forces the kind,
+   *   `forced` also appends prompts.forced to the task), then composed with `prompts.diary` as
+   *   the task and the `<world>`, `<diary>`, `<plan>` and `<found>` blocks. Its output keeps only
+   *   `<msg>` (every reply attribute dropped, links removed, at most `diary.maxMessages` (3), a
+   *   message left empty not posted), `<draw>` (only while the plan's picture check allowed it)
+   *   and `<skip/>`; no reaction, no GIF, no GIF pick. A post that reached the chat is recorded
+   *   (recordDiaryPost) and its outcome carries `diary: { kind, picture, search, messages }`; a
+   *   dry run records nothing. A failed picture is only logged: nobody asked for it.
    *
    * A private chat (`channel` without a guild) works like a server turn on behalf of its partner
    * (the trigger's author, fetched as a member of the served guild: privatePartner) with
@@ -2656,6 +2850,7 @@ export function createTurnRunner({
     part = null,
     reuseHistory = null,
     plainPosts = false,
+    diary: diaryParams = null,
   }) {
     // A server channel carries its guild; a private chat is served on behalf of the pinned one.
     const guildId = channel.guild?.id ?? guildIdParam;
@@ -2774,6 +2969,15 @@ export function createTurnRunner({
       const candidate = part && trigger ? { ...trigger, content: part.parts[part.index - 1] ?? trigger.content } : trigger;
       // The history the request is built from: with its file previews once they are ready (below).
       let history = rawHistory;
+      // A diary post plans itself first (prepareDiary), alongside the preparation below; settled
+      // into a value or an error so a refusal waits for its turn to be thrown.
+      const diaryPending =
+        mode === 'diary'
+          ? prepareDiary({ config, guildId, channel, selfName, history: rawHistory, now, params: diaryParams, memoryOn }).then(
+              (value) => ({ value }),
+              (error) => ({ error }),
+            )
+          : null;
 
       // The other channels this turn shows (`<channel_view>`, pullChannels), found and fetched
       // before the mode is chosen so a chooser sees them. Fresh captions only for a turn certain
@@ -3170,6 +3374,13 @@ export function createTurnRunner({
 
       // A neighbour's pictures get only the captions the cache already holds, under the
       // chat captions' switch: cachedDescriptions never sends a request or counts a day.
+      // A diary post's plan, search and picture check (a request or token cap refuses the turn).
+      let diaryPrep = null;
+      if (diaryPending) {
+        const settled = await beforeBar(diaryPending);
+        if (settled.error) throw settled.error;
+        diaryPrep = settled.value;
+      }
       const neighborDescriptions =
         features.mediaDescriptions === true && typeof describer?.cachedDescriptions === 'function' && neighbors.length > 0
           ? describer.cachedDescriptions(guildId, neighbors.flatMap((neighbor) => describableCandidates(neighbor.messages, [])))
@@ -3177,7 +3388,9 @@ export function createTurnRunner({
       // Drawing (features.imageGeneration, a missing key counts as on) needs the image client
       // and Attach Files here; a drawFailed turn answers the failure and never draws again.
       // An unasked turn reads the quota for no member, like draw() charges none.
-      const drawOn = Boolean(images) && features.imageGeneration !== false && triggerKind !== 'drawFailed' && canAttach(channel);
+      // A diary post draws only while its picture check allowed it (its own daily cap and the image cap).
+      const drawOn =
+        Boolean(images) && features.imageGeneration !== false && triggerKind !== 'drawFailed' && canAttach(channel) && (!diaryPrep || diaryPrep.pictureAllowed);
       const drawQuota = drawOn ? images.quota({ userId: asked ? (trigger.authorId ?? null) : null }) : undefined;
       // Neighbours the bot can read but not write in, marked in `<server>` (a pulled channel's
       // record carries its own mark). A pulled channel whose block is shown is left out of the
@@ -3205,7 +3418,7 @@ export function createTurnRunner({
           prompts,
           calibrator,
           mode: finalMode,
-          forced,
+          forced: forced || (diaryPrep !== null && diaryParams?.forced === true),
           now,
           selfName,
           history,
@@ -3258,6 +3471,10 @@ export function createTurnRunner({
           // `<recent>`: the last hours, its live lines and the members' moments (no block without the store).
           recentLines: recent.lines ?? null,
           recentAudience: recent.audience ?? null,
+          // `<senses>`: where the persona keeps its diary, when one is set.
+          diaryChannel: diaryChannelName(guildId, config),
+          // A diary post: its past posts, its plan and what its search found.
+          diary: diaryPrep ? { posts: diaryPrep.posts, plan: diaryPrep.plan, found: diaryPrep.found } : null,
         }),
       );
       // What `<recent>` showed, held back or cut: counts only.
@@ -3358,6 +3575,16 @@ export function createTurnRunner({
       }
       // No image client, drawing off, no Attach Files, or already answering a failed picture: the <draw> is dropped.
       if (!drawOn) parsed.draw = null;
+      if (diaryPrep) {
+        // A diary post: no reaction, no GIF, nothing posted as a reply, no link, at most diary.maxMessages.
+        parsed.reactions = [];
+        parsed.gif = null;
+        parsed.messages = parsed.messages
+          .map((message) => ({ ...message, replyTo: null, text: stripUrls(message.text) }))
+          .filter((message) => message.text !== '')
+          .slice(0, Math.max(0, config.diary?.maxMessages ?? 3));
+        if (parsed.draw) parsed.draw = { ...parsed.draw, replyTo: null };
+      }
       // features.gifs off, an unknown handle or gifs.maxPerDay spent: the <gif> is dropped.
       parsed.gif = resolveGif(guildId, parsed.gif, channel.id);
       const nothingToDo =
@@ -3432,9 +3659,13 @@ export function createTurnRunner({
       // top of this turn: unlike the other switches this one defaults to OFF,
       // and whether to actually post is the very last decision of a turn.
       if (hot.config.features?.dryRun === true) {
-        await dryAct({ channel, guildId, parsed, idByIndex, history, mode: finalMode, triggerKind, trigger, selfName, part, ...routing });
+        await dryAct({ channel, guildId, parsed, idByIndex, history, mode: finalMode, triggerKind, trigger, selfName, part, ...routing, gifPick: !diaryPrep });
         noteSpokeSaw(channel, history, serverShown, pulled, notAnswered);
-        return { outcome: 'spoke', mode: finalMode, dryRun: true };
+        // A rehearsed diary post is not recorded and counts for no daily cap.
+        const rehearsed = diaryPrep
+          ? { diary: { kind: diaryPrep.plan.kind, picture: Boolean(parsed.draw), search: Boolean(diaryPrep.plan.search), messages: parsed.messages.length } }
+          : {};
+        return { outcome: 'spoke', mode: finalMode, dryRun: true, ...rehearsed };
       }
       const acted = await act({
         channel,
@@ -3450,10 +3681,14 @@ export function createTurnRunner({
         selfName,
         ...routing,
         sourceId: isPrivate ? null : (source?.channelId ?? null),
+        gifPick: !diaryPrep,
       });
       noteSpokeSaw(channel, history, serverShown, pulled, notAnswered);
       stampShownCalls({ shown: serverShown, pulled, answered: acted.answered ?? new Set(), exceptId: ownCallId });
-      const spoke = { outcome: 'spoke', mode: finalMode, delivered: acted.delivered === true };
+      // A diary post that reached the chat is recorded and counted.
+      const recorded =
+        diaryPrep && acted.delivered === true ? { diary: recordDiaryPost({ config: hot.config, guildId, now, plan: diaryPrep.plan, parsed, acted }) } : {};
+      const spoke = { outcome: 'spoke', mode: finalMode, delivered: acted.delivered === true, ...recorded };
       if (!acted.drawFailed) return spoke;
       // The same predicate as runTurn's hand-off: an unasked turn notifies right here.
       handOff = asked;

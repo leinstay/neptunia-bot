@@ -47,7 +47,11 @@
 | `read-link.md` | いいえ | リンク読み取りのアウトオブキャラクタープロンプト（`features.webLookup`、`web.links.enabled`）: フェッチしたページを 1 段落に要約する。ページのタイトルと本文を受け取る。キャラクターカードなし | `{{today}}` `{{maxChars}}` |
 | `search-summary.md` | いいえ | 検索要約のアウトオブキャラクタープロンプト（`features.webLookup`、`web.search.enabled`）: 番号付き検索結果をインラインソース付きの 1 つのノートに要約する。キャラクターカードなし | `{{today}}` `{{query}}` `{{maxChars}}` |
 | `private.md` | いいえ | モードプロンプト（`reply.md`）の後、`forced.md` の前に追加。DM（`features.privateMessages`）のみ。プライベートな会話: ここで話されたことはここに留まる。ペルソナは公開知識を保持する。ファイルがなければ何も追加されない | `{{name}}` `{{author}}` |
-| `draw.md` | はい | 描画サブプロセスのアウトオブキャラクタープロンプト（`features.imageGeneration`）: シーン説明から画像 1 枚を生成する。外見とリクエストのみを受け取り、キャラクターカードは受け取らない | `{{name}}` `{{appearance}}` `{{request}}` |
+| `diary.md` | はい | タスク: 日記投稿を書く。ペルソナ自身のチャンネル、誰にも頼まれていない。計画の種類と概要、過去の投稿、オプションのワールドと検索結果がユーザーメッセージブロックに含まれる。出力: `<msg>`（1〜`diary.maxMessages`）、`<draw>`、または `<skip/>`。`<react>` と `<gif>` は削除。返信属性なし、リンクなし、読者への呼びかけなし | `{{name}}` |
+| `diary-plan.md` | はい | プランナー: 種類、概要、検索と描画の有無を選択。`classifier.text` で動作、キャラクターカードなし。`<now>`、`<server>`、`<about_chat>`、`<recent>`、`<lore>`、`<world>`、`<diary>`、`<kinds>`、`<seeds>` を受け取る。JSON オブジェクト 1 つで回答 | `{{name}}` |
+| `world.md` | いいえ | ペルソナの仮想世界: チャット外の場所と日常。日記の計画・生成リクエストでのみ `<world>` ブロックとしてレンダリング、`diary.world === true` の場合のみ。通常のターンでは使用されない。ファイルなしまたはスイッチオフはブロックなし | `{{name}}` |
+| `diary-seeds.md` | いいえ | 日記プランナー用ランダムシードファミリー。`# name` ヘッダーがファミリーを開始。コードが各ファミリーから 1 行選び `diary.seedSets` 組み合わせを作成。ファイルなしまたは `seedSets` = 0 で省略 | なし |
+| `draw.md` | はい | 描画サブプロセスのアウトオブキャラクタープロンプト（`features.imageGeneration`）: シーン説明から画像 1 枚を生成する。外見とリクエストのみを受け取り、キャラクターカードは受け取らない | `{{name}}` `{{appearance}}` `{{request}}` `{{when}}` |
 | `appearance.md` | いいえ | ペルソナのビジュアル外見。`self="yes"` 時に `draw.md` に挿入される。パーソナリティやバックストーリーなし、1 段落 | `{{name}}` |
 | `mentor-situations.md` | いいえ | Mentor: ケースのテスト状況を作成（`features.mentor`）。JSON のみを返す | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
 | `mentor-score.md` | いいえ | Mentor: ペルソナの回答をスコアリング（`features.mentor`）。キャラクターカードを受け取る。JSON のみを返す | `{{name}}` |
@@ -97,13 +101,21 @@
 | `<lookup>` | ペルソナがこのターンで調べた内容。ウェブ検索（`features.webLookup`）は `labels.lookup.webHeader`、要約された回答、`labels.lookup.sources`。何も見つからなかった場合は `labels.lookup.none`。サーバー検索（`features.recall`）は `labels.lookup.serverHeader`、サマリーノート。サマリーがストレッチを指定した場合はそのストレッチの原文行。両方実行された場合は `labels.lookup.bothNote` がその間に配置。`labels.lookup.stretch` 行が原文ストレッチを導入（`{date}` `{channel}`）。検索分類器が発火し少なくとも 1 つの検索が完了した場合にのみ表示 |
 | `<chat>` | 現在のチャンネルの最新 `context.channelMessages` 件のメッセージ。`context.fetchReplyParents` がオンの場合、トリガーメッセージとウィンドウ末尾の `context.replyParentsFor` 件の返信行（ウィンドウより古いメッセージへの返信）の親が取得され、通常のトランスクリプト行としてウィンドウの前に配置される。トリガーの親はさらにその親も取得可能。ターンあたり最大 `context.replyParentsMax` 件。ギャップマーカーと日付ヘッダーが時間の飛びをカバーし、リプライ行は `transcript.replyTo` で親を引用する。親のメディアは他の行と同様に扱われ、キャッシュ済みの説明はコストなしで提供される。削除済みまたはアクセス不能な親はスキップされ `collect: parent missing` としてログ出力 |
 | `<tempo>` | 10 分 / 1 時間 / 1 日のカウント、参加人数、沈黙時間、判定（live / slow / dead） |
-| `<task>` | `reply` / `interject` / `initiate` / `overheard`（`overheard.md` が存在する場合）/ `elsewhere`（`elsewhere.md` が存在する場合、注目コメント用）、プレースホルダー補完済み。モードプロンプトの後、条件が成立する場合に最大 3 つの `task.*` ラベルが追加（それぞれ空行で区切り）: 分割メッセージの 1 パートに応答するターンでは `task.part`、またはトリガー著者が他の呼びかけを待機中なら `task.queued`。次に他のメンバーがチャンネルで呼びかけを待機中なら `task.queuedOthers`。次に後のメッセージがこの呼びかけに統合されていれば `task.added`。`labels.task.*` を参照 |
+| `<world>` | ペルソナの仮想世界（`prompts/world.md`、`{{name}}` 補完済み）。日記投稿（`mode === 'diary'`）かつ `diary.world === true` の場合のみ。予算圧迫で丸ごと削除。ファイルなしまたはスイッチオフは何も追加しない |
+| `<diary>` | 過去の日記投稿、古い順: `labels.diary.intro`、次に投稿ごとに `labels.diary.line`。計画・生成両方のリクエストに表示。予算圧迫では古い行から先にカット |
+| `<plan>` | この日記投稿の計画: `labels.diary.plan`、次に JSON 1 行 `{"kind","brief","picture"}`。カットされない |
+| `<found>` | 日記の検索結果: `labels.diary.found`、次に検索結果テキスト。計画が検索を要求し結果があった場合のみ。予算では `<lookup>` の直後 |
+| `<kinds>` | 投稿種類と重み・使用回数: `labels.diary.kinds`、次に正の重みを持つ種類ごとに `labels.diary.kindLine`。カットされない |
+| `<seeds>` | ランダムシード組み合わせ: `labels.diary.seeds`、次にセットごとに `- a; b; c`。計画リクエストのみ。ファイルなしまたは `diary.seedSets` = 0 で省略。カットされない |
+| `<task>` | `reply` / `interject` / `initiate` / `overheard`（`overheard.md` が存在する場合）/ `elsewhere`（`elsewhere.md` が存在する場合、注目コメント用）/ `diary`（`diary.md` が存在する場合、日記投稿用）、プレースホルダー補完済み。モードプロンプトの後、条件が成立する場合に最大 3 つの `task.*` ラベルが追加（それぞれ空行で区切り）: 分割メッセージの 1 パートに応答するターンでは `task.part`、またはトリガー著者が他の呼びかけを待機中なら `task.queued`。次に他のメンバーがチャンネルで呼びかけを待機中なら `task.queuedOthers`。次に後のメッセージがこの呼びかけに統合されていれば `task.added`。`labels.task.*` を参照 |
 
 バジェットの優先順位（このリストの下からセクションがトリムされる）: system + task + clock + tempo + senses
 （カットされない）-> 発話者のプロファイル（エピソード付き）-> lookup（全体として保持または削除。ウェブパート、サーバーパート、またはその両方を含む場合がある）-> about_chat -> self_facts -> lore -> server -> chat（新しい順）->
 pulled（`<channel_view>`、`context.caps.pulled` で制限。読み取り専用チャンネルからの呼びかけに応答するターンでは、プルされたブロックは chat の後ではなく前に配置）->
 recent（`context.caps.recent` で制限）->
-他のプロファイル -> attitudes（`context.caps.attitudes` で制限）-> worn（全体として保持または削除）-> other channels -> 絵文字（下からエントリを削除、次にブロック全体; `context.caps.emoji`）-> GIF（同じトリム; `context.caps.gifs`）。
+他のプロファイル -> attitudes（`context.caps.attitudes` で制限）-> worn（全体として保持または削除）->
+日記モードのみ: `<found>`（`<lookup>` の直後）、`<world>`（丸ごと、`<worn>` の後）、`<diary>`（古い行から先にカット）、`<plan>` + `<kinds>` + `<seeds>`（カットされない）->
+other channels -> 絵文字（下からエントリを削除、次にブロック全体; `context.caps.emoji`）-> GIF（同じトリム; `context.caps.gifs`）。
 
 GIF ピッカー（`features.gifPicker`、デフォルトオン）。ペルソナが短い返答（最大 `gifs.pick.maxChars` 文字、デフォルト 160）を書き、自分で GIF を選ばなかった場合、分類器（`classifier.text`、purpose `gif-pick`、`gifs.pick.maxOutputTokens` 60、プロンプト `prompts/gif-pick.md`）が直近の `gifs.pick.contextMessages`（デフォルト 4）チャット行（応答先メッセージを明示）、ペルソナの最初のメッセージ、キャプション付きのフルライブラリ（各エントリにキャプション、ペルソナが最近投稿した場合は自分マーク付き）を受け取ります。分類器はハンドル 1 つまたは `none` を返します。ハンドルが返されると GIF が最初の送信メッセージを置換し、元のメッセージと同じ送信先にリプライします。残りのメッセージは順番に続きます。GIF の送信に失敗した場合、すべてのメッセージがそのまま投稿されます。分類器は最初のメッセージのタイピングシミュレーション中に実行され、日次 GIF 制限 `gifs.maxPerDay` が適用されます。ログ: `gifs: picked`（handle true/false、ライブラリサイズ）または `gifs: pick failed`。
 
@@ -204,6 +216,7 @@ senses.linksWatch                        replaces links when features.videoDescr
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results and that no search can happen during the reply itself
 senses.recall                            shown right after the search line when the server-history search is available: on every server turn, and in a private chat when `features.privateLikeServer` is on (the default). Tells the persona that a search of the server's old messages either ran before the reply or did not, that its part of `<lookup>` is what the history holds (a helper's summary or a verbatim stretch), and that without it nothing was looked up there. An older labels file without the key renders nothing
+senses.diary                             {channel}: `diary.channelId` が設定済みかつ `features.diary` が false でない場合に表示。ペルソナがそのチャンネルで日記をつけていることを伝える
 senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona they can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
@@ -259,6 +272,7 @@ server.category | topic | purpose | topics | tone               {text}
 server.activity                          {activity} = server.activityLive | activitySlow | activityDead
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
+server.diary                             `<server>` マップの日記チャンネルに表示。ペルソナの日記
 server.readOnly                          shown on a channel the bot can read and react in but not write in; never shown on the current channel. Appears in the `<server>` map entry and as a line after a pulled channel's header
 senses.channels                          shown on every server turn: which channels this request shows (the chat, `<other_channels>`, `<channel_view>`); never claim to have looked at a channel not shown
 senses.elsewhere                         {destination}: shown when `features.elsewhere` is on and `memory.mainChannelIds` has a usable channel; says a call from a read-only channel is answered in {destination} with a link
@@ -274,7 +288,18 @@ elsewhere.link                           {text} {link}: joins the jump link to t
 triggers.mention | reply | name | followUp | overheard   followUp = an untagged message the address classifier judged to be for the persona; overheard = talk about the persona, not to them. Both post plain, never as a Discord reply. overheard falls back to followUp, then reply
 triggers.private                         the trigger for a private (DM) message
 triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
+draw.when                                {when}: 画像モデルに光と季節を合わせるためのローカル日時。すべての描画リクエスト（日記含む）で時間が既知の場合に補完。不明時は空
 draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons; daily and userDaily are reserved but no longer reached by triggers.drawFailed — an image cap now posts limits.notice instead of a follow-up turn
+diary.intro                              `<diary>` ブロックの最初の行
+diary.line                               {date} {kind} {gist}: 過去の投稿 1 件
+diary.picture                            {scene}: 投稿に画像があった場合に日記行に付加
+diary.pictureUnknown                     バックフィルされた投稿で画像があったがシーンが記録されていない場合のプレースホルダー
+diary.kindUnknown                        バックフィルされた投稿で種類が記録されていない場合のプレースホルダー
+diary.kinds                              `<kinds>` ブロックの最初の行
+diary.kindLine                           {key} {weight} {count} {window}: 種類 1 件と重み・使用回数
+diary.plan                               `<plan>` ブロックの最初の行
+diary.found                              `<found>` ブロックの最初の行
+diary.seeds                              `<seeds>` ブロックの最初の行
 memory.privateNote                       the <private> block content in a private analyzer batch: marks the batch as a private conversation, constrains output to users for the partner's id only
 memory.privateChannel                    heading used in place of a channel name for the <new_messages> section in a private batch
 limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
@@ -616,6 +641,14 @@ Mentor サンドボックスは、状況ごとに 1 回の多様性パスを実�
 - モデレーション拒否（HTTP 400/403 + モデレーションマーカー）はリトライされない。
 - ログにはモデル、カウント、コスト、失敗理由が記録され、プロンプトは含まれません（メンバーを引用する可能性があるため）。
 - ドライランでは完全なイメージプロンプト（プロンプトファイル + ペルソナのリクエスト）がログとミラーに記録されますが、何も生成されません。
+
+## 日記
+
+`features.diary`（デフォルトオン、ただし `diary.channelId` なしでは何も動かない）。ペルソナがオーナーの選んだチャンネルに、`bot.timezone` のウィンドウからランダムな時間に自発的に投稿する。各投稿は 2 つのモデルリクエスト: 計画ステップと生成ステップ。計画がウェブ検索を要求すると 3 番目が追加される。
+
+2 つのリクエスト、計画 JSON の形式、バリデーションとフォールバック、出力ルール、`{{when}}` プレースホルダー、記録、データファイル、バックフィル、サーバーマップでの表示、ログの詳細は英語版 `docs/en/prompt-contract.md` の「Diary」セクションを参照。
+
+ログ: `diary: plan`、`diary: planned`、`diary: due`、`diary: post`、`diary: skip`（理由: `no-channel`、`off`、`paused`、`warmup`、`not-writable`、`cap`、`grace`、`busy`）、`diary: backfill`、`diary: plan failed`、`diary: search failed`、`diary: backfill failed`。
 
 ## プライベートチャット
 

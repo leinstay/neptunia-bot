@@ -42,6 +42,7 @@ Every key in `config.json` with its default, grouped by section.
 | `recent` | `true` | Show a `<recent>` block of what happened on the server in the last few days. A missing key counts as on. See `memory.recentHours` and `context.caps.recent` |
 | `channelRoute` | `true` | A classifier picks a channel the conversation is about before a turn, so the channel can be pulled into the request. A missing key counts as on. See `route.*` |
 | `pauseNotice` | `true` | Post a short notice when the persona is called while paused. A missing key counts as on. See `mention.pauseNoticeMinutes` and `labels.limits.paused` |
+| `diary` | `true` | The persona posts in one owner-chosen channel on its own, on a random schedule. A missing key counts as on; with no `diary.channelId` set, nothing happens. See [Diary](diary.md) |
 | `variety` | `true` | A model pass names the devices the persona is overusing in their own recent lines. The result becomes a `<worn>` block in the turn's request. A missing key counts as on |
 | `varietyPrecompute` | `true` | Start the variety pass right after the persona posts text, so the next turn finds the result ready. Off: the pass runs only at the turn, but a late answer is still stored for later. A missing key counts as on |
 | `stickyGuard` | `true` | After each post, find phrases the persona stuck on (repeated in 3+ recent lines, rare in older ones) and add them as filler entries so the next turn sees them in the advice list. No model needed. A missing key counts as on |
@@ -610,6 +611,43 @@ Provider-specific options for `google/*` image models.
 | Key | Default | Meaning |
 |---|---|---|
 | `resolution` | `"1K"` | Output resolution (`512`, `1K`, `2K`, `4K`; support varies by model). `gemini-2.5-flash-image` has no resolution knob |
+
+## `diary`
+
+Settings for the diary channel (`features.diary`). The persona posts in one owner-chosen channel on its own, at random times drawn from configurable windows. Each post is planned by a classifier, then composed by the main model with the character card and all the usual memory blocks. All hot-reloaded. See [Diary](diary.md) for the setup and cost.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `channelId` | `""` | The diary channel. Written by `/nep diary set`, read at every tick. Empty means no diary |
+| `world` | `false` | Include `prompts/world.md` as a `<world>` block in the diary's plan and compose requests. Must be exactly `true`; a missing key counts as off. `/nep set diary.world true` turns it on. The file describes the persona's virtual world, used only by the diary, never in an ordinary turn |
+| `windows` | see below | Posting windows in `bot.timezone`. Each window has `from` and `to` (hours 0–24, wrapping past midnight) and `posts: [min, max]` (how many posts the window draws). The default four windows are described in [Diary: windows](diary.md#windows) |
+| `quietDayChance` | `0.3` | Chance that the whole day gets no posts. Rolled once when the day plan is created |
+| `minGapMinutes` | `90` | Minimum minutes between two planned slots. A slot closer than this to the previous one is dropped |
+| `maxPerDay` | `3` | Maximum posts per day. When the planner draws more slots than this, extras are dropped at random. The daily count also gates `/nep diary post` |
+| `maxPicturesPerDay` | `2` | Maximum diary pictures per day. Shared with `image.maxPerDay`: whichever cap runs out first wins. When spent, the plan's `picture` is forced false and the senses say no drawing |
+| `slotGraceMinutes` | `30` | Minutes after a planned slot during which it still fires. A slot missed by more than this while the bot was down is dropped, not fired late |
+| `maxMessages` | `3` | Maximum `<msg>` messages per diary post. Excess messages are trimmed |
+| `historyPosts` | `150` | Past posts kept in `diary.json` and shown to the planner and the composer in the `<diary>` block. The oldest are dropped when the cap is exceeded |
+| `gistChars` | `200` | Characters kept per post gist and per picture scene in the diary history |
+| `seedSets` | `2` | Random seed combinations drawn from `prompts/diary-seeds.md` and shown to the planner in the `<seeds>` block. `0` omits the block |
+| `kinds` | `{ "selfPicture": 3, "picture": 2, "meme": 1, "thought": 2, "news": 2, "facts": 1, "status": 3 }` | Post kinds with their weights. A kind with weight 0 is never chosen. The planner sees these weights and how many recent posts used each kind. Hot-reloaded, so the owner can steer the mix at any time |
+| `searchKinds` | `["news", "facts"]` | Kinds that may trigger a web search. The planner writes a query only for these kinds |
+| `pictureKinds` | `["selfPicture", "picture", "meme"]` | Kinds that carry a drawing by default when the planner falls back to a random kind |
+| `planMaxOutputTokens` | `300` | Max output tokens for the plan request |
+| `planTimeoutMs` | `20000` | Timeout for the plan request (ms) |
+
+Default `windows`:
+
+```json
+[
+  { "from": 7,  "to": 11, "posts": [0, 0] },
+  { "from": 12, "to": 16, "posts": [0, 1] },
+  { "from": 18, "to": 1,  "posts": [0, 2] },
+  { "from": 1,  "to": 5,  "posts": [0, 1] }
+]
+```
+
+Morning (7–11) is off. Day (12–16) draws 0 or 1 post. Evening (18–01 the next day) draws 0, 1 or 2. Night (01–05) draws 0 or 1. All times are in `bot.timezone`. A window whose `to` is not after its `from` wraps past midnight: `{ "from": 18, "to": 1 }` runs from 18:00 today to 01:00 tomorrow.
 
 ## `variety`
 

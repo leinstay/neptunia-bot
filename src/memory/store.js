@@ -27,6 +27,8 @@
 //   data/guilds/<guildId>/recent.json         the recent store: short dated lines about the last
 //                                            `memory.recentHours` hours, each with its source channel
 //                                            (src/memory/recent.js)
+//   data/guilds/<guildId>/diary.json          the persona's diary posts, newest last, one-line gists
+//                                            (src/behavior/diary.js); never deleted by code
 //
 // Everything is cached in memory, marked dirty on change and flushed on a
 // timer and on shutdown. Writes are atomic (temp file + rename) so a crash
@@ -94,6 +96,11 @@ import {
   pinFiller,
   removeFiller,
 } from '../behavior/fillers.js';
+
+const DIARY_HISTORY_POSTS = 150; // diary.historyPosts
+
+/** The diary of a guild with no post yet (data/guilds/<id>/diary.json). */
+const emptyDiary = () => ({ posts: [], updatedAt: 0 });
 
 function readJson(file, fallback) {
   try {
@@ -654,6 +661,7 @@ export function createStore({ dataDir }) {
   const privateFile = (guildId, userId) => path.join(privateDir(guildId), `${userId}.json`);
   const voiceFile = (guildId) => path.join(guildDir(guildId), 'voice.json');
   const recentFile = (guildId) => path.join(guildDir(guildId), 'recent.json');
+  const diaryFile = (guildId) => path.join(guildDir(guildId), 'diary.json');
   const stateFile = path.join(dataDir, 'state.json');
 
   const stateEntry = entry(stateFile, () => ({}));
@@ -777,6 +785,23 @@ export function createStore({ dataDir }) {
       log.warn('store: recent lines dropped', { guildId, dropped: raw.lines.length - item.value.lines.length });
     }
     return item;
+  }
+
+  /** The cache entry of a guild's diary, the empty diary when there is no file; a value that is not
+   * a diary (not an object, or `posts` not a list) is replaced by the empty one in the cache, and
+   * the disk copy is only rewritten by the next change. */
+  function diaryEntry(guildId) {
+    const item = entry(diaryFile(guildId), emptyDiary);
+    if (!isPlainObject(item.value) || !Array.isArray(item.value.posts)) item.value = emptyDiary();
+    return item;
+  }
+
+  /** Store `posts` (the newest `max`) as the guild's diary, stamped `now`, and mark it dirty. */
+  function writeDiary(guildId, posts, { max, now } = {}) {
+    const item = diaryEntry(guildId);
+    const limit = Number.isFinite(max) && max > 0 ? Math.floor(max) : DIARY_HISTORY_POSTS;
+    item.value = { posts: posts.slice(-limit), updatedAt: Number.isFinite(now) ? now : Date.now() };
+    item.dirty = true;
   }
 
   /** Take every recent line that names one member out of the guild's recent store
@@ -2176,6 +2201,43 @@ export function createStore({ dataDir }) {
       if (!Array.isArray(next)) throw new TypeError('updateVoiceQueue: the change must return a queue');
       writeQueue(item, next);
       return outcome;
+    },
+
+    // ---- the diary: the persona's own posts in its diary channel (src/behavior/diary.js) ----
+
+    /**
+     * A copy of the guild's diary (data/guilds/<id>/diary.json): `{ posts, updatedAt }`, posts
+     * newest last; the empty diary (`{ posts: [], updatedAt: 0 }`) when there is no file, never
+     * null. Reading never creates the file.
+     * @param {string} guildId
+     * @returns {{ posts: Array<{ at: number, kind: string|null, gist: string, picture: string|boolean|null,
+     *   messageIds: string[], search: string }>, updatedAt: number }}
+     */
+    getDiary(guildId) {
+      return structuredClone(diaryEntry(guildId).value);
+    },
+
+    /**
+     * Append one post to the guild's diary, keep the newest `max` (diary.historyPosts) and stamp
+     * `updatedAt` with `now` (epoch ms, the clock when omitted).
+     * @param {string} guildId
+     * @param {{ at: number, kind: string|null, gist: string, picture: string|boolean|null,
+     *   messageIds: string[], search: string }} post
+     * @param {{ max?: number, now?: number }} [opts]
+     */
+    appendDiaryPost(guildId, post, opts = {}) {
+      writeDiary(guildId, [...diaryEntry(guildId).value.posts, structuredClone(post)], opts);
+    },
+
+    /**
+     * Replace the guild's post list (the backfill, run only on an empty diary), keeping the newest
+     * `max` (diary.historyPosts) and stamping `updatedAt` with `now`.
+     * @param {string} guildId
+     * @param {Array<object>} posts  Oldest first.
+     * @param {{ max?: number, now?: number }} [opts]
+     */
+    setDiaryPosts(guildId, posts, opts = {}) {
+      writeDiary(guildId, Array.isArray(posts) ? structuredClone(posts) : [], opts);
     },
 
     // ---- the recent store: short dated lines about the last days (src/memory/recent.js) ----

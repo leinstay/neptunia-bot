@@ -52,6 +52,9 @@ npm start
 
 ## 功能与变更
 
+**06.10.2026**  
+Neptunia 写日记: 在一个频道里自发发帖，无需任何人要求。帖子在可配置的时间窗口内随机出现，夹杂安静的日子。帖子种类多样: 场景绘画、表情包、思考、转述新闻、趣味冷知识、一行心情。每次发帖前，人格会回顾自己的历史，选择还没做过的事。部分帖子种类会触发网络搜索，用自己的话转述找到的内容。拥有者通过 `/nep diary set` 指定频道，通过配置调整时间表、帖子种类和权重。
+
 **05.10.2026**  
 Neptunia 能区分有人在和它说话还是在以第三人称谈论它。当对话中提到另一个频道时，即使是用文字提及而没有链接，它也会打开该频道并阅读包含图片在内的最新消息。如果有人在它没有发言权限的频道呼叫它，它会在主频道带着那条消息的链接回复。它还可以主动在主频道评论自己在无法发言的频道读到的内容。面向所有人的问题比针对某个特定人的问题更容易引起它的回应。它记住最近几天的重要事情: 别人送了什么或拜托了什么、自己承诺了什么、成员之间发生了什么。当有人问起某个人时，它会回忆起与那个人有关的往事。它搜索服务器旧消息的方式和搜索网络一样: 对于"我们新年做了什么"或"……是谁"之类的问题，它会找到相关的聊天记录并据此作答。
 
@@ -199,6 +202,10 @@ prompts/
   initiate.md              任务：发起话题
   forced.md                强制回合（/nep interject、/nep initiate）时追加
   memory.md                记忆分析器的提示
+  diary.md                 任务: 写日记帖子
+  diary-plan.md            日记计划器: 选择下一篇帖子的种类和主题
+  world.md                 角色的虚拟世界（仅用于日记帖子）
+  diary-seeds.md           日记计划器的随机种子族
   draw.md                  绘画子进程的提示（图像生成）
   appearance.md            自画像用的角色外貌
   describe.md              媒体描述器的提示
@@ -235,6 +242,7 @@ docs/
     warmup.md              预热：阶段、进度、限制、命令
     media.md               图片、视频、链接、搜索、工具、成本
     messages-and-memory.md 流程、分析器、档案、回忆、世界书
+    diary.md               日记功能: 设置、窗口、成本、调优
   zh/                      中文
     README.md
     prompt-contract.md
@@ -243,6 +251,7 @@ docs/
     warmup.md
     media.md
     messages-and-memory.md
+    diary.md
   ja/                      日文
     README.md
     prompt-contract.md
@@ -251,6 +260,7 @@ docs/
     warmup.md
     media.md
     messages-and-memory.md
+    diary.md
   ru/                      俄文
     README.md
     prompt-contract.md
@@ -259,6 +269,7 @@ docs/
     warmup.md
     media.md
     messages-and-memory.md
+    diary.md
 src/
   index.js                 入口，组装，定时器，关闭
   config.js                .env 解析器，配置加载器，deepMerge
@@ -292,6 +303,7 @@ src/
     mention.js             呼叫检测，忽略启发式
     prompt.js              带 token 预算的请求构建器
     turn.js                一个回合：收集、构建、调用、执行
+    diary.js               日记调度器、日计划、回填
     spontaneous.js         混沌定时器，窃听，面向全体的问题
     split.js               纯函数：任务分拆预过滤和回答解析
     pending.js             挂起的呼叫，合并回答解析，折叠
@@ -329,6 +341,7 @@ data/                      持久状态（已加入 gitignore，运行时创建�
   guilds/<id>/buffer.json  自上次记忆更新以来观察到的消息
   guilds/<id>/media.json   媒体描述缓存
   guilds/<id>/gifs.json    GIF 库：handle、URL、使用计数
+  guilds/<id>/diary.json   日记帖子历史（一行摘要）
   guilds/<id>/recent.json  分析器的近期记事
   guilds/<id>/users/       每成员档案和关系
   guilds/<id>/private/     每成员私聊记忆

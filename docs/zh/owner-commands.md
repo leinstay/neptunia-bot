@@ -35,6 +35,10 @@
 | `/nep private show <user>` | 显示成员的私有记忆：关系、兴趣、细节、回忆、私有和有效好感度、今日回复数。无私有层则为普通回答。仅限所有者；不可授权 |
 | `/nep private forget <user>` | 仅删除成员的私有记忆；公共档案保留。等待正在运行的分析器批次完成后再执行。仅限所有者；不可授权 |
 | `/nep private purge <user>` | 删除机器人在与成员的私信对话中发送的消息（扫描最多 `private.purgeMaxMessages` 条），然后删除该成员的私有记忆。成员自己的消息保留。暂停时拒绝。仅限所有者；不可授权 |
+| `/nep diary set <channel>` | 将日记指向此频道。机器人需具有查看、发送、读取历史和附件权限。将 `diary.channelId` 写入 `config.local.json`。日记历史为空时，从角色在该频道的过去帖子中回填。返回频道名、回填数量和今日计划 |
+| `/nep diary show` | 显示日记频道、今日时间槽和完成标记（`bot.timezone`）、今日已用帖子和图片数、历史大小 |
+| `/nep diary off` | 清除 `diary.channelId`。日记历史文件保留 |
+| `/nep diary post [kind]` | 立即强制发布一篇帖子。可选种类键（如 `selfPicture`, `thought`）；未知种类会列出所有种类后拒绝。受日次上限限制。dry-run 模式下仅镜像 |
 | `/nep alias add <user> <name>` | 添加聊天别名；立即确认 |
 | `/nep alias remove <user> <name>` | 移除聊天别名 |
 | `/nep learned list` | 列出所学内容（含 ID、教授者、观察次数） |

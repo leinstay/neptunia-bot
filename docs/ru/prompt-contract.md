@@ -47,7 +47,11 @@
 | `read-link.md` | нет | Внеролевой промпт для чтения ссылок (`features.webLookup`, `web.links.enabled`): сжать загруженную страницу в один абзац. Получает заголовок и тело страницы. Без карточки персонажа | `{{today}}` `{{maxChars}}` |
 | `search-summary.md` | нет | Внеролевой промпт для конденсатора поиска (`features.webLookup`, `web.search.enabled`): сжать нумерованные результаты поиска в одну заметку со встроенными ссылками на источники. Без карточки персонажа | `{{today}}` `{{query}}` `{{maxChars}}` |
 | `private.md` | нет | Добавляется после промпта режима (`reply.md`), перед `forced.md`, только в личном сообщении (`features.privateMessages`). Приватный разговор: сказанное здесь остаётся здесь; персонаж сохраняет публичные знания. Отсутствующий файл ничего не добавляет | `{{name}}` `{{author}}` |
-| `draw.md` | да | Внеролевой промпт подпроцесса рисования (`features.imageGeneration`): создаёт одну картинку по описанию сцены. Получает только внешность и запрос — никогда карточку персонажа | `{{name}}` `{{appearance}}` `{{request}}` |
+| `diary.md` | да | Задача: написать пост в дневник. Собственный канал персонажа, никто не просил. Вид и краткое описание из плана, прошлые посты, необязательный мир и результат поиска в блоках пользовательского сообщения. Вывод: `<msg>` (1–`diary.maxMessages`), `<draw>` или `<skip/>`; `<react>` и `<gif>` отбрасываются. Без атрибутов ответа, без ссылок, без обращения к читателю | `{{name}}` |
+| `diary-plan.md` | да | Планировщик: выбрать вид, краткое описание, искать ли и рисовать ли. На `classifier.text`, без карточки. Получает `<now>`, `<server>`, `<about_chat>`, `<recent>`, `<lore>`, `<world>`, `<diary>`, `<kinds>`, `<seeds>`. Один JSON-объект | `{{name}}` |
+| `world.md` | нет | Виртуальный мир персонажа: места и привычки за пределами чата. Блок `<world>` только в запросах дневника, только при `diary.world === true`. Никогда в обычном ходе. Без файла или переключателя — нет блока | `{{name}}` |
+| `diary-seeds.md` | нет | Случайные семейства сидов для планировщика. `# name` начинает семью; код выбирает одну строку на семью и составляет `diary.seedSets` комбинаций. Пропускается при отсутствии или `seedSets` = 0 | нет |
+| `draw.md` | да | Внеролевой промпт подпроцесса рисования (`features.imageGeneration`): создаёт одну картинку по описанию сцены. Получает только внешность и запрос — никогда карточку персонажа | `{{name}}` `{{appearance}}` `{{request}}` `{{when}}` |
 | `appearance.md` | нет | Внешний вид персонажа, вставляется в `draw.md` при `self="yes"`. Один абзац, без личности, без предыстории | `{{name}}` |
 | `mentor-situations.md` | нет | Ментор: придумать тестовые ситуации для кейса (`features.mentor`). Возвращает только JSON | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
 | `mentor-score.md` | нет | Ментор: оценить ответы персонажа на ситуацию (`features.mentor`). Получает карточку персонажа. Возвращает только JSON | `{{name}}` |
@@ -97,13 +101,21 @@
 | `<lookup>` | Что персонаж нашёл на этом ходу. Веб-поиск (`features.webLookup`) содержит `labels.lookup.webHeader`, сжатый ответ, `labels.lookup.sources` и, если ничего не найдено, `labels.lookup.none`. Серверный поиск (`features.recall`) содержит `labels.lookup.serverHeader`, сводку и, если помощник назвал отрезок, дословные строки этого отрезка. Когда оба выполнены, `labels.lookup.bothNote` стоит между ними. Строка `labels.lookup.stretch` вводит дословный отрезок (`{date}` `{channel}`). Появляется только когда классификатор поиска сработал и хотя бы один поиск завершился |
 | `<chat>` | До `context.channelMessages` последних сообщений текущего канала. При включённом `context.fetchReplyParents` сообщение-триггер и последние `context.replyParentsFor` строк окна, являющихся ответами на сообщения старше окна, получают загруженных родителей: они ставятся перед окном как обычные строки транскрипта; родитель триггера может также принести собственного родителя. Не более `context.replyParentsMax` родителей за ход. Маркер разрыва и заголовок даты покрывают прыжок во времени; строка ответа цитирует родителя через `transcript.replyTo`; медиа в родительском сообщении обрабатывается так же, как в любой другой строке, кешированное описание отдаётся бесплатно. Удалённый или недоступный родитель пропускается и логируется как `collect: parent missing` |
 | `<tempo>` | Счётчики за 10 мин / час / сутки, число участников, тишина, вердикт (live / slow / dead) |
-| `<task>` | `reply` / `interject` / `initiate` / `overheard` (при наличии `overheard.md`) / `elsewhere` (при наличии `elsewhere.md`, для замеченного комментария) с заполненными плейсхолдерами. После промпта режима добавляются до трёх меток `task.*`, когда их условия выполнены (каждая через пустую строку): `task.part`, когда ход отвечает на одну часть разделённого сообщения, или `task.queued`, когда у автора триггера есть другие ожидающие вызовы; затем `task.queuedOthers`, когда у других участников есть ожидающие вызовы в канале; затем `task.added`, когда поздние сообщения были вложены в этот вызов. См. `labels.task.*` ниже |
+| `<world>` | Виртуальный мир персонажа (`prompts/world.md` с заполнённым `{{name}}`). Только в посте дневника (`mode === 'diary'`) при `diary.world === true`. Отбрасывается целиком при нехватке бюджета. Без файла или выключенного переключателя ничего не добавляется |
+| `<diary>` | Прошлые посты дневника, от старых к новым: `labels.diary.intro`, затем по строке `labels.diary.line` на пост. Показывается в обоих запросах (план и составление). При нехватке бюджета сначала обрезаются старейшие строки |
+| `<plan>` | План для этого поста дневника: `labels.diary.plan`, затем одна JSON-строка `{"kind","brief","picture"}`. Никогда не обрезается |
+| `<found>` | Что нашёл поиск дневника: `labels.diary.found`, затем текст результата поиска. Только когда план запросил поиск и тот вернул результат. В бюджете сразу после `<lookup>` |
+| `<kinds>` | Виды постов с весами и счётчиками использования: `labels.diary.kinds`, затем `labels.diary.kindLine` на вид с положительным весом. Никогда не обрезается |
+| `<seeds>` | Случайные комбинации сидов: `labels.diary.seeds`, затем `- a; b; c` на набор. Только в запросе плана. Пропускается при отсутствии файла или `diary.seedSets` = 0. Никогда не обрезается |
+| `<task>` | `reply` / `interject` / `initiate` / `overheard` (при наличии `overheard.md`) / `elsewhere` (при наличии `elsewhere.md`, для замеченного комментария) / `diary` (при наличии `diary.md`, для поста дневника) с заполненными плейсхолдерами. После промпта режима добавляются до трёх меток `task.*`, когда их условия выполнены (каждая через пустую строку): `task.part`, когда ход отвечает на одну часть разделённого сообщения, или `task.queued`, когда у автора триггера есть другие ожидающие вызовы; затем `task.queuedOthers`, когда у других участников есть ожидающие вызовы в канале; затем `task.added`, когда поздние сообщения были вложены в этот вызов. См. `labels.task.*` ниже |
 
 Приоритет бюджета (секции обрезаются с конца этого списка): системный промпт + задача + часы + темп + восприятие
 (никогда не обрезаются) -> профиль вызвавшего с эпизодами -> lookup (сохраняется или отбрасывается целиком; может содержать веб-часть, серверную часть или обе) -> серверные привычки -> факты о себе -> лорбук -> карта каналов -> транскрипт (новейшие сначала) ->
 подтянутый (`<channel_view>`, лимит `context.caps.pulled`; на ходе, отвечающем на вызов из канала только для чтения, подтянутый блок ставится перед транскриптом, а не после) ->
 recent (лимит `context.caps.recent`) ->
-остальные профили -> attitudes (лимит `context.caps.attitudes`) -> worn (сохраняется или отбрасывается целиком) -> соседние каналы -> эмодзи (записи с конца, затем весь блок; `context.caps.emoji`) -> GIF (та же обрезка; `context.caps.gifs`).
+остальные профили -> attitudes (лимит `context.caps.attitudes`) -> worn (сохраняется или отбрасывается целиком) ->
+только режим diary: `<found>` (сразу после `<lookup>`), `<world>` (целиком, после `<worn>`), `<diary>` (старейшие строки обрезаются первыми), `<plan>` + `<kinds>` + `<seeds>` (никогда не обрезаются) ->
+соседние каналы -> эмодзи (записи с конца, затем весь блок; `context.caps.emoji`) -> GIF (та же обрезка; `context.caps.gifs`).
 
 Подборщик GIF (`features.gifPicker`, по умолчанию включён). Когда персонаж пишет короткий ответ (не длиннее `gifs.pick.maxChars` символов, по умолчанию 160) и сам не выбрал GIF, классификатор (`classifier.text`, purpose `gif-pick`, `gifs.pick.maxOutputTokens` 60, промпт `prompts/gif-pick.md`) получает последние `gifs.pick.contextMessages` (по умолчанию 4) строк чата с указанием отвечаемого сообщения, первое сообщение персонажа и полную библиотеку с подписями (каждая запись с подписью, с отметкой недавней отправки персонажем). Классификатор отвечает одним хэндлом или `none`. При хэндле GIF заменяет первое исходящее сообщение и отвечает туда, куда отвечало бы оно; остальные сообщения следуют по порядку. Если отправка GIF не удалась, все сообщения публикуются как написаны. Классификатор запускается во время имитации набора первого сообщения; дневной лимит `gifs.maxPerDay` действует. В логах: `gifs: picked` (handle true/false, размер библиотеки) или `gifs: pick failed`.
 
@@ -210,6 +222,7 @@ senses.linksWatch                        replaces links when features.videoDescr
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results and that no search can happen during the reply itself
 senses.recall                            shown right after the search line when the server-history search is available: on every server turn, and in a private chat when `features.privateLikeServer` is on (the default). Tells the persona that a search of the server's old messages either ran before the reply or did not, that its part of `<lookup>` is what the history holds (a helper's summary or a verbatim stretch), and that without it nothing was looked up there. An older labels file without the key renders nothing
+senses.diary                             {channel}: показывается при установленном `diary.channelId` и `features.diary` не false; персонаж знает, что ведёт дневник в этом канале
 senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona they can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
@@ -265,6 +278,7 @@ server.category | topic | purpose | topics | tone               {text}
 server.activity                          {activity} = server.activityLive | activitySlow | activityDead
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
+server.diary                             показывается на канале дневника в карте `<server>`. Дневник персонажа
 server.readOnly                          shown on a channel the bot can read and react in but not write in; never shown on the current channel. Appears in the `<server>` map entry and as a line after a pulled channel's header
 senses.channels                          shown on every server turn: which channels this request shows (the chat, `<other_channels>`, `<channel_view>`); never claim to have looked at a channel not shown
 senses.elsewhere                         {destination}: shown when `features.elsewhere` is on and `memory.mainChannelIds` has a usable channel; says a call from a read-only channel is answered in {destination} with a link
@@ -280,7 +294,18 @@ elsewhere.link                           {text} {link}: joins the jump link to t
 triggers.mention | reply | name | followUp | overheard   followUp = an untagged message the address classifier judged to be for the persona; overheard = talk about the persona, not to them. Both post plain, never as a Discord reply. overheard falls back to followUp, then reply
 triggers.private                         the trigger for a private (DM) message
 triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
+draw.when                                {when}: локальные дата и время для модели изображений, чтобы свет и сезон совпадали. Заполняется для каждой картинки (дневник и не только), когда время известно; пусто иначе
 draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons; daily and userDaily are reserved but no longer reached by triggers.drawFailed — an image cap now posts limits.notice instead of a follow-up turn
+diary.intro                              первая строка блока `<diary>`
+diary.line                               {date} {kind} {gist}: один прошлый пост
+diary.picture                            {scene}: добавляется к строке дневника, если пост содержал картинку
+diary.pictureUnknown                     подстановка сцены для бэкфилленного поста с картинкой, но без записанной сцены
+diary.kindUnknown                        подстановка вида для бэкфилленного поста без записанного вида
+diary.kinds                              первая строка блока `<kinds>`
+diary.kindLine                           {key} {weight} {count} {window}: один вид с весом и счётчиком использования
+diary.plan                               первая строка блока `<plan>`
+diary.found                              первая строка блока `<found>`
+diary.seeds                              первая строка блока `<seeds>`
 memory.privateNote                       the <private> block content in a private analyzer batch: marks the batch as a private conversation, constrains output to users for the partner's id only
 memory.privateChannel                    heading used in place of a channel name for the <new_messages> section in a private batch
 limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
@@ -782,6 +807,58 @@ Discord загружается и отправляется как элемент
 - Логи содержат модель, счётчики, стоимость и причины ошибок — никогда промпт, потому что он может цитировать участников.
 - В сухом прогоне полный промпт изображения (файлы промптов + запрос персонажа) логируется и зеркалируется, но ничего не
   генерируется.
+
+## Дневник
+
+`features.diary` (по умолчанию включён, но без `diary.channelId` ничего не работает). Персонаж сам пишет в один выбранный владельцем канал, во времена из настраиваемых окон в `bot.timezone`. Каждый пост состоит из двух запросов к модели: шаг планирования и шаг составления. Третий запрос добавляется, когда план запрашивает веб-поиск.
+
+### Два запроса
+
+**План** (`prompts/diary-plan.md` на `classifier.text`, purpose `diary-plan`, `diary.planMaxOutputTokens` 300, `diary.planTimeoutMs` 20000). Без карточки. Блоки пользовательского сообщения: `<now>`, `<server>`, `<about_chat>`, `<recent>`, `<lore>`, `<world>` (при `diary.world`), `<diary>`, `<kinds>`, `<seeds>`. Ответ — один JSON-объект:
+
+```
+{"kind": "<key>", "brief": "<одна строка>", "search": "<запрос или пусто>", "picture": true|false}
+```
+
+`kind` должен быть ключом `diary.kinds` с положительным весом. `search` сохраняется только для вида из `diary.searchKinds`. `picture` равен true только при ответе `true` и разрешённых лимитах на картинки.
+
+**Валидация и фоллбэк.** `validatePlan` (в `src/behavior/diary.js`) нормализует ответ. Если вид отсутствует, неизвестен или имеет вес 0, весь ответ заменяется взвешенным случайным видом с пустым brief и search (`fallback: true`). `brief` обрезается до 300 символов. `picture` принудительно становится false при исчерпании `diary.maxPicturesPerDay` или `image.maxPerDay`.
+
+**Поиск.** Когда план задаёт поисковый запрос и доступен `lookup.search`, запрос проходит через имеющийся путь Brave (с кешем, `web.maxPerDay`). Текст результата становится блоком `<found>` в запросе составления. Неудавшийся или исчерпавший лимит поиск превращает пост в тот же вид без находки.
+
+**Составление** (`prompts/diary.md` как задача, основная модель с карточкой и всеми блоками памяти, `<worn>` включён). Запрос получает `<world>` (при `diary.world`), `<diary>`, `<plan>` и `<found>` (если поиск дал результат). Блок `<diary>` обрезается через `fitSections`: сначала старейшие строки, затем весь блок. `<plan>` и `<kinds>` никогда не обрезаются.
+
+### Правила вывода
+
+Действуют только теги `<msg>`. Атрибуты ответа отбрасываются. URL в тексте сообщений удаляются механически. Не более `diary.maxMessages` (3) сообщений; лишние обрезаются. `<react>` и `<gif>` отбрасываются в этом режиме. `<skip/>` означает отсутствие поста. Пост может быть только картинкой.
+
+Неудавшийся рисунок в посте дневника логируется; ход `drawFailed` не запускается (никто не просил).
+
+### Промпт рисования и `{{when}}`
+
+Каждый запрос рисования (дневник и не только) теперь несёт локальное время: плейсхолдер `{{when}}` в `draw.md` заполняется через `labels.draw.when`, когда время известно, или остаётся пустым. Модель изображений использует это для выбора освещения и сезона.
+
+### Запись
+
+После публикации пост записывается в `diary.json` (`store.appendDiaryPost`, хранятся новейшие `diary.historyPosts`): `{ at, kind, gist, picture, messageIds, search }`. `gist` — текст поста в одну строку, обрезанный до `diary.gistChars`. `picture` — текст сцены (обрезанный так же) или null. Дневной счётчик постов увеличивается; счётчик картинок — только при публикации картинки.
+
+В dry-run пост логируется и зеркалируется. Ничего не записывается и счётчики не увеличиваются.
+
+### Файл данных
+
+`data/guilds/<id>/diary.json`: `{ posts: [...], updatedAt }`. Посты от старых к новым, лимит `diary.historyPosts` (150). Каждый пост: `{ at, kind, gist, picture, messageIds, search }`. Файл никогда не удаляется кодом; `/nep diary off` его сохраняет.
+
+### Бэкфилл
+
+Когда `diary.json` не содержит постов, первый тик с каналом и `/nep diary set` читают до `diary.historyPosts` собственных сообщений персонажа из канала (REST, от старых к новым) и сохраняют с `kind: null`, однострочным краткого содержанием и `labels.diary.pictureUnknown` как сценой для сообщений с картинкой.
+
+### Дневник на карте сервера
+
+Собственные сообщения персонажа в канале дневника учитываются в `days` и `writers` канала (единственное исключение из правила, что строки персонажа не считаются). `renderChannel` помечает канал через `labels.server.diary`.
+
+### Логи
+
+`diary: plan` (day, slots count, quiet), `diary: planned` (kind, brief, search, picture, fallback, pictureAllowed), `diary: due` (slot), `diary: post` (kind, messages, picture, search, outcome, forced), `diary: skip` (reason: `no-channel`, `off`, `paused`, `warmup`, `not-writable`, `cap`, `grace`, `busy`), `diary: backfill` (count), `diary: plan failed` (reason, status), `diary: search failed` (reason), `diary: backfill failed` (error).
 
 ## Приватный чат
 

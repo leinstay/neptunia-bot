@@ -21,6 +21,10 @@
 //   6b. the members the persona feels most strongly about that the request
 //       does not describe (`<attitudes>`, one piece: names and bands)
 //   6c. the devices the persona has worn out in its own recent lines (`<worn>`, one piece)
+//   6d. a diary post only (mode `diary`): the persona's world (`<world>`, one piece, under
+//       `diary.world`), then its past diary posts (`<diary>`, the oldest lines cut first);
+//       the post's `<plan>` is never cut, and what its search found (`<found>`) ranks
+//       right after `<lookup>`
 //   7. neighbouring channels
 //   8. the server's custom emoji (`<emoji>`)
 //   9. the GIF library (`<gifs>`)
@@ -59,6 +63,7 @@ import { ID_DIGITS, fromTokens, isWordChar, occursAsWholeWord } from '../memory/
 import { mergeProfiles } from './private.js';
 import { renderWorn } from './variety.js';
 import { gifWatchBlocker } from '../memory/gif-watch.js';
+import { renderDiaryBlock, renderKindsBlock } from './diary.js';
 
 const TAG_OVERHEAD = 60;
 
@@ -499,7 +504,7 @@ function currentChannelFallback(currentChannelId, history) {
  * carries `labels.server.readOnly` (src/memory/channels.js#renderChannel,
  * never on the current channel).
  */
-function serverItems(channels, currentChannelId, neighborChannelIds, history, now, activityCfg, labels, nameOf, readOnlyIds = new Set()) {
+function serverItems(channels, currentChannelId, neighborChannelIds, history, now, activityCfg, labels, nameOf, readOnlyIds = new Set(), diaryChannelId = null) {
   const byId = new Map(channels.map((channel) => [channel.id, channel]));
   const current = byId.get(currentChannelId) ?? currentChannelFallback(currentChannelId, history);
   const neighborEntries = [...new Set(neighborChannelIds)]
@@ -522,6 +527,8 @@ function serverItems(channels, currentChannelId, neighborChannelIds, history, no
         now,
         nameOf,
         readOnly: readOnlyIds.has(channel.id),
+        // The persona's own diary (diary.channelId): marked so it is found by name like any channel.
+        diary: diaryChannelId !== null && channel.id === diaryChannelId,
       },
     ),
   );
@@ -880,12 +887,14 @@ export function gifLine(entry, mediaCache, labels, { reactionChars, actionChars,
 /**
  * Assemble the `<now>…<task>` user-message text from already-rendered parts.
  * Factored out so a fallback rendering (see `textFallback` below) can reuse
- * every block untouched except `<chat>`. A pulled channel's lines never carry
+ * every block untouched except `<chat>`. `diary` (a diary post only): the
+ * `<diary>` block's intro, shown above its kept lines, and the `<plan>` body.
+ * A pulled channel's lines never carry
  * an `imageAttached`/`frameAttached` tag (nothing of another channel is
  * attached); `<other_channels>` lines can, when they hold an item attached for
  * the chat (see `textFallback`).
  */
-function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task, chatItems }) {
+function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task, chatItems, diary = null }) {
   return [
     block('now', formatNow(now, timezone, labels.locale)),
     block('senses', sensesText),
@@ -905,6 +914,11 @@ function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task
     block('channel_view', (kept.pulled ?? []).join('\n\n')),
     // The persona's own worn-out devices, just ahead of the chat where its own lines are.
     block('worn', (kept.worn ?? []).join('\n')),
+    // A diary post: the persona's world, its past posts, this post's plan and what its search found.
+    block('world', (kept.world ?? []).join('\n')),
+    block('diary', (kept.diary ?? []).length > 0 ? [diary?.intro, ...kept.diary].filter(Boolean).join('\n') : ''),
+    block('plan', diary?.plan ?? ''),
+    block('found', (kept.found ?? []).join('\n')),
     // Right before the chat it answers a question from.
     block('lookup', (kept.lookup ?? []).join('\n')),
     block('chat', renderTranscript(chatItems, timezone, labels)),
@@ -970,15 +984,19 @@ export function classifierTranscript(messages, { config, selfName, labels, descr
  * The drawing sub-process's prompt (prompts/draw.md): `{{name}}` and
  * `{{request}}` filled, `{{appearance}}` filled with prompts/appearance.md
  * (its own `{{name}}` filled) for a picture the persona is in, else blanked;
- * then runs of blank lines collapse to one and the result is trimmed.
- * `request` is expected already clamped to `image.maxPromptChars` by the
- * caller (src/behavior/turn.js).
- * @param {{ prompts: object, selfName: string, request: string, self: boolean }} args
+ * `{{when}}` filled with `labels.draw.when` (`{when}`: the local time) when
+ * `when` is given, else blanked; then runs of blank lines collapse to one and
+ * the result is trimmed. `request` is expected already clamped to
+ * `image.maxPromptChars` by the caller (src/behavior/turn.js).
+ * @param {{ prompts: object, selfName: string, request: string, self: boolean, when?: string }} args
+ *   `when`: the local date and time the picture is made at (src/discord/format.js#formatNow).
  * @returns {string}
  */
-export function buildDrawPrompt({ prompts, selfName, request, self }) {
+export function buildDrawPrompt({ prompts, selfName, request, self, when = '' }) {
   const appearance = self ? fillPromptTemplate(prompts?.appearance ?? '', { name: selfName }).trim() : '';
-  return fillPromptTemplate(prompts?.draw ?? '', { name: selfName, appearance, request: request ?? '' })
+  const whenLabel = prompts?.labels?.draw?.when;
+  const whenText = when && whenLabel ? fill(whenLabel, { when }) : '';
+  return fillPromptTemplate(prompts?.draw ?? '', { name: selfName, appearance, request: request ?? '', when: whenText })
     .replace(/(?:\r?\n){3,}/g, '\n\n')
     .trim();
 }
@@ -1152,8 +1170,9 @@ function lookupCandidates(lookup, labels, timezone) {
  * Outside a private chat, right after the files line: `senses.channels` (the
  * persona sees only the channels this request shows), then, with an
  * `elsewhereDestination` (`{ name }`, where a call from a read-only channel is
- * answered), `senses.elsewhere` with `{destination}`. A missing label adds
- * nothing.
+ * answered), `senses.elsewhere` with `{destination}`. With a `diaryChannel`
+ * (the bare name of the diary channel; the label carries the `#`),
+ * `senses.diary` with `{channel}` follows. A missing label adds nothing.
  */
 function renderSenses(
   config,
@@ -1167,6 +1186,7 @@ function renderSenses(
     gifs = false,
     gifWatching = false,
     elsewhereDestination = null,
+    diaryChannel = null,
   } = {},
 ) {
   const senses = labels.senses;
@@ -1233,6 +1253,8 @@ function renderSenses(
   if (!privateChat && senses.elsewhere && typeof elsewhereDestination?.name === 'string' && elsewhereDestination.name) {
     lines.push(fill(senses.elsewhere, { destination: elsewhereDestination.name }));
   }
+  // Where the persona keeps its diary, so it can speak of it anywhere.
+  if (senses.diary && typeof diaryChannel === 'string' && diaryChannel) lines.push(fill(senses.diary, { channel: diaryChannel }));
   // Private chat: the one line for this conversation, or -- on the server,
   // with the feature on -- the rule about what was said in private.
   if (privateChat) lines.push(senses.privateChat);
@@ -1814,6 +1836,19 @@ function pulledAuthors(pulledFits) {
  * @param {(channelId: string|null) => boolean} [input.recentAudience]  Whether a recent line from
  *   that channel may be shown in this turn (src/behavior/turn.js decides it from the channels'
  *   audiences). Omitted -> only the lines of `currentChannelId`.
+ * @param {string|null} [input.diaryChannel]  The bare name of the diary channel (the persona's
+ *   own, src/behavior/diary.js) when one is set: `<senses>` gains `senses.diary` with
+ *   `{channel}`. Omitted or null -> no line.
+ * @param {{ posts?: object[], plan?: { kind: string|null, brief: string, picture: boolean }|null,
+ *   found?: string|null }|null} [input.diary]  A diary post's own input, read only with `mode:
+ *   'diary'` (whose task text is `prompts.diary`): `<world>` (prompts/world.md, `{{name}}` filled,
+ *   only with `diary.world === true`, see `worldText`; one piece, fitted right after `<worn>`),
+ *   `<diary>` (the past posts through src/behavior/diary.js#renderDiaryBlock, the newest
+ *   `diary.historyPosts` (150 when unset) oldest first, fitted after `<world>` and losing its
+ *   oldest lines first), `<plan>` (`labels.diary.plan`, then the plan as one JSON line with `kind`,
+ *   `brief` and `picture`; never cut) and `<found>` (`labels.diary.found`, then what the search
+ *   found; one piece, fitted right after `<lookup>`). They render after `<worn>` and before
+ *   `<chat>`. `<world>` never renders outside a diary post.
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object,
  *   pictures: object[], textFallback: string|null, pulledIds: Map<string, string>,
  *   pulledKept: { channelId: string, ids: string[], newestId: string, newestTs: number }[],
@@ -1996,7 +2031,22 @@ export function buildRequest(input) {
     // Whether a GIF in the transcript was watched rather than seen in one frame, under the live config and prompts.
     gifWatching: gifWatchBlocker(config, prompts) === null,
     elsewhereDestination: input.elsewhereDestination ?? null,
+    diaryChannel: typeof input.diaryChannel === 'string' ? input.diaryChannel : null,
   });
+
+  // A diary post (mode `diary`): the persona's world (under `diary.world`), its past posts, the
+  // post's plan and what its search found. None of it in any other mode.
+  const diaryMode = mode === 'diary';
+  const diaryInput = diaryMode && input.diary && typeof input.diary === 'object' ? input.diary : null;
+  const worldItem = diaryMode ? worldText(config, prompts, selfName) : '';
+  const diaryLines = diaryInput ? diaryHistoryLines(diaryInput.posts, labels, config) : [];
+  const diaryIntro = diaryLines.length > 0 ? (labels.diary?.intro ?? '') : '';
+  const planText = diaryInput ? planBody(diaryInput.plan, labels) : '';
+  const foundText =
+    diaryInput && typeof diaryInput.found === 'string' && diaryInput.found.trim()
+      ? [labels.diary?.found, diaryInput.found.trim()].filter(Boolean).join('\n')
+      : '';
+  const diaryParts = diaryMode ? { intro: diaryIntro, plan: planText } : null;
 
   // A private chat has no neighbouring channels (and no server map, below).
   const offeredNeighbors = privateChat ? [] : neighbors;
@@ -2032,7 +2082,12 @@ export function buildRequest(input) {
     shownMoves,
     timezone,
   });
-  const fixedSection = { name: 'fixed', required: true, items: [system, fittedTask, formatNow(now, timezone, labels.locale), sensesText, tempoText] };
+  const fixedSection = {
+    name: 'fixed',
+    required: true,
+    // A diary post's plan and its `<diary>` intro are never cut.
+    items: [system, fittedTask, formatNow(now, timezone, labels.locale), sensesText, tempoText, ...[planText, diaryIntro].filter(Boolean)],
+  };
   const interlocutorSection = { name: 'interlocutor', cap: caps.interlocutor, items: [interlocutorShown.text].filter(Boolean) };
   // `<lookup>`: one piece. With both a web and a server part, the first candidate that fits the
   // room the two sections ahead of it leave (the whole block, else the web part alone, else the
@@ -2052,6 +2107,8 @@ export function buildRequest(input) {
     // recall.answerChars / recall.stretchChars, and ahead of the chat so a
     // tight budget trims old messages first.
     { name: 'lookup', items: [lookupItem].filter(Boolean) },
+    // A diary post's search result: one piece, bounded by web.search.summaryChars.
+    { name: 'found', items: [foundText].filter(Boolean) },
     {
       name: 'aboutChat',
       cap: caps.aboutChat,
@@ -2086,6 +2143,7 @@ export function buildRequest(input) {
             labels,
             nameOf,
             readOnlyIds,
+            config.diary?.channelId || null,
           ),
     },
   ];
@@ -2378,6 +2436,9 @@ export function buildRequest(input) {
       { name: 'attitudes', cap: caps.attitudes ?? 400, items: [attitudesText].filter(Boolean) },
       // One small piece, kept or dropped whole: below the chat and the people, above the rest.
       { name: 'worn', items: [renderWorn(input.worn, labels, config, input.fillers ?? null)].filter(Boolean) },
+      // A diary post: the persona's world whole, then its past posts, the oldest cut first.
+      { name: 'world', items: [worldItem].filter(Boolean) },
+      { name: 'diary', keep: 'newest', items: diaryLines },
       { name: 'neighbors', cap: caps.neighbors, items: neighborItems },
       // Lowest priority: a list to pick from, trimmed from the bottom (least used last).
       {
@@ -2471,7 +2532,7 @@ export function buildRequest(input) {
   }
 
   const keptChat = chatItems.slice(chatItems.length - kept.chat.length);
-  const user = assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task, chatItems: keptChat });
+  const user = assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task, chatItems: keptChat, diary: diaryParts });
 
   // A provider that rejects the images (see src/behavior/turn.js's 4xx
   // retry) must never resend a <chat> claiming a picture is attached with
@@ -2488,7 +2549,7 @@ export function buildRequest(input) {
   if (pictures.length) {
     const chatItemsBlind = formatTranscript(history, { ...formatOptions, attachedIndex: undefined });
     const keptChatBlind = chatItemsBlind.slice(chatItemsBlind.length - kept.chat.length);
-    textFallback = assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task, chatItems: keptChatBlind });
+    textFallback = assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task, chatItems: keptChatBlind, diary: diaryParts });
   }
 
   // A sticker's URL is already fully sized (see src/discord/media.js
@@ -2523,5 +2584,164 @@ export function buildRequest(input) {
     pulledKept,
     peopleShown,
     recent,
+  };
+}
+
+/**
+ * The `<world>` block's body of a diary request (the plan and the post):
+ * prompts/world.md with `{{name}}` filled, only while `diary.world === true`
+ * in `config` (the live config, read at the moment of use); '' with the
+ * switch off or the file missing or blank. Never part of an ordinary turn:
+ * only the diary's two requests call it.
+ * @param {object} config
+ * @param {object} prompts
+ * @param {string} selfName
+ * @returns {string}
+ */
+export function worldText(config, prompts, selfName) {
+  if (config?.diary?.world !== true) return '';
+  const text = prompts?.world;
+  if (typeof text !== 'string' || !text.trim()) return '';
+  return fillPromptTemplate(text, { name: selfName }).trim();
+}
+
+/** The `<diary>` block's post lines (no intro), oldest first: the newest `diary.historyPosts` (150). */
+function diaryHistoryLines(posts, labels, config) {
+  const body = renderDiaryBlock(posts, labels, { timezone: config.bot?.timezone, max: config.diary?.historyPosts ?? 150 });
+  if (!body) return [];
+  const lines = body.split('\n');
+  const intro = labels.diary?.intro;
+  return intro && lines[0] === intro ? lines.slice(1) : lines;
+}
+
+/** The `<plan>` block's body: `labels.diary.plan`, then the plan as one JSON line; '' without a plan. */
+function planBody(plan, labels) {
+  if (!plan || typeof plan !== 'object') return '';
+  const kind = typeof plan.kind === 'string' ? plan.kind : '';
+  const brief = typeof plan.brief === 'string' ? plan.brief : '';
+  if (!kind && !brief) return '';
+  return [labels.diary?.plan, JSON.stringify({ kind, brief, picture: plan.picture === true })].filter(Boolean).join('\n');
+}
+
+/**
+ * The diary's plan request (prompts/diary-plan.md, sent on the classifier
+ * model by src/behavior/turn.js): the system message is the plan prompt with
+ * `{{name}}` filled; the user message carries, in this order, `<now>`,
+ * `<server>` (the stored channel map, the diary channel first as the current
+ * one), `<about_chat>`, `<recent>` (the lines `recentAudience` accepts and the
+ * members' moments of the last `memory.recentHours`, oldest first; needs
+ * `labels.recent.header` and `line`), `<lore>` (the entries the diary
+ * channel's lines match), `<world>` (`worldText`, under `diary.world`),
+ * `<diary>` (the past posts, as in the post request), `<kinds>`
+ * (src/behavior/diary.js#renderKindsBlock over `kinds`, the use counted among
+ * the newest `diary.historyPosts`) and `<seeds>` (`seedsText`, already
+ * rendered by src/behavior/diary.js#renderSeedsBlock). Under the request
+ * token limit `<now>`, `<kinds>` and `<seeds>` are never cut, then in
+ * priority order: `<diary>` (the oldest lines first), `<world>` (whole),
+ * `<about_chat>`, `<server>`, `<recent>`, `<lore>` (each under its
+ * `context.caps` entry). Pure.
+ * @param {{ config: object, prompts: object, calibrator: object, now: number, selfName: string,
+ *   history?: object[], guildMemory?: object|null, channels?: object[], loreEntries?: object[],
+ *   currentChannelId?: string|null, recentLines?: object[]|null,
+ *   recentAudience?: ((channelId: string|null) => boolean)|null, candidateProfiles?: object[],
+ *   nameOf?: ((id: string) => (string|null))|null, posts?: object[], kinds?: Record<string, number>,
+ *   seedsText?: string }} input
+ * @returns {{ messages: { role: string, content: string }[], stats: object }}
+ */
+export function buildDiaryPlanRequest(input) {
+  const { config, prompts, calibrator, now, selfName, currentChannelId = null, seedsText = '' } = input;
+  const labels = requireLabels(prompts);
+  const timezone = config.bot?.timezone;
+  const nameOf = typeof input.nameOf === 'function' ? input.nameOf : () => null;
+  const history = Array.isArray(input.history) ? input.history : [];
+  const channels = Array.isArray(input.channels) ? input.channels : [];
+  const posts = Array.isArray(input.posts) ? input.posts : [];
+  const caps = config.context?.caps ?? {};
+  const cost = sectionCost(calibrator);
+  const limit = Math.max(0, requestTokenLimit(config) - TAG_OVERHEAD);
+
+  const system = fillPromptTemplate(prompts['diary-plan'] ?? '', { name: selfName }).trim();
+  const nowText = formatNow(now, timezone, labels.locale);
+  const kindsText = renderKindsBlock(input.kinds, posts, labels, { window: config.diary?.historyPosts ?? 150 });
+  const diaryLines = diaryHistoryLines(posts, labels, config);
+  const diaryIntro = diaryLines.length > 0 ? (labels.diary?.intro ?? '') : '';
+
+  // `<recent>`: the lines of the last hours this channel's audience may read, then the members' moments.
+  const recentCfg = recentSettings(config);
+  const recentOn = Boolean(recentCfg && labels.recent?.header && labels.recent?.line && Array.isArray(input.recentLines));
+  let recentBuilt = null;
+  if (recentOn) {
+    const episodesOn = Boolean(labels.recent.episode) && config.features?.episodes !== false;
+    const profiles = episodesOn && Array.isArray(input.candidateProfiles) ? input.candidateProfiles : [];
+    const view = recentView({
+      lines: input.recentLines,
+      profiles,
+      now,
+      hours: recentCfg.hours,
+      focusIds: [],
+      excludeEpisodeKeys: new Set(),
+      isShown: typeof input.recentAudience === 'function' ? input.recentAudience : (channelId) => channelId === currentChannelId,
+      perMember: RECENT_EPISODES_PER_MEMBER,
+    });
+    const { entries } = recentEntries(view.items, { labels, timezone, currentChannelId, channels, nameOf });
+    if (entries.length > 0) recentBuilt = { header: fill(labels.recent.header, { hours: recentCfg.hours }), entries };
+  }
+
+  const channelIds = channels.map((channel) => channel?.id).filter(Boolean);
+  const { kept, stats, used } = fitSections(
+    [
+      { name: 'fixed', required: true, items: [system, nowText, kindsText, seedsText, diaryIntro].filter(Boolean) },
+      { name: 'diary', keep: 'newest', items: diaryLines },
+      { name: 'world', items: [worldText(config, prompts, selfName)].filter(Boolean) },
+      { name: 'aboutChat', cap: caps.aboutChat, items: aboutChatItems(input.guildMemory, labels, nameOf, learnedConfig(config)) },
+      {
+        name: 'server',
+        cap: caps.server ?? 4000,
+        keep: 'first',
+        items: serverItems(channels, currentChannelId, channelIds, history, now, config.context?.channelActivity, labels, nameOf, new Set(), config.diary?.channelId || null),
+      },
+      {
+        name: 'recent',
+        cap: caps.recent ?? 1200,
+        keep: 'first',
+        items: recentBuilt ? [recentBuilt.header, ...recentBuilt.entries.map((entry) => entry.text)] : [],
+      },
+      {
+        name: 'lore',
+        cap: caps.lore,
+        keep: 'first',
+        items: config.features?.lore !== false ? loreItems(input.loreEntries, history, null, labels, config.lore, nameOf) : [],
+      },
+    ],
+    limit,
+    cost,
+  );
+
+  // `<recent>` as one piece: the header, then the entries kept, oldest first; the header alone is no block.
+  let recentText = '';
+  if (recentBuilt && kept.recent.length >= 2 && kept.recent[0] === recentBuilt.header) {
+    const keptTexts = new Set(kept.recent.slice(1));
+    const shown = recentBuilt.entries.filter((entry) => keptTexts.has(entry.text)).sort((a, b) => a.at - b.at);
+    recentText = [recentBuilt.header, ...shown.map((entry) => entry.text)].join('\n');
+  }
+  const user = [
+    block('now', nowText),
+    block('server', kept.server.join('\n\n')),
+    block('about_chat', kept.aboutChat.join('\n')),
+    block('recent', recentText),
+    block('lore', kept.lore.join('\n\n')),
+    block('world', kept.world.join('\n')),
+    block('diary', kept.diary.length > 0 ? [diaryIntro, ...kept.diary].filter(Boolean).join('\n') : ''),
+    block('kinds', kindsText),
+    block('seeds', seedsText),
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+  return {
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ],
+    stats: { ...stats, used, limit },
   };
 }

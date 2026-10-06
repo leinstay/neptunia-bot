@@ -1037,3 +1037,20 @@ test('fetchPull: the logs carry counts and codes, never message text or captions
   const text = JSON.stringify(logs);
   for (const secret of ['μυστικό', 'café', 'ιδιωτική']) assert.equal(text.includes(secret), false, secret);
 });
+
+test('pull: a read-only channel where only the persona writes is pulled and its lines are marked self', async () => {
+  const guild = fakeGuild();
+  const main = mainChannel(guild);
+  const diary = addChannel(guild, {
+    id: '760000000000000071',
+    name: 'ημερολόγιο',
+    granted: [READ, REACT],
+    messages: [{ ts: LAST - 5 * MIN, authorId: SELF_ID }, { ts: LAST, authorId: SELF_ID }],
+  });
+  assert.deepEqual(checkPull({ guild, channelId: diary.id, destination: main, config: config(), now: NOW }), { channel: diary, skip: null });
+  const { result } = await withCapturedLogs(() => pull(guild, diary.id));
+  assert.equal(result.skip, null);
+  assert.equal(result.pulled.readOnly, true);
+  assert.equal(result.pulled.messages.length, 2);
+  assert.ok(result.pulled.messages.every((m) => m.self === true));
+});

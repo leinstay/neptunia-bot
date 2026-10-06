@@ -35,4 +35,7 @@ When the request does not specify clothing, dress the character for the setting,
 
 ## Request
 
+{{when}}
+When a local time appears above, the light and the season in the picture follow it.
+
 {{request}}

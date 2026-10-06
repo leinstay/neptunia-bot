@@ -72,9 +72,12 @@ function topWritersText(topWriters, nameOf) {
  *   caller) adds the `labels.server.readOnly` line after the fact lines, before the last-message
  *   line; nothing is added when that label is missing or blank, and never on the `current`
  *   channel (the turn is answering there, so it is never shown as one the persona cannot write in).
+ *   `diary` (the caller's `channel.id === config.diary.channelId`) adds the `labels.server.diary`
+ *   line, with `{channel}` the channel's name, right before the read-only line, on any channel
+ *   including the current one; nothing is added when that label is missing.
  * @returns {string}
  */
-export function renderChannel(channel, labels, { current = false, activity, now: nowMs, nameOf, readOnly = false } = {}) {
+export function renderChannel(channel, labels, { current = false, activity, now: nowMs, nameOf, readOnly = false, diary = false } = {}) {
   const s = labels.server;
   const mark = current ? s.currentMark : '';
   const lines = [`# ${channel.name}${mark}`];
@@ -85,6 +88,7 @@ export function renderChannel(channel, labels, { current = false, activity, now:
   if (channel.topics) lines.push(fill(s.topics, { text: channel.topics }));
   if (channel.tone) lines.push(fill(s.tone, { text: channel.tone }));
 
+  if (diary === true && s.diary) lines.push(fill(s.diary, { channel: channel.name }));
   if (readOnly === true && !current && s.readOnly) lines.push(fill(s.readOnly));
 
   if (s.lastMessage && Number.isFinite(channel.lastMessageAt) && Number.isFinite(nowMs)) {

@@ -94,6 +94,7 @@ export const labels = {
     gifs: 'you can post one gif per turn from <gifs> by its handle',
     channels: 'you see only the channels shown here',
     elsewhere: 'read-only channels: read and react only; a call there is answered in #{destination}',
+    diary: 'You keep a diary in #{channel}; you post there yourself, nobody asked, and people here read it.',
   },
   tempo: {
     counts: 'messages in the last 10 min: {last10min}, last hour: {lastHour}, last day: {lastDay}',
@@ -193,6 +194,7 @@ export const labels = {
     activityLive: 'live',
     activitySlow: 'slow',
     activityDead: 'dead',
+    diary: 'Your diary.',
   },
   triggers: {
     mention: 'tagged you',
@@ -211,6 +213,7 @@ export const labels = {
       timeout: 'timed out',
       error: 'failed',
     },
+    when: 'Local time: {when}',
   },
   memory: {
     privateNote: 'Private batch: judge only this person.',
@@ -267,5 +270,17 @@ export const labels = {
     line: '{date} {time}: {text}',
     lineIn: '{date} {time} in #{channel}: {text}',
     episode: '{date}, with {name}: {what}',
+  },
+  diary: {
+    intro: 'Your latest diary posts, oldest first:',
+    line: '- {date} {kind}: {gist}',
+    picture: ' [picture: {scene}]',
+    pictureUnknown: 'not recorded',
+    kindUnknown: 'post',
+    kinds: 'Post kinds and their recent use:',
+    kindLine: '{key} weight {weight}, used {count} of the last {window}',
+    plan: 'Plan for this post:',
+    found: 'What the search found. Retell it in your own words; no links, no quoting.',
+    seeds: 'Random seeds (place; setting; detail; activity; subject; twist):',
   },
 };

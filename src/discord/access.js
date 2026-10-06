@@ -13,7 +13,7 @@
 // grant, the `*` wildcard included: only an owner decides who may run what.
 
 /** Command groups only an owner may ever run: no `bot.access` grant opens them. */
-export const OWNER_ONLY_GROUPS = Object.freeze(['private', 'mentor', 'access']);
+export const OWNER_ONLY_GROUPS = Object.freeze(['private', 'mentor', 'access', 'diary']);
 
 /** The group of a dotted command key (`memory` for `memory.show`), or null for a bare key or a non-string. */
 function groupOf(key) {

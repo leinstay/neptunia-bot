@@ -40,6 +40,7 @@
     "channelPull": true,
     "channelRoute": true,
     "elsewhere": true,
+    "diary": true,
     "typingSimulation": true,
     "pauseNotice": true,
     "adminCommands": true
@@ -292,6 +293,30 @@
     "provider": null,
     "openai": { "quality": "medium", "background": "auto", "moderation": "low" },
     "google": { "resolution": "1K" }
+  },
+  "diary": {
+    "channelId": "",
+    "world": false,
+    "windows": [
+      { "from": 7, "to": 11, "posts": [0, 0] },
+      { "from": 12, "to": 16, "posts": [0, 1] },
+      { "from": 18, "to": 1, "posts": [0, 2] },
+      { "from": 1, "to": 5, "posts": [0, 1] }
+    ],
+    "quietDayChance": 0.3,
+    "minGapMinutes": 90,
+    "maxPerDay": 3,
+    "maxPicturesPerDay": 2,
+    "slotGraceMinutes": 30,
+    "maxMessages": 3,
+    "historyPosts": 150,
+    "gistChars": 200,
+    "seedSets": 2,
+    "kinds": { "selfPicture": 3, "picture": 2, "meme": 1, "thought": 2, "news": 2, "facts": 1, "status": 3 },
+    "searchKinds": ["news", "facts"],
+    "pictureKinds": ["selfPicture", "picture", "meme"],
+    "planMaxOutputTokens": 300,
+    "planTimeoutMs": 20000
   },
   "gifs": { "max": 40, "reactionChars": 40, "actionChars": 70, "ownMarkHours": 24, "storeMax": 300, "halfLifeDays": 30, "maxPerDay": 40, "backfillMessages": 500, "backfillDescribe": 20, "recachePerRun": 50, "pick": { "maxChars": 160, "contextMessages": 4, "maxOutputTokens": 60 } },
   "variety": { "window": 16, "recentMinutes": 180, "minLines": 3, "contextChars": 120, "maxPatterns": 4, "shapeChars": 140, "maxOutputTokens": 500, "timeoutMs": 8000, "requestTimeoutMs": 30000, "history": 20, "longLines": 300, "longEveryHours": 6, "longMinLines": 60, "longMaxPatterns": 3, "examplesInBlock": false, "fillers": { "cooldownHours": 36, "cooldownMessages": 300, "max": 12, "halfLifeDays": 14 }, "sticky": { "minRepeats": 3, "minRepeatsWord": 4, "lines": 40, "maxWords": 3, "minChars": 4, "baselineMax": 1, "baselineMin": 100, "ignore": [] } },
