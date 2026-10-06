@@ -49,6 +49,7 @@ import {
   mergeWindows,
   parseRecallAnswer,
   queryKey,
+  rareFormKeys,
   recallSettings,
   renderRecallWindows,
   sampleOffsets,
@@ -321,7 +322,9 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
     }
 
     // 3. One query after another, newest first; a range alone is sampled across its total.
+    // Each query's total on the whole server is kept: a form found that rarely weighs more (step 5).
     const hits = new Map();
+    const totals = new Map();
     const queue = [...plan];
     stats.planned = plan.length;
     while (queue.length > 0) {
@@ -339,6 +342,7 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
       // A message several queries find is one hit carrying every key, each by the query's kind
       // (form / who / author / range): clusterHits ranks by the topic (form) keys first.
       const key = queryKey(query);
+      if (!query.offset) totals.set(key, page.total);
       for (const raw of page.hits) {
         if (!hits.has(raw.id)) hits.set(raw.id, hitFrom(raw));
         hits.get(raw.id).queries.add(key);
@@ -379,8 +383,14 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
       person.username ||= theirs.find((hit) => hit.username)?.username ?? '';
     }
 
-    // 5. Clusters, 6. a window around each (other bots and the turn's own chat left out).
-    const clusters = clusterHits(kept, { gapMinutes: settings.clusterGapMinutes, maxClusters: settings.maxClusters, keepOldest: settings.keepOldest });
+    // 5. Clusters (a form whose search totals at most `recall.rareHits` is rare), 6. a window
+    // around each (other bots and the turn's own chat left out).
+    const clusters = clusterHits(kept, {
+      gapMinutes: settings.clusterGapMinutes,
+      maxClusters: settings.maxClusters,
+      keepOldest: settings.keepOldest,
+      rareForms: rareFormKeys(totals, settings.rareHits),
+    });
     stats.clusters = clusters.length;
     const normalizeOptions = { selfId, embedTextChars: config.media?.embedTextChars, videoSites: config.media?.video?.sites };
     const fetched = await Promise.all(

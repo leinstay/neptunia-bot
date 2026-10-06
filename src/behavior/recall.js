@@ -35,6 +35,7 @@ export const RECALL_DEFAULTS = Object.freeze({
   clusterGapMinutes: 30,
   maxClusters: 5,
   keepOldest: 0,
+  rareHits: 5,
   windowMessages: 16,
   answerChars: 1200,
   stretchChars: 1500,
@@ -57,8 +58,10 @@ export const MAX_SEARCH_OFFSET = 9975;
 /** The structural mark that opens a line the search matched, in `<found>` and in the stretch. */
 export const HIT_MARK = '>> ';
 
-/** The fewest distinct `form:` queries a cluster needs to take a keepOldest slot (clusterHits). */
-const OLDEST_MIN_FORMS = 2;
+/** The least topic score a cluster needs to take a keepOldest slot: two common forms or one rare (clusterHits). */
+const OLDEST_MIN_TOPIC = 2;
+/** The weight of a rare `form:` key in a cluster's topic score; a common one weighs 1 (clusterHits). */
+const RARE_WEIGHT = 2;
 /** The prefix of a query key that names the topic (a `server:` form), see queryKey. */
 const FORM_KEY = 'form:';
 /** The most messages one window may ask for (one page of a channel's history). */
@@ -100,13 +103,14 @@ function numberAtLeast(value, fallback, min) {
  * `features.recall` is false (a missing key counts as on). Each number falls
  * back to RECALL_DEFAULTS when missing or unusable; counts are floored.
  * `maxForms`, `maxPeople`, `maxPerDay`, `stretchChars`, `minSummaryMs`,
- * `memoryItems` and `keepOldest` may be 0 (no content query, no member
- * lookup, no recall today, no stretch, the summary asked whatever time is
- * left, no stored memory searched, no slot reserved for old clusters);
+ * `memoryItems`, `keepOldest` and `rareHits` may be 0 (no content query, no
+ * member lookup, no recall today, no stretch, the summary asked whatever time
+ * is left, no stored memory searched, no slot reserved for old clusters, no
+ * form counted rare);
  * `windowMessages` is at most 100.
  * @param {object} config  The live config.
  * @returns {{ maxForms: number, maxPeople: number, dateSamples: number, clusterGapMinutes: number,
- *   maxClusters: number, keepOldest: number, windowMessages: number, answerChars: number, stretchChars: number, maxPerDay: number,
+ *   maxClusters: number, keepOldest: number, rareHits: number, windowMessages: number, answerChars: number, stretchChars: number, maxPerDay: number,
  *   timeoutMs: number, minSummaryMs: number, maxOutputTokens: number, memoryItems: number }|null}
  */
 export function recallSettings(config) {
@@ -120,6 +124,7 @@ export function recallSettings(config) {
     clusterGapMinutes: numberAtLeast(r.clusterGapMinutes, d.clusterGapMinutes, 0),
     maxClusters: intAtLeast(r.maxClusters, d.maxClusters, 1),
     keepOldest: intAtLeast(r.keepOldest, d.keepOldest, 0),
+    rareHits: intAtLeast(r.rareHits, d.rareHits, 0),
     windowMessages: Math.min(MAX_WINDOW_MESSAGES, intAtLeast(r.windowMessages, d.windowMessages, 1)),
     answerChars: intAtLeast(r.answerChars, d.answerChars, 1),
     stretchChars: intAtLeast(r.stretchChars, d.stretchChars, 0),
@@ -385,35 +390,60 @@ export function sampleOffsets(total, samples) {
 }
 
 /**
+ * The `form:` keys (queryKey) whose search found at most `rareHits` messages
+ * on the whole server (the API's `total_results`): a form that rare is the
+ * most distinctive evidence there is. `totals` maps a query key to its
+ * search's total (a Map or `[key, total]` pairs); keys of other kinds and
+ * totals that are not finite numbers of at least 0 are ignored. `rareHits`
+ * 0 marks none (an unusable value: RECALL_DEFAULTS.rareHits).
+ * @param {Map<string, number>|Iterable<[string, number]>|null|undefined} totals
+ * @param {number} rareHits
+ * @returns {Set<string>}
+ */
+export function rareFormKeys(totals, rareHits) {
+  const limit = intAtLeast(rareHits, RECALL_DEFAULTS.rareHits, 0);
+  const out = new Set();
+  if (limit === 0 || !totals || typeof totals[Symbol.iterator] !== 'function') return out;
+  for (const [key, total] of totals) {
+    if (typeof key === 'string' && key.startsWith(FORM_KEY) && Number.isFinite(total) && total >= 0 && total <= limit) out.add(key);
+  }
+  return out;
+}
+
+/**
  * Hits grouped into clusters: per channel, hits sorted by time; a hit less
  * than `gapMinutes` after the previous one joins its cluster. Each cluster:
- * `{ channelId, ids (oldest first), startTs, endTs, middleId, queries, forms }`,
+ * `{ channelId, ids (oldest first), startTs, endTs, middleId, queries, forms, topic }`,
  * `middleId` the hit at the middle of its list, `queries` how many distinct
  * query keys (queryKey) its hits carry -- a hit found by two queries counts
- * both, a hit without `queries` counts none -- and `forms` how many of
- * them are `form:` keys (the topic). With more than `maxClusters`
- * clusters, they rank by `forms` (more first), then `queries` (more
- * first), then the newer `endTs` (channel id on a tie): the dense stretch
- * where several topic forms meet outranks a retelling or a stray old hit,
- * name and author hits only locate the person -- a cluster of them alone
- * ranks below any with one topic hit -- and a one-hit cluster still counts,
- * below the denser ones. The top `maxClusters - keepOldest` are kept; each
- * of the `keepOldest` slots (at most `maxClusters`) then goes to the
- * oldest cluster of the rest with at least OLDEST_MIN_FORMS `form:` keys --
- * where a running thing started, never a single generic hit -- and a slot no
- * such cluster takes goes on by rank. `keepOldest` 0 reserves nothing. The kept
+ * both, a hit without `queries` counts none -- `forms` how many of them are
+ * `form:` keys (the topic), and `topic` the sum of their weights: RARE_WEIGHT
+ * (2) for a key in `rareForms` (rareFormKeys: its search found at most
+ * `recall.rareHits` messages), else 1. With more than `maxClusters`
+ * clusters, they rank by `topic` (more first), then `queries` (more first),
+ * then the newer `endTs` (channel id on a tie): the dense stretch where
+ * several topic forms meet, or the one place a rare form occurs, outranks a
+ * retelling or a stray hit of a common form; name and author hits only
+ * locate the person -- a cluster of them alone ranks below any with one
+ * topic hit -- and a one-hit cluster still counts, below the denser ones.
+ * The top `maxClusters - keepOldest` are kept; each of the `keepOldest`
+ * slots (at most `maxClusters`) then goes to the oldest cluster of the rest
+ * with a `topic` of at least OLDEST_MIN_TOPIC (2) -- two common forms or one
+ * rare: where a running thing started, never a single generic hit -- and a
+ * slot no such cluster takes goes on by rank. `keepOldest` 0 reserves nothing. The kept
  * ones are returned newest first by `endTs` (channel id on a tie). Hits
  * without an id, a channel or a finite `ts` are ignored; a repeated id is one
  * hit with the queries of every copy.
  * @param {{ id: string, channelId: string, ts: number, queries?: Iterable<string> }[]} hits
- * @param {{ gapMinutes?: number, maxClusters?: number, keepOldest?: number }} [options]
+ * @param {{ gapMinutes?: number, maxClusters?: number, keepOldest?: number, rareForms?: Iterable<string> }} [options]
  * @returns {{ channelId: string, ids: string[], startTs: number, endTs: number, middleId: string, queries: number,
- *   forms: number }[]}
+ *   forms: number, topic: number }[]}
  */
-export function clusterHits(hits, { gapMinutes, maxClusters, keepOldest } = {}) {
+export function clusterHits(hits, { gapMinutes, maxClusters, keepOldest, rareForms } = {}) {
   const gapMs = numberAtLeast(gapMinutes, RECALL_DEFAULTS.clusterGapMinutes, 0) * MINUTE_MS;
   const keep = intAtLeast(maxClusters, RECALL_DEFAULTS.maxClusters, 1);
   const oldest = Math.min(keep, intAtLeast(keepOldest, RECALL_DEFAULTS.keepOldest, 0));
+  const rare = new Set(rareForms && typeof rareForms !== 'string' && typeof rareForms[Symbol.iterator] === 'function' ? rareForms : []);
   const byChannel = new Map();
   const seen = new Map();
   for (const hit of Array.isArray(hits) ? hits : []) {
@@ -443,15 +473,19 @@ export function clusterHits(hits, { gapMinutes, maxClusters, keepOldest } = {}) 
       clusters.push(current);
     }
   }
-  for (const cluster of clusters) cluster.forms = [...cluster.keys].filter((key) => key.startsWith(FORM_KEY)).length;
+  for (const cluster of clusters) {
+    const topical = [...cluster.keys].filter((key) => key.startsWith(FORM_KEY));
+    cluster.forms = topical.length;
+    cluster.topic = topical.reduce((sum, key) => sum + (rare.has(key) ? RARE_WEIGHT : 1), 0);
+  }
   const newestFirst = (x, y) => y.endTs - x.endTs || (x.channelId < y.channelId ? -1 : 1);
-  const ranked = clusters.sort((x, y) => y.forms - x.forms || y.keys.size - x.keys.size || newestFirst(x, y));
+  const ranked = clusters.sort((x, y) => y.topic - x.topic || y.keys.size - x.keys.size || newestFirst(x, y));
   let kept = ranked;
   if (ranked.length > keep) {
     kept = ranked.slice(0, keep - oldest);
     const rest = ranked.slice(keep - oldest);
     const reserved = rest
-      .filter((cluster) => cluster.forms >= OLDEST_MIN_FORMS)
+      .filter((cluster) => cluster.topic >= OLDEST_MIN_TOPIC)
       .sort((x, y) => -newestFirst(x, y))
       .slice(0, oldest);
     const taken = new Set(reserved);
@@ -459,7 +493,7 @@ export function clusterHits(hits, { gapMinutes, maxClusters, keepOldest } = {}) 
   }
   return [...kept]
     .sort(newestFirst)
-    .map(({ keys, forms, ...cluster }) => ({ ...cluster, middleId: cluster.ids[Math.floor(cluster.ids.length / 2)], queries: keys.size, forms }));
+    .map(({ keys, forms, topic, ...cluster }) => ({ ...cluster, middleId: cluster.ids[Math.floor(cluster.ids.length / 2)], queries: keys.size, forms, topic }));
 }
 
 /**

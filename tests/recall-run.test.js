@@ -23,7 +23,7 @@ const GUILD = 'g1';
 const PROMPT = 'You are {{name}}; {{answerChars}}.';
 
 // The recall settings the runner tests rely on, pinned here instead of read from the shipped defaults.
-const RECALL_PIN = { maxForms: 8, maxPeople: 2, dateSamples: 4, clusterGapMinutes: 30, maxClusters: 8, windowMessages: 16, answerChars: 1200, stretchChars: 1500, maxPerDay: 100, timeoutMs: 30000, minSummaryMs: 2500, maxOutputTokens: 500, memoryItems: 6 };
+const RECALL_PIN = { maxForms: 8, maxPeople: 2, dateSamples: 4, clusterGapMinutes: 30, maxClusters: 8, rareHits: 0, windowMessages: 16, answerChars: 1200, stretchChars: 1500, maxPerDay: 100, timeoutMs: 30000, minSummaryMs: 2500, maxOutputTokens: 500, memoryItems: 6 };
 
 /** The shipped config.json with the recall settings pinned and the given groups merged over a fresh copy (one level deep). */
 function config(overrides = {}) {
@@ -511,6 +511,20 @@ test('recall: each hit carries the queries that found it; the cluster two forms 
   const plain = scene({ lines: RANKED_LINES, answers: rankedAnswers, recall: { maxClusters: 1 } });
   await withCapturedLogs(() => plain.recaller.run({ ...plain.args, server: RABBIT_SERVER }));
   assert.deepEqual(plain.fetches.map((f) => f.around), ['g9'], 'one form each: the newer cluster wins the tie');
+});
+test('recall: a form whose search totals at most recall.rareHits is rare: the old cluster it found beats a newer one-form hit', async () => {
+  const rareOld = (route, query) => {
+    if (route.endsWith('/members/search')) return [];
+    if (query.content === 'κουνέλι') return { total_results: 40, messages: [[rawHit('c2', GARDEN_AGAIN)]] };
+    if (query.content === 'κουνελιού') return { total_results: 1, messages: [[rawHit('c1', RABBIT_LINES[2])]] };
+    return { total_results: 0, messages: [] };
+  };
+  const rare = scene({ lines: RANKED_LINES, answers: rareOld, recall: { maxClusters: 1, rareHits: 5 } });
+  await withCapturedLogs(() => rare.recaller.run({ ...rare.args, server: RABBIT_SERVER }));
+  assert.deepEqual(rare.fetches.map((f) => f.around), ['r2'], 'one hit on the whole server: the rare form weighs two');
+  const off = scene({ lines: RANKED_LINES, answers: rareOld, recall: { maxClusters: 1, rareHits: 0 } });
+  await withCapturedLogs(() => off.recaller.run({ ...off.args, server: RABBIT_SERVER }));
+  assert.deepEqual(off.fetches.map((f) => f.around), ['g9'], 'rareHits 0: one form each, the newer cluster wins the tie');
 });
 test('recall: name and author queries locate the person, the forms rank: an older two-form cluster beats a newer one of the person', async () => {
   const answers = (route, query) => {

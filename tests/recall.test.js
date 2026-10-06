@@ -15,6 +15,7 @@ import {
   parseLookupAnswer,
   parseRecallAnswer,
   queryKey,
+  rareFormKeys,
   recallSettings,
   renderRecallWindows,
   sampleOffsets,
@@ -336,6 +337,69 @@ test('clusterHits: a missing keepOldest falls back to the shipped config value',
     clusterHits(hits, { gapMinutes: 30, maxClusters: 3 }).map((c) => c.middleId),
     clusterHits(hits, { gapMinutes: 30, maxClusters: 3, keepOldest: shipped }).map((c) => c.middleId),
   );
+});
+
+test('rareFormKeys: the form keys whose search totals at most rareHits; 0 marks none', () => {
+  const totals = new Map([
+    ['form:κουνέλι', 1],
+    ['form:σκελετός', 5],
+    ['form:λέξη', 6],
+    ['who:éloïse', 1],
+    ['author:u3', 1],
+    ['range', 1],
+    ['form:άγνωστο', 'x'],
+  ]);
+  assert.deepEqual([...rareFormKeys(totals, 5)].sort(), ['form:κουνέλι', 'form:σκελετός']);
+  assert.deepEqual([...rareFormKeys(totals, 1)], ['form:κουνέλι']);
+  assert.equal(rareFormKeys(totals, 0).size, 0, '0 = no rarity bonus');
+  assert.equal(rareFormKeys(null, 5).size, 0);
+});
+
+test('clusterHits: a one-hit old cluster with a rare form beats a newer cluster with one common form', () => {
+  const t = Date.UTC(2026, 9, 1, 8);
+  const hits = [
+    found('o1', Date.UTC(2021, 2, 1, 20), ['form:σκελετός']),
+    found('n1', t, ['form:κουνέλι'], 'c2'),
+    found('n2', t + 5 * MINUTE, ['form:κουνέλι'], 'c2'),
+  ];
+  const kept = (rareForms) => clusterHits(hits, { gapMinutes: 30, maxClusters: 1, keepOldest: 0, rareForms });
+  const [rare] = kept(new Set(['form:σκελετός']));
+  assert.deepEqual([rare.middleId, rare.forms, rare.topic], ['o1', 1, 2]);
+  assert.deepEqual(kept(undefined).map((c) => c.middleId), ['n2'], 'no rare form: the newer one-form cluster');
+  assert.deepEqual(kept(rareFormKeys(new Map([['form:σκελετός', 1]]), 0)).map((c) => c.middleId), ['n2'], 'rareHits 0 disables the bonus');
+});
+
+test('clusterHits: two common forms tie with one rare form and recency decides', () => {
+  const t = Date.UTC(2026, 9, 1, 8);
+  // Equal topic score (2) and equal distinct keys (2): only then does recency decide.
+  const rare = found('o1', Date.UTC(2021, 2, 1, 20), ['form:σκελετός', 'who:éloïse']);
+  const common = found('n1', t, ['form:κουνέλι', 'form:λέξη'], 'c2');
+  const ids = (hits) => clusterHits(hits, { gapMinutes: 30, maxClusters: 1, keepOldest: 0, rareForms: ['form:σκελετός'] }).map((c) => c.middleId);
+  assert.deepEqual(ids([rare, common]), ['n1'], 'equal topic score and keys: the newer');
+  const older = found('n1', Date.UTC(2020, 2, 1, 20), ['form:κουνέλι', 'form:λέξη'], 'c2');
+  assert.deepEqual(ids([rare, older]), ['o1'], 'equal topic score and keys: the rare one is newer now');
+  const named = found('n1', Date.UTC(2020, 2, 1, 20), ['form:κουνέλι', 'form:λέξη', 'who:éloïse'], 'c2');
+  assert.deepEqual(ids([rare, named]), ['n1'], 'equal topic score: more distinct keys first');
+});
+
+test('clusterHits: keepOldest takes a cluster of one rare form, never one of one common form', () => {
+  const t = Date.UTC(2026, 9, 1, 8);
+  const newer = Array.from({ length: 3 }, (_, i) => found(`n${i}`, t + i * 2 * HOUR, ['form:a', 'form:b']));
+  const common = found('c', Date.UTC(2020, 4, 1), ['form:a']);
+  const rare = found('r', Date.UTC(2022, 4, 1), ['form:z']);
+  const ids = (rareForms) => clusterHits([...newer, common, rare], { gapMinutes: 30, maxClusters: 2, keepOldest: 1, rareForms }).map((c) => c.middleId);
+  assert.deepEqual(ids(['form:z']), ['n2', 'r'], 'one rare form scores 2');
+  assert.deepEqual(ids([]), ['n2', 'n0'], 'no rare form: the oldest two-form cluster, never the one common form');
+});
+
+test('recallSettings: a missing rareHits falls back to the shipped config value; 0 is kept', () => {
+  const shipped = SHIPPED_CONFIG.recall.rareHits;
+  assert.equal(typeof shipped, 'number');
+  assert.equal(RECALL_DEFAULTS.rareHits, shipped);
+  assert.equal(recallSettings({ recall: {} }).rareHits, shipped);
+  assert.equal(recallSettings({ recall: { rareHits: 0 } }).rareHits, 0, '0 = no rarity bonus');
+  assert.equal(recallSettings({ recall: { rareHits: 2.7 } }).rareHits, 2);
+  assert.equal(recallSettings({ recall: { rareHits: -1 } }).rareHits, shipped);
 });
 
 test('clusterHits: with no more clusters than maxClusters, keepOldest changes nothing', () => {
