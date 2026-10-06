@@ -20,10 +20,12 @@
 // Identity-like short fields (an interest's `topic`, an alias `name`, a lore
 // `title`/`key`) call this with `tolerance: 1` -- a HARD limit, still cut at
 // a boundary and never inside a token, just with no overshoot allowed.
+// `clampWithEllipsis` is that hard cut for display text, marked with `…`.
 //
 // Two blunt helpers live here too, for text that is not analyzer prose:
 // `oneLine` (whitespace collapsed, so a value stays on its one line) and
-// `clampChars` (a plain code-point cut, no boundary search).
+// `clampChars` (a plain code-point cut, no boundary search). `stripDashes` /
+// `countDashes` clean em and en dashes out of the persona's outgoing text.
 
 const SENTENCE_ENDERS = new Set(['.', '!', '?', '…']);
 const SENTENCE_CLOSERS = new Set(['"', "'", '’', '”', ')', ']', '»']);
@@ -161,6 +163,66 @@ export function clampText(text, limit, { tolerance } = {}) {
 
   cut = avoidTokenSplit(cut, spans);
   return stripTrailing(codePoints.slice(0, cut));
+}
+
+/**
+ * `text` (trimmed) cut to at most `limit` code points with clampText as a hard
+ * limit (`tolerance: 1`: a sentence end, else a word boundary, never inside a
+ * token), and an ellipsis `…` appended when something was cut and the kept
+ * part does not already end a sentence -- the ellipsis counts within `limit`.
+ * For display text a reader must not take for whole (a list caption, a
+ * quoted line). A `limit` below 2 is a plain clampText cut (no room for the
+ * mark); a non-finite/non-positive `limit` leaves the text whole, as
+ * clampText does. Non-string `text` -> `''`.
+ * @param {string} text
+ * @param {number} limit
+ * @returns {string}
+ */
+export function clampWithEllipsis(text, limit) {
+  if (typeof text !== 'string') return '';
+  const trimmed = text.trim();
+  const numericLimit = Math.floor(Number(limit));
+  if (!Number.isFinite(numericLimit) || numericLimit <= 0) return trimmed;
+  if (Array.from(trimmed).length <= numericLimit) return trimmed;
+  if (numericLimit < 2) return clampText(trimmed, numericLimit, { tolerance: 1 });
+  const cut = clampText(trimmed, numericLimit - 1, { tolerance: 1 });
+  const points = Array.from(cut);
+  let last = points.length - 1;
+  while (last >= 0 && SENTENCE_CLOSERS.has(points[last])) last -= 1;
+  return last >= 0 && SENTENCE_ENDERS.has(points[last]) ? cut : `${cut}…`;
+}
+
+// An em dash (U+2014) or en dash (U+2013); the hyphen (U+002D) is never one.
+const DASH = /[–—]/gu;
+// A run of dashes with the spaces/tabs around them (never a line break).
+const DASH_RUN = /[^\S\n]*[–—](?:[^\S\n]*[–—])*[^\S\n]*/gu;
+
+/**
+ * `text` without any em dash `—` or en dash `–`: each run of them, with the
+ * spaces around it, becomes one space, then each line that held one is
+ * trimmed (a dash at a line's start or end goes with its space; a line of
+ * dashes alone becomes empty) and the whole text is trimmed. Hyphens and line
+ * breaks are untouched. Non-string `text` -> `''`. For the persona's outgoing
+ * message text (src/behavior/turn.js, `format.stripDashes`).
+ * @param {unknown} text
+ * @returns {string}
+ */
+export function stripDashes(text) {
+  if (typeof text !== 'string') return '';
+  return text
+    .split('\n')
+    .map((line) => (countDashes(line) > 0 ? line.replace(DASH_RUN, ' ').trim() : line))
+    .join('\n')
+    .trim();
+}
+
+/**
+ * How many em/en dashes `text` holds (what stripDashes removes); 0 for a non-string.
+ * @param {unknown} text
+ * @returns {number}
+ */
+export function countDashes(text) {
+  return typeof text === 'string' ? (text.match(DASH) ?? []).length : 0;
 }
 
 /**

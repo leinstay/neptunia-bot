@@ -551,7 +551,7 @@ test('answerReply: a situation\'s variety patterns render as <worn> as in a live
   const worn = [{ shape: 'mock promise ending in (no)', examples: ['fix it (no)'], count: 2 }];
   const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
   const withBlock = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm('<msg>ok</msg>'), samples: 1, at: NOW, worn });
-  assert.ok(withBlock.request.user.includes(`<worn>\n${labels.variety.intro}\n- mock promise ending in (no) ("fix it (no)")\n</worn>`));
+  assert.ok(withBlock.request.user.includes(`<worn>\n${labels.variety.intro}\n- mock promise ending in (no)\n</worn>`));
   const without = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm('<msg>ok</msg>'), samples: 1, at: NOW });
   assert.ok(!without.request.user.includes('<worn>'));
 });

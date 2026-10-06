@@ -11,6 +11,10 @@
 import { clipWithEllipsis, mediaLabelFor, stickerLabelFor, stickerUrl } from './media.js';
 import { gifHandleOf } from '../memory/gifs.js';
 import { MINUTE_MS, HOUR_MS, DAY_MS } from '../time.js';
+import { clampWithEllipsis, oneLine } from '../memory/clamp.js';
+
+// config.json's context.replyQuoteChars: how much of a reply's parent its line quotes.
+const DEFAULT_REPLY_QUOTE_CHARS = 80;
 
 // A language-neutral marker (memory transcript only) for a message addressed
 // to the persona, so the analyzer can weigh "how people talk TO it" apart
@@ -129,7 +133,8 @@ export function formatDuration(ms, units) {
  * informative form available (see docs/prompt-contract.md, "Media in
  * a transcript line" and src/discord/media.js#mediaLabelFor/stickerLabelFor):
  * attached to this request > described > blind, plus one extra tag per
- * distinct described custom emoji. `context.attachedIndex`/
+ * distinct described custom emoji unless `context.emojiInline` is false (the
+ * request describes them once elsewhere). `context.attachedIndex`/
  * `context.descriptions` are optional `Map`s keyed by the item's id (an
  * attachment's Discord id, a link's synthesized id, `sticker:<id>` or
  * `emoji:<id>` — see normalizeMessage). `context.videos` is an optional
@@ -231,7 +236,9 @@ function mediaTags(message, labels, context = {}) {
     const url = sticker.url ?? stickerUrl(sticker.id, sticker.format);
     pushLabel(stickerLabelFor({ ...sticker, url }, { attachedIndex, description }));
   }
-  if (labels.transcript.emojiDescribed) {
+  // `context.emojiInline === false`: the request lists the emoji once in its
+  // `<emoji>` block (src/behavior/prompt.js), so the line keeps the bare `:name:`.
+  if (labels.transcript.emojiDescribed && context.emojiInline !== false) {
     for (const emoji of message.emojis ?? []) {
       const description = context.descriptions?.get(`emoji:${emoji.id}`) ?? null;
       if (!description) continue;
@@ -259,6 +266,17 @@ function reactionsTag(message, labels, max) {
     .filter(Boolean)
     .join(', ');
   return list ? fill(template, { list }) : '';
+}
+
+/**
+ * What a reply line quotes of its parent: the parent's text on one line, else
+ * its media tags (mediaTags) joined, cut to `maxChars` code points at a word
+ * boundary with an ellipsis (src/memory/clamp.js#clampWithEllipsis; 0 =
+ * whole); '' when the parent has neither.
+ */
+function replyQuote(parent, labels, context, maxChars) {
+  const text = oneLine(parent.content) || oneLine(mediaTags(parent, labels, context).join(' '));
+  return clampWithEllipsis(text, maxChars);
 }
 
 /**
@@ -317,6 +335,11 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  *   `transcript.reactions` at the end of its line. Ignored when the labels have no
  *   `transcript.reactions` key.
  * @param {number} [options.reactionsPerMessage]  Default 6: at most this many reactions per message.
+ * @param {number} [options.replyQuoteChars]  `context.replyQuoteChars` (80 when omitted; 0 = whole):
+ *   a reply to a message of the list renders `transcript.replyTo` with `{index}`, `{author}` (the
+ *   parent's name, the persona's self label for its own line) and `{quote}` (replyQuote).
+ * @param {boolean} [options.emojiInline]  Default true; false leaves out the `emojiDescribed` tag of a
+ *   custom emoji (the request lists the emoji with their descriptions in `<emoji>` instead).
  * @param {number} [options.indexOffset]  Default 0 (when undefined or null): the first message
  *   is numbered `indexOffset + 1`, and every index (the `#index`, a reply target inside the
  *   list, `item.index`) shifts by it, so a second block (another channel's lines) continues
@@ -335,7 +358,8 @@ export function formatTranscript(messages, options) {
   const { timezone, gapMinutes, maxChars, selfName, labels, mode = 'chat', attachedIndex, descriptions, videos, reads, gifHandles, imageAnswers } = options;
   const seeReactions = options.seeReactions ?? true;
   const reactionsPerMessage = options.reactionsPerMessage ?? 6;
-  const mediaContext = { attachedIndex, descriptions, videos, reads, gifHandles, imageAnswers };
+  const replyQuoteChars = options.replyQuoteChars ?? DEFAULT_REPLY_QUOTE_CHARS;
+  const mediaContext = { attachedIndex, descriptions, videos, reads, gifHandles, imageAnswers, emojiInline: options.emojiInline !== false };
   const locale = labels.locale;
   const selfLabel = fill(labels.self, { name: selfName });
   const indexOffset = options.indexOffset ?? 0;
@@ -346,6 +370,7 @@ export function formatTranscript(messages, options) {
     throw new RangeError(`formatTranscript: indexOffset must be an integer >= 0, got ${String(indexOffset)}`);
   }
   const indexById = new Map(messages.map((message, i) => [message.id, indexOffset + i + 1]));
+  const byId = new Map(messages.map((message) => [message.id, message]));
   const items = [];
   let previous = null;
   let previousChannelId = NO_CHANNEL;
@@ -380,7 +405,14 @@ export function formatTranscript(messages, options) {
     if (message.content) body.push(clipWithEllipsis(message.content, maxChars));
     if (message.replyToId && mode === 'chat') {
       const target = indexById.get(message.replyToId);
-      body.push(target ? fill(labels.transcript.replyTo, { index: target }) : labels.transcript.replyToOld);
+      if (target) {
+        const parent = byId.get(message.replyToId);
+        const author = parent.self ? selfLabel : parent.authorName;
+        const quote = replyQuote(parent, labels, mediaContext, replyQuoteChars);
+        body.push(fill(labels.transcript.replyTo, { index: target, author, quote }));
+      } else {
+        body.push(labels.transcript.replyToOld);
+      }
     }
     body.push(...mediaTags(message, labels, mediaContext));
     for (const snapshot of message.forwarded ?? []) {
