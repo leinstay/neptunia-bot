@@ -56,6 +56,8 @@ export const TURN_INPUT_KEYS = Object.freeze([
   'readOnlyIds',
   'recentLines',
   'recentAudience',
+  'diaryChannel',
+  'diary',
 ]);
 
 const KNOWN = new Set(TURN_INPUT_KEYS);

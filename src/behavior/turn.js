@@ -942,6 +942,18 @@ export function createTurnRunner({
     return emoji && hot.config.features?.customEmoji !== false ? emoji.byName : null;
   }
 
+  /**
+   * The bare name of the diary channel (`diary.channelId`, in `config`: the turn's live config)
+   * for `<senses>`: null with no channel set, `features.diary` off, or a channel the served
+   * guild's cache (else the client's) does not know by name.
+   */
+  function diaryChannelName(guildId, config) {
+    const id = config.diary?.channelId;
+    if (!id || config.features?.diary === false) return null;
+    const found = client.guilds?.cache?.get?.(guildId)?.channels?.cache?.get?.(id) ?? client.channels?.cache?.get?.(id) ?? null;
+    return typeof found?.name === 'string' && found.name ? found.name : null;
+  }
+
   /** One dry-run mirror message (src/behavior/limits.js#mirrorDryRun), `bot.dryRunChannelId` read now. */
   function mirror(header, body) {
     return mirrorDryRun({ client, dryRunChannelId: hot.config.bot?.dryRunChannelId || '', header, body });
@@ -3258,6 +3270,9 @@ export function createTurnRunner({
           // `<recent>`: the last hours, its live lines and the members' moments (no block without the store).
           recentLines: recent.lines ?? null,
           recentAudience: recent.audience ?? null,
+          // `<senses>`: where the persona keeps its diary, when one is set.
+          diaryChannel: diaryChannelName(guildId, config),
+          diary: null,
         }),
       );
       // What `<recent>` showed, held back or cut: counts only.
