@@ -44,9 +44,7 @@ Every key in `config.json` with its default, grouped by section.
 | `pauseNotice` | `true` | Post a short notice when the persona is called while paused. A missing key counts as on. See `mention.pauseNoticeMinutes` and `labels.limits.paused` |
 | `variety` | `true` | A model pass names the devices the persona is overusing in their own recent lines. The result becomes a `<worn>` block in the turn's request. A missing key counts as on |
 | `varietyPrecompute` | `true` | Start the variety pass right after the persona posts text, so the next turn finds the result ready. Off: the pass runs only at the turn, but a late answer is still stored for later. A missing key counts as on |
-| `fillerGuard` | `true` | Block words and phrases the persona overuses from repeating in replies until a cooldown expires. The variety passes feed the list automatically; the owner can pin entries with `/nep variety add type:filler`. When a fresh reply holds an entry on cooldown, one rewrite request replaces it. A missing key counts as on |
-| `patternGuard` | `true` | Before posting, check the reply against the current worn patterns and rewrite when a match is found. A missing key counts as on |
-| `stickyGuard` | `true` | After each post, find phrases the persona stuck on (repeated in 3+ recent lines, rare in older ones) and add them as filler entries so the filler guard rewrites the next use. No model needed. A missing key counts as on |
+| `stickyGuard` | `true` | After each post, find phrases the persona stuck on (repeated in 3+ recent lines, rare in older ones) and add them as filler entries so the next turn sees them in the advice list. No model needed. A missing key counts as on |
 | `splitTasks` | `true` | Split a long structured direct call into separate parts, each answered in its own turn. A missing key counts as on. Needs `prompts/split.md` and `labels.task.part` |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
@@ -622,7 +620,7 @@ Settings for the variety pass (`features.variety`). The persona's own recent lin
 
 ### `variety.fillers`
 
-Settings for the filler guard (`features.fillerGuard`). Two kinds of entry: a PREFIX entry ends with `*` (at least 3 letters before the `*`) and matches every word starting with that prefix on a word boundary; an EXACT entry (no `*`) matches the word or phrase whole. The variety passes are the main source: a word-type habit the pass finds becomes an entry with weight equal to its count. The owner can pin entries with `/nep variety add type:filler` as a fallback. The list is ranked with eviction like interests: capacity `max`, weight with recency decay (`halfLifeDays`), the weakest evicted when full. Owner-added entries are pinned: never evicted or decayed. An entry may be reused only after a cooldown in hours or in the persona's own posted messages, whichever comes first. When a fresh reply holds an entry on cooldown, the speaking model rewrites the reply without it (`prompts/reword.md`). State in guild memory: `fillers` and `ownMessageCount`.
+Settings for the filler advice list. Two kinds of entry: a PREFIX entry ends with `*` (at least 3 letters before the `*`) and matches every word starting with that prefix on a word boundary; an EXACT entry (no `*`) matches the word or phrase whole. The variety passes are the main source: a word-type habit the pass finds becomes an entry with weight equal to its count. The owner can pin entries with `/nep variety add type:filler` as a fallback. The list is ranked with eviction like interests: capacity `max`, weight with recency decay (`halfLifeDays`), the weakest evicted when full. Owner-added entries are pinned: never evicted or decayed. Entries on cooldown (used within `cooldownHours` or `cooldownMessages` of the persona's own posts; pinned entries always) are shown to the persona in the `<worn>` block before the reply, ranked, at most `max`. The persona sees them before writing and avoids them on its own. State in guild memory: `fillers` and `ownMessageCount`.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -630,11 +628,10 @@ Settings for the filler guard (`features.fillerGuard`). Two kinds of entry: a PR
 | `cooldownMessages` | `300` | The persona's own posted messages since an entry's last use before it is free again |
 | `max` | `12` | Entries kept in the list; the weakest by rank is evicted when full |
 | `halfLifeDays` | `14` | Recency half-life for the entry ranking (days); same decay formula as interests |
-| `maxOutputTokens` | `400` | Max output tokens for the rewrite request |
 
 ### `variety.sticky`
 
-Settings for the mechanical sticky-token detector (`features.stickyGuard`). After each of the persona's posts (or when the short variety pass lands), code scans two windows: the persona's last `lines` own lines (the recent window) and the older part of the ring up to `variety.longLines` (the baseline). A phrase of 1 to `maxWords` words counts as sticky when it occurs in at least `minRepeats` recent lines and in at most `baselineMax` older lines, so ordinary vocabulary the persona always uses never qualifies. A one-word phrase needs `minChars` characters, or at least 2 characters if it contains a digit. With fewer than `baselineMin` older lines available, a single word counts only when it contains a digit. Words in the `ignore` list are never counted. The longest overlapping phrase wins. Each match becomes an exact filler entry with weight equal to its count and cooldown already started, so the filler guard rewrites its next use. Logged as `fillers: sticky`.
+Settings for the mechanical sticky-token detector (`features.stickyGuard`). After each of the persona's posts (or when the short variety pass lands), code scans two windows: the persona's last `lines` own lines (the recent window) and the older part of the ring up to `variety.longLines` (the baseline). A phrase of 1 to `maxWords` words counts as sticky when it occurs in at least `minRepeats` recent lines and in at most `baselineMax` older lines, so ordinary vocabulary the persona always uses never qualifies. A one-word phrase needs `minChars` characters, or at least 2 characters if it contains a digit. With fewer than `baselineMin` older lines available, a single word counts only when it contains a digit. Words in the `ignore` list are never counted. The longest overlapping phrase wins. Each match becomes an exact filler entry with weight equal to its count and cooldown already started, so the next turn's advice list includes it. Logged as `fillers: sticky`.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -646,15 +643,6 @@ Settings for the mechanical sticky-token detector (`features.stickyGuard`). Afte
 | `baselineMax` | `1` | Maximum occurrences in the older ring for a phrase to count as sticky |
 | `baselineMin` | `100` | With fewer older lines than this, a single word counts only when it contains a digit |
 | `ignore` | `[]` | Words never counted as a sticky token |
-
-### `variety.patternCheck`
-
-Settings for the pattern guard (`features.patternGuard`). Before posting, when the reply has at least `minChars` characters and the worn lists (short and long) are not empty, a classifier (`classifier.text`, `prompts/pattern-check.md`) checks which worn patterns the reply falls into. On a match the same rewrite request rewrites the reply without that pattern. The classifier runs during the typing simulation of the first message, so it adds no visible delay; only a rewrite does.
-
-| Key | Default | Meaning |
-|---|---|---|
-| `minChars` | `15` | Minimum characters in the reply before the check runs |
-| `maxOutputTokens` | `200` | Max output tokens for the pattern check classifier |
 
 ## `private`
 

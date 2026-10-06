@@ -30,18 +30,8 @@ import { audienceCovers, markSeen, messageLink, resolveDestination, stampPings }
 import { classifierTextModel } from './mention.js';
 import { parseLookupAnswer, recallSettings } from './recall.js';
 import { parseSplitAnswer, splitCandidate, splitSettings } from './split.js';
-import {
-  applyReword,
-  fillerKey,
-  fillersOnCooldown,
-  fillersSettings,
-  findFillers,
-  parsePatternCheck,
-  patternCheckBody,
-  patternCheckSettings,
-} from './fillers.js';
+import { fillerKey, fillersSettings, findFillers } from './fillers.js';
 import { stickyOn, stickyPhrases, stickySettings } from './sticky.js';
-import { mergeWorn, varietyOn } from './variety.js';
 import { captionedEntries, gifPickSettings, parseGifPick, pickCandidates, renderGifLibrary } from './gif-pick.js';
 import { turnRequestInput } from './turn-input.js';
 import { parseOutput } from '../llm/parse.js';
@@ -950,14 +940,12 @@ export function createTurnRunner({
    * that answers a line (a reply or a linked pulled line); nothing more for
    * one that answers none. A turn answering one part of a split message
    * names its part (`part <index>/<total>`) after the trigger kind. The
-   * reply guard runs as in act() (guardReply: the pattern check and the
-   * rewrite request included, so the log shows what would be posted), but
-   * nothing is counted or stamped: nothing was posted. So does the GIF picker
+   * messages are the model's as written (nothing rewrites them); nothing is
+   * counted or stamped: nothing was posted. The GIF picker runs as in act()
    * (pickGif, its request included): a GIF it picks is logged and mirrored as
-   * the GIF that would be posted instead of the messages. `worn`: the patterns
-   * this turn's `<worn>` block showed, or null; `history`: the chat lines the
-   * picker's `<context>` reads.
-   * @param {{ channel: object, guildId: string, worn: object[]|null, parsed: object, idByIndex: Map<number, string>,
+   * the GIF that would be posted instead of the messages. `history`: the chat
+   * lines the picker's `<context>` reads.
+   * @param {{ channel: object, guildId: string, parsed: object, idByIndex: Map<number, string>,
    *   history?: object[], mode: string, triggerKind: TriggerKind|null, plain: boolean, selfName: string, pulledIds: Map<string, string>,
    *   lines: object[], knownNames: { name: string, id: string }[], linkFor: (pulledId: string|null) => string|null,
    *   part?: { index: number, total: number }|null }} args
@@ -965,7 +953,7 @@ export function createTurnRunner({
    *   channels, then this chat's history (names and authors); `knownNames`: the stored names
    *   `@name` resolves by too (storedNames).
    */
-  async function dryAct({ channel, guildId, worn = null, parsed, idByIndex, history = [], mode, triggerKind, plain, selfName, pulledIds, lines, knownNames, linkFor, part = null }) {
+  async function dryAct({ channel, guildId, parsed, idByIndex, history = [], mode, triggerKind, plain, selfName, pulledIds, lines, knownNames, linkFor, part = null }) {
     const channelName = channel.name ?? null;
     const where = mirrorChannelLabel(channel);
     // Every triggered turn shares the mode `reply`: the header names its
@@ -991,10 +979,9 @@ export function createTurnRunner({
       await mirror(`${head} · react to ${authorName}`, `reacts with ${reaction.emoji} to ${authorName}${elsewhere}`);
     }
 
-    const guarded = await guardReplySafely({ channelId: channel.id, guildId, messages: parsed.messages, selfName, worn });
-    const picked = await pickGifSafely({ channelId: channel.id, guildId, messages: guarded, gif: parsed.gif, history, selfName });
+    const picked = await pickGifSafely({ channelId: channel.id, guildId, messages: parsed.messages, gif: parsed.gif, history, selfName });
     // A picked GIF would be posted instead of the messages.
-    const messages = picked ? [] : guarded;
+    const messages = picked ? [] : parsed.messages;
     const gif = picked ?? parsed.gif;
     for (const message of messages) {
       const { replyId, pulledId } = replyTarget(message.replyTo, { plain, idByIndex, pulledIds });
@@ -1258,168 +1245,37 @@ export function createTurnRunner({
 
   /**
    * The guild's filler list (`fillers`, src/behavior/fillers.js) and its count
-   * of the persona's own messages; null when the list is empty (the cheap
-   * check that keeps such a turn off this path).
+   * of the persona's own messages; null when the list is empty. `known`: the
+   * guild memory the caller already read, else it is read here.
+   * @param {string} guildId
+   * @param {object|null} [known]
    * @returns {{ list: object[], ownMessages: number }|null}
    */
-  function guildFillers(guildId) {
-    const guild = typeof store.getGuild === 'function' ? store.getGuild(guildId) : null;
+  function guildFillers(guildId, known = null) {
+    const guild = known ?? (typeof store.getGuild === 'function' ? store.getGuild(guildId) : null);
     const list = Array.isArray(guild?.fillers) ? guild.fillers : [];
     if (list.length === 0) return null;
     return { list, ownMessages: Number.isInteger(guild.ownMessageCount) ? guild.ownMessageCount : 0 };
   }
 
   /**
-   * The fillers `text` holds that still rest (findFillers, then
-   * fillersOnCooldown with `variety.fillers` read now); [] with
-   * features.fillerGuard off (a missing key counts as on) or an empty list.
-   * @returns {object[]}
+   * The request's `fillers` input (src/behavior/variety.js#renderWorn): the
+   * guild's filler list and own-message count (guildFillers, over `known`
+   * when the turn already read the guild memory) with the turn's `now`; null
+   * when the list is empty.
+   * @param {string} guildId
+   * @param {object|null} known
+   * @param {number} now
+   * @returns {{ list: object[], ownMessages: number, now: number }|null}
    */
-  function restingFillers(guildId, text, config) {
-    if (config.features?.fillerGuard === false) return [];
-    const fillers = guildFillers(guildId);
-    if (!fillers) return [];
-    const found = findFillers(text, fillers.list);
-    if (found.length === 0) return [];
-    const settings = fillersSettings(config);
-    return fillersOnCooldown(found, {
-      now: clock(),
-      ownMessages: fillers.ownMessages,
-      cooldownHours: settings.cooldownHours,
-      cooldownMessages: settings.cooldownMessages,
-    });
+  function requestFillers(guildId, known, now) {
+    const fillers = guildFillers(guildId, known);
+    return fillers ? { ...fillers, now } : null;
   }
 
   /**
-   * The worn patterns a reply is checked against: the ones this turn's
-   * `<worn>` block showed (`worn`, the variety pass's answer, already joined
-   * by mergeWorn), else -- the pass late or absent -- the guild's stored long
-   * and short lists joined the same way (mergeWorn), only with features.variety on.
-   * @returns {{ shape: string, examples: string[] }[]}
-   */
-  function wornForCheck(guildId, worn, config) {
-    if (Array.isArray(worn) && worn.length > 0) return worn;
-    if (!varietyOn(config) || typeof store.getGuild !== 'function') return [];
-    const guild = store.getGuild(guildId);
-    return mergeWorn(guild?.wornLong?.patterns, guild?.worn?.patterns, config);
-  }
-
-  /**
-   * The pattern post-check: with features.patternGuard on (a missing key
-   * counts as on), prompts['pattern-check'] present, a reply of at least
-   * `variety.patternCheck.minChars` code points and worn patterns to check
-   * (wornForCheck), ONE helper request on the classifier model (role
-   * `classifier.text`, purpose `pattern-check`, its answer capped at
-   * `variety.patternCheck.maxOutputTokens`): system = the prompt with
-   * `{{name}}`, user = `<patterns>` (patternCheckBody) and `<reply>` (the
-   * messages joined by a blank line). Resolves the shapes of the patterns the
-   * answer names (parsePatternCheck); `none`, an unparsable answer or a failed
-   * request match nothing. Logs `patterns: checked` (`patterns`: how many
-   * were listed, `matched`, and `unparsed` for an answer it could not read)
-   * or `patterns: check failed` with the rail's code. Counts only. Never throws.
-   * @returns {Promise<string[]>}
-   */
-  async function checkPatterns({ channelId, guildId, joined, selfName, worn, config }) {
-    if (config.features?.patternGuard === false) return [];
-    const prompt = hot.prompts?.['pattern-check'];
-    if (typeof prompt !== 'string' || prompt.trim() === '') return [];
-    const settings = patternCheckSettings(config);
-    if ([...joined].length < settings.minChars) return [];
-    const patterns = wornForCheck(guildId, worn, config);
-    if (patterns.length === 0) return [];
-    let completion;
-    try {
-      completion = await llm.complete(
-        [
-          { role: 'system', content: fillPromptTemplate(prompt, { name: selfName ?? '' }) },
-          { role: 'user', content: [block('patterns', patternCheckBody(patterns)), block('reply', joined)].join('\n\n') },
-        ],
-        {
-          model: classifierTextModel(config),
-          ...helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: settings.maxOutputTokens, purpose: 'pattern-check' }),
-        },
-      );
-    } catch (err) {
-      log.warn('patterns: check failed', { channel: channelId, reason: railReason(err), status: err?.statusCode ?? null });
-      return [];
-    }
-    const { matched, parsed } = parsePatternCheck(completion?.text, patterns.length);
-    log.info('patterns: checked', { channel: channelId, patterns: patterns.length, matched: matched.length, ...(parsed ? {} : { unparsed: true }) });
-    return matched.map((index) => patterns[index].shape);
-  }
-
-  /**
-   * The reply guard, before the persona's messages are posted: the fillers
-   * the reply holds that still rest (restingFillers) and the worn
-   * patterns a judge finds in it (checkPatterns) are asked away together in
-   * ONE rewrite on the voice model (role `voice`, purpose `reword`, its
-   * answer capped at `variety.fillers.maxOutputTokens`, no cache marker):
-   * system = prompts.reword with `{{name}}` = the persona's display name,
-   * `{{words}}` = the resting fillers as listed (a prefix with its `*`) joined by `, ` and
-   * `{{patterns}}` = the matched shapes joined by `; ` (an empty list fills its placeholder with
-   * `none`, so the sentence stays readable); user = the messages'
-   * texts joined by a blank line. The answer replaces the texts when it parses
-   * (applyReword), else the messages stay as they are. Logs `fillers: reworded`
-   * (`fillers`, `patterns`: how many of each, `changed`: whether a text
-   * changed); a failed request `fillers: reword failed` with the rail's code;
-   * no prompts.reword, or only patterns matched while the prompt carries no
-   * `{{patterns}}` (it would ask for nothing), `fillers: reword skipped`
-   * (`no-prompt`, `no-placeholder`): the originals are posted. Counts only,
-   * never a filler, a shape or a text. Nothing resting and nothing matched: no rewrite.
-   * @param {{ channelId: string, guildId: string, messages: { text: string }[], selfName: string,
-   *   worn?: object[]|null }} args
-   * @returns {Promise<{ text: string }[]>}  The messages to post.
-   */
-  async function guardReply({ channelId, guildId, messages, selfName, worn = null }) {
-    if (messages.length === 0) return messages;
-    const config = hot.config;
-    const joined = messages.map((message) => message.text).join('\n\n');
-    const blocked = restingFillers(guildId, joined, config);
-    const shapes = await checkPatterns({ channelId, guildId, joined, selfName, worn, config });
-    if (blocked.length === 0 && shapes.length === 0) return messages;
-    const counts = { fillers: blocked.length, patterns: shapes.length };
-    const prompt = hot.prompts?.reword;
-    if (typeof prompt !== 'string' || prompt.trim() === '') {
-      log.info('fillers: reword skipped', { channel: channelId, reason: 'no-prompt', ...counts });
-      return messages;
-    }
-    if (blocked.length === 0 && !prompt.includes('{{patterns}}')) {
-      log.info('fillers: reword skipped', { channel: channelId, reason: 'no-placeholder', ...counts });
-      return messages;
-    }
-    let completion;
-    try {
-      completion = await llm.complete(
-        [
-          { role: 'system', content: fillPromptTemplate(prompt, { name: selfName ?? '', words: blocked.map(fillerKey).join(', ') || 'none', patterns: shapes.join('; ') || 'none' }) },
-          { role: 'user', content: joined },
-        ],
-        {
-          ...helperRequestOptions(config, { role: 'voice', maxOutputTokens: fillersSettings(config).maxOutputTokens, purpose: 'reword' }),
-          cache: false,
-        },
-      );
-    } catch (err) {
-      log.warn('fillers: reword failed', { channel: channelId, reason: railReason(err), status: err?.statusCode ?? null, ...counts });
-      return messages;
-    }
-    const rewritten = applyReword(messages, completion?.text);
-    const changed = rewritten.some((message, i) => message.text !== messages[i].text);
-    log.info('fillers: reworded', { channel: channelId, ...counts, changed });
-    return rewritten;
-  }
-
-  /** guardReply that never rejects: an unexpected failure (`fillers: guard failed`) posts the messages as written. */
-  function guardReplySafely(args) {
-    return guardReply(args).catch((err) => {
-      log.warn('fillers: guard failed', { channel: args.channelId, error: err });
-      return args.messages;
-    });
-  }
-
-  /**
-   * The GIF picker (src/behavior/gif-pick.js), on the messages the reply guard
-   * left: with features.gifPicker and features.gifs on (a missing key counts as
+   * The GIF picker (src/behavior/gif-pick.js), on the messages as the model
+   * wrote them: with features.gifPicker and features.gifs on (a missing key counts as
    * on), prompts['gif-pick'] present, the guild's library readable, room left
    * under `gifs.maxPerDay` (gifsToday) and pickCandidates saying yes (a reply
    * of at most `gifs.pick.maxChars` code points, no `<gif>` of the turn's own,
@@ -1502,7 +1358,7 @@ export function createTurnRunner({
    * `bumped`) when a phrase was found. Nothing with features.stickyGuard off
    * (a missing key counts as on). Never throws (`fillers: sticky failed`).
    * @returns {string[]} The keys of the entries it added: notePosted stamps
-   *   them used now, so the filler guard rewrites the very next use.
+   *   them used now, so the very next turn's `<worn>` lists them as resting.
    */
   function noteSticky(guildId) {
     try {
@@ -1533,9 +1389,8 @@ export function createTurnRunner({
    * grows by how many were posted, the sticky-phrase guard runs (noteSticky),
    * then every filler the posted texts still hold (`texts`, as the persona
    * wrote them) and every entry the sticky guard just added are stamped used
-   * at that count and now (store.markFillers, one stamp each) -- with
-   * features.fillerGuard off too, so switching it on finds the real last uses.
-   * Nothing while paused or when nothing was posted; never throws into the
+   * at that count and now (store.markFillers, one stamp each): the stamps
+   * that decide which fillers the next turns' `<worn>` lists. Nothing while paused or when nothing was posted; never throws into the
    * turn (`fillers: note failed`).
    * @param {string} guildId
    * @param {string[]} texts
@@ -1606,18 +1461,14 @@ export function createTurnRunner({
    * the post ledger (recordPost) with `mode`, the trigger, the newest line of
    * `history` and `sourceId`.
    *
-   * After the reactions, the reply guard (guardReply: the resting fillers, the
-   * pattern check against `worn`, one rewrite) runs alongside the first
+   * The messages are posted as the model wrote them: nothing rewrites them.
+   * After the reactions, the GIF picker (pickGif) runs alongside the first
    * message's typing imitation: both start together, the first message waits
-   * for both, so a judge that answers within the typing time costs nothing
-   * and a rewrite always lands before the first send. Once the messages are
-   * out (all, or those before a failed send), notePosted counts them and
-   * stamps the fillers they hold. `worn`: the patterns this turn's `<worn>`
-   * block showed, or null. The GIF picker (pickGif) runs on the messages the
-   * guard left, still alongside that typing; a GIF it picks is posted in their
-   * place (no text message, nothing counted by notePosted), replying where the
-   * first message would have.
-   * @param {{ channel: object, guildId: string, worn: object[]|null, privateChat: boolean, parsed: object,
+   * for both; a GIF it picks is posted in place of the messages (no text
+   * message, nothing counted by notePosted), replying where the first message
+   * would have. Once the messages are out (all, or those before a failed
+   * send), notePosted counts them and stamps the fillers they hold.
+   * @param {{ channel: object, guildId: string, privateChat: boolean, parsed: object,
    *   idByIndex: Map<number, string>, history: object[], startedAt: number, mode: string,
    *   triggerKind: TriggerKind|null, plain: boolean, trigger: object|null, selfName: string,
    *   pulledIds: Map<string, string>, lines: object[], knownNames: { name: string, id: string }[],
@@ -1629,7 +1480,7 @@ export function createTurnRunner({
    *   with it a refused drawing's limit notice quotes nothing (the trigger of a routed turn
    *   lives in that channel).
    */
-  async function act({ channel, guildId, worn = null, privateChat, parsed, idByIndex, history, startedAt, mode, triggerKind, plain, trigger, selfName, pulledIds, lines, knownNames, linkFor, sourceId }) {
+  async function act({ channel, guildId, privateChat, parsed, idByIndex, history, startedAt, mode, triggerKind, plain, trigger, selfName, pulledIds, lines, knownNames, linkFor, sourceId }) {
     const cfg = hot.config.typing;
     const typingOn = hot.config.features?.typingSimulation !== false;
     // The typing imitation of one message: the indicator, then the time its text takes to type.
@@ -1679,20 +1530,18 @@ export function createTurnRunner({
     // Each posted message as the next fetchHistory will normalize it (its own id and time, the
     // persona's text as written): the lines the pass ahead looks at.
     const ownPosted = [];
-    // The texts posted, as the persona wrote them: what the root guard counts and stamps.
+    // The texts posted, as the persona wrote them: what notePosted counts and stamps.
     const postedTexts = [];
     let sendFailed = false;
-    // The guard starts first (its judge is sent at once), then the first message's typing.
-    const guarding = guardReplySafely({ channelId: channel.id, guildId, messages: parsed.messages, selfName, worn });
-    // The GIF picker reads what the guard left, still alongside the same typing.
-    const picking = guarding.then((guarded) => pickGifSafely({ channelId: channel.id, guildId, messages: guarded, gif: parsed.gif, history, selfName }));
+    // The GIF picker starts first (its request is sent at once), then the first message's typing.
+    const picking = pickGifSafely({ channelId: channel.id, guildId, messages: parsed.messages, gif: parsed.gif, history, selfName });
     if (typingOn && parsed.messages.length > 0) {
       const first = renderCustomEmoji(resolveMentions(parsed.messages[0].text, lines, knownNames).text, emojiLookup());
       await typeFor(first);
     }
     const picked = await picking;
     // A picked GIF is posted instead of the messages.
-    const messages = picked ? [] : await guarding;
+    const messages = picked ? [] : parsed.messages;
     const gif = picked ?? parsed.gif;
     for (const [index, message] of messages.entries()) {
       if (index > 0 && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
@@ -1704,7 +1553,7 @@ export function createTurnRunner({
       // Custom emoji after the mentions: `<@id>` has no `:name:` in it to break.
       const spoken = renderCustomEmoji(mentioned.text, emojiLookup());
       const text = withLink(spoken, link, hot.prompts?.labels);
-      // The first message was typed alongside the guard, above.
+      // The first message was typed alongside the GIF picker, above.
       if (typingOn && index > 0) await typeFor(spoken);
 
       let posted;
@@ -3243,6 +3092,7 @@ export function createTurnRunner({
       const triggerAt = part && trigger ? history.findIndex((m) => m.id === trigger.id) : -1;
       const notAnswered =
         triggerAt === -1 ? tasks.deferred : new Set([...tasks.deferred, ...history.slice(triggerAt + 1).map((m) => m.id)]);
+      const guildMemory = memoryOn ? store.getGuild(guildId) : null;
       // Every input named (turnRequestInput throws on one left undefined); null marks an absent one.
       const request = buildRequest(
         turnRequestInput({
@@ -3257,7 +3107,7 @@ export function createTurnRunner({
           neighbors,
           trigger,
           triggerKind,
-          guildMemory: memoryOn ? store.getGuild(guildId) : {},
+          guildMemory: guildMemory ?? {},
           interlocutor: memoryOn && trigger ? (store.getUser(guildId, trigger.authorId) ?? null) : null,
           // A private chat: the partner's private layer joins their public profile (only there).
           privateChat: isPrivate ? { userId: trigger?.authorId ?? null } : null,
@@ -3290,6 +3140,8 @@ export function createTurnRunner({
             emoji || (features.gifs !== false && typeof store.getGifs === 'function') ? (store.getMediaCache(guildId) ?? null) : null,
           // The `<worn>` block: what this turn's variety pass named, or nothing.
           worn: worn ?? null,
+          // ...and, in the same block, the guild's resting fillers as advice before the reply.
+          fillers: requestFillers(guildId, guildMemory, now),
           // `<channel_view>`: the channels pulled into this turn, the one it is about, the chat
           // line put to the room, where a call from a read-only channel is answered.
           pulled,
@@ -3466,14 +3318,13 @@ export function createTurnRunner({
       // top of this turn: unlike the other switches this one defaults to OFF,
       // and whether to actually post is the very last decision of a turn.
       if (hot.config.features?.dryRun === true) {
-        await dryAct({ channel, guildId, worn, parsed, idByIndex, history, mode: finalMode, triggerKind, selfName, part, ...routing });
+        await dryAct({ channel, guildId, parsed, idByIndex, history, mode: finalMode, triggerKind, selfName, part, ...routing });
         noteSpokeSaw(channel, history, serverShown, pulled, notAnswered);
         return { outcome: 'spoke', mode: finalMode, dryRun: true };
       }
       const acted = await act({
         channel,
         guildId,
-        worn,
         privateChat: isPrivate,
         parsed,
         idByIndex,

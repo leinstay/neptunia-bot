@@ -227,6 +227,8 @@ export const labels = {
   },
   variety: {
     intro: 'devices you used in your last lines, do not repeat them:',
+    fillersIntro: 'filler words still resting, leave them out:',
+    fillerLine: '{text} -- {count} uses, last {ago} ago',
   },
   mentor: {
     intended: ['a limit notice is a feature'],

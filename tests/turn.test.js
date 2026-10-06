@@ -2913,8 +2913,8 @@ test('runTurn: a private turn takes guildId from params and reads the private la
   const { result, channel, store } = await runPrivateTurn();
 
   assert.equal(result.outcome, 'spoke');
-  // The request's guild memory, then the root guard's stems before the message is posted.
-  assert.deepEqual(store.guildCalls, ['g1', 'g1']);
+  // The request's guild memory: nothing reads the guild again before the message is posted.
+  assert.deepEqual(store.guildCalls, ['g1']);
   assert.deepEqual(store.privateCalls, [{ guildId: 'g1', userId: 'u1' }]);
   assert.equal(channel.sent.length, 1);
   assert.equal(channel.sent[0].content, 'hi');
@@ -3155,8 +3155,8 @@ test('runTurn: the drawFailed turn of a private chat keeps the guildId', async (
 
   assert.equal(result.drawFailed, 'moderation');
   assert.equal(llm.calls.length, 2);
-  // Each turn's request, then the root guard of the one turn that posts a message.
-  assert.deepEqual(store.guildCalls, ['g1', 'g1', 'g1']);
+  // Each turn's request: nothing reads the guild again before the message is posted.
+  assert.deepEqual(store.guildCalls, ['g1', 'g1']);
   assert.ok(userTextOf(llm.calls[1]).includes(fill(labels.triggers.drawFailed, { reason: labels.draw.reasons.moderation })));
 });
 
@@ -7031,19 +7031,17 @@ test('runTurn: another member\'s waiting call is named under labels.task.queuedO
 });
 
 // ---------------------------------------------------------------------------
-// The reply guard (src/behavior/fillers.js): a reply holding a resting filler
-// or matching a worn pattern is asked once to be rewritten before it is
-// posted; every posted message is counted and the fillers it holds stamped.
-
-const REWORD_PROMPT = 'Rewrite {{name}}: no {{words}}; not {{patterns}}.';
-const PATTERN_CHECK_PROMPT = 'Check what {{name}} wrote.';
+// The filler list (src/behavior/fillers.js): nothing rewrites a reply after
+// the model wrote it -- the resting fillers are shown before it, in the
+// request's <worn> block; every posted message is counted and the fillers it
+// holds stamped.
 
 /** A stored filler entry over a never-used, unpinned one. */
 function fillerEntry(text, prefix, fields = {}) {
   return { text, prefix, pinned: false, weight: 2, lastSeen: new Date(NOW).toISOString(), lastUsedAt: null, lastUsedAtMessage: null, uses: 0, ...fields };
 }
 
-/** fakeStore with the guild's fillers and the two guard writes recorded. */
+/** fakeStore with the guild's fillers and the two bookkeeping writes recorded. */
 function fillersStore(guild = {}, ownMessageCount = 10) {
   const guildMemory = { fillers: [], ownMessageCount, ...guild };
   const store = fakeStore({ guildMemory });
@@ -7061,147 +7059,122 @@ function fillersStore(guild = {}, ownMessageCount = 10) {
   return store;
 }
 
-/** A fake LLM answering by purpose; a function answer may wait or throw. Each call keeps its time. */
-function purposeLlm({ reply, check = 'none', reword = 'κάτι άλλο\n\nκαι τέλος' }) {
+/** A fake LLM answering every request with `reply`; each call keeps its messages and options. */
+function replyLlm(reply) {
   const calls = [];
-  const answers = { reply, 'pattern-check': check, reword };
   return {
     calls,
     complete: async (messages, options) => {
-      calls.push({ messages, options, at: Date.now() });
-      const answer = answers[options?.purpose];
-      return { text: typeof answer === 'function' ? await answer() : answer, usage: {}, estimated: 10 };
+      calls.push({ messages, options });
+      return { text: reply, usage: {}, estimated: 10 };
     },
   };
 }
 
-async function runGuardTurn({ features = {}, guild = {}, ownMessageCount = 10, reply, check, reword, prompts = {}, typing = null, patternCheck = { minChars: 15, maxOutputTokens: 33 }, variety, sticky } = {}) {
+async function runFillerTurn({ features = {}, guild = {}, ownMessageCount = 10, reply, sticky, variety } = {}) {
   const raw = rawMessage({ id: 'm1', ts: NOW - 1000 });
   const channel = fakeTurnChannel({ historyMessages: [raw] });
-  const sendTimes = [];
-  const send = channel.send;
-  channel.send = async (payload) => {
-    sendTimes.push(Date.now());
-    return send(payload);
-  };
-  const llm = purposeLlm({ reply, check, reword });
+  const llm = replyLlm(reply);
   const store = sticky ? learningStore(guild, ownMessageCount) : fillersStore(guild, ownMessageCount);
   const hot = fakeHot(
-    { typingSimulation: typing !== null, ...features },
+    { typingSimulation: false, ...features },
     {},
     {
       variety: {
         maxPatterns: 4,
         longMaxPatterns: 3,
-        fillers: { cooldownHours: 36, cooldownMessages: 300, maxOutputTokens: 123, max: 12, halfLifeDays: 14 },
-        patternCheck,
+        fillers: { cooldownHours: 36, cooldownMessages: 300, max: 12, halfLifeDays: 14 },
         ...(sticky ? { sticky } : {}),
       },
-      ...(typing ? { typing: { reactionDelayMs: [0, 0], betweenMessagesMs: [0, 0], ...typing } } : {}),
     },
   );
-  Object.assign(hot.prompts, { 'pattern-check': PATTERN_CHECK_PROMPT, reword: REWORD_PROMPT }, prompts);
-  for (const [name, text] of Object.entries(prompts)) if (text === null) delete hot.prompts[name];
   const turns = createTurnRunner({ hot, store, llm, calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW, variety });
   const { result, logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
-  const of = (purpose) => llm.calls.filter((call) => call.options?.purpose === purpose);
   const sent = () => channel.sent.map((payload) => payload.content);
-  return { result, logs, channel, llm, store, sendTimes, of, sent };
+  return { result, logs, channel, llm, store, sent };
+}
+
+/** The `<worn>` block's body of the turn's request, or null. */
+function wornOfCall(call) {
+  const user = call.messages[1].content;
+  const text = typeof user === 'string' ? user : user.find((part) => part.type === 'text').text;
+  const match = /<worn>\n([\s\S]*?)\n<\/worn>/.exec(text);
+  return match ? match[1] : null;
 }
 
 // ---- fillers ----------------------------------------------------------------------------
 
 const RESTING = { fillers: [fillerEntry('ειλικρ', true, { lastUsedAt: NOW - 3_600_000, lastUsedAtMessage: 9, uses: 4 })] };
 const TWO_MESSAGES = '<msg>ειλικρινά ωραίο</msg><msg>και τέλος</msg>';
+// What this turn's variety pass names: the patterns of its <worn> block.
+const PASS_WORN = [
+  { shape: 'ends on a rhetorical question', examples: ['σωστά;'], count: 3 },
+  { shape: 'opens with a sigh', examples: ['αχ', 'ουφ'], count: 2 },
+];
+const passNaming = () => fakeVariety(async () => PASS_WORN);
 
-test('runTurn: a reply holding a resting filler is rewritten by one voice request and the rewrite is posted', async () => {
-  const { result, logs, of, store, sent } = await runGuardTurn({ guild: RESTING, reply: TWO_MESSAGES, features: { patternGuard: false } });
+test('runTurn: a reply holding a resting filler and a worn pattern is posted exactly as the model wrote it, after one request', async () => {
+  const { result, logs, llm, store, sent } = await runFillerTurn({ guild: RESTING, variety: passNaming(), reply: '<msg>αχ, ειλικρινά ωραίο</msg><msg>και τέλος</msg>' });
 
   assert.equal(result.outcome, 'spoke');
-  const rewords = of('reword');
-  assert.equal(rewords.length, 1, 'exactly one reword request');
-  const [system, user] = rewords[0].messages;
-  assert.deepEqual(system, { role: 'system', content: fillPromptTemplate(REWORD_PROMPT, { name: 'Bot', words: 'ειλικρ*', patterns: 'none' }) });
-  assert.deepEqual(user, { role: 'user', content: 'ειλικρινά ωραίο\n\nκαι τέλος' });
-  const { options } = rewords[0];
-  assert.deepEqual([options.role, options.maxOutputTokens, options.countAgainstDailyCap, options.cache, options.model], ['voice', 123, true, false, undefined]);
-
-  assert.deepEqual(sent(), ['κάτι άλλο', 'και τέλος']);
+  assert.deepEqual(llm.calls.map((call) => call.options?.purpose), ['reply'], 'no request after the reply');
+  assert.deepEqual(sent(), ['αχ, ειλικρινά ωραίο', 'και τέλος']);
   assert.deepEqual(store.counted, [{ guildId: 'g1', posted: 2 }]);
-  assert.deepEqual(store.marked, [], 'the posted text no longer holds the filler');
-  const line = logs.find((entry) => entry.msg === 'fillers: reworded');
-  assert.deepEqual([line.fillers, line.patterns, line.changed], [1, 0, true]);
-  assert.equal(JSON.stringify(logs.filter((entry) => entry.msg.startsWith('fillers:'))).includes('ειλικρ'), false, 'counts only');
+  assert.deepEqual(store.marked, [{ guildId: 'g1', keys: ['ειλικρ*'], nowMs: NOW, ownMessages: 12 }], 'the use is stamped at the new count');
+  assert.equal(logs.some((entry) => /^(fillers: reword|fillers: guard|patterns:)/.test(entry.msg)), false);
 });
 
-test('runTurn: an exact filler rests only as a whole word', async () => {
+test('runTurn: the request\'s <worn> lists the resting fillers after the worn patterns', async () => {
+  const { llm } = await runFillerTurn({ guild: RESTING, variety: passNaming(), reply: '<msg>και τέλος</msg>' });
+  const [request] = llm.calls;
+  assert.equal(
+    wornOfCall(request),
+    [
+      labels.variety.intro,
+      '- ends on a rhetorical question ("σωστά;")',
+      '- opens with a sigh ("αχ", "ουφ")',
+      labels.variety.fillersIntro,
+      `- ${fill(labels.variety.fillerLine, { text: 'ειλικρ*', count: 4, ago: '1 h' })}`,
+    ].join('\n'),
+  );
+});
+
+test('runTurn: resting fillers alone make the <worn> block; a guild with none shows no filler line', async () => {
+  const alone = await runFillerTurn({ guild: RESTING, reply: '<msg>και τέλος</msg>' });
+  assert.equal(wornOfCall(alone.llm.calls[0]), [labels.variety.intro, labels.variety.fillersIntro, `- ${fill(labels.variety.fillerLine, { text: 'ειλικρ*', count: 4, ago: '1 h' })}`].join('\n'));
+  const none = await runFillerTurn({ variety: passNaming(), reply: '<msg>και τέλος</msg>' });
+  assert.equal(wornOfCall(none.llm.calls[0]), [labels.variety.intro, '- ends on a rhetorical question ("σωστά;")', '- opens with a sigh ("αχ", "ουφ")'].join('\n'));
+});
+
+test('runTurn: an exact filler is stamped only as a whole word', async () => {
   const guild = { fillers: [fillerEntry('ναι', false, { lastUsedAt: NOW - 1000, lastUsedAtMessage: 9 })] };
-  const inside = await runGuardTurn({ guild, reply: '<msg>ναιναι εντάξει</msg>', features: { patternGuard: false } });
-  assert.equal(inside.of('reword').length, 0);
-  const whole = await runGuardTurn({ guild, reply: '<msg>ναι, εντάξει</msg>', reword: 'εντάξει', features: { patternGuard: false } });
-  assert.equal(whole.of('reword').length, 1);
-  assert.deepEqual(whole.sent(), ['εντάξει']);
+  const inside = await runFillerTurn({ guild, reply: '<msg>ναιναι εντάξει</msg>' });
+  assert.deepEqual([inside.sent(), inside.store.marked], [['ναιναι εντάξει'], []]);
+  const whole = await runFillerTurn({ guild, reply: '<msg>ναι, εντάξει</msg>' });
+  assert.deepEqual(whole.sent(), ['ναι, εντάξει']);
+  assert.deepEqual(whole.store.marked.map((call) => call.keys), [['ναι']]);
 });
 
 test('runTurn: a filler past its cooldown is posted as written and stamped used at the new count', async () => {
-  const { of, store, sent } = await runGuardTurn({ guild: RESTING, ownMessageCount: 400, reply: TWO_MESSAGES, features: { patternGuard: false } });
-  assert.equal(of('reword').length, 0);
+  const { llm, store, sent } = await runFillerTurn({ guild: RESTING, ownMessageCount: 400, reply: TWO_MESSAGES });
+  assert.equal(llm.calls.length, 1);
+  assert.equal(wornOfCall(llm.calls[0]), null, 'nothing rests, no pattern: no <worn>');
   assert.deepEqual(sent(), ['ειλικρινά ωραίο', 'και τέλος']);
   assert.deepEqual(store.counted, [{ guildId: 'g1', posted: 2 }]);
   assert.deepEqual(store.marked, [{ guildId: 'g1', keys: ['ειλικρ*'], nowMs: NOW, ownMessages: 402 }]);
 });
 
-test('runTurn: keep posts the original, and the filler it still holds is stamped', async () => {
-  const { of, store, sent, logs } = await runGuardTurn({ guild: RESTING, reply: TWO_MESSAGES, reword: 'keep', features: { patternGuard: false } });
-  assert.equal(of('reword').length, 1);
-  assert.deepEqual(sent(), ['ειλικρινά ωραίο', 'και τέλος']);
-  assert.deepEqual(store.marked.map((call) => call.keys), [['ειλικρ*']]);
-  assert.equal(logs.find((entry) => entry.msg === 'fillers: reworded').changed, false);
-});
-
-test('runTurn: features.fillerGuard false sends no reword request, yet counts and stamps what was posted', async () => {
-  const { of, store, sent, logs } = await runGuardTurn({ features: { fillerGuard: false, patternGuard: false }, guild: RESTING, reply: TWO_MESSAGES });
-  assert.equal(of('reword').length, 0);
-  assert.deepEqual(sent(), ['ειλικρινά ωραίο', 'και τέλος']);
-  assert.deepEqual(store.counted, [{ guildId: 'g1', posted: 2 }]);
-  assert.deepEqual(store.marked.map((call) => call.keys), [['ειλικρ*']]);
-  assert.equal(logs.some((entry) => entry.msg === 'fillers: reworded'), false);
-});
-
-test('runTurn: a failed reword request posts the original and logs fillers: reword failed', async () => {
-  const { result, of, sent, logs } = await runGuardTurn({
-    guild: RESTING,
-    reply: TWO_MESSAGES,
-    features: { patternGuard: false },
-    reword: () => {
-      throw Object.assign(new Error('upstream'), { statusCode: 502 });
-    },
-  });
-  assert.equal(result.outcome, 'spoke');
-  assert.equal(of('reword').length, 1);
-  assert.deepEqual(sent(), ['ειλικρινά ωραίο', 'και τέλος']);
-  const line = logs.find((entry) => entry.msg === 'fillers: reword failed');
-  assert.deepEqual([line.status, line.fillers], [502, 1]);
-});
-
-test('runTurn: without prompts.reword a resting filler posts as written, no request', async () => {
-  const { of, sent, logs } = await runGuardTurn({ guild: RESTING, reply: TWO_MESSAGES, prompts: { reword: null }, features: { patternGuard: false } });
-  assert.equal(of('reword').length, 0);
-  assert.deepEqual(sent(), ['ειλικρινά ωραίο', 'και τέλος']);
-  assert.equal(logs.find((entry) => entry.msg === 'fillers: reword skipped').reason, 'no-prompt');
-});
-
-test('runTurn: a guild without fillers sends no reword request and still counts its messages', async () => {
-  const { llm, store } = await runGuardTurn({ reply: TWO_MESSAGES, features: { patternGuard: false } });
+test('runTurn: a guild without fillers still counts its messages', async () => {
+  const { llm, store } = await runFillerTurn({ reply: TWO_MESSAGES });
   assert.equal(llm.calls.length, 1);
   assert.deepEqual(store.counted, [{ guildId: 'g1', posted: 2 }]);
   assert.deepEqual(store.marked, []);
 });
 
-test('runTurn: a dry run rewrites and logs the rewrite, but counts and stamps nothing', async () => {
-  const { of, store, logs } = await runGuardTurn({ features: { dryRun: true, patternGuard: false }, guild: RESTING, reply: TWO_MESSAGES });
-  assert.equal(of('reword').length, 1);
-  assert.deepEqual(logs.filter((entry) => entry.msg === 'dry-run: would send').map((entry) => entry.text), ['κάτι άλλο', 'και τέλος']);
+test('runTurn: a dry run logs the model\'s text as written and counts and stamps nothing', async () => {
+  const { llm, store, logs } = await runFillerTurn({ features: { dryRun: true }, guild: RESTING, variety: passNaming(), reply: TWO_MESSAGES });
+  assert.equal(llm.calls.length, 1);
+  assert.deepEqual(logs.filter((entry) => entry.msg === 'dry-run: would send').map((entry) => entry.text), ['ειλικρινά ωραίο', 'και τέλος']);
   assert.deepEqual([store.counted, store.marked], [[], []]);
 });
 
@@ -7237,7 +7210,7 @@ function ownRing(phrase, times, extra = []) {
 }
 
 test('runTurn: a phrase in minRepeats of the own lines becomes an exact filler already on its cooldown', async () => {
-  const { store, logs, sent } = await runGuardTurn({ sticky: STICKY, guild: { ownLines: ownRing('φεγγάρι ψηλά', 3) }, reply: '<msg>καλή νύχτα</msg>', features: { patternGuard: false } });
+  const { store, logs, sent } = await runFillerTurn({ sticky: STICKY, guild: { ownLines: ownRing('φεγγάρι ψηλά', 3) }, reply: '<msg>καλή νύχτα</msg>' });
   assert.deepEqual(sent(), ['καλή νύχτα']);
   assert.deepEqual(store.learned.map((call) => call.patterns), [[{ word: 'φεγγάρι ψηλά', count: 3, exact: true }]]);
   const [entry] = store.getGuild('g1').fillers;
@@ -7252,14 +7225,14 @@ test('runTurn: a phrase in minRepeats of the own lines becomes an exact filler a
 });
 
 test('runTurn: a new sticky phrase the reply itself holds is stamped once', async () => {
-  const { store } = await runGuardTurn({ sticky: STICKY, guild: { ownLines: ownRing('φεγγάρι ψηλά', 3) }, reply: '<msg>φεγγάρι ψηλά ξανά</msg>', features: { patternGuard: false } });
+  const { store } = await runFillerTurn({ sticky: STICKY, guild: { ownLines: ownRing('φεγγάρι ψηλά', 3) }, reply: '<msg>φεγγάρι ψηλά ξανά</msg>' });
   assert.deepEqual(store.marked.map((call) => call.keys), [['φεγγάρι ψηλά']]);
   assert.equal(store.getGuild('g1').fillers[0].uses, 1);
 });
 
 test('runTurn: a sticky phrase the list already covers is bumped, its stamps left alone', async () => {
   const stored = fillerEntry('φεγγάρι ψηλά', false, { weight: 2 });
-  const { store, logs } = await runGuardTurn({ sticky: STICKY, guild: { ownLines: ownRing('φεγγάρι ψηλά', 4), fillers: [stored] }, reply: '<msg>καλή νύχτα</msg>', features: { patternGuard: false } });
+  const { store, logs } = await runFillerTurn({ sticky: STICKY, guild: { ownLines: ownRing('φεγγάρι ψηλά', 4), fillers: [stored] }, reply: '<msg>καλή νύχτα</msg>' });
   const [entry] = store.getGuild('g1').fillers;
   assert.deepEqual([entry.weight, entry.lastUsedAt, entry.lastUsedAtMessage, entry.uses], [6, null, null, 0]);
   assert.deepEqual(store.marked, []);
@@ -7269,146 +7242,23 @@ test('runTurn: a sticky phrase the list already covers is bumped, its stamps lef
 
 test('runTurn: the whole ring is read, its older lines the baseline: a phrase they already hold is not sticky', async () => {
   const older = Array.from({ length: 150 }, (_, i) => ({ ts: NOW - (200 - i) * 60_000, channelId: 'c1', text: i % 20 === 0 && i < 100 ? 'φεγγάρι ψηλά' : `κ${i}ος` }));
-  const { store, logs } = await runGuardTurn({ sticky: STICKY, guild: { ownLines: [...older, ...ownRing('φεγγάρι ψηλά', 3)] }, reply: '<msg>καλή νύχτα</msg>', features: { patternGuard: false } });
+  const { store, logs } = await runFillerTurn({ sticky: STICKY, guild: { ownLines: [...older, ...ownRing('φεγγάρι ψηλά', 3)] }, reply: '<msg>καλή νύχτα</msg>' });
   assert.deepEqual([store.learned, store.getGuild('g1').fillers], [[], []], 'five older lines hold it, one is allowed');
   assert.equal(logs.some((item) => item.msg === 'fillers: sticky'), false);
 });
 
 test('runTurn: a limit notice in the own lines never counts toward a sticky phrase', async () => {
   const notice = fill(labels.limits.notice, { limit: 'x', used: 1, cap: 2 });
-  const { store, logs } = await runGuardTurn({ sticky: STICKY, guild: { ownLines: ownRing('', 0, [notice, notice, notice]) }, reply: '<msg>καλή νύχτα</msg>', features: { patternGuard: false } });
+  const { store, logs } = await runFillerTurn({ sticky: STICKY, guild: { ownLines: ownRing('', 0, [notice, notice, notice]) }, reply: '<msg>καλή νύχτα</msg>' });
   assert.deepEqual([store.learned, store.getGuild('g1').fillers], [[], []]);
   assert.equal(logs.some((item) => item.msg === 'fillers: sticky'), false);
 });
 
 test('runTurn: features.stickyGuard false learns no sticky phrase', async () => {
-  const { store, logs } = await runGuardTurn({ sticky: STICKY, guild: { ownLines: ownRing('φεγγάρι ψηλά', 3) }, reply: '<msg>καλή νύχτα</msg>', features: { patternGuard: false, stickyGuard: false } });
+  const { store, logs } = await runFillerTurn({ sticky: STICKY, guild: { ownLines: ownRing('φεγγάρι ψηλά', 3) }, reply: '<msg>καλή νύχτα</msg>', features: { stickyGuard: false } });
   assert.deepEqual([store.learned, store.getGuild('g1').fillers], [[], []]);
   assert.deepEqual(store.counted, [{ guildId: 'g1', posted: 1 }], 'the post is still counted');
   assert.equal(logs.some((item) => item.msg === 'fillers: sticky'), false);
-});
-
-// ---- the pattern post-check -------------------------------------------------------------
-
-const STORED_WORN = {
-  wornLong: { at: NOW - 1000, lines: 60, patterns: [{ shape: 'ends on a rhetorical question', examples: ['σωστά;'], count: 3 }] },
-  worn: { at: NOW - 1000, key: 'k', channelId: 'c1', lines: 8, patterns: [{ shape: 'opens with a sigh', examples: ['αχ', 'ουφ'], count: 2 }] },
-};
-const LONG_REPLY = '<msg>αχ, πάλι τα ίδια σήμερα</msg><msg>και τέλος</msg>';
-const REWRITTEN = 'καλό απόγευμα\n\nκαι τέλος';
-
-test('runTurn: the judge naming pattern 2 sends its shape into the one rewrite, and the rewrite is posted', async () => {
-  const { of, logs, sent } = await runGuardTurn({ guild: STORED_WORN, reply: LONG_REPLY, check: '2', reword: REWRITTEN });
-
-  const [check] = of('pattern-check');
-  assert.deepEqual(check.messages[0], { role: 'system', content: 'Check what Bot wrote.' });
-  assert.equal(
-    check.messages[1].content,
-    '<patterns>\n1. ends on a rhetorical question — "σωστά;"\n2. opens with a sigh — "αχ", "ουφ"\n</patterns>\n\n<reply>\nαχ, πάλι τα ίδια σήμερα\n\nκαι τέλος\n</reply>',
-    'the long list first, then the short one, as <worn> joins them',
-  );
-  assert.deepEqual([check.options.role, check.options.maxOutputTokens, check.options.countAgainstDailyCap], ['classifier.text', 33, true]);
-
-  const rewords = of('reword');
-  assert.equal(rewords.length, 1);
-  assert.equal(rewords[0].messages[0].content, 'Rewrite Bot: no none; not opens with a sigh.', 'no filler: none, the matched shape in patterns');
-  assert.deepEqual(sent(), ['καλό απόγευμα', 'και τέλος']);
-  const checked = logs.find((entry) => entry.msg === 'patterns: checked');
-  assert.deepEqual([checked.patterns, checked.matched, checked.unparsed], [2, 1, undefined]);
-  const reworded = logs.find((entry) => entry.msg === 'fillers: reworded');
-  assert.deepEqual([reworded.fillers, reworded.patterns, reworded.changed], [0, 1, true]);
-  assert.equal(JSON.stringify(logs.filter((entry) => /^(patterns|fillers):/.test(entry.msg))).includes('sigh'), false, 'counts only');
-});
-
-test('runTurn: a pinned pattern is judged like any other', async () => {
-  const guild = { wornLong: { at: null, lines: 0, patterns: [{ shape: 'quotes a film line', examples: [], count: 0, pinned: true }] } };
-  const { of } = await runGuardTurn({ guild, reply: LONG_REPLY, check: '1', reword: REWRITTEN });
-  assert.match(of('pattern-check')[0].messages[1].content, /^<patterns>\n1\. quotes a film line\n<\/patterns>/);
-  assert.equal(of('reword')[0].messages[0].content, 'Rewrite Bot: no none; not quotes a film line.');
-});
-
-test('runTurn: a resting filler and a matched pattern share one rewrite', async () => {
-  const guild = { ...STORED_WORN, fillers: [fillerEntry('πάλι', false, { lastUsedAt: NOW - 1000, lastUsedAtMessage: 9 }), fillerEntry('σήμερ', true, { lastUsedAt: NOW - 1000, lastUsedAtMessage: 9 })] };
-  const { of } = await runGuardTurn({ guild, reply: LONG_REPLY, check: '1, 2', reword: REWRITTEN });
-  const rewords = of('reword');
-  assert.equal(rewords.length, 1);
-  assert.equal(rewords[0].messages[0].content, 'Rewrite Bot: no πάλι, σήμερ*; not ends on a rhetorical question; opens with a sigh.', 'a prefix filler keeps its *');
-});
-
-test('runTurn: the judge answering none, or an answer it cannot read, posts the reply as written', async () => {
-  for (const check of ['none', 'pattern two']) {
-    const { of, logs, sent } = await runGuardTurn({ guild: STORED_WORN, reply: LONG_REPLY, check });
-    assert.equal(of('pattern-check').length, 1, check);
-    assert.equal(of('reword').length, 0, check);
-    assert.deepEqual(sent(), ['αχ, πάλι τα ίδια σήμερα', 'και τέλος'], check);
-    const checked = logs.find((entry) => entry.msg === 'patterns: checked');
-    assert.equal(checked.matched, 0, check);
-    assert.equal(checked.unparsed, check === 'none' ? undefined : true, check);
-  }
-});
-
-test('runTurn: a failed judge request logs patterns: check failed and posts the reply as written', async () => {
-  const { of, sent, logs } = await runGuardTurn({
-    guild: STORED_WORN,
-    reply: LONG_REPLY,
-    check: () => {
-      throw Object.assign(new Error('upstream'), { statusCode: 503 });
-    },
-  });
-  assert.equal(of('reword').length, 0);
-  assert.equal(sent().length, 2);
-  assert.equal(logs.find((entry) => entry.msg === 'patterns: check failed').status, 503);
-});
-
-test('runTurn: no judge for a reply under minChars, with patternGuard off, without patterns or without the prompt', async () => {
-  const base = { guild: STORED_WORN, reply: LONG_REPLY };
-  const short = await runGuardTurn({ ...base, reply: '<msg>αχ ναι</msg>', patternCheck: { minChars: 15 } });
-  assert.equal(short.of('pattern-check').length, 0, 'too short');
-  const exact = await runGuardTurn({ ...base, reply: '<msg>αχ ναι</msg>', patternCheck: { minChars: 5 } });
-  assert.equal(exact.of('pattern-check').length, 1, 'minChars read now: 5 code points of Greek suffice');
-  const off = await runGuardTurn({ ...base, features: { patternGuard: false }, check: '2' });
-  assert.deepEqual([off.of('pattern-check').length, off.of('reword').length], [0, 0], 'switch off');
-  const none = await runGuardTurn({ reply: LONG_REPLY });
-  assert.equal(none.of('pattern-check').length, 0, 'no worn pattern');
-  const varietyOff = await runGuardTurn({ ...base, features: { variety: false } });
-  assert.equal(varietyOff.of('pattern-check').length, 0, 'stored lists are not read with features.variety off');
-  const noPrompt = await runGuardTurn({ ...base, prompts: { 'pattern-check': null } });
-  assert.equal(noPrompt.of('pattern-check').length, 0, 'no prompts/pattern-check.md');
-});
-
-test('runTurn: the judge reads the patterns this turn\'s <worn> showed before the stored ones', async () => {
-  const shown = [{ shape: 'quotes a film line', examples: ['όπως λέει ο Ρικ'], count: 2 }];
-  const { of } = await runGuardTurn({ guild: STORED_WORN, reply: LONG_REPLY, variety: fakeVariety(async () => shown) });
-  assert.match(of('pattern-check')[0].messages[1].content, /^<patterns>\n1\. quotes a film line — "όπως λέει ο Ρικ"\n<\/patterns>/);
-});
-
-test('runTurn: a pattern match with a reword prompt lacking {{patterns}} sends no rewrite', async () => {
-  const { of, sent, logs } = await runGuardTurn({ guild: STORED_WORN, reply: LONG_REPLY, check: '2', prompts: { reword: 'Rewrite {{name}} without {{words}}.' } });
-  assert.equal(of('reword').length, 0);
-  assert.deepEqual(sent(), ['αχ, πάλι τα ίδια σήμερα', 'και τέλος']);
-  assert.equal(logs.find((entry) => entry.msg === 'fillers: reword skipped').reason, 'no-placeholder');
-});
-
-test('runTurn: a dry run checks and rewrites the same way, posting nothing', async () => {
-  const { of, channel, logs } = await runGuardTurn({ guild: STORED_WORN, reply: LONG_REPLY, features: { dryRun: true }, check: '2', reword: REWRITTEN });
-  assert.deepEqual([of('pattern-check').length, of('reword').length, channel.sent.length], [1, 1, 0]);
-  assert.deepEqual(logs.filter((entry) => entry.msg === 'dry-run: would send').map((entry) => entry.text), ['καλό απόγευμα', 'και τέλος']);
-});
-
-test('runTurn: the judge runs alongside the first message\'s typing time, which it never lengthens', async () => {
-  const typing = { msPerChar: [0, 0], minMs: 150, maxMs: 150 };
-  // A judge as slow as the typing: the first send comes after about one of the two, not both.
-  const slow = await runGuardTurn({ guild: STORED_WORN, reply: LONG_REPLY, typing, check: () => new Promise((resolve) => setTimeout(() => resolve('none'), 150)) });
-  const [slowCheck] = slow.of('pattern-check');
-  assert.ok(slowCheck.at <= slow.sendTimes[0], 'the judge is asked before the first send');
-  const together = slow.sendTimes[0] - slowCheck.at;
-  assert.ok(together >= 140 && together < 270, `the judge and the typing ran together (${together} ms)`);
-
-  // A judge answering at once: the first send waits exactly the typing time.
-  const fast = await runGuardTurn({ guild: STORED_WORN, reply: LONG_REPLY, typing, check: 'none' });
-  const waited = fast.sendTimes[0] - fast.of('pattern-check')[0].at;
-  assert.ok(waited >= 140 && waited < 270, `the typing time, not more (${waited} ms)`);
-  assert.equal(fast.channel.sent.length, 2);
 });
 
 // ---------------------------------------------------------------------------
@@ -7463,10 +7313,10 @@ function pickHistory() {
   return [rawMessage({ id: 'm0', ts: NOW - 5000, content: 'καλημέρα' }), rawMessage({ id: 'm1', ts: NOW - 1000, content: 'θα έρθεις απόψε;' })];
 }
 
-/** A hot config for the picker: its prompt, its own gifs values, the guard off unless `features` turns it on. */
+/** A hot config for the picker: its prompt and its own gifs values. */
 function pickHot({ features = {}, prompts = {}, pickSettings = PICK_SETTINGS, maxPerDay = 40, typing = null } = {}) {
   const hot = fakeHot(
-    { typingSimulation: typing !== null, patternGuard: false, fillerGuard: false, ...features },
+    { typingSimulation: typing !== null, ...features },
     {},
     {
       gifs: { maxPerDay, listChars: 70, ownMarkHours: 24, halfLifeDays: 30, pick: pickSettings },

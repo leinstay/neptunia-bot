@@ -68,6 +68,7 @@ export const SANDBOX_OMITS = Object.freeze({
   focus: 'no room question: a live turn has no caller for it either',
   tasks: 'no part of a split message, no queued or folded call: a stored moment records none',
   recentAudience: 'no guild to compare audiences in: <recent> shows the lines of the turn\'s own channel only',
+  fillers: 'no filler list is read: <worn> shows the patterns of the variety pass of the situation only',
 });
 
 /**
@@ -390,6 +391,7 @@ export function sandboxRequestInput({
     focus: null,
     tasks: null,
     recentAudience: null,
+    fillers: null,
   };
 }
 

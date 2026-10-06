@@ -2951,7 +2951,7 @@ export function createAdmin({
     return renderVarietyReport(guild?.worn, guild?.wornHistory, hot.config, Date.now(), guild?.wornLong);
   }
 
-  // The owner's fallback over the two lists the reply guard reads: worn patterns
+  // The owner's fallback over the two lists the `<worn>` block shows: worn patterns
   // (the long list, where a pinned pattern lives, then the short one) and fillers
   // (src/behavior/fillers.js). The variety passes fill both by themselves; these
   // commands pin, show and remove.
@@ -2984,8 +2984,8 @@ export function createAdmin({
 
   /**
    * `/nep variety list`: one numbered list. `type:pattern` -- the patterns the
-   * reply guard checks (patternRows). `type:filler` -- a header (the switch,
-   * the cooldown read now, the persona's own message count), then each filler:
+   * `<worn>` block shows (patternRows). `type:filler` -- a header (the
+   * cooldown read now, the persona's own message count), then each filler:
    * its text (`*` = prefix), kind, pinned, weight, uses, last use, own
    * messages since and whether it rests now, with what releases it first.
    */
@@ -3002,7 +3002,7 @@ export function createAdmin({
     const count = Number.isInteger(guild?.ownMessageCount) ? guild.ownMessageCount : 0;
     const now = Date.now();
     const header =
-      `guard: ${onOff(hot.config?.features?.fillerGuard !== false)} · cooldown ${settings.cooldownHours}h or ` +
+      `cooldown ${settings.cooldownHours}h or ` +
       `${settings.cooldownMessages} own messages · own messages: ${count} · max ${settings.max}`;
     const rows = fillerRows(guild);
     if (rows.length === 0) return `${header}\n${NONE}`;

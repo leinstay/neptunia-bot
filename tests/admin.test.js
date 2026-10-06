@@ -4074,7 +4074,7 @@ test('run: variety.list type:filler numbers pinned first, then by rank, with kin
   hot.config.variety = { fillers: { cooldownHours: 10, cooldownMessages: 50, max: 12, halfLifeDays: 14 } };
   const { admin, store, dataDir } = makeRealStoreAdmin(rootDir, { hot });
   try {
-    assert.equal(await admin.run('variety.list', { type: 'filler' }, { guildId: 'g1' }), 'guard: on · cooldown 10h or 50 own messages · own messages: 0 · max 12\n(none)');
+    assert.equal(await admin.run('variety.list', { type: 'filler' }, { guildId: 'g1' }), 'cooldown 10h or 50 own messages · own messages: 0 · max 12\n(none)');
     const settings = { max: 12, halfLifeDays: 14 };
     store.learnFillers('g1', [{ count: 2, word: 'genre' }, { count: 6, word: 'voilà' }], Date.now(), settings);
     store.pinFiller('g1', { text: 'bof', prefix: false }, Date.now(), settings);
@@ -4084,7 +4084,7 @@ test('run: variety.list type:filler numbers pinned first, then by rank, with kin
     store.countOwnMessages('g1', 5);
 
     const lines = (await admin.run('variety.list', { type: 'filler' }, { guildId: 'g1' })).split('\n');
-    assert.equal(lines[0], 'guard: on · cooldown 10h or 50 own messages · own messages: 25 · max 12');
+    assert.equal(lines[0], 'cooldown 10h or 50 own messages · own messages: 25 · max 12');
     assert.equal(lines[1], '#1 bof · exact, pinned · weight 1 · uses 0 · never used · free');
     assert.equal(
       lines[2],
@@ -4092,10 +4092,9 @@ test('run: variety.list type:filler numbers pinned first, then by rank, with kin
     );
     assert.equal(lines[3], '#3 genre* · prefix · weight 2 · uses 0 · never used · free');
 
-    hot.config.features = { ...hot.config.features, fillerGuard: false };
     hot.config.variety = { fillers: { cooldownHours: 10, cooldownMessages: 5 } };
     const later = (await admin.run('variety.list', { type: 'filler' }, { guildId: 'g1' })).split('\n');
-    assert.ok(later[0].startsWith('guard: off · cooldown 10h or 5 own messages'));
+    assert.ok(later[0].startsWith('cooldown 10h or 5 own messages'));
     assert.match(later[2], /· free$/, 'enough own messages release it, the cooldown read now');
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });

@@ -55,8 +55,6 @@
 | `mentor-diagnose.md` | 否 | Mentor：评分后解释弱回答，指出角色上下文中的具体文本（`features.mentor`）。结果为未验证的假设，存储为运行中的 `diagnosis`。`mentor.diagnose` 为 false 或文件缺失时省略 | `{{name}}` |
 | `variety.md` | 否 | `classifier.text` 请求：识别角色近期消息中重复的表达手法（`features.variety`）。不接收角色卡 | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `variety-long.md` | 否 | 长多样性过程：在全部消息环中识别手法（`features.variety`、`variety.longLines`）。与 `variety.md` 相同的占位符、`<lines>` 块和回答格式。使用 `classifier.text` 模型。不接收角色卡。文件不存在则无长过程 | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
-| `reword.md` | 否 | 填充词守卫和手法守卫的重写请求：替换冷却中的词语和短语，改写匹配已磨损手法的习惯。将回复作为用户消息接收。不接收角色卡 | `{{name}}` `{{words}}` `{{patterns}}` |
-| `pattern-check.md` | 否 | `classifier.text` 请求：检查回复是否落入当前已磨损手法（`features.patternGuard`）。接收编号的手法和回复。不接收角色卡 | `{{name}}` |
 | `gif-pick.md` | 否 | 分类器：从库中挑选 GIF 替代短文本回复（`features.gifPicker`）。接收最近 `gifs.pick.contextMessages` 行聊天、角色的回复及带说明的完整库。输出为库中的一个 handle 或 `none`。不接收角色卡 | `{{name}}` |
 | `split.md` | 否 | 分类器：直接呼叫是否包含多个独立请求（`features.splitTasks`）。接收一段短 `<transcript>` 和新消息作为 `<candidate>`。输出为 `one`，或 2 到 `{{maxTasks}}` 行，每行以 `- ` 开头，用作者自己的话表述一个部分。不接收角色卡。没有此文件时分拆器关闭 | `{{name}}` `{{maxTasks}}` |
 | `merge.md` | 否 | 分类器：已有等候条目的作者的新消息是否属于其中一个。接收编号的 `<waiting>` 列表和新消息作为 `<candidate>`。输出为一行：列表中的一个编号或 `new`。不接收角色卡。没有此文件时新呼叫始终作为独立条目排队 | `{{name}}` |
@@ -70,7 +68,7 @@
 在 `overheard` 回合中，`overheard.md` 替代模式提示（它是任务文本本身，而非追加）。当 `overheard.md` 缺失或为空时，使用模式提示代替（降级：模式提示将消息描述为对角色说话，与实际不符）。
 在私聊中，`private.md` 追加在模式提示之后（`forced.md` 之前），使用相同的 `{{name}}` 和 `{{author}}` 占位符。
 分析器和预热的 `profile.md`、`server.md` 在用户消息中以 `<character>` 块接收角色卡和 `rules.md`。
-`channel.md`、`describe.md`、`describe-video.md`、`describe-gif.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md`、`recall-summary.md`、`room.md`、`route-channel.md`、`elsewhere.md`、`variety.md`、`variety-long.md`、`reword.md` 和 `pattern-check.md` 不接收角色卡。
+`channel.md`、`describe.md`、`describe-video.md`、`describe-gif.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md`、`recall-summary.md`、`room.md`、`route-channel.md`、`elsewhere.md`、`variety.md` 和 `variety-long.md` 不接收角色卡。
 
 `{{guildFieldChars}}` 等于 `fieldChars * 2`，是代码对服务器级规律和开场白进行截断的上限。
 `{{maxEpisodes}}` 是每人保留的回忆总数上限。两者均从配置填充，但默认提示未使用；自定义的 `memory.md`
@@ -95,7 +93,7 @@
 | `<attitudes>` | 角色感受最强烈的前 `context.attitudes`（默认 6，`0` = 关）名成员，按态度评分绝对值排序，好感与反感混合。跳过呼叫者以及已在 `<people>` 中显示的成员。每人一行（`labels.attitudes.line`）：名字和态度区间。标题：`labels.attitudes.header`。上限 `context.caps.attitudes`（默认 400）。服务器回合和私聊中均显示 |
 | `<other_channels>` | 每个相邻频道最多 `context.neighborMessages` 条消息，不超过 `context.neighborMaxAgeMinutes` 的时效。`features.mediaDescriptions` 开启时，相邻频道行中的图片在描述器缓存已有说明时携带说明；不为相邻频道发起新的描述请求。`<channel_view>` 中已显示其块的频道不再出现在 `<other_channels>` 中；如果预算丢弃了拉取的块，该频道重新作为普通相邻频道出现 |
 | `<channel_view>` | 拉入本轮的另一个频道（`features.channelPull`）。每个拉取的频道一个条目：标题行（`labels.pull.header`）、适用时的只读标记（`labels.server.readOnly`）、窗口被截断时的"更早的未显示"行、"图片未查看"计数、角色的早期呼叫（带已回复/未回复/已跳过标记），然后是窗口行。行使用与 `<chat>` 相同的对话记录格式，但编号在对话后继续（对话为 `#1`..`#N`，拉取块从 `#N+1` 开始），因此每个 `#n` 在块间唯一。图片仅以说明或盲标签形式出现，不作为附加图片。没有 `labels.pull.header` 时块为空 |
-| `<worn>` | 角色在近期消息中过度使用的手法（`features.variety`）：`labels.variety.intro`，然后每个手法一行 `- <shape> ("<example>", ...)`。长过程的手法（`wornLong`，来自 `variety-long.md`）在前，然后是短过程的，去重后最多 `variety.maxPatterns` + `variety.longMaxPatterns` 个。两者都无结果或开关关闭时省略 |
+| `<worn>` | 角色过度使用的手法和词语（`features.variety`）：`labels.variety.intro`，然后每个手法一行 `- <shape> ("<example>", ...)`。长过程的手法（`wornLong`，来自 `variety-long.md`）在前，然后是短过程的，去重后最多 `variety.maxPatterns` + `variety.longMaxPatterns` 个。有冷却中的填充词条目时，手法行后跟 `labels.variety.fillersIntro`，然后每条目一行 `- <labels.variety.fillerLine>`（占位符 `{text}`、`{count}`、`{ago}`），按排名排列，最多 `variety.fillers.max` 条。两者都无结果且无冷却中的填充词，或开关关闭时省略 |
 | `<lookup>` | 角色本轮查询的内容。网络搜索（`features.webLookup`）携带 `labels.lookup.webHeader`、浓缩的答案、`labels.lookup.sources`，未找到时为 `labels.lookup.none`。服务器搜索（`features.recall`）携带 `labels.lookup.serverHeader`、摘要笔记，摘要指出一段时还有逐字原文。两者都运行时 `labels.lookup.bothNote` 位于两部分之间。`labels.lookup.stretch` 行引入一段逐字原文（`{date}` `{channel}`）。仅在搜索分类器触发且至少一项搜索完成后出现 |
 | `<chat>` | 当前频道最新的 `context.channelMessages` 条消息 |
 | `<tempo>` | 10 分钟 / 1 小时 / 1 天的消息计数，不同人数，沉默时长，一个判定（活跃 / 缓慢 / 沉寂） |
@@ -269,6 +267,8 @@ mentor.original                          first line inside the `<original>` bloc
 room.focus                               {target} {author}: appended to the reply task when a room question triggers the turn
 address.author                           {name} {aliases}: the candidate author's display name and known aliases, shown to the address classifier when the member has aliases
 variety.intro                            first line of the `<worn>` block: tells the persona these devices are spent
+variety.fillersIntro                     separator before the filler lines; present only when filler entries on cooldown follow
+variety.fillerLine                       {text} {count} {ago}: one filler entry on cooldown; text is the word stem (trailing `*` for prefix) or the exact phrase, count is how many times it was used, ago is time since last use
 recent.header                            REQUIRED {hours}: the block's first line. A missing header or a missing `recent.line` means no `<recent>` block
 recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
 recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
@@ -624,15 +624,19 @@ task.added                               {added}: later messages from the author
 
 Mentor 沙盒为每个场景执行一次多样性过程，计入 mentor 的 token 预算（不计入 `llm.maxRequestsPerDay`）。沙盒使用 `variety.timeoutMs` 作为请求超时（它没有后续回合来使用迟到的结果）。识别的手法保存为场景记录上的 `worn`。评分者不会看到 `<worn>` 块。
 
-## 填充词守卫和手法守卫
+## 填充词建议列表
 
-两个后生成轨道，在语音模型写好回复后、发布前检测角色的语言习惯。
+角色过度使用的词语和短语的排名列表，在回复前以 `<worn>` 块显示，使角色可以自行避免。模型写好回复后不再有任何重写。
 
-**填充词守卫**（`features.fillerGuard`，缺失 = 开启）。角色过度使用的词语和短语的排名列表，主要由多样性过程供给（过程发现的词类习惯以其计数为权重成为条目）。机械检测器（`features.stickyGuard`）也在每次发帖后供给列表，查找在 3+ 条近期消息中重复但在旧环中罕见的短语，将每个作为精确条目添加，冷却已开始（日志 `fillers: sticky`）。所有者可通过 `/nep variety add type:filler` 作为备选方案固定条目。条目分两种类型：PREFIX 条目以 `*` 结尾（至少 3 个字母），在词边界匹配以该前缀开头的所有词（任何文字系统）；EXACT 条目（无 `*`）精确匹配整个词或短语。条目在 `variety.fillers.cooldownHours`（默认 36）小时 OR `variety.fillers.cooldownMessages`（默认 300）角色自身发布消息数的先到者之后才可再次使用；使用会重置两个计数器。列表以排名和淘汰管理：容量 `variety.fillers.max`（默认 12），权重带时间衰减（`variety.fillers.halfLifeDays`，默认 14），满时淘汰最弱的；所有者添加的条目被固定（不淘汰、不衰减）。冷却中的条目出现在回复中时，发言模型（`llm.model`，用途标记 `reword`，`variety.fillers.maxOutputTokens` 400，提示 `prompts/reword.md`）重写回复移除该条目。主要角色请求不会看到填充词列表。服务器记忆中的状态：`fillers` 和 `ownMessageCount`。日志：`fillers: reworded`、`fillers: reword failed`、`fillers: reword skipped`。
+**数据来源。** 多样性过程是主要供给源：过程发现的词类习惯以其计数为权重成为条目。机械检测器（`features.stickyGuard`）也在每次发帖后供给列表，查找在 3+ 条近期消息中重复但在旧环中罕见的短语，将每个作为精确条目添加，冷却已开始（日志 `fillers: sticky`）。所有者可通过 `/nep variety add type:filler` 作为备选方案固定条目。
 
-**手法守卫**（`features.patternGuard`，缺失 = 开启）。发布前，当回复不少于 `variety.patternCheck.minChars`（默认 15）个字符且已磨损列表不为空时，分类器（`classifier.text`，用途标记 `pattern-check`，`variety.patternCheck.maxOutputTokens` 40，提示 `prompts/pattern-check.md`）判断回复落入当前已磨损手法（短列表和长列表）中的哪些。匹配时，同一重写请求重写回复以移除该手法。分类器在第一条消息的打字模拟期间运行，不增加可见延迟；仅重写增加延迟。日志：`patterns: checked`、`patterns: check failed`。
+**排名。** 列表以排名和淘汰管理，类似兴趣：容量 `variety.fillers.max`（默认 12），权重带时间衰减（`variety.fillers.halfLifeDays`，默认 14），满时淘汰最弱的；所有者添加的条目被固定（不淘汰、不衰减）。
 
-两个守卫共享 `prompts/reword.md`，接受两个占位符：`{{words}}`（冷却中的词、词干或短语，逗号分隔；无时为空）和 `{{patterns}}`（匹配习惯的形状，以 `; ` 连接；无时为空）。两者可在同一回复上触发：填充词守卫先重写，手法守卫再检查重写后的文本。
+**冷却 = 哪些条目被显示。** 条目在角色于 `variety.fillers.cooldownHours`（默认 36）小时内 OR `variety.fillers.cooldownMessages`（默认 300）条自身消息内使用过时处于冷却中（以先到者为准）；使用会重置两个计数器。固定条目始终处于冷却中。建议列表中仅显示冷却中的条目。条目分两种类型：PREFIX 条目以 `*` 结尾（至少 3 个字母），在词边界匹配以该前缀开头的所有词（任何文字系统）；EXACT 条目（无 `*`）精确匹配整个词或短语。
+
+**渲染。** 在已磨损手法行之后，有冷却中的填充词条目时：`labels.variety.fillersIntro`，然后每条目一行 `- labels.variety.fillerLine`。`fillerLine` 占位符：`{text}`（词干，前缀条目末尾带 `*`，或精确短语），`{count}`（使用或检测次数），`{ago}`（距最后使用的时间，如"3 h 12 min"，未知时为 `?:??`）。条目按排名排列，最多 `variety.fillers.max` 条。
+
+**状态。** 服务器记忆：`fillers`（条目列表）和 `ownMessageCount`（角色自身发布消息计数器，用于基于消息数的冷却）。日志：`fillers: sticky`（检测器添加了条目），`fillers: learned`（多样性过程添加或更新了条目）。
 
 ## 任务分拆器
 

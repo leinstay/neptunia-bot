@@ -25,7 +25,8 @@ import { parseJsonObject } from '../llm/parse.js';
 import { fillPromptTemplate } from './prompt.js';
 import { clampChars, oneLine } from '../memory/clamp.js';
 import { HOUR_MS, MINUTE_MS } from '../time.js';
-import { FILLERS_DEFAULTS, PATTERN_CHECK_DEFAULTS, fillersSettings, patternCheckSettings } from './fillers.js';
+import { FILLERS_DEFAULTS, fillerKey, fillersOnCooldown, fillersSettings, normalizeFillers, rankFillers } from './fillers.js';
+import { fill, formatDuration } from '../discord/format.js';
 import { STICKY_DEFAULTS, stickySettings } from './sticky.js';
 
 /**
@@ -53,9 +54,8 @@ export const VARIETY_DEFAULTS = Object.freeze({
   longEveryHours: 6,
   longMinLines: 60,
   longMaxPatterns: 3,
-  // The reply guard's groups (src/behavior/fillers.js), read there with their own fallbacks.
+  // The filler list (src/behavior/fillers.js), read there with its own fallbacks.
   fillers: FILLERS_DEFAULTS,
-  patternCheck: PATTERN_CHECK_DEFAULTS,
   // The sticky-phrase detector (src/behavior/sticky.js), read there with its own fallbacks.
   sticky: STICKY_DEFAULTS,
 });
@@ -85,10 +85,9 @@ function intAtLeast(value, fallback, min) {
  *   maxPatterns: number, shapeChars: number, maxOutputTokens: number, timeoutMs: number,
  *   requestTimeoutMs: number, history: number, longLines: number, longEveryHours: number,
  *   longMinLines: number, longMaxPatterns: number, fillers: { cooldownHours: number, cooldownMessages: number,
- *   maxOutputTokens: number, max: number, halfLifeDays: number }, patternCheck: { minChars: number,
- *   maxOutputTokens: number }, sticky: { minRepeats: number, minRepeatsWord: number, lines: number, maxWords: number, minChars: number,
- *   baselineMax: number, baselineMin: number, ignore: string[] } }}  `fillers` and `patternCheck`: the reply guard's groups
- *   (src/behavior/fillers.js#fillersSettings, #patternCheckSettings); `sticky`: the sticky-phrase
+ *   max: number, halfLifeDays: number }, sticky: { minRepeats: number, minRepeatsWord: number, lines: number, maxWords: number, minChars: number,
+ *   baselineMax: number, baselineMin: number, ignore: string[] } }}  `fillers`: the filler list's group
+ *   (src/behavior/fillers.js#fillersSettings); `sticky`: the sticky-phrase
  *   detector's (src/behavior/sticky.js#stickySettings).
  */
 export function varietySettings(config) {
@@ -110,7 +109,6 @@ export function varietySettings(config) {
     longMinLines: intAtLeast(v.longMinLines, d.longMinLines, 1),
     longMaxPatterns: intAtLeast(v.longMaxPatterns, d.longMaxPatterns, 0),
     fillers: fillersSettings(config),
-    patternCheck: patternCheckSettings(config),
     sticky: stickySettings(config),
   };
 }
@@ -594,26 +592,90 @@ export function appendWornHistory(history, pass, max) {
 
 // ---- the block --------------------------------------------------------------
 
+/** A label as a usable template: a non-blank string, else null (a blanked label switches its line off). */
+function usableLabel(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value : null;
+}
+
+/**
+ * The epoch time of an entry's last use (`lastUsedAt`), else of the last
+ * pass that named it (`lastSeen`); null when it has neither.
+ */
+function lastStampOf(entry) {
+  if (Number.isFinite(entry.lastUsedAt)) return entry.lastUsedAt;
+  const seen = entry.lastSeen === null ? NaN : Date.parse(entry.lastSeen);
+  return Number.isFinite(seen) ? seen : null;
+}
+
+/**
+ * The filler lines of the `<worn>` block: the guild's entries still resting
+ * (fillersOnCooldown with `ownMessages` and `variety.fillers.cooldownHours` /
+ * `cooldownMessages`, read now) plus every pinned entry (the owner pinned it
+ * on purpose), in rankFillers order, at most `variety.fillers.max`. Each is
+ * `- <labels.variety.fillerLine>` with `{text}` (fillerKey: a prefix entry
+ * with its `*`), `{count}` (`uses` when > 0, else the rounded `weight`) and
+ * `{ago}` (since `lastUsedAt`, else since `lastSeen`, via formatDuration and
+ * `labels.units`; neither -> `labels.transcript.unknownDuration`). [] when
+ * `fillers` is null, or the label is missing or blank.
+ * @param {{ list: unknown, ownMessages: number, now: number }|null|undefined} fillers
+ * @param {object} labels
+ * @param {object} config
+ * @returns {string[]}
+ */
+function fillerLines(fillers, labels, config) {
+  const template = usableLabel(labels?.variety?.fillerLine);
+  if (!template || !fillers) return [];
+  const settings = fillersSettings(config);
+  const list = normalizeFillers(fillers.list);
+  const now = fillers.now;
+  const resting = new Set(
+    fillersOnCooldown(list, {
+      now,
+      ownMessages: Number.isInteger(fillers.ownMessages) ? fillers.ownMessages : 0,
+      cooldownHours: settings.cooldownHours,
+      cooldownMessages: settings.cooldownMessages,
+    }),
+  );
+  const unknown = labels?.transcript?.unknownDuration ?? '?';
+  return rankFillers(
+    list.filter((entry) => entry.pinned || resting.has(entry)),
+    settings.halfLifeDays,
+  )
+    .slice(0, settings.max)
+    .map((entry) => {
+      const stamp = lastStampOf(entry);
+      const ago = stamp !== null && Number.isFinite(now) && labels?.units ? formatDuration(Math.max(0, now - stamp), labels.units) : unknown;
+      const count = entry.uses > 0 ? entry.uses : Math.round(entry.weight);
+      return `- ${fill(template, { text: fillerKey(entry), count, ago })}`;
+    });
+}
+
 /**
  * The `<worn>` block's body: `labels.variety.intro`, then one line per pattern,
  * `- <shape> ("<example>", "<example>")`, at most `variety.maxPatterns` +
  * `variety.longMaxPatterns` (read now; the long pass's list and the short
- * one's, joined by mergeWorn). '' when there is no pattern, the switch is
- * off, or the labels have no `variety.intro` (an older labels.json renders
- * nothing).
+ * one's, joined by mergeWorn), then -- advice shown before the reply, never a
+ * rewrite after it -- `labels.variety.fillersIntro` and one line per resting
+ * filler (fillerLines; left out when either label is missing or blank). ''
+ * when there is neither a pattern nor a filler line, the switch is off, or
+ * the labels have no `variety.intro` (an older labels.json renders nothing).
  * @param {{ shape: string, examples: string[] }[]|null|undefined} patterns
  * @param {object} labels
  * @param {object} config  The live config.
+ * @param {{ list: object[], ownMessages: number, now: number }|null} [fillers]  The guild's
+ *   filler entries, its `ownMessageCount` and the clock; null or omitted -> no filler lines.
  * @returns {string}
  */
-export function renderWorn(patterns, labels, config) {
+export function renderWorn(patterns, labels, config, fillers = null) {
   const intro = labels?.variety?.intro;
   if (!varietyOn(config) || typeof intro !== 'string' || !intro.trim()) return '';
   const settings = varietySettings(config);
   const list = normalizePatterns(patterns).slice(0, settings.maxPatterns + settings.longMaxPatterns);
-  if (list.length === 0) return '';
   const lines = list.map((p) => (p.examples.length > 0 ? `- ${p.shape} (${p.examples.map((e) => `"${e}"`).join(', ')})` : `- ${p.shape}`));
-  return [intro, ...lines].join('\n');
+  const fillersIntro = usableLabel(labels?.variety?.fillersIntro);
+  const fillerPart = fillersIntro ? fillerLines(fillers, labels, config) : [];
+  if (lines.length === 0 && fillerPart.length === 0) return '';
+  return [intro, ...lines, ...(fillerPart.length > 0 ? [fillersIntro, ...fillerPart] : [])].join('\n');
 }
 
 // ---- the owner's view -------------------------------------------------------

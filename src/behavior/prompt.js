@@ -1611,6 +1611,11 @@ function pulledAuthors(pulledFits) {
  *   lines; with `features.variety` on (a missing key counts as on) and `labels.variety.intro`
  *   present, rendered as `<worn>` (see src/behavior/variety.js#renderWorn). Omitted, null or
  *   empty -> no block.
+ * @param {{ list: object[], ownMessages: number, now: number }|null} [input.fillers]  The guild's
+ *   filler list (guild memory `fillers`), its `ownMessageCount` and the clock: the resting
+ *   fillers are listed in the same `<worn>` block after the patterns, as advice before the reply
+ *   (see src/behavior/variety.js#renderWorn); the block also renders with filler lines alone.
+ *   Omitted or null -> no filler lines.
  * @param {PulledChannel[]} [input.pulled]  Other channels pulled into this turn, rendered as
  *   `<channel_view>` (one item per channel, see `fitPulledChannel`) after `<other_channels>`:
  *   lines numbered on after the chat's (and after each earlier pulled channel), captions only
@@ -2228,7 +2233,7 @@ export function buildRequest(input) {
       // One piece, kept or dropped whole: right below the people it leaves out.
       { name: 'attitudes', cap: caps.attitudes ?? 400, items: [attitudesText].filter(Boolean) },
       // One small piece, kept or dropped whole: below the chat and the people, above the rest.
-      { name: 'worn', items: [renderWorn(input.worn, labels, config)].filter(Boolean) },
+      { name: 'worn', items: [renderWorn(input.worn, labels, config, input.fillers ?? null)].filter(Boolean) },
       { name: 'neighbors', cap: caps.neighbors, items: neighborItems },
       // Lowest priority: a list to pick from, trimmed from the bottom (least used last).
       {

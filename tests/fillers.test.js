@@ -1,15 +1,12 @@
-// Tests for src/behavior/fillers.js: the filler guard's pure side -- the entry
+// Tests for src/behavior/fillers.js: the filler list's pure side -- the entry
 // syntax, which fillers a text holds, which still rest, the use stamp, the
-// ranked list with pinned entries, the learning from variety patterns, the
-// pattern judge's block and answer, the parse of the rewrite and the
+// ranked list with pinned entries, the learning from variety patterns and the
 // persona's own message counter.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   FILLERS_DEFAULTS,
-  PATTERN_CHECK_DEFAULTS,
-  applyReword,
   evictFillers,
   fillerFromWord,
   fillerKey,
@@ -22,9 +19,6 @@ import {
   normalizeOwnMessageCount,
   ownMessageCounter,
   parseFiller,
-  parsePatternCheck,
-  patternCheckBody,
-  patternCheckSettings,
   pinFiller,
   rankFillers,
   removeFiller,
@@ -243,32 +237,6 @@ test('learnFillers: an exact pattern adds an exact entry even for a long single 
   assert.deepEqual([covered.added, covered.bumped, keys(covered.list), covered.list[0].weight], [0, 1, ['φεγγ*'], 3]);
 });
 
-// ---- the rewrite --------------------------------------------------------------------
-
-const MESSAGES = [
-  { text: 'ειλικρινά ωραίο', replyTo: 2 },
-  { text: 'και τέλος', replyTo: null },
-];
-
-test('applyReword: the same number of blank-line separated messages replaces the texts, keeping replyTo', () => {
-  const out = applyReword(MESSAGES, '  πολύ ωραίο \n   \n και τέλος\n');
-  assert.deepEqual(out, [
-    { text: 'πολύ ωραίο', replyTo: 2 },
-    { text: 'και τέλος', replyTo: null },
-  ]);
-  assert.notEqual(out, MESSAGES);
-});
-
-test('applyReword: keep, an empty answer, a count mismatch or no text give the originals', () => {
-  for (const answer of ['keep', ' Keep. ', '`keep`', '"keep"', '', '   ', 'μόνο ένα', 'ένα\n\nδύο\n\nτρία', null, undefined, 42]) {
-    assert.equal(applyReword(MESSAGES, answer), MESSAGES, JSON.stringify(answer));
-  }
-});
-
-test('applyReword: one message keeps its inner single line breaks', () => {
-  assert.deepEqual(applyReword([{ text: 'α\nβ', replyTo: null }], 'γ\nδ'), [{ text: 'γ\nδ', replyTo: null }]);
-});
-
 // ---- the own-message count -----------------------------------------------------------
 
 test('ownMessageCounter: adds the posted count; a broken count starts at 0, a broken bump adds nothing', () => {
@@ -281,53 +249,24 @@ test('ownMessageCounter: adds the posted count; a broken count starts at 0, a br
   assert.equal(normalizeOwnMessageCount(9), 9);
 });
 
-// ---- the pattern post-check ---------------------------------------------------------
-
-test('patternCheckBody: one numbered line per pattern, its examples quoted after a dash', () => {
-  const body = patternCheckBody([
-    { shape: 'ends on a rhetorical question', examples: ['έτσι δεν είναι;', 'σωστά;'] },
-    { shape: 'opens with a sigh', examples: [] },
-  ]);
-  assert.equal(body, '1. ends on a rhetorical question — "έτσι δεν είναι;", "σωστά;"\n2. opens with a sigh');
-  assert.equal(patternCheckBody(null), '');
-});
-
-test('parsePatternCheck: listed numbers become 0-based indices, deduplicated, out-of-range ones dropped', () => {
-  assert.deepEqual(parsePatternCheck('2', 3), { matched: [1], parsed: true });
-  assert.deepEqual(parsePatternCheck('`3, 3, 1.`', 3), { matched: [2, 0], parsed: true });
-  assert.deepEqual(parsePatternCheck('1, 7, 0', 3), { matched: [0], parsed: true });
-  assert.deepEqual(parsePatternCheck('2\nbecause it repeats', 3), { matched: [1], parsed: true }, 'the first line is the answer');
-});
-
-test('parsePatternCheck: none is no match; prose, an empty answer or no string is unparsed', () => {
-  assert.deepEqual(parsePatternCheck(' None. ', 2), { matched: [], parsed: true });
-  for (const answer of ['pattern 2 matches', 'two', '', '   ', null, undefined, 3]) {
-    assert.deepEqual(parsePatternCheck(answer, 2), { matched: [], parsed: false }, JSON.stringify(answer));
-  }
-});
-
 // ---- settings -----------------------------------------------------------------------
 
-test('fillersSettings / patternCheckSettings: live values are read, garbage falls back to the defaults', () => {
+test('fillersSettings: live values are read, garbage falls back to the defaults', () => {
   assert.deepEqual(
-    fillersSettings({ variety: { fillers: { cooldownHours: 1.5, cooldownMessages: 0, maxOutputTokens: 80.9, max: 5, halfLifeDays: 0 } } }),
-    { cooldownHours: 1.5, cooldownMessages: 0, maxOutputTokens: 80, max: 5, halfLifeDays: 0 },
+    fillersSettings({ variety: { fillers: { cooldownHours: 1.5, cooldownMessages: 0, max: 5, halfLifeDays: 0 } } }),
+    { cooldownHours: 1.5, cooldownMessages: 0, max: 5, halfLifeDays: 0 },
   );
   assert.deepEqual(
-    fillersSettings({ variety: { fillers: { cooldownHours: -1, cooldownMessages: 'x', maxOutputTokens: 0, max: -2, halfLifeDays: null } } }),
+    fillersSettings({ variety: { fillers: { cooldownHours: -1, cooldownMessages: 'x', max: -2, halfLifeDays: null } } }),
     { ...FILLERS_DEFAULTS },
   );
-  assert.deepEqual(patternCheckSettings({ variety: { patternCheck: { minChars: 0, maxOutputTokens: 9.7 } } }), { minChars: 0, maxOutputTokens: 9 });
-  assert.deepEqual(patternCheckSettings({ variety: { patternCheck: { minChars: -1, maxOutputTokens: 0 } } }), { ...PATTERN_CHECK_DEFAULTS });
 });
 
-test('config.json: the fillers and patternCheck groups equal the code defaults; both guards ship on', () => {
+test('config.json: the fillers group equals the code defaults; nothing of the removed reply rewrite is left', () => {
   const config = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
   assert.deepEqual(config.variety.fillers, { ...FILLERS_DEFAULTS });
   assert.deepEqual(fillersSettings({}), { ...FILLERS_DEFAULTS });
-  assert.deepEqual(config.variety.patternCheck, { ...PATTERN_CHECK_DEFAULTS });
-  assert.equal(config.features.fillerGuard, true);
-  assert.equal(config.features.patternGuard, true);
-  assert.equal(Object.hasOwn(config.features, 'rootGuard'), false);
+  for (const key of ['fillerGuard', 'patternGuard', 'rootGuard']) assert.equal(Object.hasOwn(config.features, key), false, key);
+  assert.equal(Object.hasOwn(config.variety, 'patternCheck'), false);
   assert.equal(Object.hasOwn(config.variety, 'roots'), false);
 });
