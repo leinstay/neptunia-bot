@@ -214,7 +214,7 @@ Post-processing applied to the model's output before it is sent to Discord. All 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `stripDashes` | `true` | Remove em dashes and en dashes from `<msg>` texts before posting. The dash and the spaces around it become one space. A message left empty after stripping is not sent. Hyphens stay. `<draw>`, `<react>`, `<gif>` and reply ids are not touched. A missing key counts as on; only `false` turns it off |
+| `stripDashes` | `true` | Remove em dashes and en dashes from `<msg>` texts before posting. The dash and the spaces around it become one space. Every guillemet (`«`, `»`) becomes a plain `"`. A message left empty after stripping is not sent. Hyphens stay. `<draw>`, `<react>`, `<gif>` and reply ids are not touched. A missing key counts as on; only `false` turns it off |
 
 ## `route`
 
