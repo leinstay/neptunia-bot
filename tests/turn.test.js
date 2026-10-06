@@ -28,6 +28,7 @@ import { createVarietyPass } from '../src/behavior/variety-pass.js';
 import { pingStatus } from '../src/behavior/elsewhere.js';
 import { PAGE } from '../src/discord/collect.js';
 import { findGif } from '../src/memory/gifs.js';
+import { learnFillers, markUsed } from '../src/behavior/fillers.js';
 
 function rngReturning(value) {
   return () => value;
@@ -6923,7 +6924,7 @@ function purposeLlm({ reply, check = 'none', reword = 'κάτι άλλο\n\nκα
   };
 }
 
-async function runGuardTurn({ features = {}, guild = {}, ownMessageCount = 10, reply, check, reword, prompts = {}, typing = null, patternCheck = { minChars: 15, maxOutputTokens: 33 }, variety } = {}) {
+async function runGuardTurn({ features = {}, guild = {}, ownMessageCount = 10, reply, check, reword, prompts = {}, typing = null, patternCheck = { minChars: 15, maxOutputTokens: 33 }, variety, sticky } = {}) {
   const raw = rawMessage({ id: 'm1', ts: NOW - 1000 });
   const channel = fakeTurnChannel({ historyMessages: [raw] });
   const sendTimes = [];
@@ -6933,7 +6934,7 @@ async function runGuardTurn({ features = {}, guild = {}, ownMessageCount = 10, r
     return send(payload);
   };
   const llm = purposeLlm({ reply, check, reword });
-  const store = fillersStore(guild, ownMessageCount);
+  const store = sticky ? learningStore(guild, ownMessageCount) : fillersStore(guild, ownMessageCount);
   const hot = fakeHot(
     { typingSimulation: typing !== null, ...features },
     {},
@@ -6943,6 +6944,7 @@ async function runGuardTurn({ features = {}, guild = {}, ownMessageCount = 10, r
         longMaxPatterns: 3,
         fillers: { cooldownHours: 36, cooldownMessages: 300, maxOutputTokens: 123, max: 12, halfLifeDays: 14 },
         patternCheck,
+        ...(sticky ? { sticky } : {}),
       },
       ...(typing ? { typing: { reactionDelayMs: [0, 0], betweenMessagesMs: [0, 0], ...typing } } : {}),
     },
@@ -7050,6 +7052,82 @@ test('runTurn: a dry run rewrites and logs the rewrite, but counts and stamps no
   assert.equal(of('reword').length, 1);
   assert.deepEqual(logs.filter((entry) => entry.msg === 'dry-run: would send').map((entry) => entry.text), ['κάτι άλλο', 'και τέλος']);
   assert.deepEqual([store.counted, store.marked], [[], []]);
+});
+
+// ---- the sticky-phrase guard (src/behavior/sticky.js) ------------------------------------
+
+const STICKY = { minRepeats: 3, lines: 40, maxWords: 3, minChars: 4, ignore: [] };
+
+/** fillersStore whose learn and use stamp really change the guild's list (src/behavior/fillers.js). */
+function learningStore(guild, ownMessageCount) {
+  const store = fillersStore(guild, ownMessageCount);
+  const guildMemory = store.getGuild('g1');
+  store.learned = [];
+  store.learnFillers = (guildId, patterns, nowMs, settings) => {
+    store.learned.push({ guildId, patterns, nowMs });
+    const out = learnFillers(guildMemory.fillers, patterns, { now: nowMs, max: settings.max, halfLifeDays: settings.halfLifeDays });
+    guildMemory.fillers = out.list;
+    return { added: out.added, bumped: out.bumped };
+  };
+  const record = store.markFillers;
+  store.markFillers = (guildId, keys, nowMs) => {
+    record(guildId, keys, nowMs);
+    guildMemory.fillers = markUsed(guildMemory.fillers, keys, { now: nowMs, ownMessages: guildMemory.ownMessageCount });
+    return guildMemory.fillers;
+  };
+  return store;
+}
+
+/** The persona's own ring of lines: `phrase` in `times` of them, plain lines around it. */
+function ownRing(phrase, times, extra = []) {
+  const plain = ['ήλιος', 'βροχή', 'θάλασσα', 'βουνό', 'δρόμος', 'σπίτι', 'κήπος', 'αέρας', 'ποτάμι', 'πόλη'];
+  const lines = plain.map((word, i) => ({ ts: NOW - (20 - i) * 60_000, channelId: 'c1', text: i < times ? `${phrase} ${word}` : word }));
+  return [...lines, ...extra.map((text, i) => ({ ts: NOW - 1000 + i, channelId: 'c1', text }))];
+}
+
+test('runTurn: a phrase in minRepeats of the own lines becomes an exact filler already on its cooldown', async () => {
+  const { store, logs, sent } = await runGuardTurn({ sticky: STICKY, guild: { ownLines: ownRing('φεγγάρι ψηλά', 3) }, reply: '<msg>καλή νύχτα</msg>', features: { patternGuard: false } });
+  assert.deepEqual(sent(), ['καλή νύχτα']);
+  assert.deepEqual(store.learned.map((call) => call.patterns), [[{ word: 'φεγγάρι ψηλά', count: 3, exact: true }]]);
+  const [entry] = store.getGuild('g1').fillers;
+  assert.deepEqual(
+    [entry.text, entry.prefix, entry.pinned, entry.weight, entry.lastSeen, entry.lastUsedAt, entry.lastUsedAtMessage],
+    ['φεγγάρι ψηλά', false, false, 3, new Date(NOW).toISOString(), NOW, 11],
+    'stamped at the count after this post, so its next use rests',
+  );
+  const line = logs.find((item) => item.msg === 'fillers: sticky');
+  assert.deepEqual([line.guildId, line.found, line.added, line.bumped], ['g1', 1, 1, 0]);
+  assert.equal(JSON.stringify(logs.filter((item) => item.msg.startsWith('fillers:'))).includes('φεγγάρι'), false, 'counts only');
+});
+
+test('runTurn: a new sticky phrase the reply itself holds is stamped once', async () => {
+  const { store } = await runGuardTurn({ sticky: STICKY, guild: { ownLines: ownRing('φεγγάρι ψηλά', 3) }, reply: '<msg>φεγγάρι ψηλά ξανά</msg>', features: { patternGuard: false } });
+  assert.deepEqual(store.marked.map((call) => call.keys), [['φεγγάρι ψηλά']]);
+  assert.equal(store.getGuild('g1').fillers[0].uses, 1);
+});
+
+test('runTurn: a sticky phrase the list already covers is bumped, its stamps left alone', async () => {
+  const stored = fillerEntry('φεγγάρι ψηλά', false, { weight: 2 });
+  const { store, logs } = await runGuardTurn({ sticky: STICKY, guild: { ownLines: ownRing('φεγγάρι ψηλά', 4), fillers: [stored] }, reply: '<msg>καλή νύχτα</msg>', features: { patternGuard: false } });
+  const [entry] = store.getGuild('g1').fillers;
+  assert.deepEqual([entry.weight, entry.lastUsedAt, entry.lastUsedAtMessage, entry.uses], [6, null, null, 0]);
+  assert.deepEqual(store.marked, []);
+  const line = logs.find((item) => item.msg === 'fillers: sticky');
+  assert.deepEqual([line.found, line.added, line.bumped], [1, 0, 1]);
+});
+
+test('runTurn: a limit notice in the own lines never counts toward a sticky phrase', async () => {
+  const notice = fill(labels.limits.notice, { limit: 'x', used: 1, cap: 2 });
+  const { store, logs } = await runGuardTurn({ sticky: STICKY, guild: { ownLines: ownRing('', 0, [notice, notice, notice]) }, reply: '<msg>καλή νύχτα</msg>', features: { patternGuard: false } });
+  assert.deepEqual([store.learned, store.getGuild('g1').fillers], [[], []]);
+  assert.equal(logs.some((item) => item.msg === 'fillers: sticky'), false);
+});
+
+test('runTurn: features.stickyGuard false learns no sticky phrase', async () => {
+  const { store, logs } = await runGuardTurn({ sticky: STICKY, guild: { ownLines: ownRing('φεγγάρι ψηλά', 3) }, reply: '<msg>καλή νύχτα</msg>', features: { patternGuard: false, stickyGuard: false } });
+  assert.deepEqual([store.learned, store.getGuild('g1').fillers], [[], []]);
+  assert.deepEqual(store.counted, [{ guildId: 'g1', posted: 1 }], 'the post is still counted');
+  assert.equal(logs.some((item) => item.msg === 'fillers: sticky'), false);
 });
 
 // ---- the pattern post-check -------------------------------------------------------------

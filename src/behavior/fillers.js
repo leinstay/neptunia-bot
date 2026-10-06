@@ -112,9 +112,14 @@ export function parseFiller(input) {
  * @returns {{ text: string, prefix: boolean }|null}
  */
 export function fillerFromWord(word) {
-  const { entry } = parseFiller(typeof word === 'string' ? word.replace(/\*/gu, '') : '');
+  const entry = exactFromWord(word);
   if (!entry) return null;
   return { text: entry.text, prefix: !entry.text.includes(' ') && letters(entry.text) >= LEARNED_PREFIX_LETTERS };
+}
+
+/** The EXACT entry `word` stands for, any `*` dropped; null when it holds no word or is too long. */
+function exactFromWord(word) {
+  return parseFiller(typeof word === 'string' ? word.replace(/\*/gu, '') : '').entry;
 }
 
 /**
@@ -306,14 +311,16 @@ export function removeFiller(list, key) {
 
 /**
  * The list after a variety pass named `patterns`: each pattern with a `word`
- * (fillerFromWord) bumps the entry that already covers it -- the same key,
+ * (fillerFromWord; with `exact: true` always an EXACT entry, as the
+ * sticky-phrase detector's phrases are, src/behavior/sticky.js) bumps the
+ * entry that already covers it -- the same key,
  * else an entry that matches the word itself (a stored `honest*` covers a
  * learned `honestly`) -- by the pattern's `count` (`weight += count`,
  * `lastSeen` = `now`), or is added unpinned with that weight. Past `max` the
  * weakest unpinned entries are evicted (evictFillers), a newcomer included.
  * Never mutates `list`.
  * @param {object[]} list
- * @param {{ word?: string, count?: number }[]} patterns
+ * @param {{ word?: string, count?: number, exact?: boolean }[]} patterns
  * @param {{ now: number, max: number, halfLifeDays: number }} opts
  * @returns {{ list: object[], added: number, bumped: number }}
  */
@@ -323,7 +330,7 @@ export function learnFillers(list, patterns, { now, max, halfLifeDays }) {
   const addedKeys = new Set();
   const bumpedKeys = new Set();
   for (const pattern of Array.isArray(patterns) ? patterns : []) {
-    const learned = fillerFromWord(pattern?.word);
+    const learned = pattern?.exact === true ? exactFromWord(pattern.word) : fillerFromWord(pattern?.word);
     if (!learned) continue;
     const count = Number.isInteger(pattern.count) && pattern.count > 0 ? pattern.count : 1;
     const key = fillerKey(learned);

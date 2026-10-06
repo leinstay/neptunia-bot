@@ -40,13 +40,14 @@ import {
   patternCheckBody,
   patternCheckSettings,
 } from './fillers.js';
+import { stickyOn, stickyPhrases, stickySettings } from './sticky.js';
 import { mergeWorn, varietyOn } from './variety.js';
 import { captionedEntries, gifPickSettings, parseGifPick, pickCandidates, renderGifLibrary } from './gif-pick.js';
 import { turnRequestInput } from './turn-input.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, REPLY_REQUEST, TokenLimitError, RETRY_STATUS, helperRequestOptions, railReason, sleep } from '../llm/openrouter.js';
 import { ImageCapError, ImageGenError } from '../llm/images.js';
-import { limitOf, mirrorChannelLabel, mirrorDryRun, postLimitNotice } from './limits.js';
+import { isLimitNotice, limitOf, mirrorChannelLabel, mirrorDryRun, postLimitNotice } from './limits.js';
 import { between, typingMs } from './random.js';
 import {
   collectPictures,
@@ -1474,12 +1475,51 @@ export function createTurnRunner({
   }
 
   /**
+   * The sticky-phrase guard after a post (src/behavior/sticky.js): the
+   * phrases the persona keeps reusing in its own newest lines (the guild's
+   * `ownLines` ring, which already holds this turn's lines; a limit notice is
+   * never one of them, `variety.sticky` read now) go into the filler list as
+   * EXACT entries (store.learnFillers with `exact`): a phrase the list
+   * already covers bumps that entry by its line count, a new one is added
+   * with that weight. Logs `fillers: sticky` (`guildId`, `found`, `added`,
+   * `bumped`) when a phrase was found. Nothing with features.stickyGuard off
+   * (a missing key counts as on). Never throws (`fillers: sticky failed`).
+   * @returns {string[]} The keys of the entries it added: notePosted stamps
+   *   them used now, so the filler guard rewrites the very next use.
+   */
+  function noteSticky(guildId) {
+    try {
+      const config = hot.config;
+      if (!stickyOn(config) || typeof store.learnFillers !== 'function' || typeof store.getGuild !== 'function') return [];
+      const guild = store.getGuild(guildId);
+      const labels = hot.prompts?.labels;
+      const lines = (Array.isArray(guild?.ownLines) ? guild.ownLines : [])
+        .map((line) => line?.text)
+        .filter((text) => typeof text === 'string' && !isLimitNotice(labels, text));
+      const found = stickyPhrases(lines, stickySettings(config));
+      if (found.length === 0) return [];
+      const before = new Set((Array.isArray(guild?.fillers) ? guild.fillers : []).map(fillerKey));
+      const patterns = found.map(({ text, count }) => ({ word: text, count, exact: true }));
+      const { added, bumped } = store.learnFillers(guildId, patterns, clock(), fillersSettings(config));
+      log.info('fillers: sticky', { guildId, found: found.length, added, bumped });
+      if (added === 0) return [];
+      const after = store.getGuild(guildId)?.fillers;
+      return (Array.isArray(after) ? after : []).map(fillerKey).filter((key) => !before.has(key));
+    } catch (err) {
+      log.warn('fillers: sticky failed', { guildId, error: err });
+      return [];
+    }
+  }
+
+  /**
    * After the persona's messages are posted: the guild's `ownMessageCount`
-   * grows by how many were posted, then every filler the posted texts
-   * still hold (`texts`, as the persona wrote them) is stamped used at that
-   * count and now (store.markFillers) -- with features.fillerGuard off too, so
-   * switching it on finds the real last uses. Nothing while paused or when
-   * nothing was posted; never throws into the turn (`fillers: note failed`).
+   * grows by how many were posted, the sticky-phrase guard runs (noteSticky),
+   * then every filler the posted texts still hold (`texts`, as the persona
+   * wrote them) and every entry the sticky guard just added are stamped used
+   * at that count and now (store.markFillers, one stamp each) -- with
+   * features.fillerGuard off too, so switching it on finds the real last uses.
+   * Nothing while paused or when nothing was posted; never throws into the
+   * turn (`fillers: note failed`).
    * @param {string} guildId
    * @param {string[]} texts
    */
@@ -1487,10 +1527,12 @@ export function createTurnRunner({
     if (texts.length === 0 || typeof store.countOwnMessages !== 'function' || store.state?.data?.paused) return;
     try {
       store.countOwnMessages(guildId, texts.length);
+      const sticky = noteSticky(guildId);
       const fillers = guildFillers(guildId);
       if (!fillers) return;
       const used = findFillers(texts.join('\n\n'), fillers.list).map(fillerKey);
-      if (used.length > 0) store.markFillers(guildId, used, clock());
+      const keys = [...new Set([...used, ...sticky])];
+      if (keys.length > 0) store.markFillers(guildId, keys, clock());
     } catch (err) {
       log.warn('fillers: note failed', { guildId, error: err });
     }
