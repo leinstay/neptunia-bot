@@ -639,6 +639,22 @@ async function answerJsonOf(response) {
   return json;
 }
 
+// The error of a 200 whose first choice failed at the provider (a plain-object `choices[0].error`,
+// or `finish_reason: 'error'`), else null: the provider's message (else the finish reason), its
+// numeric `code` on `.statusCode` (else undefined), `error.metadata.error_type` on `.errorType`
+// and `native_finish_reason` on `.nativeFinishReason` (null when absent).
+function choiceErrorOf(json) {
+  const choice = json?.choices?.[0];
+  const detail = isPlainObject(choice?.error) ? choice.error : null;
+  if (!detail && choice?.finish_reason !== 'error') return null;
+  const message = typeof detail?.message === 'string' && detail.message ? detail.message : String(choice.finish_reason ?? 'error');
+  const error = new Error(message);
+  error.statusCode = typeof detail?.code === 'number' ? detail.code : undefined;
+  error.errorType = detail?.metadata?.error_type ?? null;
+  error.nativeFinishReason = choice.native_finish_reason ?? null;
+  return error;
+}
+
 // One attempt of a hedged call, never rejecting (a loser's late failure is no unhandled
 // rejection): `{ json }` for an answer, else `{ err, answered, retryable }` -- `answered` when the
 // provider sent a status (an HTTP error, or an error after a 200), `retryable` when the ordinary
@@ -879,8 +895,13 @@ export function createLlm({
    * `llm: provider limit` (role, model, status, limitSource, provider, kind,
    * `retried: false`; codes only, never the provider's text). Once a 200 was received
    * (the request may be billed) nothing is retried: a `json.error` body or an
-   * unparsable body is thrown as it is.
-   * Every answered request logs one `llm: usage` line (role, purpose, origin,
+   * unparsable body is thrown as it is, and so is an error the provider put
+   * in the first choice (`choices[0].error`, or `finish_reason: 'error'`):
+   * an Error with the provider's message, its numeric code on `statusCode`,
+   * `errorType` (`error.metadata.error_type`) and `nativeFinishReason`,
+   * logged once as `llm: provider error` (role, purpose, model, status,
+   * errorType, nativeFinishReason, ms) with no `llm: usage` line.
+   * Every other answered request logs one `llm: usage` line (role, purpose, origin,
    * model, provider, token counts, the prompt cache's `cache` code -- `read` |
    * `write` | `none`, or `off` when no marker was sent --, cost, BYOK flag,
    * response id, and `ms`, the time from the start of the first attempt to the
@@ -1048,6 +1069,21 @@ export function createLlm({
     // The answered request, once: calibration, the over-cap warning and the usage line (`extra`
     // fields appended to it).
     const answer = (json, extra) => {
+      // A provider can fail inside a 200 (e.g. a context-length refusal): thrown, never read as an
+      // empty answer, never retried (it is deterministic), no usage line and no calibration.
+      const choiceError = choiceErrorOf(json);
+      if (choiceError) {
+        log.warn('llm: provider error', {
+          role: options.role ?? null,
+          purpose: options.purpose ?? null,
+          model: body.model,
+          status: choiceError.statusCode ?? null,
+          errorType: choiceError.errorType,
+          nativeFinishReason: choiceError.nativeFinishReason,
+          ms: now() - startedAt,
+        });
+        throw choiceError;
+      }
       const text = json.choices?.[0]?.message?.content ?? '';
       const usage = json.usage ?? {};
       const finishReason = json.choices?.[0]?.finish_reason ?? undefined;

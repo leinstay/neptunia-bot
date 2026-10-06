@@ -2567,3 +2567,112 @@ test('currentRoleName: talk reads as voice and says so once per process; any oth
   assert.equal(logs.filter((line) => line.msg === 'config: role talk is now voice').length, 1);
   assert.equal(currentRoleName('mentor'), 'mentor');
 });
+
+// --- a choice-level provider error inside a 200 ---
+
+const CONTEXT_ERROR_ANSWER = {
+  id: 'gen-err',
+  provider: 'Google',
+  choices: [{
+    finish_reason: 'error',
+    native_finish_reason: 'INVALID_ARGUMENT',
+    error: {
+      code: 400,
+      message: 'The input token count exceeds the maximum number of tokens allowed 1048576.',
+      metadata: { error_type: 'context_length_exceeded' },
+    },
+    message: { role: 'assistant', content: null },
+  }],
+  usage: { prompt_tokens: 0, completion_tokens: 0 },
+};
+
+test('complete: a 200 with a choice-level error rejects with the provider message, once, without a usage line', async () => {
+  let calls = 0;
+  const calibrator = fakeCalibrator();
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig(),
+    calibrator,
+    state: fakeState(),
+    fetchImpl: async () => {
+      calls += 1;
+      return jsonResponse(CONTEXT_ERROR_ANSWER);
+    },
+  });
+  const { result: err, logs } = await withCapturedLogs(() =>
+    llm.complete([{ role: 'user', content: 'the prompt itself' }], { role: 'classifier.video', purpose: 'video', model: 'google/gemini-x' })
+      .then(() => assert.fail('expected a rejection'), (e) => e),
+  );
+  assert.ok(err instanceof Error);
+  assert.equal(err.message, 'The input token count exceeds the maximum number of tokens allowed 1048576.');
+  assert.equal(err.statusCode, 400);
+  assert.equal(err.errorType, 'context_length_exceeded');
+  assert.equal(err.nativeFinishReason, 'INVALID_ARGUMENT');
+  assert.equal(railReason(err), 'llm-error');
+  assert.equal(calls, 1, 'never retried');
+  assert.deepEqual(calibrator.observed, []);
+  assert.deepEqual(linesOf(logs, 'llm: usage'), []);
+  assert.deepEqual(linesOf(logs, 'llm: retry'), []);
+  const warned = logs.filter((l) => l.msg === 'llm: provider error');
+  assert.equal(warned.length, 1);
+  const { level, time, msg, ms, ...fields } = warned[0];
+  assert.equal(level, 'warn');
+  assert.ok(Number.isInteger(ms) && ms >= 0);
+  assert.deepEqual(fields, {
+    role: 'classifier.video',
+    purpose: 'video',
+    model: 'google/gemini-x',
+    status: 400,
+    errorType: 'context_length_exceeded',
+    nativeFinishReason: 'INVALID_ARGUMENT',
+  });
+  assert.ok(!JSON.stringify(warned[0]).includes('the prompt itself'));
+});
+
+test('complete: finish_reason error without an error object rejects with the finish reason, no status', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig(),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => jsonResponse({ choices: [{ finish_reason: 'error', message: { content: null } }] }),
+  });
+  const { result: err } = await withCapturedLogs(() =>
+    llm.complete([{ role: 'user', content: 'x' }]).then(() => assert.fail('expected a rejection'), (e) => e),
+  );
+  assert.equal(err.message, 'error');
+  assert.equal(err.statusCode, undefined);
+  assert.equal(err.errorType, null);
+  assert.equal(err.nativeFinishReason, null);
+});
+
+test('complete: an ordinary answer with finish_reason stop is unaffected by the choice-error check', async () => {
+  const llm = createLlm({
+    apiKey: 'k',
+    getConfig: () => baseConfig(),
+    calibrator: fakeCalibrator(),
+    state: fakeState(),
+    fetchImpl: async () => jsonResponse({ choices: [{ finish_reason: 'stop', message: { content: 'fine' } }], usage: { prompt_tokens: 5 } }),
+  });
+  const { result, logs } = await withCapturedLogs(() => llm.complete([{ role: 'user', content: 'x' }]));
+  assert.equal(result.text, 'fine');
+  assert.equal(result.finishReason, 'stop');
+  assert.equal(linesOf(logs, 'llm: usage').length, 1);
+  assert.deepEqual(linesOf(logs, 'llm: provider error'), []);
+});
+
+test('hedge: a choice-level error of the winning attempt is thrown, not hedged again', async () => {
+  const { ask, clock, calls } = hedgedLlm();
+  const { logs } = await withCapturedLogs(async () => {
+    const seen = watch(ask());
+    await drain();
+    calls[0].answer(jsonResponse(CONTEXT_ERROR_ANSWER));
+    await drain();
+    assert.equal(seen.status, 'rejected');
+    assert.equal(seen.value.statusCode, 400);
+    await clock.advance(HEDGE.timeoutMs);
+  });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(linesOf(logs, 'llm: usage'), []);
+  assert.equal(linesOf(logs, 'llm: provider error').length, 1);
+});

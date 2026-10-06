@@ -128,6 +128,20 @@ export function youtubeVideoId(url) {
 }
 
 /**
+ * The URL a video link goes out by when a provider opens it itself: the
+ * canonical `https://www.youtube.com/watch?v=<id>` for any YouTube video form
+ * youtubeVideoId reads (so no playlist, timestamp or tracking param reaches
+ * the provider -- a `list=` makes it ingest the whole playlist), else `url`
+ * unchanged (another site, a YouTube page without an id, an unparsable URL).
+ * @param {string} url
+ * @returns {string}
+ */
+export function publicVideoUrl(url) {
+  const id = youtubeVideoId(url);
+  return id ? `https://www.youtube.com/watch?v=${id}` : url;
+}
+
+/**
  * `video:url:<16 hex>` -- sha1 of a canonical form: lowercase host without a
  * leading `www.` / `m.`, the path, and only the `v` query param (YouTube's
  * video id) when present. Every YouTube form of one video (`youtu.be/<id>`,

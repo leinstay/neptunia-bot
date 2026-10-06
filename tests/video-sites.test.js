@@ -15,6 +15,7 @@ import {
   parseProbe,
   safeLocation,
   youtubeVideoId,
+  publicVideoUrl,
   parseYoutubePageDuration,
   parseIsoDuration,
   parseYoutubeDataApi,
@@ -237,6 +238,36 @@ test('youtubeVideoId: every YouTube form canonicalised by the cache key gives th
     'https://www.youtube.com/live/dQw4w9WgXcQ',
   ]) {
     assert.equal(youtubeVideoId(url), 'dQw4w9WgXcQ', url);
+  }
+});
+
+test('publicVideoUrl: a YouTube watch link loses its playlist, timestamp and tracking params', () => {
+  assert.equal(
+    publicVideoUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=OLAK5uy_abc&index=2&t=42&si=track&pp=xyz'),
+    'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+  );
+});
+
+test('publicVideoUrl: youtu.be, shorts, embed, live and m. links become the canonical watch URL', () => {
+  for (const url of [
+    'https://youtu.be/dQw4w9WgXcQ?si=track',
+    'https://youtube.com/shorts/dQw4w9WgXcQ?feature=share',
+    'https://www.youtube.com/embed/dQw4w9WgXcQ',
+    'https://www.youtube.com/live/dQw4w9WgXcQ?si=x',
+    'https://m.youtube.com/watch?v=dQw4w9WgXcQ&list=PL1',
+  ]) {
+    assert.equal(publicVideoUrl(url), 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', url);
+  }
+});
+
+test('publicVideoUrl: a non-YouTube link, a YouTube page without an id or garbage comes back unchanged', () => {
+  for (const url of [
+    'https://www.tiktok.com/@someone/video/123?is_from_webapp=1',
+    'https://notyoutube.com/watch?v=abc&list=x',
+    'https://www.youtube.com/@channel',
+    'not a url',
+  ]) {
+    assert.equal(publicVideoUrl(url), url);
   }
 });
 

@@ -1525,6 +1525,25 @@ test('describeVideo: a direct-URL link of 120 s (within directUrlMaxSeconds) goe
   assert.equal(llm.calls[0].options.videoSeconds, 120);
 });
 
+test('describeVideo: a pinned YouTube link with a playlist goes out by its canonical watch URL', async () => {
+  const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 120, title: null } });
+  const { describer, llm } = videoDescriber({ videoFetcher });
+  const link = videoLink(undefined, { url: 'https://www.youtube.com/watch?v=abc&list=OLAK5uy_xyz&si=track' });
+  assert.equal((await describer.describeVideo('g1', link)).state, 'watched');
+  assert.equal(videoFetcher.calls[0].url, link.url, 'the probe still gets the link as posted');
+  assert.deepEqual(llm.calls[0].messages[1].content, [
+    { type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc', processing: 'agentic' } },
+  ]);
+});
+
+test('describeVideo: with an unknown duration a pinned YouTube link also goes out canonical', async () => {
+  const videoFetcher = fakeVideoFetcher({ probe: PROBE_FAILED });
+  const { describer, llm } = videoDescriber({ videoFetcher, hot: videoHot({ video: { directUrlUnknownDuration: true } }) });
+  const link = videoLink(undefined, { url: 'https://youtu.be/abc?list=PL1&t=9' });
+  assert.equal((await describer.describeVideo('g1', link)).state, 'watched');
+  assert.equal(llm.calls[0].messages[1].content[0].video_url.url, 'https://www.youtube.com/watch?v=abc');
+});
+
 test('describeVideo: a 120 s non-direct link whose clip fails stores a length miss with durationSec 120', async () => {
   const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 120, title: null }, clip: { ok: false, reason: 'download' } });
   const { describer, store } = videoDescriber({ videoFetcher, now: () => 7_000 });
