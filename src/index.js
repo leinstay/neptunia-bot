@@ -42,6 +42,7 @@ import { createTagHistory, deprecatedModelKeys } from './behavior/mention.js';
 import { createMessageHandler } from './discord/events.js';
 import { fetchHistoryWindow, fetchMoment } from './discord/collect.js';
 import { resolveGuild } from './discord/guild.js';
+import { createAudienceWarmer } from './discord/audience-warm.js';
 import { isValidCommandName, registerCommands, createInteractionHandler } from './discord/commands.js';
 
 const REQUIRED_PROMPTS = ['system-prompt', 'character-card', 'format', 'reply', 'interject', 'initiate', 'memory'];
@@ -122,6 +123,11 @@ const client = new Client({
 // switch to a different guild always requires a restart, never a silent swap.
 const instance = { guildId: null };
 const getGuildId = () => instance.guildId;
+
+// The audience rail tells a bot's member overwrite by the member cache, which
+// the client fills only with members seen since startup (no member intent):
+// the warmer fetches every member named by an overwrite (src/discord/audience-warm.js).
+const audienceWarmer = createAudienceWarmer({ getGuild: () => (instance.guildId ? client.guilds.cache.get(instance.guildId) ?? null : null) });
 
 // Shared so a picture attached on consecutive turns, or described more than
 // once, is only ever downloaded once within the fetcher's LRU window.
@@ -370,6 +376,10 @@ client.once(Events.ClientReady, async () => {
   const guild = client.guilds.cache.get(instance.guildId);
   await startupStep('registerCommands', () => registerCommands(guild, hot.config), { wait: true });
 
+  // The members named by channel overwrites, fetched so the audience rail knows which are bots.
+  // Fire-and-forget: REST one by one, never throws.
+  await startupStep('audienceWarmer.warm', () => audienceWarmer.warm());
+
   // THE way memory starts: with warmup.enabled and no stored profile at all, starts a run
   // automatically; with an unfinished run left from before a restart, resumes it. Fire-and-forget.
   await startupStep('warmup.resumeIfNeeded', () => warmup.resumeIfNeeded(instance.guildId));
@@ -415,6 +425,12 @@ hot.on('change', ({ what }) => {
 });
 
 client.on('messageCreate', onMessage);
+// A new or edited channel of the served guild may name a member the cache has not seen.
+const warmOnChannel = (channel) => {
+  if (instance.guildId && channel?.guild?.id === instance.guildId) audienceWarmer.warm({ quiet: true });
+};
+client.on(Events.ChannelCreate, warmOnChannel);
+client.on(Events.ChannelUpdate, (_old, channel) => warmOnChannel(channel));
 client.on('interactionCreate', onInteraction);
 
 let shuttingDown = false;
