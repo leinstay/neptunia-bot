@@ -3652,6 +3652,159 @@ test('prompt: near the request limit the recent block is cut, never a token-limi
   }
 });
 
+// --- <attitudes>: the members the persona feels most strongly about -----------------
+
+/** A stored member with an attitude score (`null` = no affinity at all). */
+function scored(id, name, score) {
+  const affinity = score === null ? {} : { affinity: { score, reason: `${name} reason`, history: [] } };
+  return { id, names: [name, `${name} alt`], character: `${name} character`, ...affinity };
+}
+
+/** The guild's members: the interlocutor, a member the trigger names, nine others with or without a score. */
+function attitudeCandidates() {
+  return [
+    scored('u0', 'Ana', 99),
+    scored('z1', 'Zoé', 95),
+    scored('m1', 'Ágata', 70),
+    scored('m2', 'Björn', -80),
+    scored('m3', 'Chloé', 30),
+    scored('m4', 'Δήμος', -40),
+    scored('m5', 'Èlia', 12),
+    scored('m6', 'Fañch', -12),
+    scored('m7', 'Γιώργος', 3),
+    scored('m8', 'Hélène', null),
+    scored('m9', 'Íñigo', 0),
+  ];
+}
+
+/** A server turn: Ana asks about Zoé; `attitudes` is context.attitudes (undefined = unset). */
+function attitudesScene({ attitudes, caps, features, llm, prompts, ...overrides } = {}) {
+  const trigger = makeMessage(1, NOW - MIN, { authorId: 'u0', authorName: 'Ana', content: 'what about Zoé' });
+  const candidates = attitudeCandidates();
+  return baseInput({
+    config: fakeConfig({
+      context: {
+        ...(attitudes === undefined ? {} : { attitudes }),
+        caps: { interlocutor: 2500, aboutChat: 2500, people: 4000, neighbors: 3000, server: 2500, lore: 1500, attitudes: 400, ...caps },
+      },
+      features,
+      llm,
+    }),
+    prompts: prompts ?? fakePrompts(),
+    history: [trigger],
+    trigger,
+    triggerKind: 'mention',
+    interlocutor: candidates[0],
+    candidateProfiles: candidates,
+    ...overrides,
+  });
+}
+
+/** The `<attitudes>` body of a request, or null when the block is absent. */
+function attitudesOf(request) {
+  const match = /<attitudes>\n([\s\S]*?)\n<\/attitudes>/.exec(request.messages[1].content);
+  return match ? match[1] : null;
+}
+
+const attitudeLine = (name, band) => fill(labels.attitudes.line, { name, band: labels.affinity.bands[band] });
+
+test('attitudes: the top context.attitudes members by |score|, warm and cool mixed, warmest first', () => {
+  const request = buildRequest(attitudesScene({ attitudes: 4 }));
+  assert.equal(
+    attitudesOf(request),
+    [
+      labels.attitudes.header,
+      attitudeLine('Ágata', 'devoted'),
+      attitudeLine('Chloé', 'fond'),
+      attitudeLine('Δήμος', 'dislike'),
+      attitudeLine('Björn', 'hostile'),
+    ].join('\n'),
+  );
+  assert.deepEqual([request.stats.attitudes.kept, request.stats.attitudes.dropped], [1, 0]);
+});
+
+test('attitudes: no score, a zero score, the interlocutor and the members shown in <people> are left out', () => {
+  const body = attitudesOf(buildRequest(attitudesScene({ attitudes: 20 })));
+  assert.equal(
+    body,
+    [
+      labels.attitudes.header,
+      attitudeLine('Ágata', 'devoted'),
+      attitudeLine('Chloé', 'fond'),
+      attitudeLine('Èlia', 'warm'),
+      attitudeLine('Γιώργος', 'neutral'),
+      attitudeLine('Fañch', 'cool'),
+      attitudeLine('Δήμος', 'dislike'),
+      attitudeLine('Björn', 'hostile'),
+    ].join('\n'),
+  );
+  for (const absent of ['Ana', 'Zoé', 'Hélène', 'Íñigo', 'reason', 'character', 'alt']) assert.ok(!body.includes(absent), absent);
+});
+
+test('attitudes: a member <people> was offered but the budget cut is listed', () => {
+  // Björn takes part in the chat, but caps.people leaves room for Zoé (asked about) alone.
+  const trigger = makeMessage(2, NOW - MIN, { authorId: 'u0', authorName: 'Ana', content: 'what about Zoé' });
+  const history = [makeMessage(1, NOW - 2 * MIN, { authorId: 'm2', authorName: 'Björn' }), trigger];
+  const bjorn = { ...scored('m2', 'Björn', -80), character: 'ß'.repeat(4000) };
+  const shown = buildRequest(attitudesScene({ attitudes: 2, history, trigger, otherProfiles: [bjorn] }));
+  assert.ok(shown.messages[1].content.includes('## Björn'));
+  assert.equal(attitudesOf(shown), [labels.attitudes.header, attitudeLine('Ágata', 'devoted'), attitudeLine('Δήμος', 'dislike')].join('\n'));
+
+  const zoeOnly = buildRequest(attitudesScene({ attitudes: 2, history, trigger })).stats.people.used;
+  const cut = buildRequest(attitudesScene({ attitudes: 2, history, trigger, otherProfiles: [bjorn], caps: { people: zoeOnly + 50 } }));
+  assert.deepEqual([cut.stats.people.kept, cut.stats.people.dropped], [1, 1]);
+  assert.ok(!cut.messages[1].content.includes('## Björn'));
+  assert.equal(attitudesOf(cut), [labels.attitudes.header, attitudeLine('Ágata', 'devoted'), attitudeLine('Björn', 'hostile')].join('\n'));
+});
+
+test('attitudes: context.attitudes 0, features.relationships off or a missing label make no block', () => {
+  assert.equal(attitudesOf(buildRequest(attitudesScene({ attitudes: 0 }))), null);
+  assert.equal(attitudesOf(buildRequest(attitudesScene({ attitudes: 4, features: { relationships: false } }))), null);
+  for (const key of ['header', 'line']) {
+    const { [key]: _gone, ...rest } = labels.attitudes;
+    const request = buildRequest(attitudesScene({ attitudes: 4, prompts: fakePrompts({ labels: { ...labels, attitudes: rest } }) }));
+    assert.equal(attitudesOf(request), null, key);
+  }
+  const { attitudes: _none, ...older } = labels;
+  assert.equal(attitudesOf(buildRequest(attitudesScene({ attitudes: 4, prompts: fakePrompts({ labels: older }) }))), null);
+});
+
+test('attitudes: an unset context.attitudes lists six members', () => {
+  const body = attitudesOf(buildRequest(attitudesScene()));
+  assert.equal(body.split('\n').length, 1 + 6);
+});
+
+test('attitudes: the block renders right after <people>, ahead of the chat', () => {
+  const user = buildRequest(attitudesScene({ attitudes: 4 })).messages[1].content;
+  assert.ok(user.indexOf('</people>') < user.indexOf('<attitudes>'));
+  assert.ok(user.indexOf('</attitudes>') < user.indexOf('<chat>'));
+});
+
+test('attitudes: a private chat gets the block from the public profiles, its partner left out', () => {
+  const candidates = [scored('u1', 'Alice', 60), scored('m1', 'Ágata', 70), scored('m2', 'Björn', -80)];
+  const body = attitudesOf(buildRequest(privateScene({ candidateProfiles: candidates })));
+  assert.equal(body, [labels.attitudes.header, attitudeLine('Ágata', 'devoted'), attitudeLine('Björn', 'hostile')].join('\n'));
+});
+
+test('attitudes: a tight budget drops the block whole, after the chat and the people', () => {
+  const roomy = buildRequest(attitudesScene({ attitudes: 6, llm: { safetyMargin: 1 } }));
+  assert.ok(roomy.stats.attitudes.used > 0);
+  // Room for everything but the block's last token (the tags take 60): the block goes, nothing ahead of it is cut.
+  const tight = buildRequest(attitudesScene({ attitudes: 6, llm: { maxRequestTokens: roomy.stats.used - 1 + 60, safetyMargin: 1 } }));
+  assert.equal(attitudesOf(tight), null);
+  assert.deepEqual([tight.stats.attitudes.kept, tight.stats.attitudes.dropped], [0, 1]);
+  assert.equal(tight.stats.chat.dropped, 0);
+  assert.equal(tight.stats.people.dropped, 0);
+  assert.equal(tight.stats.people.used, roomy.stats.people.used);
+});
+
+test('attitudes: a block over context.caps.attitudes is dropped whole', () => {
+  const roomy = buildRequest(attitudesScene({ attitudes: 6 }));
+  const capped = buildRequest(attitudesScene({ attitudes: 6, caps: { attitudes: roomy.stats.attitudes.used - 1 } }));
+  assert.equal(attitudesOf(capped), null);
+  assert.deepEqual([capped.stats.attitudes.kept, capped.stats.attitudes.dropped], [0, 1]);
+});
+
 // --- code fallbacks equal config.json --------------------------------------------
 
 test('buildRequest: the code fallbacks for missing settings equal the values in config.json', () => {
@@ -3670,6 +3823,8 @@ test('buildRequest: the code fallbacks for missing settings equal the values in 
       tempo: shipped.context.tempo,
       neighborMessageChars: shipped.context.neighborMessageChars,
       askedAboutEpisodes: shipped.context.askedAboutEpisodes,
+      attitudes: shipped.context.attitudes,
+      caps: { attitudes: shipped.context.caps.attitudes },
       vision: { ...base.context.vision, tokensPerImage: shipped.context.vision.tokensPerImage },
     },
     lore: shipped.lore,
@@ -3680,6 +3835,7 @@ test('buildRequest: the code fallbacks for missing settings equal the values in 
   const zoe = { id: 'z1', names: ['Zoé'], character: 'rêveuse', episodes: askedEpisodes() };
   const asker = makeMessage(1, NOW - MIN, { authorName: 'Ana', content: 'τι έκανε η Zoé χθες;' });
   const floodHistory = [makeMessage(1, NOW - MIN, { content: 'the flood again' })];
+  const members = (count, name) => Array.from({ length: count }, (_, i) => scored(`a${i}`, name(i), (i % 2 ? -1 : 1) * (10 + i)));
   const scenes = {
     'neighbour message length': {
       neighbors: [{ channelName: 'general', messages: [makeMessage(9, NOW - 5 * MIN, { content: 'λ'.repeat(400) })] }],
@@ -3705,6 +3861,8 @@ test('buildRequest: the code fallbacks for missing settings equal the values in 
       history: floodHistory,
       loreEntries: Array.from({ length: shipped.lore.maxMatches + 3 }, (_, i) => loreEntry({ id: `l${i}`, title: `Flood ${i}`, text: `story ${i}` })),
     },
+    'attitudes count': { candidateProfiles: members(shipped.context.attitudes + 3, (i) => `Mélo${i}`) },
+    'attitudes cap': { candidateProfiles: members(shipped.context.attitudes, (i) => `Mélo${i} ${'λόγος '.repeat(26)}`) },
     'picture cost': {
       history: [makeMessage(1, NOW - MIN, { attachments: [{ id: 'i1', kind: 'image', url: 'img1' }] })],
       trigger: makeMessage(1, NOW - MIN, { attachments: [{ id: 'i1', kind: 'image', url: 'img1' }] }),
