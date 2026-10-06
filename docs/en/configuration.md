@@ -237,8 +237,8 @@ Settings for the server-history search (`features.recall`). When the lookup clas
 | `maxPeople` | `2` | People the `who:` line may name |
 | `dateSamples` | `4` | Date-only queries sampled across a `when:` range when no content forms are given |
 | `clusterGapMinutes` | `30` | Gap between hits that separates them into clusters |
-| `maxClusters` | `5` | Clusters kept (excess dropped) |
-| `keepOldest` | `1` | Of the `maxClusters` kept, this many go to the oldest clusters; the rest fill newest first. `0` = all newest first |
+| `maxClusters` | `5` | Clusters kept, ranked by the count of distinct queries with hits in each cluster (descending; ties newest first) |
+| `keepOldest` | `0` | Of the `maxClusters` kept, this many slots go to the oldest clusters whose hits come from at least two distinct queries. A cluster hit by only one query never gets a reserved slot. `0` = ranked order only |
 | `windowMessages` | `16` | Messages fetched around each cluster centre |
 | `answerChars` | `1200` | Max characters for the summary note; fills `{{answerChars}}` in `recall-summary.md` |
 | `stretchChars` | `1500` | Max characters of the verbatim stretch shown to the persona |
