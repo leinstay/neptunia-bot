@@ -1803,7 +1803,8 @@ test('run: a real moment is answered without the memory written at or after its 
     const invented = requestText(talk[2]);
     assert.match(invented, /are you out of drawings/);
     for (const mark of [...EARLIER_MARKS, ...LATER_MARKS]) assert.ok(invented.includes(mark), mark);
-    assert.ok(!invented.includes('REASON_BEFORE'));
+    // The earlier move shows too: the profile lists the moves behind the attitude (relationships.shownMoves).
+    assert.ok(invented.includes('REASON_BEFORE'));
     // The judge's <learned> follows what the persona saw.
     assert.equal(blockBody(scoreCallOf(llm, 1).user, 'learned').includes('LEARNED_AFTER'), false);
     assert.match(blockBody(scoreCallOf(llm, 1).user, 'learned'), /LEARNED_BEFORE/);
