@@ -314,6 +314,7 @@
     "seedSets": 2,
     "kinds": { "selfPicture": 3, "picture": 2, "meme": 1, "thought": 2, "news": 2, "facts": 1, "status": 3 },
     "searchKinds": ["news", "facts"],
+    "pictureKinds": ["selfPicture", "picture", "meme"],
     "planMaxOutputTokens": 300,
     "planTimeoutMs": 20000
   },

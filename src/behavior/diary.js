@@ -28,6 +28,7 @@ const DEFAULT_MAX_PER_DAY = 3; // diary.maxPerDay
 const DEFAULT_HISTORY_POSTS = 150; // diary.historyPosts
 const DEFAULT_GIST_CHARS = 200; // diary.gistChars
 const DEFAULT_SEARCH_KINDS = ['news', 'facts']; // diary.searchKinds
+const DEFAULT_PICTURE_KINDS = ['selfPicture', 'picture', 'meme']; // diary.pictureKinds
 const DEFAULT_FAMILY = 'seed';
 const URL_RE = /https?:///iu;
 
@@ -81,8 +82,9 @@ function windowSpan(window, dayKey, timezone) {
  * `min + floor(rng() * (max - min + 1))` from `posts: [min, max]` and places
  * that many slots uniformly inside itself (local hours; a window with `to <=
  * from` ends the next day); the slots are sorted, a slot closer than
- * `minGapMinutes` to the previous kept one is dropped, and the rest is cut to
- * the first `maxPerDay`. Slots already past at planning time are kept:
+ * `minGapMinutes` to the previous kept one is dropped, and while more than
+ * `maxPerDay` remain one of them, chosen at random (one roll each), is
+ * dropped, so the cap does not always cost the latest window. Slots already past at planning time are kept:
  * dueSlot decides what still fires. A malformed window is skipped.
  * @param {{ windows?: Array<{ from: number, to: number, posts: [number, number] }>, quietDayChance?: number,
  *   minGapMinutes?: number, maxPerDay?: number }} cfg  config.diary
@@ -115,7 +117,11 @@ export function planDay(cfg, nowMs, timezone, rng) {
     if (slots.length > 0 && slot - slots[slots.length - 1] < gapMs) continue;
     slots.push(slot);
   }
-  return { day, slots: slots.slice(0, countOf(cfg?.maxPerDay ?? DEFAULT_MAX_PER_DAY)), quiet: false, done: [] };
+  const cap = countOf(cfg?.maxPerDay ?? DEFAULT_MAX_PER_DAY);
+  while (slots.length > cap) {
+    slots.splice(Math.min(slots.length - 1, Math.floor(rng() * slots.length)), 1);
+  }
+  return { day, slots, quiet: false, done: [] };
 }
 
 /**
@@ -171,20 +177,27 @@ export function pickKind(kinds, rng) {
  * The plan request's answer, normalised. `kind` must be a key of `kinds` with
  * a positive weight, else the whole answer is replaced by a weighted random
  * kind (pickKind; null when no kind is weighted) with an empty brief and
- * search (`fallback: true`). `brief` is one line, at most 300 characters;
+ * search (`fallback: true`), drawing when `pictureAllowed` and the kind is in
+ * `pictureKinds`. Otherwise `brief` is one line, at most 300 characters;
  * `search` is kept only for a kind in `searchKinds`; `picture` is true only
  * when the answer says `true` and `pictureAllowed`.
  * @param {unknown} parsed  The JSON the model answered (untrusted).
  * @param {Record<string, number>} kinds  diary.kinds
- * @param {{ pictureAllowed?: boolean, searchKinds?: string[] }} opts  searchKinds: diary.searchKinds
+ * @param {{ pictureAllowed?: boolean, searchKinds?: string[], pictureKinds?: string[] }} opts
+ *   searchKinds: diary.searchKinds; pictureKinds: diary.pictureKinds
  * @param {() => number} rng
  * @returns {{ kind: string|null, brief: string, search: string, picture: boolean, fallback: boolean }}
  */
-export function validatePlan(parsed, kinds, { pictureAllowed = false, searchKinds } = {}, rng) {
+export function validatePlan(parsed, kinds, { pictureAllowed = false, searchKinds, pictureKinds } = {}, rng) {
   const answer = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  const picture = answer.picture === true && pictureAllowed === true;
   const valid = weightedKinds(kinds).some(([key]) => key === answer.kind);
-  if (!valid) return { kind: pickKind(kinds, rng), brief: '', search: '', picture, fallback: true };
+  if (!valid) {
+    const kind = pickKind(kinds, rng);
+    const drawable = Array.isArray(pictureKinds) ? pictureKinds : DEFAULT_PICTURE_KINDS;
+    const picture = pictureAllowed === true && kind !== null && drawable.includes(kind);
+    return { kind, brief: '', search: '', picture, fallback: true };
+  }
+  const picture = answer.picture === true && pictureAllowed === true;
   const searchable = Array.isArray(searchKinds) ? searchKinds : DEFAULT_SEARCH_KINDS;
   const brief = typeof answer.brief === 'string' ? clampText(oneLine(answer.brief), BRIEF_CHARS, { tolerance: 1 }) : '';
   const search = typeof answer.search === 'string' && searchable.includes(answer.kind) ? oneLine(answer.search) : '';

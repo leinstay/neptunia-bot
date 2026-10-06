@@ -71,6 +71,21 @@ test('planDay: posts count is drawn per window and capped by maxPerDay', () => {
   assert.equal(plan.slots.length, 2);
 });
 
+test('planDay: slots over maxPerDay are dropped at random, not the latest', () => {
+  const cfg = {
+    ...base,
+    maxPerDay: 2,
+    windows: [
+      { from: 7, to: 9, posts: [1, 1] },
+      { from: 12, to: 14, posts: [1, 1] },
+      { from: 18, to: 20, posts: [1, 1] },
+    ],
+  };
+  // quiet roll, then count + placement per window (all mid-window), then the drop roll picks index 0
+  const plan = planDay(cfg, Date.parse('2026-03-10T05:00:00Z'), 'UTC', seq([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.1]));
+  assert.deepEqual(plan.slots, [Date.parse('2026-03-10T13:00:00Z'), Date.parse('2026-03-10T19:00:00Z')]);
+});
+
 test('planDay: the count is drawn inside the window range', () => {
   const cfg = { ...base, windows: [{ from: 12, to: 16, posts: [0, 2] }] };
   const nowMs = Date.parse('2026-03-10T05:00:00Z');
@@ -171,6 +186,28 @@ test('validatePlan: falls back to a weighted kind', () => {
     assert.equal(plan.search, '');
   }
   assert.equal(validatePlan(null, { a: 0 }, opts, () => 0).kind, null);
+});
+
+test('validatePlan: a fallback picture kind draws when allowed', () => {
+  const plan = validatePlan(null, kinds, { ...opts, pictureKinds: ['selfPicture'] }, () => 0);
+  assert.equal(plan.kind, 'selfPicture');
+  assert.equal(plan.fallback, true);
+  assert.equal(plan.picture, true);
+  const capped = validatePlan(null, kinds, { ...opts, pictureAllowed: false, pictureKinds: ['selfPicture'] }, () => 0);
+  assert.equal(capped.picture, false);
+});
+
+test('validatePlan: a fallback text kind does not draw', () => {
+  const plan = validatePlan({ kind: 'nope', picture: true }, kinds, { ...opts, pictureKinds: ['selfPicture'] }, () => 0.99);
+  assert.equal(plan.kind, 'news');
+  assert.equal(plan.fallback, true);
+  assert.equal(plan.picture, false);
+});
+
+test('validatePlan: a picture kind answered without a picture is kept as given', () => {
+  const plan = validatePlan({ kind: 'selfPicture', brief: 'b', picture: false }, kinds, { ...opts, pictureKinds: ['selfPicture'] }, () => 0.5);
+  assert.equal(plan.picture, false);
+  assert.equal(plan.fallback, false);
 });
 
 test('validatePlan: search is cleared for a kind outside searchKinds', () => {
