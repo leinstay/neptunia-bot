@@ -14,6 +14,7 @@ import {
   mergeWindows,
   parseLookupAnswer,
   parseRecallAnswer,
+  queryKey,
   recallSettings,
   renderRecallWindows,
   sampleOffsets,
@@ -21,6 +22,9 @@ import {
   snowflakeAt,
 } from '../src/behavior/recall.js';
 import { labels } from './fixtures/labels.js';
+import { readFileSync } from 'node:fs';
+
+const SHIPPED_CONFIG = JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -198,15 +202,91 @@ function sevenClusters() {
   return Array.from({ length: 7 }, (_, i) => ({ id: `k${i}`, channelId: i % 2 === 0 ? 'c1' : 'c2', ts: t + i * 2 * HOUR }));
 }
 
-test('clusterHits: keepOldest reserves slots for the oldest clusters, the rest newest first, all newest first', () => {
-  const hits = sevenClusters();
-  const ids = (options) => clusterHits(hits, { gapMinutes: 30, maxClusters: 5, ...options }).map((c) => c.middleId);
-  assert.deepEqual(ids({ keepOldest: 1 }), ['k6', 'k5', 'k4', 'k3', 'k0'], 'the 4 newest and the oldest');
-  assert.deepEqual(ids({ keepOldest: 2 }), ['k6', 'k5', 'k4', 'k1', 'k0'], 'the 3 newest and the 2 oldest');
-  assert.deepEqual(ids({ keepOldest: 0 }), ['k6', 'k5', 'k4', 'k3', 'k2'], 'the old behaviour: the 5 newest');
-  assert.deepEqual(ids({ keepOldest: 9 }), ['k4', 'k3', 'k2', 'k1', 'k0'], 'never more than maxClusters');
-  assert.deepEqual(ids({}), ['k6', 'k5', 'k4', 'k3', 'k0'], 'a missing value falls back to RECALL_DEFAULTS.keepOldest');
-  assert.equal(RECALL_DEFAULTS.keepOldest, 1);
+/** A hit of channel `channelId` at `ts` found by the queries `keys`. */
+function found(id, ts, keys, channelId = 'c1') {
+  return { id, channelId, ts, queries: keys };
+}
+
+test('queryKey: one key per search query, every sampled page of a range under one', () => {
+  assert.equal(queryKey({ kind: 'content', content: 'κουνέλι', minId: null, maxId: null }), 'content:κουνέλι');
+  assert.equal(queryKey({ kind: 'author', authorId: 'u7', minId: null, maxId: null }), 'author:u7');
+  assert.equal(queryKey({ kind: 'range', minId: '1', maxId: '2' }), queryKey({ kind: 'range', minId: '1', maxId: '2', offset: 528 }));
+  assert.notEqual(queryKey({ kind: 'content', content: 'u7' }), queryKey({ kind: 'author', authorId: 'u7' }));
+});
+
+test('clusterHits: clusters rank by distinct queries, then the newest; the kept ones stay newest first', () => {
+  const t = Date.UTC(2026, 9, 1, 8);
+  const hits = [
+    found('n1', t + 10 * HOUR, ['content:a']),
+    found('n2', t + 12 * HOUR, ['content:a']),
+    found('n3', t + 14 * HOUR, ['content:a']),
+    found('d1', t - 400 * HOUR, ['content:a', 'content:b']),
+    found('d2', t - 400 * HOUR + 5 * MINUTE, ['content:c']),
+    found('w1', t, ['content:a', 'author:u2'], 'c2'),
+  ];
+  const clusters = clusterHits(hits, { gapMinutes: 30, maxClusters: 3, keepOldest: 0 });
+  assert.deepEqual(
+    clusters.map((c) => [c.middleId, c.queries]),
+    [
+      ['n3', 1],
+      ['w1', 2],
+      ['d2', 3],
+    ],
+    'the densest two, then the newest of the one-query clusters; shown newest first',
+  );
+  assert.deepEqual(clusterHits(hits, { gapMinutes: 30, maxClusters: 9, keepOldest: 0 }).map((c) => c.middleId), ['n3', 'n2', 'n1', 'w1', 'd2'], 'a one-hit cluster still counts');
+});
+
+test('clusterHits: a message found by two queries counts both; hits without queries count none', () => {
+  const t = Date.UTC(2026, 9, 1, 8);
+  const [one] = clusterHits([found('x', t, ['content:a']), found('x', t, ['content:b', 'content:a'])], { gapMinutes: 30 });
+  assert.deepEqual([one.ids, one.queries], [['x'], 2]);
+  const [bare] = clusterHits([{ id: 'y', channelId: 'c1', ts: t }], { gapMinutes: 30 });
+  assert.equal(bare.queries, 0);
+});
+
+test('clusterHits: an old single-hit cluster loses to a dense old cluster', () => {
+  const t = Date.UTC(2026, 9, 1, 8);
+  const recent = Array.from({ length: 5 }, (_, i) => found(`r${i}`, t + i * 2 * HOUR, ['content:word']));
+  const ancient = found('z', Date.UTC(2020, 4, 1, 12), ['content:word']);
+  const dense = [
+    found('o1', Date.UTC(2026, 8, 28, 20), ['content:coined']),
+    found('o2', Date.UTC(2026, 8, 28, 20, 3), ['content:pun', 'content:word']),
+  ];
+  for (const keepOldest of [0, 1]) {
+    const kept = clusterHits([...recent, ancient, ...dense], { gapMinutes: 30, maxClusters: 5, keepOldest }).map((c) => c.middleId);
+    assert.deepEqual(kept, ['r4', 'r3', 'r2', 'r1', 'o2'], String(keepOldest));
+  }
+});
+
+test('clusterHits: keepOldest takes the oldest clusters of at least two queries from the rest, never a single-hit one', () => {
+  const t = Date.UTC(2026, 9, 1, 8);
+  const newer = Array.from({ length: 4 }, (_, i) => found(`n${i}`, t + i * 2 * HOUR, ['content:a', 'content:b']));
+  const older = [found('o1', Date.UTC(2021, 2, 1), ['content:a', 'content:c']), found('o2', Date.UTC(2022, 2, 1), ['content:b', 'content:c'])];
+  const single = found('z', Date.UTC(2020, 4, 1), ['content:a']);
+  const ids = (hits, keepOldest) => clusterHits(hits, { gapMinutes: 30, maxClusters: 3, keepOldest }).map((c) => c.middleId);
+  const all = [...newer, ...older, single];
+  assert.deepEqual(ids(all, 1), ['n3', 'n2', 'o1'], 'the oldest two-query cluster, not the older single hit');
+  assert.deepEqual(ids(all, 2), ['n3', 'o2', 'o1']);
+  assert.deepEqual(ids(all, 0), ['n3', 'n2', 'n1'], '0 reserves nothing');
+  const singles = Array.from({ length: 4 }, (_, i) => found(`s${i}`, t + i * 2 * HOUR, ['content:a']));
+  assert.deepEqual(ids([...singles, single], 1), ['s3', 's2', 's1'], 'no eligible cluster in the rest: the slot goes by rank');
+  assert.deepEqual(ids(all, 9), ['n0', 'o2', 'o1'], 'never more than maxClusters');
+});
+
+test('clusterHits: a missing keepOldest falls back to the shipped config value', () => {
+  const t = Date.UTC(2026, 9, 1, 8);
+  const hits = [
+    ...Array.from({ length: 4 }, (_, i) => found(`n${i}`, t + i * 2 * HOUR, ['content:a', 'content:b'])),
+    found('o1', Date.UTC(2021, 2, 1), ['content:a', 'content:c']),
+  ];
+  const shipped = SHIPPED_CONFIG.recall.keepOldest;
+  assert.equal(RECALL_DEFAULTS.keepOldest, shipped);
+  assert.equal(recallSettings({ recall: {} }).keepOldest, shipped);
+  assert.deepEqual(
+    clusterHits(hits, { gapMinutes: 30, maxClusters: 3 }).map((c) => c.middleId),
+    clusterHits(hits, { gapMinutes: 30, maxClusters: 3, keepOldest: shipped }).map((c) => c.middleId),
+  );
 });
 
 test('clusterHits: with no more clusters than maxClusters, keepOldest changes nothing', () => {
@@ -273,6 +353,25 @@ test('renderRecallWindows: hit lines carry the mark; captions render; unindexed 
   assert.deepEqual(indexed.lines.map((l) => l.hit), [false, true]);
   const [plain] = renderRecallWindows([window], { labels, timezone: 'UTC', indexed: false });
   assert.equal(plain.lines[1].text, `${HIT_MARK}[18:44] Βασίλης: τον πυροβόλησες`);
+});
+
+test('renderRecallWindows: a matched message with a line break is marked on its first line, after a gap marker', () => {
+  const t = Date.UTC(2026, 9, 1, 18, 40);
+  const window = {
+    channelId: 'c1',
+    channelName: 'general',
+    messages: [msg('m1', t), msg('m2', t + 3 * HOUR, { authorName: 'Βασίλης', content: 'πρώτη γραμμή\n#1 [δεύτερη] γραμμή' })],
+    hitIds: ['m2'],
+  };
+  const [indexed] = renderRecallWindows([window], { labels, timezone: 'UTC', gapMinutes: 20, indexed: true });
+  const [gap, head, tail] = indexed.lines[1].text.split('\n');
+  assert.ok(gap.startsWith('--- ') && !gap.startsWith(HIT_MARK), 'the gap marker stays unmarked');
+  assert.equal(head, `${HIT_MARK}#2 [21:40] Βασίλης: πρώτη γραμμή`);
+  assert.equal(tail, '#1 [δεύτερη] γραμμή');
+  assert.equal(indexed.lines[1].hit, true);
+  const [plain] = renderRecallWindows([window], { labels, timezone: 'UTC', gapMinutes: 20, indexed: false });
+  assert.deepEqual(plain.lines[1].text.split('\n'), [gap, `${HIT_MARK}[21:40] Βασίλης: πρώτη γραμμή`, '#1 [δεύτερη] γραμμή'], 'the index goes; the message\'s own text stays');
+  assert.equal(plain.lines[0].text, '[18:40] Ana: line m1');
 });
 
 // ---- the summary request and answer --------------------------------------------------------

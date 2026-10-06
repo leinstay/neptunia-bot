@@ -48,6 +48,7 @@ import {
   matchMemory,
   mergeWindows,
   parseRecallAnswer,
+  queryKey,
   recallSettings,
   renderRecallWindows,
   sampleOffsets,
@@ -76,7 +77,7 @@ function asksServer(server) {
   return some(server.forms) || some(server.who) || Number.isFinite(server.from) || Number.isFinite(server.to);
 }
 
-/** A raw search hit (src/discord/search.js) as the clustering reads it. */
+/** A raw search hit (src/discord/search.js) as the clustering reads it; `queries` the keys of the queries that found it. */
 function hitFrom(raw) {
   return {
     id: raw.id,
@@ -85,6 +86,7 @@ function hitFrom(raw) {
     authorId: raw.author?.id ?? null,
     bot: raw.author?.bot === true,
     username: raw.author?.username ?? null,
+    queries: new Set(),
   };
 }
 
@@ -334,7 +336,12 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
         stats.failed += 1;
         continue;
       }
-      for (const raw of page.hits) if (!hits.has(raw.id)) hits.set(raw.id, hitFrom(raw));
+      // A message several queries find is one hit carrying every key: clusterHits ranks by them.
+      const key = queryKey(query);
+      for (const raw of page.hits) {
+        if (!hits.has(raw.id)) hits.set(raw.id, hitFrom(raw));
+        hits.get(raw.id).queries.add(key);
+      }
       if (query.kind === 'range' && !query.offset) {
         const more = sampleOffsets(page.total, settings.dateSamples)
           .filter((offset) => offset > 0)

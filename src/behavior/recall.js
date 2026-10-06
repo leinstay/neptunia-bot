@@ -34,7 +34,7 @@ export const RECALL_DEFAULTS = Object.freeze({
   dateSamples: 4,
   clusterGapMinutes: 30,
   maxClusters: 5,
-  keepOldest: 1,
+  keepOldest: 0,
   windowMessages: 16,
   answerChars: 1200,
   stretchChars: 1500,
@@ -57,6 +57,8 @@ export const MAX_SEARCH_OFFSET = 9975;
 /** The structural mark that opens a line the search matched, in `<found>` and in the stretch. */
 export const HIT_MARK = '>> ';
 
+/** The fewest distinct queries a cluster needs to take a keepOldest slot (clusterHits). */
+const OLDEST_MIN_QUERIES = 2;
 /** The most messages one window may ask for (one page of a channel's history). */
 const MAX_WINDOW_MESSAGES = 100;
 /** A web query is cut to this many characters (as the old single-line answer was). */
@@ -98,7 +100,7 @@ function numberAtLeast(value, fallback, min) {
  * `maxForms`, `maxPeople`, `maxPerDay`, `stretchChars`, `minSummaryMs`,
  * `memoryItems` and `keepOldest` may be 0 (no content query, no member
  * lookup, no recall today, no stretch, the summary asked whatever time is
- * left, no stored memory searched, only the newest clusters kept);
+ * left, no stored memory searched, no slot reserved for old clusters);
  * `windowMessages` is at most 100.
  * @param {object} config  The live config.
  * @returns {{ maxForms: number, maxPeople: number, dateSamples: number, clusterGapMinutes: number,
@@ -343,6 +345,19 @@ export function searchPlan({ forms = [], who = [], memberIds = [], from = null, 
 }
 
 /**
+ * The key a search query's hits are tagged with (clusterHits counts the
+ * distinct keys of a cluster): `content:<form>`, `author:<id>`, or `range`
+ * for a date range alone -- every sampled page of it is one query.
+ * @param {{ kind: string, content?: string, authorId?: string }} query  A searchPlan entry.
+ * @returns {string}
+ */
+export function queryKey(query) {
+  if (query?.kind === 'content') return `content:${query.content}`;
+  if (query?.kind === 'author') return `author:${query.authorId}`;
+  return 'range';
+}
+
+/**
  * The offsets at which a date-only range of `total` messages is read:
  * `samples` evenly spaced offsets from 0 (the newest page), floored,
  * de-duplicated, at most MAX_SEARCH_OFFSET; just [0] when one page holds
@@ -364,31 +379,43 @@ export function sampleOffsets(total, samples) {
 
 /**
  * Hits grouped into clusters: per channel, hits sorted by time; a hit less
- * than `gapMinutes` after the previous one joins its cluster. A one-hit
- * cluster counts like any other. Each cluster: `{ channelId, ids (oldest
- * first), startTs, endTs, middleId }`, `middleId` the hit at the middle of
- * its list. Clusters are ordered newest first by `endTs` (channel id on a
- * tie). With more than `maxClusters` of them, `keepOldest` slots (at most
- * `maxClusters`) go to the oldest ones -- where a running thing started --
- * and the rest to the newest; the kept ones stay newest first, so the oldest
- * come last. `keepOldest` 0 keeps just the newest `maxClusters`. Hits
- * without an id, a channel or a finite `ts` are ignored; a repeated id counts
- * once.
- * @param {{ id: string, channelId: string, ts: number }[]} hits
+ * than `gapMinutes` after the previous one joins its cluster. Each cluster:
+ * `{ channelId, ids (oldest first), startTs, endTs, middleId, queries }`,
+ * `middleId` the hit at the middle of its list, `queries` how many distinct
+ * query keys (queryKey) its hits carry -- a hit found by two queries counts
+ * both, a hit without `queries` counts none. With more than `maxClusters`
+ * clusters, they rank by `queries` (more first), then the newer `endTs`
+ * (channel id on a tie): the dense stretch where several forms meet outranks
+ * a retelling or a stray old hit, and a one-hit cluster still counts, below
+ * the denser ones. The top `maxClusters - keepOldest` are kept; each of the
+ * `keepOldest` slots (at most `maxClusters`) then goes to the oldest
+ * cluster of the rest with at least OLDEST_MIN_QUERIES queries -- where a
+ * running thing started, never a single generic hit -- and a slot no such
+ * cluster takes goes on by rank. `keepOldest` 0 reserves nothing. The kept
+ * ones are returned newest first by `endTs` (channel id on a tie). Hits
+ * without an id, a channel or a finite `ts` are ignored; a repeated id is one
+ * hit with the queries of every copy.
+ * @param {{ id: string, channelId: string, ts: number, queries?: Iterable<string> }[]} hits
  * @param {{ gapMinutes?: number, maxClusters?: number, keepOldest?: number }} [options]
- * @returns {{ channelId: string, ids: string[], startTs: number, endTs: number, middleId: string }[]}
+ * @returns {{ channelId: string, ids: string[], startTs: number, endTs: number, middleId: string, queries: number }[]}
  */
 export function clusterHits(hits, { gapMinutes, maxClusters, keepOldest } = {}) {
   const gapMs = numberAtLeast(gapMinutes, RECALL_DEFAULTS.clusterGapMinutes, 0) * MINUTE_MS;
   const keep = intAtLeast(maxClusters, RECALL_DEFAULTS.maxClusters, 1);
   const oldest = Math.min(keep, intAtLeast(keepOldest, RECALL_DEFAULTS.keepOldest, 0));
   const byChannel = new Map();
-  const seen = new Set();
+  const seen = new Map();
   for (const hit of Array.isArray(hits) ? hits : []) {
-    if (!hit?.id || !hit.channelId || !Number.isFinite(hit.ts) || seen.has(hit.id)) continue;
-    seen.add(hit.id);
+    if (!hit?.id || !hit.channelId || !Number.isFinite(hit.ts)) continue;
+    const keys = typeof hit.queries === 'string' ? [] : [...(hit.queries ?? [])].filter((key) => typeof key === 'string' && key);
+    if (seen.has(hit.id)) {
+      for (const key of keys) seen.get(hit.id).queries.add(key);
+      continue;
+    }
+    const entry = { id: hit.id, ts: hit.ts, queries: new Set(keys) };
+    seen.set(hit.id, entry);
     if (!byChannel.has(hit.channelId)) byChannel.set(hit.channelId, []);
-    byChannel.get(hit.channelId).push(hit);
+    byChannel.get(hit.channelId).push(entry);
   }
   const clusters = [];
   for (const [channelId, list] of byChannel) {
@@ -398,15 +425,29 @@ export function clusterHits(hits, { gapMinutes, maxClusters, keepOldest } = {}) 
       if (current && hit.ts - current.endTs < gapMs) {
         current.ids.push(hit.id);
         current.endTs = hit.ts;
+        for (const key of hit.queries) current.keys.add(key);
         continue;
       }
-      current = { channelId, ids: [hit.id], startTs: hit.ts, endTs: hit.ts };
+      current = { channelId, ids: [hit.id], startTs: hit.ts, endTs: hit.ts, keys: new Set(hit.queries) };
       clusters.push(current);
     }
   }
-  clusters.sort((x, y) => y.endTs - x.endTs || (x.channelId < y.channelId ? -1 : 1));
-  const kept = clusters.length <= keep ? clusters : [...clusters.slice(0, keep - oldest), ...clusters.slice(clusters.length - oldest)];
-  return kept.map((cluster) => ({ ...cluster, middleId: cluster.ids[Math.floor(cluster.ids.length / 2)] }));
+  const newestFirst = (x, y) => y.endTs - x.endTs || (x.channelId < y.channelId ? -1 : 1);
+  const ranked = clusters.sort((x, y) => y.keys.size - x.keys.size || newestFirst(x, y));
+  let kept = ranked;
+  if (ranked.length > keep) {
+    kept = ranked.slice(0, keep - oldest);
+    const rest = ranked.slice(keep - oldest);
+    const reserved = rest
+      .filter((cluster) => cluster.keys.size >= OLDEST_MIN_QUERIES)
+      .sort((x, y) => -newestFirst(x, y))
+      .slice(0, oldest);
+    const taken = new Set(reserved);
+    kept.push(...reserved, ...rest.filter((cluster) => !taken.has(cluster)).slice(0, oldest - reserved.length));
+  }
+  return [...kept]
+    .sort(newestFirst)
+    .map(({ keys, ...cluster }) => ({ ...cluster, middleId: cluster.ids[Math.floor(cluster.ids.length / 2)], queries: keys.size }));
 }
 
 /**
@@ -465,11 +506,14 @@ export function fallbackWindow(windows, among = FALLBACK_AMONG) {
  * The windows rendered as transcript lines with the transcript helpers of
  * src/discord/format.js (the chat form: gap and date markers, media tags
  * with the `descriptions` captions, reactions; wording from `labels`). A
- * line whose message is in the window's `hitIds` opens with HIT_MARK.
+ * message whose id is in the window's `hitIds` gets HIT_MARK at the start
+ * of its own first line (`#n [time] Name: ...`, after any gap or date
+ * marker, before the rest of a message with line breaks).
  * `indexed` true keeps the `#n` index of each line, numbered across all
  * windows so a reply marker points inside its own window; false (the
  * stretch handed to the persona, which must not mistake them for chat
- * indices) drops the index and the reply markers with it.
+ * indices) drops the index from that first line and the reply markers with
+ * it; the message's own text is left as it is.
  * @param {{ channelId: string, channelName?: string|null, messages: object[], hitIds?: Iterable<string>,
  *   descriptions?: Map<string, string> }[]} windows
  * @param {{ labels: object, timezone?: string, selfName?: string, gapMinutes?: number, maxChars?: number,
@@ -498,10 +542,12 @@ export function renderRecallWindows(windows, { labels, timezone = 'UTC', selfNam
     if (indexed) offset += messages.length;
     const lines = items.map((item) => {
       const parts = item.text.split('\n');
-      let last = parts.pop();
-      if (!indexed) last = last.replace(LINE_INDEX_RE, '');
+      // The message's own first line: the first opening with its `#n [` index (markers come before it).
+      const found = parts.findIndex((part) => part.startsWith(`#${item.index} [`));
+      const at = found === -1 ? 0 : found;
+      if (!indexed) parts[at] = parts[at].replace(LINE_INDEX_RE, '');
       const hit = hits.has(item.id);
-      parts.push(hit ? `${HIT_MARK}${last}` : last);
+      if (hit) parts[at] = `${HIT_MARK}${parts[at]}`;
       return { id: item.id, ts: item.ts, text: parts.join('\n'), hit };
     });
     out.push({ channelId: window.channelId, channelName: window.channelName ?? null, startTs: messages[0].ts, lines });

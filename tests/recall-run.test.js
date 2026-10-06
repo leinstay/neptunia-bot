@@ -498,6 +498,20 @@ function rankedAnswers(route, query) {
   return { total_results: 3, messages: [[rawHit('c2', GARDEN_AGAIN)], [rawHit('c1', RABBIT_LINES[3])], [rawHit('c1', RABBIT_LINES[2])]] };
 }
 const RANKED_LINES = { c1: RABBIT_LINES, c2: [...GARDEN_LINES, GARDEN_AGAIN] };
+
+test('recall: each hit carries the queries that found it; the cluster two forms meet in outranks a newer one-form hit', async () => {
+  const bothForms = (route, query) => {
+    if (route.endsWith('/members/search')) return [];
+    if (query.content === 'κουνελιού') return { total_results: 1, messages: [[rawHit('c1', RABBIT_LINES[2])]] };
+    return rankedAnswers(route, query);
+  };
+  const dense = scene({ lines: RANKED_LINES, answers: bothForms, recall: { maxClusters: 1 } });
+  await withCapturedLogs(() => dense.recaller.run({ ...dense.args, server: RABBIT_SERVER }));
+  assert.deepEqual(dense.fetches.map((f) => f.around), ['r3'], 'r2 found by both forms: the rabbit cluster counts two queries');
+  const plain = scene({ lines: RANKED_LINES, answers: rankedAnswers, recall: { maxClusters: 1 } });
+  await withCapturedLogs(() => plain.recaller.run({ ...plain.args, server: RABBIT_SERVER }));
+  assert.deepEqual(plain.fetches.map((f) => f.around), ['g9'], 'one form each: the newer cluster wins the tie');
+});
 const RANKED_STRETCH = [
   '[18:38] Βασίλης: πάμε κυνήγι',
   '[18:40] Ana: bang [image]',
