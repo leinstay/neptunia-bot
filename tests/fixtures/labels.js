@@ -141,6 +141,7 @@ export const labels = {
   gifs: {
     header: 'gifs of this server, most used first:',
     entry: '{id} -- {text}',
+    entryFields: '{id} -- {reaction}; {action}; "{text}"',
     entryNoText: '{id}',
     ownMark: '(you, {ago})',
   },

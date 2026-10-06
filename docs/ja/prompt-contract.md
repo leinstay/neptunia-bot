@@ -34,7 +34,7 @@
 | `server.md` | はい | ウォームアップ: チャンネルノートとメンバーの要約からサーバーレベルのノートを作成 | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | はい | メディア説明モデルのアウトオブキャラクタープロンプト（`features.mediaDescriptions`）: 画像 1 枚を入力、プレーンテキスト 1 行を出力: 写っているもの、要点、判読可能なテキストは元のスクリプトで引用。常に英語。意見なし、道徳的判断なし、マークダウンなし | `{{today}}` `{{maxChars}}`（オプション） |
 | `describe-video.md` | はい | 動画説明モデルのアウトオブキャラクタープロンプト（`features.videoDescriptions`）: 動画クリップ 1 本（音声付き）を入力、設定可能な長さの完全な説明を出力: 誰が登場するか、何が言われるか（重要なフレーズを引用）、画面上のテキスト、視覚的に何が起きるか、音楽/効果音。常に英語。発話、字幕、画面上のテキストは元の言語で引用。キャラクターカードなし | `{{today}}` `{{maxChars}}` |
-| `describe-gif.md` | いいえ | GIF 説明モデルのアウトオブキャラクタープロンプト（`media.gif.watch`）: 短い無音クリップを入力、1 行のコンパクトな説明を出力: アクション、表現する内容、可視テキスト。常に英語。キャラクターカードなし。ファイルがない場合は `describe-video.md` にフォールバック | `{{today}}` `{{maxChars}}` `{{seconds}}` |
+| `describe-gif.md` | いいえ | GIF 説明モデルのアウトオブキャラクタープロンプト（`media.gif.watch`）: 短い無音クリップを入力、ラベル付き 3 行を出力: `reaction`（返信機能、数語または `none`）、`action`（視覚的な出来事、`{{maxChars}}` で制限）、`text`（画面上のテキストをそのまま、または `none`）。常に英語。キャラクターカードなし。ファイルがない場合は `describe-video.md` にフォールバック | `{{today}}` `{{maxChars}}` `{{seconds}}` |
 | `rewatch.md` | はい | 分類器: ペルソナが動画を再視聴するか、読み込めなかった動画をリトライするか、画像をもう一度見る必要があるか（`features.videoRewatch`、`features.imageRelook`）。番号付きの最近のメディアリスト（動画と画像）を種類・ステータスと共に受け取る。出力は 1 行: `<number> \| <question>`、`<number> \| retry` または `none` | `{{name}}` |
 | `rewatch-answer.md` | はい | セカンドルックのアウトオブキャラクタープロンプト: ビジョンまたは動画モデルがアイテムをもう一度見て、質問の言語で 1 つの質問に回答。種類を問わず（動画と画像の両方に対応）。キャラクターカードなし | `{{today}}` `{{question}}` `{{maxChars}}` |
 | `address.md` | はい | 分類器: タグなしメッセージがペルソナ宛か、ペルソナについてか、どちらでもないか。出力は 1 語: `yes`、`overheard` または `no` | `{{name}}` |
@@ -55,7 +55,7 @@
 | `mentor-diagnose.md` | いいえ | Mentor: スコアリング後に弱い回答の原因をペルソナのコンテキスト内の具体的なテキストで説明（`features.mentor`）。結果は未検証の仮説としてランの `diagnosis` に保存。`mentor.diagnose` が false またはファイルがない場合は省略 | `{{name}}` |
 | `variety.md` | いいえ | `classifier.text` リクエスト: ペルソナの最近のメッセージで繰り返されている表現手法を特定（`features.variety`）。キャラクターカードなし | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `variety-long.md` | いいえ | 長い多様性パス: 全チャンネルにわたるペルソナ自身の行のリング全体での使い回し手法を特定（`features.variety`、`variety.longLines`）。プレースホルダー、`<lines>` ブロック、回答フォーマットは `variety.md` と同じ。`classifier.text` モデルを使用。キャラクターカードなし。ファイルがない場合、長いパスは実行されない | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
-| `gif-pick.md` | いいえ | 分類器: 短いテキスト返答の代わりにライブラリから GIF を選ぶ（`features.gifPicker`）。直近の `gifs.pick.contextMessages` チャット行、ペルソナの返答、キャプション付きのフルライブラリを受け取る。出力はライブラリのハンドル 1 つまたは `none`。キャラクターカードなし | `{{name}}` |
+| `gif-pick.md` | いいえ | 分類器: 短いテキスト返答の代わりにライブラリから GIF を選ぶ（`features.gifPicker`）。直近の `gifs.pick.contextMessages` チャット行（応答先メッセージを明示）、ペルソナの返答、キャプション付きのフルライブラリを受け取る。長さゲートは `gifs.pick.maxChars`（デフォルト 160）; 複数の送信メッセージがある場合は最初のメッセージのみ置換。出力はライブラリのハンドル 1 つまたは `none`。キャラクターカードなし | `{{name}}` |
 | `split.md` | いいえ | 分類器: 直接呼びかけに複数の独立したリクエストが含まれるか（`features.splitTasks`）。短い `<transcript>` と新しいメッセージを `<candidate>` として受け取る。出力は `one` という語、または 2 行から `{{maxTasks}}` 行で各行 `- ` で始まり著者自身の言葉でパートを示す。キャラクターカードなし。このファイルがない場合スプリッターはオフ | `{{name}}` `{{maxTasks}}` |
 | `merge.md` | いいえ | 分類器: 待機中の項目を持つ著者からの新しいメッセージがそのいずれかに属するか。番号付き `<waiting>` リストと新しいメッセージを `<candidate>` として受け取る。出力は 1 行: リストの番号または `new` という語。キャラクターカードなし。このファイルがない場合、新しい呼びかけは常に独自の項目としてキューされる | `{{name}}` |
 | `labels.json` | はい | コードがプロンプトに挿入するすべての文字列。キーは以下で固定、値はライターが記述する | 以下参照 |
@@ -84,7 +84,7 @@
 | `<senses>` | ペルソナが今この瞬間に何を知覚でき何を知覚できないか。ライブ設定から生成: どの画像をペルソナ自身が見て、どれがヘルパーの説明文として届き、何が見えず聞こえないか。ペルソナが動画を見たと偽ることなく、自分の声でネタにできるようにする |
 | `<about_chat>` | 人々がここでどう話すか、会話の始め方と割り込み方、内輪ネタ、人々がペルソナに教えたこと |
 | `<emoji>` | ペルソナが使えるカスタム絵文字（`features.customEmoji`）: 最大 `context.customEmoji.max` エントリ、メンバーの使用頻度でランク付け。各エントリは `:name:` とキャッシュ済みのヘルパーキャプション（ある場合）。`labels.emoji.seenInChat` がある場合、トランスクリプト・プルされたチャンネル・隣接チャンネルに出現したがトップリストに含まれない説明付きカスタム絵文字がそのサブ見出しの下に表示される。トランスクリプト行ではすべてのカスタム絵文字が素の `:name:` のまま残る。ラベルがない場合（またはブロックがない場合）はインラインの `transcript.emojiDescribed` タグがそのまま使用される |
-| `<gifs>` | ペルソナが投稿できる GIF（`features.gifs`）: 最大 `gifs.max`（デフォルト 40）エントリ、使用頻度と新しさでランク付け。各エントリはハンドル（`g1`、`g2`、...）とキャッシュ済みのヘルパーキャプション（ある場合）。キャプションは `gifs.listChars`（デフォルト 70、`0` で全文）で単語境界でカットされ、カットが文末でない場合は `…` マークが付き、より多くのエントリがバジェットに収まるようにする。各エントリはペルソナ自身の投稿時刻と回数も記録し（`ownLast`、`ownUses`）、`gifs.ownMarkHours`（デフォルト 24、`0` = オフ）以内に投稿されたものには `gifs.ownMark` が短い相対時間とともに付く |
+| `<gifs>` | ペルソナが投稿できる GIF（`features.gifs`）: 最大 `gifs.max`（デフォルト 40）エントリ、使用頻度と新しさでランク付け。各エントリはハンドル（`g1`、`g2`、...）とキャッシュ済みの説明 3 フィールド（ある場合）: リアクションラベル（`gifs.reactionChars` で制限、デフォルト 40）、可視アクション（`gifs.actionChars` で制限、デフォルト 70）、画面上のテキスト。フィールド付きエントリは `labels.gifs.entryFields`（`{id}`、`{reaction}`、`{action}`、`{text}`; コードが空フィールドとそのセパレータを除去）で表示; フィールドなしのエントリは `labels.gifs.entry`（`{id}`、`{text}`）でキャプションを単語境界でカット。各エントリはペルソナ自身の投稿時刻と回数も記録し（`ownLast`、`ownUses`）、`gifs.ownMarkHours`（デフォルト 24、`0` = オフ）以内に投稿されたものには `gifs.ownMark` が短い相対時間とともに付く |
 | `<server>` | 現在のチャンネルの詳細（Discord カテゴリとトピック、目的、投稿内容、トーン、アクティビティ、最新メッセージ、トップライター。`labels.server.currentMark` でマーク）に加え、このターンで `<other_channels>` に供給した隣接チャンネルのみ。他のチャンネルは含まない |
 | `<lore>` | 直近のメッセージにキーが出現するサーバーのロアブックエントリ（常時表示マーク付きのエントリも含む）: イベント、繰り返し登場するキャラクター、長期にわたるストーリー。ロアブックのように数百エントリが存在できるが、該当する少数だけが表示される |
 | `<self_facts>` | ペルソナが自身について主張した内容 |
@@ -105,7 +105,7 @@ pulled（`<channel_view>`、`context.caps.pulled` で制限。読み取り専用
 recent（`context.caps.recent` で制限）->
 他のプロファイル -> attitudes（`context.caps.attitudes` で制限）-> worn（全体として保持または削除）-> other channels -> 絵文字（下からエントリを削除、次にブロック全体; `context.caps.emoji`）-> GIF（同じトリム; `context.caps.gifs`）。
 
-GIF ピッカー（`features.gifPicker`、デフォルトオン）。ペルソナが短い返答（最大 `gifs.pick.maxChars` 文字、デフォルト 60）を書き、自分で GIF を選ばなかった場合、分類器（`classifier.text`、purpose `gif-pick`、`gifs.pick.maxOutputTokens` 60、プロンプト `prompts/gif-pick.md`）が直近の `gifs.pick.contextMessages`（デフォルト 4）チャット行、返答、キャプション付きのフルライブラリ（各エントリにキャプション、ペルソナが最近投稿した場合は自分マーク付き）を受け取ります。分類器はハンドル 1 つまたは `none` を返します。ハンドルが返されると GIF がテキストの代わりに投稿され、そうでなければテキストがそのまま投稿されます。分類器は最初のメッセージのタイピングシミュレーション中に実行され、日次 GIF 制限 `gifs.maxPerDay` が適用されます。ログ: `gifs: picked`（handle true/false、ライブラリサイズ）または `gifs: pick failed`。
+GIF ピッカー（`features.gifPicker`、デフォルトオン）。ペルソナが短い返答（最大 `gifs.pick.maxChars` 文字、デフォルト 160）を書き、自分で GIF を選ばなかった場合、分類器（`classifier.text`、purpose `gif-pick`、`gifs.pick.maxOutputTokens` 60、プロンプト `prompts/gif-pick.md`）が直近の `gifs.pick.contextMessages`（デフォルト 4）チャット行（応答先メッセージを明示）、ペルソナの最初のメッセージ、キャプション付きのフルライブラリ（各エントリにキャプション、ペルソナが最近投稿した場合は自分マーク付き）を受け取ります。分類器はハンドル 1 つまたは `none` を返します。ハンドルが返されると GIF が最初の送信メッセージを置換し、元のメッセージと同じ送信先にリプライします。残りのメッセージは順番に続きます。GIF の送信に失敗した場合、すべてのメッセージがそのまま投稿されます。分類器は最初のメッセージのタイピングシミュレーション中に実行され、日次 GIF 制限 `gifs.maxPerDay` が適用されます。ログ: `gifs: picked`（handle true/false、ライブラリサイズ）または `gifs: pick failed`。
 
 トランスクリプト行のメディア（利用可能な最も情報量の多い形式）: このリクエストに添付された画像 →
 `transcript.imageAttached`（画像がテキストの後に並ぶ順にナンバリング）、説明済み →
@@ -130,7 +130,7 @@ GIF ピッカー（`features.gifPicker`、デフォルトオン）。ペルソ�
 
 画像の静止フレームエントリは従来通り独自の `<itemId>` キーを保持します。同一アイテムに対して両方が共存できます。
 
-視聴された GIF は GIF 自身の `<itemId>` キー（`video:` プレフィックスなし）でキャッシュされます: `{ text, ts, watched: true, gif: true }`。単一フレームのキャプションは `{ text, ts, gif: true }`（視聴を試みて失敗した場合は `watchFailed` 付き）で保存されます。どちらも画像の記述と同じキャッシュ内に配置されます。
+視聴された GIF は GIF 自身の `<itemId>` キー（`video:` プレフィックスなし）でキャッシュされます: `{ text, reaction, action, screen, ts, watched: true, gif: true }`。`text` は一行のアクション（アクション行がない場合はリアクションまたは画面上のテキスト）です。`gifs.reactionChars` がリスト内の `reaction` と `screen` を切り詰め、`gifs.actionChars` が `action` と旧形式の一行キャプションを切り詰めます。`0` = 切り詰めなし。単一フレームのキャプションは `{ text, ts, gif: true }`（視聴を試みて失敗した場合は `watchFailed` 付き）で保存されます。どちらも画像の記述と同じキャッシュ内に配置されます。
 
 ウェブルックアップの結果も同じ `data/guilds/<id>/media.json` に動画や画像のエントリと並んでキャッシュされます:
 
@@ -191,14 +191,14 @@ transcript.reactionItem                  {emoji} {count}: one reaction; emoji is
 transcript.reactionMine                  {emoji} {count}: used instead of reactionItem when the persona is among the reactors; reads correctly whether count is 1 or more
 transcript.unknownDuration               shown in place of {duration} when Discord gave none
 senses.imageSee | imageDescribed | imageBlind        one line each; code picks the ones true under the live config. imageSee also covers the helper's note when features.attachedDescriptions is on
-senses.gifWatched | gifDescribed | gifBlind   gifWatched replaces gifDescribed when media.gif.watch is on (needs video vision on and a describe-gif or describe-video prompt); a labels file without gifWatched falls back to gifDescribed
+senses.gifWatched | gifDescribed | gifBlind   gifWatched replaces gifDescribed when media.gif.watch is on (needs video vision on and a describe-gif or describe-video prompt); a labels file without gifWatched falls back to gifDescribed. Both say GIF descriptions come from a helper (second-hand); without a description the persona does not infer the content
 senses.videoDescribed | videoBlind
 senses.videoWatch                        replaces videoDescribed when features.videoDescriptions is on (needs mediaDescriptions too); covers watched, still frame and not-watched states
 senses.videoRewatch                      shown alongside videoWatch when features.videoRewatch is on; tells the persona that a second look at a watched video may appear, marked as first-hand
 senses.stickerSee | stickerDescribed | stickerBlind
 senses.lottie
 senses.customEmoji                       shown when features.customEmoji is on and the server has at least one custom emoji; tells the persona they can use server custom emoji by writing :name:
-senses.gifs                              shown when features.gifs is on and the library is not empty; tells the persona they can post one GIF per turn by handle from the list
+senses.gifs                              shown when features.gifs is on and the library is not empty; tells the persona they can post one GIF per turn by handle from the list or transcript; entries give the reaction, visible action and on-screen text; recent-use marks show own posts; only listed or transcript handles; unknown handle posts nothing
 senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
@@ -241,8 +241,9 @@ emoji.header                             カスタム絵文字リストの導入
 emoji.entry                              {name} {text}: キャプション付きの絵文字 1 つ
 emoji.entryNoText                        {name}: キャプションなしの絵文字 1 つ
 emoji.seenInChat                         トランスクリプトに出現したがトップリストに含まれない説明付きカスタム絵文字の前のサブ見出し。なければインラインの `transcript.emojiDescribed` タグがそのまま使用される
-gifs.header                              GIF ライブラリリストの導入
-gifs.entry                               {id} {text}: キャプション付きの GIF 1 つ
+gifs.header                              GIF ライブラリリストの導入: エントリごとに、表現する返答、可視アクション、画面上のテキスト
+gifs.entry                               {id} {text}: 1 行キャプション付きの GIF 1 つ（3 フィールド説明なしのエントリ）
+gifs.entryFields                         {id} {reaction} {action} {text}: 3 フィールドキャプション付きの GIF 1 つ; コードが空フィールドとセパレータを除去
 gifs.entryNoText                         {id}: キャプションなしの GIF 1 つ
 gifs.ownMark                             {ago}: appended to an entry the persona posted within gifs.ownMarkHours
 affinity.bands.hostile | dislike | cool | neutral | warm | fond | devoted

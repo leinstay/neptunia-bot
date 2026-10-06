@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createStore } from '../src/memory/store.js';
-import { createDescriber, videoStateFromCache } from '../src/memory/describe.js';
+import { createDescriber, parseGifDescription, videoStateFromCache } from '../src/memory/describe.js';
 import { createHash } from 'node:crypto';
 import { createLlm, helperRequestOptions, TokenLimitError, DailyCapError, VIDEO_TOKENS_PER_SECOND_FALLBACK } from '../src/llm/openrouter.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
@@ -2487,7 +2487,7 @@ test('watchGif: replaces a one-frame caption with a watched one under the same k
 
 test('watchGif: an entry already watched is served from the cache, no fetch, no request', async () => {
   const run = gifDescriber();
-  run.store.getMediaCache('g1')['m1#e0'] = { text: 'watched before', ts: 1, watched: true, gif: true };
+  run.store.getMediaCache('g1')['m1#e0'] = { text: 'watched before', reaction: '', action: 'watched before', screen: '', ts: 1, watched: true, gif: true };
   assert.deepEqual(await run.describer.watchGif('g1', gifEmbedItem()), { state: 'watched', text: 'watched before', cached: true });
   assert.equal(run.videoFetcher.calls.length, 0);
 });
@@ -2611,4 +2611,70 @@ test('describe: describe-gif alone (no describe-video) is enough to watch GIFs',
   await run.describer.describe('g1', gifEmbedItem());
   assert.equal(run.videoFetcher.calls[0].fn, 'fetchGif');
   assert.equal(run.llm.calls[0].messages[0].content, 'Loop, 200.');
+});
+
+// --- The GIF describer's three fields ------------------------------------------
+
+const GIF_FIELD_CAPS = { reactionChars: 40, actionChars: 70, descriptionChars: 200 };
+
+test('parseGifDescription: three labelled lines, any order and case, "none" read as empty', () => {
+  const parsed = parseGifDescription('Text: "ναι."\nREACTION: firm agreement\naction: a cat lifts its chin', GIF_FIELD_CAPS);
+  assert.deepEqual(parsed, { text: 'a cat lifts its chin', reaction: 'firm agreement', action: 'a cat lifts its chin', screen: 'ναι.' });
+  const none = parseGifDescription('reaction: none\naction: a train passes\ntext: None.', GIF_FIELD_CAPS);
+  assert.deepEqual(none, { text: 'a train passes', reaction: '', action: 'a train passes', screen: '' });
+});
+
+test('parseGifDescription: missing lines are tolerated; an unlabelled answer is the action alone', () => {
+  assert.deepEqual(parseGifDescription('action: a man waves', GIF_FIELD_CAPS), { text: 'a man waves', reaction: '', action: 'a man waves', screen: '' });
+  assert.deepEqual(parseGifDescription('  a man waves\n  goodbye  ', GIF_FIELD_CAPS), { text: 'a man waves goodbye', reaction: '', action: 'a man waves goodbye', screen: '' });
+  assert.deepEqual(
+    parseGifDescription("reaction: waiting\ntext: j'attends", GIF_FIELD_CAPS),
+    { text: 'waiting', reaction: 'waiting', action: '', screen: "j'attends" },
+    'no action: the transcript line falls back to the reaction',
+  );
+  assert.equal(parseGifDescription('   ', GIF_FIELD_CAPS), null);
+  assert.equal(parseGifDescription('reaction: none\naction: none\ntext: none', GIF_FIELD_CAPS), null);
+});
+
+test('parseGifDescription: each field is cut at a word boundary with an ellipsis; text keeps descriptionChars', () => {
+  const long = Array.from({ length: 30 }, (_, i) => `mot${i}`).join(' ');
+  const parsed = parseGifDescription(`reaction: ${long}\naction: ${long}\ntext: ${long}`, GIF_FIELD_CAPS);
+  for (const [field, cap] of [['reaction', 40], ['action', 70], ['screen', 40]]) {
+    assert.ok([...parsed[field]].length <= cap, `${field}: ${parsed[field].length}`);
+    assert.ok(parsed[field].endsWith('…'), field);
+    assert.ok(long.startsWith(`${parsed[field].slice(0, -1)} `), `${field} cut at a word boundary`);
+  }
+  assert.equal(parsed.text, long, 'the transcript line is the whole action under descriptionChars');
+});
+
+test('describe: a three-field GIF answer is cached as text, reaction, action and screen', async () => {
+  const llm = fakeLlm({ text: 'reaction: firm agreement\naction: a cat lifts its chin\ntext: yes.' });
+  const hot = gifHot();
+  hot.config.gifs = { reactionChars: 40, actionChars: 70 };
+  const { describer, store } = gifDescriber({ llm, hot });
+  const result = await describer.describe('g1', gifEmbedItem());
+  assert.equal(result.text, 'a cat lifts its chin');
+  const entry = store.getMediaCache('g1')['m1#e0'];
+  assert.deepEqual(
+    { ...entry, ts: 0 },
+    { text: 'a cat lifts its chin', reaction: 'firm agreement', action: 'a cat lifts its chin', screen: 'yes.', ts: 0, watched: true, gif: true },
+  );
+});
+
+test('describe: gifs.reactionChars and gifs.actionChars are read at the moment of use', async () => {
+  const llm = fakeLlm({ text: 'reaction: quiet firm agreement\naction: a small cat lifts its chin slowly' });
+  const hot = gifHot();
+  hot.config.gifs = { reactionChars: 12, actionChars: 20 };
+  const { describer, store } = gifDescriber({ llm, hot });
+  await describer.describe('g1', gifEmbedItem());
+  const entry = store.getMediaCache('g1')['m1#e0'];
+  assert.deepEqual([entry.reaction, entry.action, entry.text], ['quiet firm…', 'a small cat lifts…', 'a small cat lifts its chin slowly']);
+});
+
+test('watchGif: an old-format watched entry (no reaction field) is watched again and gains the fields', async () => {
+  const run = gifDescriber({ llm: fakeLlm({ text: 'reaction: waiting\naction: a caracal stares ahead\ntext: none' }) });
+  run.store.getMediaCache('g1')['m1#e0'] = { text: 'watched before', ts: 1, watched: true, gif: true };
+  assert.deepEqual(await run.describer.watchGif('g1', gifEmbedItem()), { state: 'watched', text: 'a caracal stares ahead' });
+  const entry = run.store.getMediaCache('g1')['m1#e0'];
+  assert.deepEqual([entry.reaction, entry.action, entry.screen, entry.watched], ['waiting', 'a caracal stares ahead', '', true]);
 });

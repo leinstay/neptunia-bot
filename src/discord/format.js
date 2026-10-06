@@ -280,6 +280,24 @@ function replyQuote(parent, labels, context, maxChars) {
 }
 
 /**
+ * The marker of a line that replies to `parent`, shown in the list as `#index`:
+ * `labels.transcript.replyTo` with `{index}`, `{author}` (the parent's name,
+ * `labels.self` filled with `selfName` for the persona's own line) and
+ * `{quote}` (replyQuote under `replyQuoteChars`, 80 when omitted; 0 = whole;
+ * `context` as mediaTags reads it, every map optional). The one copy for the
+ * transcript and the GIF picker's `<reply>` (src/behavior/turn.js). Pure.
+ * @param {object} parent  A normalized message.
+ * @param {number} index
+ * @param {{ labels: object, selfName: string, replyQuoteChars?: number, context?: object }} options
+ * @returns {string}
+ */
+export function replyMarker(parent, index, { labels, selfName, replyQuoteChars, context = {} }) {
+  const author = parent.self ? fill(labels.self, { name: selfName }) : parent.authorName;
+  const quote = replyQuote(parent, labels, context, replyQuoteChars ?? DEFAULT_REPLY_QUOTE_CHARS);
+  return fill(labels.transcript.replyTo, { index, author, quote });
+}
+
+/**
  * One forwarded message-snapshot, wrapped in `labels.transcript.forwardedFrom`
  * when the source channel's name is known AND that key is set (a key blanked
  * in prompts.local/labels.json switches this form off); otherwise the plain
@@ -406,10 +424,7 @@ export function formatTranscript(messages, options) {
     if (message.replyToId && mode === 'chat') {
       const target = indexById.get(message.replyToId);
       if (target) {
-        const parent = byId.get(message.replyToId);
-        const author = parent.self ? selfLabel : parent.authorName;
-        const quote = replyQuote(parent, labels, mediaContext, replyQuoteChars);
-        body.push(fill(labels.transcript.replyTo, { index: target, author, quote }));
+        body.push(replyMarker(byId.get(message.replyToId), target, { labels, selfName, replyQuoteChars, context: mediaContext }));
       } else {
         body.push(labels.transcript.replyToOld);
       }

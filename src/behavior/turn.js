@@ -24,7 +24,7 @@ import {
   withTextPreviews,
 } from '../discord/collect.js';
 import { audienceAllows, captionPulled, checkPull, fetchPull } from '../discord/pull-fetch.js';
-import { block, buildDrawPrompt, buildRequest, classifierTranscript, fillPromptTemplate } from './prompt.js';
+import { block, buildDrawPrompt, buildRequest, classifierTranscript, fillPromptTemplate, gifFieldChars } from './prompt.js';
 import { channelPullOn, pullSettings, pullTargets } from './pull.js';
 import { audienceCovers, markSeen, messageLink, resolveDestination, stampPings } from './elsewhere.js';
 import { classifierTextModel } from './mention.js';
@@ -32,7 +32,7 @@ import { parseLookupAnswer, recallSettings } from './recall.js';
 import { parseSplitAnswer, splitCandidate, splitSettings } from './split.js';
 import { fillerKey, fillersSettings, findFillers } from './fillers.js';
 import { stickyOn, stickyPhrases, stickySettings } from './sticky.js';
-import { captionedEntries, gifPickSettings, parseGifPick, pickCandidates, renderGifLibrary } from './gif-pick.js';
+import { captionedEntries, gifPickSettings, parseGifPick, pickCandidates, pickContext, renderGifLibrary } from './gif-pick.js';
 import { turnRequestInput } from './turn-input.js';
 import { parseOutput } from '../llm/parse.js';
 import { DailyCapError, REPLY_REQUEST, TokenLimitError, RETRY_STATUS, helperRequestOptions, railReason, sleep } from '../llm/openrouter.js';
@@ -50,7 +50,7 @@ import {
 } from '../discord/media.js';
 import { avatarReference, createImageFetcher } from '../discord/fetch-image.js';
 import { renderCustomEmoji, resolveReactionEmoji } from '../discord/emoji.js';
-import { fill } from '../discord/format.js';
+import { fill, replyMarker } from '../discord/format.js';
 import { log } from '../log.js';
 import { clampChars, countDashes, oneLine, stripDashes } from '../memory/clamp.js';
 import { gifPostsToday } from '../memory/gif-watch.js';
@@ -976,18 +976,19 @@ export function createTurnRunner({
    * names its part (`part <index>/<total>`) after the trigger kind. The
    * messages are the model's as written (nothing rewrites them); nothing is
    * counted or stamped: nothing was posted. The GIF picker runs as in act()
-   * (pickGif, its request included): a GIF it picks is logged and mirrored as
-   * the GIF that would be posted instead of the messages. `history`: the chat
-   * lines the picker's `<context>` reads.
+   * (pickGif, its request included): a GIF it picks is logged and mirrored
+   * first, as the GIF that would be posted in place of the first message, then
+   * the other messages. `history`: the chat lines the picker's `<context>`
+   * reads; `trigger`: the message the turn answers (the picker's answered line).
    * @param {{ channel: object, guildId: string, parsed: object, idByIndex: Map<number, string>,
-   *   history?: object[], mode: string, triggerKind: TriggerKind|null, plain: boolean, selfName: string, pulledIds: Map<string, string>,
+   *   history?: object[], mode: string, triggerKind: TriggerKind|null, trigger?: object|null, plain: boolean, selfName: string, pulledIds: Map<string, string>,
    *   lines: object[], knownNames: { name: string, id: string }[], linkFor: (pulledId: string|null) => string|null,
    *   part?: { index: number, total: number }|null }} args
    *   `plain`: the turn quotes no chat line (postsPlain); `lines`: the lines shown of the pulled
    *   channels, then this chat's history (names and authors); `knownNames`: the stored names
    *   `@name` resolves by too (storedNames).
    */
-  async function dryAct({ channel, guildId, parsed, idByIndex, history = [], mode, triggerKind, plain, selfName, pulledIds, lines, knownNames, linkFor, part = null }) {
+  async function dryAct({ channel, guildId, parsed, idByIndex, history = [], mode, triggerKind, trigger = null, plain, selfName, pulledIds, lines, knownNames, linkFor, part = null }) {
     const channelName = channel.name ?? null;
     const where = mirrorChannelLabel(channel);
     // Every triggered turn shares the mode `reply`: the header names its
@@ -1013,10 +1014,21 @@ export function createTurnRunner({
       await mirror(`${head} · react to ${authorName}`, `reacts with ${reaction.emoji} to ${authorName}${elsewhere}`);
     }
 
-    const picked = await pickGifSafely({ channelId: channel.id, guildId, messages: parsed.messages, gif: parsed.gif, history, selfName });
-    // A picked GIF would be posted instead of the messages.
-    const messages = picked ? [] : parsed.messages;
-    const gif = picked ?? parsed.gif;
+    const dryGif = async (gif) => {
+      const { replyId, pulledId } = replyTarget(gif.replyTo, { plain, idByIndex, pulledIds });
+      const link = linkFor(pulledId);
+      const { entry } = gif;
+      // The persona's own pick from the library, dry-run only: the handle and the stored URL.
+      log.info('dry-run: would send gif', { channel: channel.id, channelName, mode, replyTo: replyId, link, gif: entry.id, kind: entry.kind, url: entry.url });
+      await mirror(`${head} · gif ${entry.id}`, withLink(entry.url, link, labels));
+      lastPostAt.set(channel.id, clock());
+    };
+
+    const picked = await pickGifSafely({ channelId: channel.id, guildId, messages: parsed.messages, gif: parsed.gif, history, selfName, idByIndex, trigger });
+    // A picked GIF would be posted in place of the first message; the rest follow as written.
+    if (picked) await dryGif(picked);
+    const messages = picked ? parsed.messages.slice(1) : parsed.messages;
+    const gif = picked ? null : parsed.gif;
     for (const message of messages) {
       const { replyId, pulledId } = replyTarget(message.replyTo, { plain, idByIndex, pulledIds });
       const answeredId = replyId ?? pulledId;
@@ -1031,15 +1043,7 @@ export function createTurnRunner({
       lastPostAt.set(channel.id, clock());
     }
 
-    if (gif) {
-      const { replyId, pulledId } = replyTarget(gif.replyTo, { plain, idByIndex, pulledIds });
-      const link = linkFor(pulledId);
-      const { entry } = gif;
-      // The persona's own pick from the library, dry-run only: the handle and the stored URL.
-      log.info('dry-run: would send gif', { channel: channel.id, channelName, mode, replyTo: replyId, link, gif: entry.id, kind: entry.kind, url: entry.url });
-      await mirror(`${head} · gif ${entry.id}`, withLink(entry.url, link, labels));
-      lastPostAt.set(channel.id, clock());
-    }
+    if (gif) await dryGif(gif);
 
     if (parsed.draw) {
       const self = parsed.draw.self === true;
@@ -1227,7 +1231,8 @@ export function createTurnRunner({
   }
 
   /**
-   * Post the persona's GIF (after its messages): a link GIF as its stored
+   * Post the persona's GIF (after its messages, or in place of the first one
+   * when the GIF picker chose it): a link GIF as its stored
    * URL (Discord embeds tenor/giphy links), an attached one as a fresh URL of
    * its attachment, the stored one when that fails. Counted against
    * `gifs.maxPerDay` once sent, and stamped on its library entry of
@@ -1310,46 +1315,62 @@ export function createTurnRunner({
   }
 
   /**
-   * The GIF picker (src/behavior/gif-pick.js), on the messages as the model
-   * wrote them: with features.gifPicker and features.gifs on (a missing key counts as
+   * The GIF picker (src/behavior/gif-pick.js), on the turn's FIRST message as
+   * the model wrote it (a picked GIF takes its place; the rest are posted as
+   * written): with features.gifPicker and features.gifs on (a missing key counts as
    * on), prompts['gif-pick'] present, the guild's library readable, room left
-   * under `gifs.maxPerDay` (gifsToday) and pickCandidates saying yes (a reply
-   * of at most `gifs.pick.maxChars` code points, no `<gif>` of the turn's own,
-   * at least one captioned entry), ONE helper request on the classifier model
+   * under `gifs.maxPerDay` (gifsToday) and pickCandidates saying yes (a first
+   * message of at most `gifs.pick.maxChars` code points, no `<gif>` of the
+   * turn's own -- the model's own GIF is never second-guessed --, at least one
+   * captioned entry), ONE helper request on the classifier model
    * (role `classifier.text`, purpose `gif-pick`, its answer capped at
    * `gifs.pick.maxOutputTokens`): system = the prompt with `{{name}}`, user =
-   * `<context>` (the last `gifs.pick.contextMessages` lines of `history` as
-   * classifierTranscript renders them; no block for 0), `<reply>` (the
-   * messages joined by a blank line) and `<gifs>` (renderGifLibrary over the
-   * WHOLE library in rank order, `gifs.listChars` and `gifs.ownMarkHours`
+   * `<context>` (pickContext: the last `gifs.pick.contextMessages` lines of
+   * `history`, preceded by the line the first message answers when that one is
+   * older -- its `reply` target, else the trigger --, as classifierTranscript
+   * renders them; no block for 0), `<reply>` (the first message, preceded by
+   * `transcript.replyTo` naming the `#n` of the line it answers when that line
+   * is in `<context>`) and `<gifs>` (renderGifLibrary over the WHOLE library in
+   * rank order, `gifs.reactionChars`, `gifs.actionChars` and `gifs.ownMarkHours`
    * read now). A handle it lists (parseGifPick) resolves through resolveGif,
    * replying where the first message would have; `none` or anything else
    * resolves null. Logs `gifs: picked` (`handle`: whether one was named,
    * `library`: how many entries were listed) or `gifs: pick failed` with the
    * rail's code. Counts only.
    * @param {{ channelId: string, guildId: string, messages: { text: string, replyTo?: number|null }[],
-   *   gif: object|null, history: object[], selfName: string }} args  `gif`: the turn's own resolved GIF.
-   * @returns {Promise<object|null>}  The GIF to post instead of the messages (resolveGif's shape), or null.
+   *   gif: object|null, history: object[], selfName: string, idByIndex?: Map<number, string>,
+   *   trigger?: object|null }} args  `gif`: the turn's own resolved GIF; `idByIndex`: the
+   *   request's `#n` -> message id; `trigger`: the message the turn answers, if any.
+   * @returns {Promise<object|null>}  The GIF to post in place of the first message (resolveGif's shape), or null.
    */
-  async function pickGif({ channelId, guildId, messages, gif, history, selfName }) {
+  async function pickGif({ channelId, guildId, messages, gif, history, selfName, idByIndex = new Map(), trigger = null }) {
     const config = hot.config;
     if (config.features?.gifPicker === false || config.features?.gifs === false) return null;
     const prompt = hot.prompts?.['gif-pick'];
     if (typeof prompt !== 'string' || prompt.trim() === '') return null;
     if (typeof store.getGifs !== 'function' || typeof store.findGif !== 'function' || messages.length === 0) return null;
     const settings = gifPickSettings(config);
-    const joined = messages.map((message) => message.text).join('\n\n');
+    const first = messages[0];
     const gifsCfg = config.gifs ?? {};
-    const listChars = gifsCfg.listChars ?? 70;
+    const chars = gifFieldChars(gifsCfg);
     const mediaCache = typeof store.getMediaCache === 'function' ? (store.getMediaCache(guildId) ?? null) : null;
-    const listed = captionedEntries(rankGifs(store.getGifs(guildId), gifsCfg.halfLifeDays ?? 30), mediaCache, listChars);
+    const listed = captionedEntries(rankGifs(store.getGifs(guildId), gifsCfg.halfLifeDays ?? 30), mediaCache, chars.actionChars);
     const labels = hot.prompts?.labels;
-    const library = renderGifLibrary(listed, mediaCache, labels, { now: clock(), ownMarkHours: gifsCfg.ownMarkHours ?? 24, listChars });
-    if (!pickCandidates({ text: joined, postsGif: Boolean(gif), captioned: library.length }, settings)) return null;
+    const library = renderGifLibrary(listed, mediaCache, labels, { now: clock(), ownMarkHours: gifsCfg.ownMarkHours ?? 24, ...chars });
+    if (!pickCandidates({ text: first.text, postsGif: Boolean(gif), captioned: library.length }, settings)) return null;
     const posts = gifsToday();
     if (posts.used >= posts.cap) return null;
-    const context = settings.contextMessages > 0 ? history.slice(-settings.contextMessages) : [];
-    const contextBody = context.length > 0 ? classifierTranscript(context, { config, selfName, labels }) : '';
+    // The line the first message answers: its reply target (a pulled line is not in `history`), else the trigger.
+    const replyId = first.replyTo !== null && first.replyTo !== undefined ? (idByIndex.get(first.replyTo) ?? null) : null;
+    const answeredId = replyId ?? trigger?.id ?? null;
+    const context = pickContext(history, { contextMessages: settings.contextMessages, answeredId });
+    const contextBody = context.messages.length > 0 ? classifierTranscript(context.messages, { config, selfName, labels }) : '';
+    // The reply is marked as a transcript line replying to that line would be: its #n, author and a quote.
+    const answersMark =
+      context.answeredIndex !== null && labels?.transcript?.replyTo
+        ? replyMarker(context.messages[context.answeredIndex - 1], context.answeredIndex, { labels, selfName, replyQuoteChars: config.context?.replyQuoteChars })
+        : '';
+    const replyBody = answersMark ? `${answersMark} ${first.text}` : first.text;
     let completion;
     try {
       completion = await llm.complete(
@@ -1357,7 +1378,7 @@ export function createTurnRunner({
           { role: 'system', content: fillPromptTemplate(prompt, { name: selfName ?? '' }) },
           {
             role: 'user',
-            content: [block('context', contextBody), block('reply', joined), block('gifs', library.join('\n'))].filter(Boolean).join('\n\n'),
+            content: [block('context', contextBody), block('reply', replyBody), block('gifs', library.join('\n'))].filter(Boolean).join('\n\n'),
           },
         ],
         {
@@ -1372,7 +1393,7 @@ export function createTurnRunner({
     const handle = parseGifPick(completion?.text, listed.map((entry) => entry.id));
     log.info('gifs: picked', { channel: channelId, handle: handle !== null, library: library.length });
     if (handle === null) return null;
-    return resolveGif(guildId, { id: handle, replyTo: messages[0].replyTo ?? null }, channelId);
+    return resolveGif(guildId, { id: handle, replyTo: first.replyTo ?? null }, channelId);
   }
 
   /** pickGif that never rejects: an unexpected failure (`gifs: pick failed`) posts the messages as written. */
@@ -1500,10 +1521,13 @@ export function createTurnRunner({
    * The messages are posted as the model wrote them: nothing rewrites them.
    * After the reactions, the GIF picker (pickGif) runs alongside the first
    * message's typing imitation: both start together, the first message waits
-   * for both; a GIF it picks is posted in place of the messages (no text
-   * message, nothing counted by notePosted), replying where the first message
-   * would have. Once the messages are out (all, or those before a failed
-   * send), notePosted counts them and stamps the fillers they hold.
+   * for both; a GIF it picks is posted in place of the first message (that
+   * text is not sent nor counted by notePosted), replying where it would have,
+   * and the other messages follow in order, each waited for and typed; a
+   * picked GIF that fails to send (`turn: gif failed`) leaves every message to
+   * be posted as written, so nothing is lost. Once
+   * the messages are out (all, or those before a failed send), notePosted
+   * counts them and stamps the fillers they hold.
    * @param {{ channel: object, guildId: string, privateChat: boolean, parsed: object,
    *   idByIndex: Map<number, string>, history: object[], startedAt: number, mode: string,
    *   triggerKind: TriggerKind|null, plain: boolean, trigger: object|null, selfName: string,
@@ -1570,17 +1594,32 @@ export function createTurnRunner({
     const postedTexts = [];
     let sendFailed = false;
     // The GIF picker starts first (its request is sent at once), then the first message's typing.
-    const picking = pickGifSafely({ channelId: channel.id, guildId, messages: parsed.messages, gif: parsed.gif, history, selfName });
+    const picking = pickGifSafely({ channelId: channel.id, guildId, messages: parsed.messages, gif: parsed.gif, history, selfName, idByIndex, trigger });
     if (typingOn && parsed.messages.length > 0) {
       const first = renderCustomEmoji(resolveMentions(parsed.messages[0].text, lines, knownNames).text, emojiLookup());
       await typeFor(first);
     }
     const picked = await picking;
-    // A picked GIF is posted instead of the messages.
-    const messages = picked ? [] : parsed.messages;
-    const gif = picked ?? parsed.gif;
+    // One GIF post (the turn's own or the picked one), recorded like a message.
+    const sendGif = async (gif) => {
+      const { replyId, pulledId } = replyTarget(gif.replyTo, { plain, idByIndex, pulledIds });
+      const sent = await postGif(channel, guildId, gif, replyId, linkFor(pulledId));
+      if (sent) {
+        delivered = true;
+        if (pulledId) answered.add(pulledId);
+        record(sent);
+      }
+      return sent;
+    };
+    // A picked GIF is posted in place of the first message (typed above); the rest follow as written.
+    // When it fails to send (`turn: gif failed`), the first message goes as written after all.
+    const replaced = picked ? Boolean(await sendGif(picked)) : false;
+    const messages = replaced ? parsed.messages.slice(1) : parsed.messages;
+    const gif = picked ? null : parsed.gif;
+    // Every message but the first one as written waits and is typed here; that one was typed alongside the picker.
+    const typedAbove = (index) => index === 0 && !replaced;
     for (const [index, message] of messages.entries()) {
-      if (index > 0 && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
+      if (!typedAbove(index) && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
 
       const { replyId, pulledId } = replyTarget(message.replyTo, { plain, idByIndex, pulledIds });
       const link = linkFor(pulledId);
@@ -1590,7 +1629,7 @@ export function createTurnRunner({
       const spoken = renderCustomEmoji(mentioned.text, emojiLookup());
       const text = withLink(spoken, link, hot.prompts?.labels);
       // The first message was typed alongside the GIF picker, above.
-      if (typingOn && index > 0) await typeFor(spoken);
+      if (typingOn && !typedAbove(index)) await typeFor(spoken);
 
       let posted;
       try {
@@ -1600,7 +1639,7 @@ export function createTurnRunner({
           allowedMentions: { parse: [], users: userIds, repliedUser: true },
         });
       } catch (err) {
-        log.warn('turn: send failed', { channel: channel.id, index, error: err });
+        log.warn('turn: send failed', { channel: channel.id, index: replaced ? index + 1 : index, error: err });
         sendFailed = true;
         break;
       }
@@ -1645,16 +1684,10 @@ export function createTurnRunner({
     startAhead({ guildId, channelId: channel.id, history, posted: ownPosted, selfName, privateChat });
     if (sendFailed) return { delivered, answered };
 
-    // The GIF right after the messages (or in their place, picked).
+    // The turn's own GIF right after the messages.
     if (gif) {
       if (messages.length > 0 && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
-      const { replyId, pulledId } = replyTarget(gif.replyTo, { plain, idByIndex, pulledIds });
-      const sent = await postGif(channel, guildId, gif, replyId, linkFor(pulledId));
-      if (sent) {
-        delivered = true;
-        if (pulledId) answered.add(pulledId);
-        record(sent);
-      }
+      await sendGif(gif);
     }
 
     // The picture comes last, once every message is out.
@@ -3370,7 +3403,7 @@ export function createTurnRunner({
       // top of this turn: unlike the other switches this one defaults to OFF,
       // and whether to actually post is the very last decision of a turn.
       if (hot.config.features?.dryRun === true) {
-        await dryAct({ channel, guildId, parsed, idByIndex, history, mode: finalMode, triggerKind, selfName, part, ...routing });
+        await dryAct({ channel, guildId, parsed, idByIndex, history, mode: finalMode, triggerKind, trigger, selfName, part, ...routing });
         noteSpokeSaw(channel, history, serverShown, pulled, notAnswered);
         return { outcome: 'spoke', mode: finalMode, dryRun: true };
       }

@@ -730,22 +730,19 @@ function seenEmoji(messageSets) {
 /**
  * The `<gifs>` section's items: `labels.gifs.header` first, then one line
  * per GIF of the library -- the top `gifsCfg.max` (default 40) by rank
- * (src/memory/gifs.js#rankGifs, `gifsCfg.halfLifeDays`, default 30). A helper
- * caption cached under the entry's `itemId` (the describer's cache; a `miss`
- * entry has no text) renders through `labels.gifs.entry` (`{id}`/`{text}`),
- * cut to `gifsCfg.listChars` (default 70; 0 = whole) at a word boundary with
- * an ellipsis (gifCaption, a hard limit) -- only here: the cached
- * caption stays whole -- otherwise `labels.gifs.entryNoText` (`{id}`). A GIF
- * the persona itself posted (`ownLast`, see src/memory/gifs.js#markOwnGif) no
- * longer than `gifsCfg.ownMarkHours` (default 24; 0 = never) before `now`
- * gets ` ` + `labels.gifs.ownMark` appended, `{ago}` = that time through
- * formatDuration (`labels.units`); no mark without that label. `[]`
- * when the library is empty or the labels lack `header`/`entryNoText` (an
- * older labels.json).
+ * (src/memory/gifs.js#rankGifs, `gifsCfg.halfLifeDays`, default 30), each
+ * rendered by gifLine (the three caption fields through
+ * `labels.gifs.entryFields`, an older one-line caption through
+ * `labels.gifs.entry`, cut per field by `gifsCfg.reactionChars` /
+ * `gifsCfg.actionChars` -- only here: the cached caption stays as stored --,
+ * else `labels.gifs.entryNoText`, plus the own-post mark within
+ * `gifsCfg.ownMarkHours`, default 24). `[]` when the library is empty or the
+ * labels lack `header`/`entryNoText` (an older labels.json).
  * @param {unknown} gifs            The library (store.getGifs).
  * @param {object|null} mediaCache  The describer cache (store.getMediaCache), read only.
  * @param {object} labels
- * @param {{ max?: number, halfLifeDays?: number, listChars?: number, ownMarkHours?: number }} [gifsCfg]  `config.gifs`.
+ * @param {{ max?: number, halfLifeDays?: number, reactionChars?: number, actionChars?: number,
+ *   ownMarkHours?: number }} [gifsCfg]  `config.gifs`.
  * @param {number} now
  * @returns {string[]}
  */
@@ -753,34 +750,108 @@ function gifItems(gifs, mediaCache, labels, gifsCfg, now) {
   const g = labels.gifs;
   if (!g?.header || !g.entryNoText) return [];
   const max = Number.isInteger(gifsCfg?.max) && gifsCfg.max >= 0 ? gifsCfg.max : 40;
-  const options = { listChars: gifsCfg?.listChars ?? 70, ownMarkHours: gifsCfg?.ownMarkHours ?? 24, now };
+  const options = { ...gifFieldChars(gifsCfg), ownMarkHours: gifsCfg?.ownMarkHours ?? 24, now };
   const chosen = rankGifs(gifs, gifsCfg?.halfLifeDays ?? 30).slice(0, max);
   if (chosen.length === 0) return [];
   return [g.header, ...chosen.map((entry) => gifLine(entry, mediaCache, labels, options))];
 }
 
 /**
- * The caption of a GIF library entry: the helper caption cached under its
- * `itemId` (the describer's cache; a `miss` entry has none), cut to
- * `listChars` (0 = whole) at a word boundary, a cut marked with an ellipsis
+ * `gifs.reactionChars` (40) and `gifs.actionChars` (70) of `gifsCfg`
+ * (`config.gifs`), config.json's value when missing or not a number >= 0;
+ * 0 = no cut. The one reader of both for the `<gifs>` list and the GIF picker.
+ * @param {object|undefined} gifsCfg
+ * @returns {{ reactionChars: number, actionChars: number }}
+ */
+export function gifFieldChars(gifsCfg) {
+  const read = (value, fallback) => (Number.isFinite(value) && value >= 0 ? value : fallback);
+  return { reactionChars: read(gifsCfg?.reactionChars, 40), actionChars: read(gifsCfg?.actionChars, 70) };
+}
+
+/**
+ * The one-line caption of a GIF library entry: the helper caption cached
+ * under its `itemId` (the describer's cache; a `miss` entry has none), cut to
+ * `actionChars` (0 = whole) at a word boundary, a cut marked with an ellipsis
  * (src/memory/clamp.js#clampWithEllipsis, a hard limit); '' when there is
  * none. Render time only, so a caption stored whole or stored cut renders the
- * same way. Pure.
+ * same way. Whether an entry is captioned at all (the GIF picker lists only
+ * those). Pure.
  * @param {{ itemId: string }} entry
  * @param {object|null} mediaCache  The describer cache (store.getMediaCache), read only.
- * @param {number} listChars
+ * @param {number} actionChars
  * @returns {string}
  */
-export function gifCaption(entry, mediaCache, listChars) {
+export function gifCaption(entry, mediaCache, actionChars) {
   const cached = mediaCache?.[entry?.itemId];
-  return cached && !cached.miss && typeof cached.text === 'string' ? clampWithEllipsis(cached.text, listChars) : '';
+  return cached && !cached.miss && typeof cached.text === 'string' ? clampWithEllipsis(cached.text, actionChars) : '';
+}
+
+/**
+ * The three caption fields of a GIF library entry described in that format
+ * (src/memory/describe.js#parseGifDescription: the cache entry holds a
+ * `reaction` or a `screen` string), each cut at render time like gifCaption
+ * -- `reaction` and `screen` to `reactionChars`, `action` to `actionChars`
+ * (0 = whole) --, `text` being the on-screen text; null for an entry in the
+ * older one-line format, a miss or no entry, or when every field is empty. Pure.
+ * @param {{ itemId: string }} entry
+ * @param {object|null} mediaCache
+ * @param {{ reactionChars: number, actionChars: number }} chars
+ * @returns {{ reaction: string, action: string, text: string }|null}
+ */
+export function gifFields(entry, mediaCache, { reactionChars, actionChars }) {
+  const cached = mediaCache?.[entry?.itemId];
+  if (!cached || cached.miss || (typeof cached.reaction !== 'string' && typeof cached.screen !== 'string')) return null;
+  const field = (value, chars) => (typeof value === 'string' ? clampWithEllipsis(value, chars) : '');
+  const fields = {
+    reaction: field(cached.reaction, reactionChars),
+    action: field(cached.action, actionChars),
+    text: field(cached.screen, reactionChars),
+  };
+  return fields.reaction || fields.action || fields.text ? fields : null;
+}
+
+// A field slot of labels.gifs.entryFields: the placeholder with the quote or
+// bracket that hugs it in the label, if any (`"{text}"`, `({reaction})`).
+const GIF_FIELD_SLOT = /(["'«“„‘([]?)\{(reaction|action|text)\}(["'»”“’)\]]?)/g;
+
+/**
+ * `template` (labels.gifs.entryFields) filled with `id` and the non-empty
+ * `fields`: an empty field leaves out its slot (the placeholder with any quote
+ * or bracket hugging it) together with the label text that separates it from
+ * the previous kept field -- the first kept field takes no separator -- so no
+ * dangling separator or empty quotes remain. The text before the first slot
+ * and after the last one is kept as written. Field values are inserted as
+ * they are (a brace in a caption is never read as a placeholder). Pure.
+ * @param {string} template
+ * @param {string} id
+ * @param {{ reaction: string, action: string, text: string }} fields
+ * @returns {string}
+ */
+function fillGifFields(template, id, fields) {
+  const slots = [...template.matchAll(GIF_FIELD_SLOT)];
+  if (slots.length === 0) return fill(template, { id });
+  const endOf = (slot) => slot.index + slot[0].length;
+  let out = fill(template.slice(0, slots[0].index), { id });
+  let kept = 0;
+  for (const [i, slot] of slots.entries()) {
+    const value = fields[slot[2]];
+    if (!value) continue;
+    if (kept > 0) out += fill(template.slice(endOf(slots[i - 1]), slot.index), { id });
+    out += `${slot[1]}${value}${slot[3]}`;
+    kept += 1;
+  }
+  return out + fill(template.slice(endOf(slots.at(-1))), { id });
 }
 
 /**
  * One line of a GIF library entry, as the `<gifs>` section shows it (gifItems)
- * and the GIF picker lists it (src/behavior/gif-pick.js#renderGifLibrary): its
- * caption (gifCaption) through `labels.gifs.entry` (`{id}`/`{text}`), else
- * `labels.gifs.entryNoText` (`{id}`); a GIF the persona itself posted
+ * and the GIF picker lists it (src/behavior/gif-pick.js#renderGifLibrary): an
+ * entry described in three fields (gifFields) through `labels.gifs.entryFields`
+ * (`{id}`, `{reaction}`, `{action}`, `{text}` = the on-screen text; empty
+ * fields left out, see fillGifFields); an older one-line caption (gifCaption,
+ * cut to `actionChars`) -- or a three-field one when the labels have no
+ * `entryFields` -- through `labels.gifs.entry` (`{id}`/`{text}`); else
+ * `labels.gifs.entryNoText` (`{id}`). A GIF the persona itself posted
  * (`ownLast`) no longer than `ownMarkHours` (0 = never) before `now` gets
  * ` ` + `labels.gifs.ownMark` appended, `{ago}` = that time through
  * formatDuration (`labels.units`); no mark without that label. The caller
@@ -788,13 +859,18 @@ export function gifCaption(entry, mediaCache, listChars) {
  * @param {{ id: string, itemId: string, ownLast?: number }} entry
  * @param {object|null} mediaCache
  * @param {object} labels
- * @param {{ listChars: number, ownMarkHours: number, now: number }} options
+ * @param {{ reactionChars: number, actionChars: number, ownMarkHours: number, now: number }} options
  * @returns {string}
  */
-export function gifLine(entry, mediaCache, labels, { listChars, ownMarkHours, now }) {
+export function gifLine(entry, mediaCache, labels, { reactionChars, actionChars, ownMarkHours, now }) {
   const g = labels.gifs;
-  const text = gifCaption(entry, mediaCache, listChars);
-  const line = text && g.entry ? fill(g.entry, { id: entry.id, text }) : fill(g.entryNoText, { id: entry.id });
+  const fields = g.entryFields ? gifFields(entry, mediaCache, { reactionChars, actionChars }) : null;
+  const text = fields ? '' : gifCaption(entry, mediaCache, actionChars);
+  const line = fields
+    ? fillGifFields(g.entryFields, entry.id, fields)
+    : text && g.entry
+      ? fill(g.entry, { id: entry.id, text })
+      : fill(g.entryNoText, { id: entry.id });
   const markOn = Boolean(g.ownMark && labels.units) && Number.isFinite(ownMarkHours) && ownMarkHours > 0;
   const age = Math.max(0, now - entry.ownLast);
   if (!markOn || !(entry.ownLast > 0) || age > ownMarkHours * HOUR_MS) return line;
