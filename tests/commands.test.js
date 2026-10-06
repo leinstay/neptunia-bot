@@ -1020,3 +1020,46 @@ test('autocomplete: the route model option offers the route prefixes and the mod
   await handler(typed);
   assert.deepEqual(typed.respondCalls[0].map((c) => c.value), ['google/', 'google/gemini-3.8-flash']);
 });
+
+// ---------------------------------------------------------------------------
+// variety: the worn patterns and the fillers
+// ---------------------------------------------------------------------------
+
+test('buildCommandTree: variety is a group of show, list, add and remove; type a pattern|filler choice; no root or filler group', () => {
+  const { keys, groups } = commandKeys();
+  assert.ok(groups.has('variety'));
+  assert.ok(!groups.has('root') && !groups.has('filler'));
+  assert.ok(!keys.has('variety'), 'the bare key is now the group');
+  for (const key of ['variety.show', 'variety.list', 'variety.add', 'variety.remove']) assert.ok(keys.has(key), key);
+  const group = buildCommandTree('nep')[0].options.find((option) => option.name === 'variety');
+  const options = (name) => group.options.find((option) => option.name === name).options ?? [];
+  assert.deepEqual(options('show'), []);
+  for (const name of ['list', 'add', 'remove']) {
+    const type = options(name).find((option) => option.name === 'type');
+    assert.deepEqual([type.required, type.choices.map((choice) => choice.value)], [true, ['pattern', 'filler']], name);
+  }
+  assert.deepEqual(options('add').map((option) => [option.name, option.required]), [['type', true], ['text', true]]);
+  assert.deepEqual(options('remove').map((option) => [option.name, option.type, option.required]), [['type', 3, true], ['id', 4, false], ['text', 3, false]]);
+});
+
+test('interaction handler: variety show, list, add and remove map their options to admin.run', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  await handler(fakeInteraction({ group: 'variety', subcommand: 'show' }));
+  await handler(fakeInteraction({ group: 'variety', subcommand: 'list', optionValues: { type: 'filler' } }));
+  await handler(fakeInteraction({ group: 'variety', subcommand: 'add', optionValues: { type: 'filler', text: 'équit*' } }));
+  await handler(fakeInteraction({ group: 'variety', subcommand: 'remove', optionValues: { type: 'pattern', id: 2 } }));
+  await handler(fakeInteraction({ group: 'variety', subcommand: 'remove', optionValues: { type: 'filler', text: 'bof' } }));
+
+  assert.deepEqual(
+    admin.runCalls.map(([key, args]) => [key, args]),
+    [
+      ['variety.show', {}],
+      ['variety.list', { type: 'filler' }],
+      ['variety.add', { type: 'filler', text: 'équit*' }],
+      ['variety.remove', { type: 'pattern', id: 2, text: undefined }],
+      ['variety.remove', { type: 'filler', id: undefined, text: 'bof' }],
+    ],
+  );
+});

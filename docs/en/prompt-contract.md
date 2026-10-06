@@ -55,6 +55,8 @@ All instructions are English in both layers; a character's speech samples may be
 | `mentor-diagnose.md` | no | Mentor: explain weak answers after scoring by pointing at specific text in the persona's context (`features.mentor`). The result is an unverified opinion stored as `diagnosis` on the run. Omitted when `mentor.diagnose` is false or the file is missing | `{{name}}` |
 | `variety.md` | no | `classifier.text` request: name the repeated devices in the persona's own recent lines (`features.variety`). No character card | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `variety-long.md` | no | Long variety pass: name the devices across the whole ring of own lines (`features.variety`, `variety.longLines`). Same placeholders, `<lines>` block and answer format as `variety.md`. Uses the `classifier.text` model. No character card. Falls back to no long pass when absent | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
+| `reword.md` | no | Rewrite request for the filler guard and pattern guard: replace words and phrases on cooldown and rephrase habits matching worn patterns. Receives the reply as the user message. No character card | `{{name}}` `{{words}}` `{{patterns}}` |
+| `pattern-check.md` | no | `classifier.text` request: check whether the reply falls into any of the current worn patterns (`features.patternGuard`). Receives numbered patterns and the reply. No character card | `{{name}}` |
 | `split.md` | no | Classifier: does a direct call hold several separate requests (`features.splitTasks`). Receives a short `<transcript>` and the new message as `<candidate>`. Output is the word `one`, or 2 to `{{maxTasks}}` lines each starting with `- ` and holding one part in the author's own words. No character card. Without this file the splitter is off | `{{name}}` `{{maxTasks}}` |
 | `merge.md` | no | Classifier: does a new message from an author with waiting items belong to one of them. Receives a numbered `<waiting>` list and the new message as `<candidate>`. Output is one line: a number from the list or the word `new`. No character card. Without this file a new call is always queued as its own item | `{{name}}` |
 | `labels.json` | yes | Every string the CODE inserts into a prompt. Keys fixed below, values are the writer's | see below |
@@ -67,7 +69,7 @@ On a forced turn (`/nep interject`, `/nep initiate`), `forced.md` is appended af
 On an `overheard` turn, `overheard.md` REPLACES the mode prompt (it is the task text, not an append). When `overheard.md` is missing or blank, the mode prompt is used instead (degraded: the mode prompt frames the line as said to the persona, which is not what happened).
 In a private chat, `private.md` is appended after the mode prompt (before `forced.md`) with the same `{{name}}` and `{{author}}` placeholders.
 The analyzer and the warmup's `profile.md` and `server.md` receive the character card and `rules.md` as a
-`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `describe-gif.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md`, `search-summary.md`, `recall-summary.md`, `room.md`, `route-channel.md`, `elsewhere.md`, `variety.md` and `variety-long.md` do not receive the card.
+`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `describe-gif.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md`, `search-summary.md`, `recall-summary.md`, `room.md`, `route-channel.md`, `elsewhere.md`, `variety.md`, `variety-long.md`, `reword.md` and `pattern-check.md` do not receive the card.
 
 `{{guildFieldChars}}` is `fieldChars * 2`, the limit code clamps guild-level patterns and starters to.
 `{{maxEpisodes}}` is the total episodes kept per person. Both are filled from config but not used by the default
@@ -83,7 +85,7 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 | `<senses>` | What the persona can and cannot perceive RIGHT NOW, generated from the live config: which pictures they see themselves, which come as a helper's description, what they are blind and deaf to. So the persona never pretends to have watched a video and can joke about it in their own voice |
 | `<about_chat>` | How people talk here, how they start and cut into conversations, in-jokes, things people taught the persona |
 | `<emoji>` | Custom emoji the persona can use (`features.customEmoji`): at most `context.customEmoji.max` entries, ranked by member usage. Each carries `:name:` and the helper's caption when one is cached |
-| `<gifs>` | GIFs the persona can post (`features.gifs`): at most `gifs.max` (default 40) entries from the library, ranked by recency-weighted use. Each carries the handle (`g1`, `g2`, …) and the helper's caption when one is cached, cut to `gifs.listChars` (default 70; `0` = whole) at a word boundary so more entries fit the budget |
+| `<gifs>` | GIFs the persona can post (`features.gifs`): at most `gifs.max` (default 40) entries from the library, ranked by recency-weighted use. Each carries the handle (`g1`, `g2`, …) and the helper's caption when one is cached, cut to `gifs.listChars` (default 70; `0` = whole) at a word boundary so more entries fit the budget. Each entry also stores when and how often the persona posted it (`ownLast`, `ownUses`); one posted within `gifs.ownMarkHours` (default 24; `0` = off) carries `gifs.ownMark` with a short relative time |
 | `<server>` | The CURRENT channel in full (Discord category and topic, purpose, what people write, tone, activity, last message, top writers; marked with `labels.server.currentMark`) plus only the neighbour channels that fed `<other_channels>` this turn; no other channel |
 | `<lore>` | Server lore entries whose keys occur in the recent messages (plus entries marked always): events, recurring characters, long-running stories. Like a lorebook: hundreds may exist, only the relevant few are shown |
 | `<self_facts>` | What the persona has claimed about themselves |
@@ -246,6 +248,7 @@ emoji.entryNoText                        {name}: one emoji without a caption
 gifs.header                              introduces the GIF library list
 gifs.entry                               {id} {text}: one GIF with a caption
 gifs.entryNoText                         {id}: one GIF without a caption
+gifs.ownMark                             {ago}: appended to an entry the persona posted within gifs.ownMarkHours
 affinity.bands.hostile | dislike | cool | neutral | warm | fond | devoted
                                          thresholds in code: ≤-60 · ≤-25 · ≤-8 · <8 · <25 · <60 · ≥60
 affinity.ownerSet                        reason shown when the owner set a score by hand without giving one
@@ -743,12 +746,12 @@ omits the context.
 One bare JSON object:
 
 ```
-{ "patterns": [ { "shape": "", "examples": ["", ""], "count": 0 } ] }
+{ "patterns": [ { "shape": "", "examples": ["", ""], "count": 0, "word": "" } ] }
 ```
 
 `shape`: what the device does, 3 to `variety.shapeChars` characters, in the language the lines use. `examples`: 1 to 3
 verbatim pieces from the persona's own words (not from the `(to: ...)` context), each at most 80 characters, kept only
-when the text occurs in a sent line (case-insensitive). `count`: at least 2, capped at the number of lines sent. At
+when the text occurs in a sent line (case-insensitive). `count`: at least 2, capped at the number of lines sent. `word`: the base form of the word or the fixed phrase when the habit is a word or phrase used as a filler, tag, intensifier or sign-off; empty string for a construction, a stance or a source of material. At
 most `variety.maxPatterns` valid patterns; an empty list is the normal answer. An answer that is not the expected JSON
 produces no block.
 
@@ -769,6 +772,16 @@ nothing said in private reaches the owner's view or another conversation.
 
 The mentor sandbox runs one variety pass per situation, charged to the mentor's token budget (not to
 `llm.maxRequestsPerDay`). The sandbox uses `variety.timeoutMs` as its request timeout (it has no later turn that could use a late answer). The patterns are saved as `worn` on the situation record. The judge never sees the `<worn>` block.
+
+## Filler guard and pattern guard
+
+Two post-generation rails that catch the persona's verbal tics after the voice model writes a reply, before posting.
+
+**Filler guard** (`features.fillerGuard`, missing = on). A ranked list of words and phrases the persona overuses, fed mainly by the variety passes (a word-type habit the pass finds becomes an entry with weight equal to its count); the owner can pin entries with `/nep variety add type:filler` as a fallback. Two kinds of entry: a PREFIX entry ends with `*` (at least 3 letters) and matches every word starting with that prefix on a word boundary, in any script; an EXACT entry (no `*`) matches the word or phrase whole. An entry may be used again only after `variety.fillers.cooldownHours` (default 36) hours OR `variety.fillers.cooldownMessages` (default 300) of the persona's own posted messages since its last use, whichever comes first; a use resets both counters. The list is ranked with eviction like interests: capacity `variety.fillers.max` (default 12), weight with recency decay (`variety.fillers.halfLifeDays`, default 14), the weakest evicted when full; owner-added entries are pinned (never evicted or decayed). When a fresh reply holds an entry on cooldown, one rewrite request on the speaking model (`llm.model`, purpose `reword`, `variety.fillers.maxOutputTokens` 400, prompt `prompts/reword.md`) rewrites the reply without it. The main persona request never sees the filler list. State in guild memory: `fillers` and `ownMessageCount`. Logs: `fillers: reworded`, `fillers: reword failed`, `fillers: reword skipped`.
+
+**Pattern guard** (`features.patternGuard`, missing = on). Before posting, when the reply has at least `variety.patternCheck.minChars` (default 15) characters and the worn lists are not empty, a classifier (`classifier.text`, purpose `pattern-check`, `variety.patternCheck.maxOutputTokens` 40, prompt `prompts/pattern-check.md`) says which of the current worn patterns (the short and the long list) the reply falls into. On a match the same reword request rewrites the reply without that pattern. The classifier runs during the typing simulation of the first message, so it adds no visible delay; only a rewrite does. Logs: `patterns: checked`, `patterns: check failed`.
+
+Both guards share `prompts/reword.md`, which takes two placeholders: `{{words}}` (words, word stems or phrases on cooldown, comma-separated; empty when none) and `{{patterns}}` (shapes of matched habits, joined by `; `; empty when none). Both can fire on the same reply: the filler guard rewrites first, then the pattern guard checks the rewritten text.
 
 ## Task splitter
 

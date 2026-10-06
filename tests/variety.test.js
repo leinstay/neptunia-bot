@@ -14,6 +14,8 @@ import {
   appendOwnLine,
   appendWornHistory,
   buildVarietyRequest,
+  carryPinned,
+  dropPattern,
   linesKey,
   longPassDue,
   mergeWorn,
@@ -21,6 +23,7 @@ import {
   normalizeWorn,
   normalizeWornLong,
   parseVariety,
+  pinPattern,
   renderVarietyReport,
   renderWorn,
   selectLongLines,
@@ -1315,4 +1318,126 @@ test('long pass: logs carry counts and codes, never the lines, the examples or t
   assert.equal(logs.find((l) => l.msg === 'variety: turn').long, 2);
   const all = JSON.stringify(logs);
   for (const secret of ['honestly', 'surprise', 'question', 'Names What', 'ends a line']) assert.ok(!all.includes(secret), secret);
+});
+
+// ---- the word of a habit, pinned patterns, the filler auto-feed --------------------------
+
+test('parseVariety: a pattern keeps its word on one line, cut to 40 characters; an empty or non-string word is left out', () => {
+  const parsed = parseVariety(
+    answer([
+      { shape: 'mock promise ending in (no)', examples: ['(no)'], count: 2, word: '  (no) \n ' },
+      { shape: 'names what was said', examples: ['what a surprise'], count: 2, word: 'w'.repeat(60) },
+      { shape: 'promises to behave', examples: ['promise to behave'], count: 2, word: '' },
+      { shape: 'fixes things', examples: ['fix it'], count: 2, word: 7 },
+    ]),
+    TEXTS,
+    {},
+  );
+  assert.deepEqual(parsed.patterns.map((p) => p.word), ['(no)', 'w'.repeat(40), undefined, undefined]);
+  assert.equal(Object.hasOwn(parsed.patterns[2], 'word'), false);
+  assert.equal(normalizeWorn({ at: 1, patterns: parsed.patterns }).patterns[0].word, '(no)', 'kept in storage too');
+});
+
+test('normalizeWornLong: a pinned pattern needs no example and keeps count 0; an unpinned one without examples is dropped', () => {
+  const long = normalizeWornLong({
+    at: 1,
+    lines: 60,
+    patterns: [
+      { shape: 'quotes a film line', examples: [], count: 0, pinned: true },
+      { shape: 'no examples', examples: [], count: 3 },
+      { shape: 'a habit', examples: ['ex'], count: 3, pinned: 'yes' },
+    ],
+  });
+  assert.deepEqual(long.patterns, [
+    { shape: 'quotes a film line', count: 0, examples: [], pinned: true },
+    { shape: 'a habit', count: 3, examples: ['ex'] },
+  ]);
+});
+
+test('carryPinned: the pins first, the pass filling the room left, a pinned shape never doubled', () => {
+  const pin = { shape: 'Quotes a film line', examples: [], count: 0, pinned: true };
+  const fresh = ['quotes A FILM line', 'ends on a question', 'opens with a sigh'].map((shape) => ({ shape, examples: ['ex'], count: 2 }));
+  assert.deepEqual(carryPinned([pin, { shape: 'old', examples: ['ex'], count: 2 }], fresh, 2).map((p) => p.shape), ['Quotes a film line', 'ends on a question']);
+  assert.deepEqual(carryPinned([pin], fresh).map((p) => p.shape), ['Quotes a film line', 'ends on a question', 'opens with a sigh'], 'no room: no cap');
+  assert.deepEqual(carryPinned([pin], fresh, 0).map((p) => p.shape), ['Quotes a film line'], 'pins stay even past the room');
+  assert.deepEqual(carryPinned(null, fresh, 3).length, 3);
+});
+
+test('pinPattern / dropPattern: a new pin joins the pins ahead of the pass\'s patterns; a listed shape is pinned in place', () => {
+  const list = [{ shape: 'old pin', examples: [], count: 0, pinned: true }, { shape: 'ends on a question', examples: ['ex'], count: 2 }];
+  const added = pinPattern(list, '  quotes  a film line ');
+  assert.equal(added.added, true);
+  assert.deepEqual(added.patterns.map((p) => [p.shape, p.pinned === true]), [['old pin', true], ['quotes a film line', true], ['ends on a question', false]]);
+  const marked = pinPattern(list, 'ENDS ON A QUESTION');
+  assert.deepEqual([marked.added, marked.patterns[1].pinned, marked.patterns[1].examples], [false, true, ['ex']]);
+  const dropped = dropPattern(added.patterns, 'Quotes A Film Line');
+  assert.equal(dropped.removed.shape, 'quotes a film line');
+  assert.deepEqual(dropped.patterns.map((p) => p.shape), ['old pin', 'ends on a question']);
+  assert.equal(dropPattern(list, 'missing').removed, null);
+});
+
+test('renderWorn / renderVarietyReport: a pinned pattern without examples renders as its shape alone', () => {
+  const pinned = [{ shape: 'quotes a film line', examples: [], count: 0, pinned: true }];
+  assert.ok(renderWorn(pinned, labels, { variety: BASE_VARIETY }).endsWith('\n- quotes a film line'));
+  assert.ok(renderVarietyReport(null, [], { variety: BASE_VARIETY }, NOW, { at: null, lines: 0, patterns: pinned }).includes('  - quotes a film line (pinned)'));
+});
+
+const WORD_ANSWER = answer([{ shape: 'names what was said', examples: ['what a surprise'], count: 2, word: 'Surprise' }]);
+
+test('short pass: a pattern with a word feeds the filler list -- added, then bumped -- and logs fillers: learned', async () => {
+  const { pass, store } = liveSetup({ llm: fakeLlm(() => WORD_ANSWER) });
+  const first = await withCapturedLogs(() => pass.forTurn({ ...TURN, history: ownHistory() }));
+  assert.deepEqual(
+    store.getGuild('g1').fillers.map((e) => [e.text, e.prefix, e.pinned, e.weight, e.lastSeen]),
+    [['surprise', true, false, 2, new Date(NOW).toISOString()]],
+  );
+  const learned = first.logs.find((l) => l.msg === 'fillers: learned');
+  assert.deepEqual([learned.guildId, learned.added, learned.bumped], ['g1', 1, 0]);
+  assert.equal(JSON.stringify(learned).includes('surprise'), false, 'counts only');
+
+  await pass.forTurn({ ...TURN, history: historyPlus('a9') });
+  assert.equal(store.getGuild('g1').fillers[0].weight, 4, 'the next pass naming it bumps the same entry');
+});
+
+test('short pass: no filler is learned from a private chat, a pattern without a word, or while paused', async () => {
+  const privately = liveSetup({ llm: fakeLlm(() => WORD_ANSWER) });
+  await privately.pass.forTurn({ ...TURN, privateChat: true, history: ownHistory() });
+  assert.deepEqual(privately.store.getGuild('g1').fillers, []);
+
+  const plain = liveSetup();
+  const { logs } = await withCapturedLogs(() => plain.pass.forTurn({ ...TURN, history: ownHistory() }));
+  assert.deepEqual(plain.store.getGuild('g1').fillers, []);
+  assert.equal(logs.some((l) => l.msg === 'fillers: learned'), false);
+
+  const paused = liveSetup({ llm: fakeLlm(() => WORD_ANSWER) });
+  paused.store.state.data.paused = true;
+  await paused.pass.forTurn({ ...TURN, history: ownHistory() });
+  assert.deepEqual(paused.store.getGuild('g1').fillers, []);
+});
+
+test('short pass: learned fillers respect variety.fillers.max and keep the owner\'s pins', async () => {
+  const hot = liveHot({ variety: { fillers: { max: 1, halfLifeDays: 14 } } });
+  const { pass, store } = liveSetup({ hot, llm: fakeLlm(() => WORD_ANSWER) });
+  store.pinFiller('g1', { text: 'honest', prefix: true }, NOW, { max: 1, halfLifeDays: 14 });
+  await pass.forTurn({ ...TURN, history: ownHistory() });
+  assert.deepEqual(store.getGuild('g1').fillers.map((e) => [e.text, e.pinned]), [['honest', true]], 'no room beside the pin: the newcomer is evicted');
+});
+
+test('long pass: a word feeds the filler list; patterns the owner pinned stay ahead of the pass\'s own, within longMaxPatterns', async () => {
+  const longWords = answer([
+    { shape: 'ends a line on honestly', examples: ['honestly'], count: 5, word: 'honestly' },
+    { shape: 'Names What Was Said', examples: ['what a surprise'], count: 9 },
+  ]);
+  const { pass, store } = liveSetup({ hot: longHot({ variety: { longMaxPatterns: 2 }, features: { varietyPrecompute: false } }), llm: bothLlm({ long: () => longWords }) });
+  fillRing(store, 70);
+  store.pinWornPattern('g1', 'quotes a film line');
+  const { logs } = await withCapturedLogs(() => pass.ahead({ ...TURN, history: ownHistory() }));
+
+  const long = store.getGuild('g1').wornLong;
+  assert.equal(long.at, NOW);
+  assert.deepEqual(long.patterns.map((p) => [p.shape, p.pinned === true]), [['quotes a film line', true], ['ends a line on honestly', false]]);
+  assert.deepEqual(store.getGuild('g1').fillers.map((e) => [e.text, e.prefix, e.weight]), [['honestly', true, 5]], 'learned from every pattern the pass named');
+  assert.ok(logs.some((l) => l.msg === 'fillers: learned' && l.added === 1));
+  const shown = await pass.forTurn({ ...TURN, history: ownHistory() });
+  assert.equal(shown[0].shape, 'quotes a film line', 'the pin reaches the turn\'s <worn> first');
 });

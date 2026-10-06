@@ -25,6 +25,7 @@ import { parseJsonObject } from '../llm/parse.js';
 import { fillPromptTemplate } from './prompt.js';
 import { clampChars, oneLine } from '../memory/clamp.js';
 import { HOUR_MS, MINUTE_MS } from '../time.js';
+import { FILLERS_DEFAULTS, PATTERN_CHECK_DEFAULTS, fillersSettings, patternCheckSettings } from './fillers.js';
 
 /**
  * Defaults of the `variety` config block (config.json carries the same values).
@@ -51,11 +52,16 @@ export const VARIETY_DEFAULTS = Object.freeze({
   longEveryHours: 6,
   longMinLines: 60,
   longMaxPatterns: 3,
+  // The reply guard's groups (src/behavior/fillers.js), read there with their own fallbacks.
+  fillers: FILLERS_DEFAULTS,
+  patternCheck: PATTERN_CHECK_DEFAULTS,
 });
 
 // Fixed by the prompt contract, not by config: an example is a short verbatim
 // piece, at most three per pattern; a shape shorter than this names nothing.
 const EXAMPLE_CHARS = 80;
+// A habit's `word` (its base form or phrase) is a word or a short phrase, never a sentence.
+const WORD_CHARS = 40;
 const MAX_EXAMPLES = 3;
 const MIN_SHAPE_CHARS = 3;
 // What one stored own line keeps of the message it answered; `contextChars` cuts it again when sent.
@@ -75,7 +81,10 @@ function intAtLeast(value, fallback, min) {
  * @returns {{ window: number, recentMinutes: number, minLines: number, contextChars: number,
  *   maxPatterns: number, shapeChars: number, maxOutputTokens: number, timeoutMs: number,
  *   requestTimeoutMs: number, history: number, longLines: number, longEveryHours: number,
- *   longMinLines: number, longMaxPatterns: number }}
+ *   longMinLines: number, longMaxPatterns: number, fillers: { cooldownHours: number, cooldownMessages: number,
+ *   maxOutputTokens: number, max: number, halfLifeDays: number }, patternCheck: { minChars: number,
+ *   maxOutputTokens: number } }}  `fillers` and `patternCheck`: the reply guard's groups
+ *   (src/behavior/fillers.js#fillersSettings, #patternCheckSettings).
  */
 export function varietySettings(config) {
   const v = config?.variety ?? {};
@@ -95,6 +104,8 @@ export function varietySettings(config) {
     longEveryHours: Number.isFinite(v.longEveryHours) && v.longEveryHours > 0 ? v.longEveryHours : d.longEveryHours,
     longMinLines: intAtLeast(v.longMinLines, d.longMinLines, 1),
     longMaxPatterns: intAtLeast(v.longMaxPatterns, d.longMaxPatterns, 0),
+    fillers: fillersSettings(config),
+    patternCheck: patternCheckSettings(config),
   };
 }
 
@@ -332,7 +343,9 @@ function withMaxPatterns(settings, maxPatterns) {
  * characters and kept only when it occurs in one of `haystacks` (the sent
  * lines, lower-cased; the match ignores case), duplicates dropped, `count` an
  * integer of at least 2 (2 when missing; more than the lines sent is cut to
- * their number).
+ * their number). `word`, the base form or phrase of a word-type habit
+ * (src/behavior/fillers.js learns it), is kept on one line, cut to
+ * WORD_CHARS, only when it is a non-empty string; otherwise the key is absent.
  */
 function validPattern(item, haystacks, settings) {
   if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
@@ -357,7 +370,8 @@ function validPattern(item, haystacks, settings) {
     examples.push(example);
   }
   if (examples.length === 0) return null;
-  return { shape, examples, count };
+  const word = wordOf(item.word);
+  return word ? { shape, examples, count, word } : { shape, examples, count };
 }
 
 /**
@@ -394,16 +408,32 @@ export function parseVariety(raw, texts, config, { maxPatterns } = {}) {
 
 // ---- storage ----------------------------------------------------------------
 
-/** Stored patterns made safe to read: shape and count as stored, examples strings, broken ones dropped. */
+/** A pattern's `word` on one line, cut to WORD_CHARS; '' when it is no string or empty. */
+function wordOf(value) {
+  return typeof value === 'string' ? clampChars(oneLine(value), WORD_CHARS).trim() : '';
+}
+
+/**
+ * Stored patterns made safe to read: shape and count as stored, examples
+ * strings, `word` when non-empty, broken ones dropped. A pattern the owner
+ * pinned (`pinned: true`, `/nep variety add type:pattern`) keeps its mark and
+ * needs no example; its count is an integer >= 0 (else 0), every other
+ * pattern's at least 2.
+ */
 function normalizePatterns(value, { examples = true } = {}) {
   return (Array.isArray(value) ? value : [])
     .filter((p) => p && typeof p === 'object' && typeof p.shape === 'string' && p.shape.trim())
     .map((p) => {
-      const out = { shape: p.shape.trim(), count: Number.isInteger(p.count) && p.count >= 2 ? p.count : 2 };
+      const pinned = p.pinned === true;
+      const least = pinned ? 0 : 2;
+      const out = { shape: p.shape.trim(), count: Number.isInteger(p.count) && p.count >= least ? p.count : least };
       if (examples) out.examples = (Array.isArray(p.examples) ? p.examples : []).filter((e) => typeof e === 'string' && e.trim());
+      const word = examples ? wordOf(p.word) : '';
+      if (word) out.word = word;
+      if (pinned) out.pinned = true;
       return out;
     })
-    .filter((p) => !examples || p.examples.length > 0);
+    .filter((p) => !examples || p.examples.length > 0 || p.pinned === true);
 }
 
 /**
@@ -469,6 +499,57 @@ export function mergeWorn(long, short, config) {
 }
 
 /**
+ * The long list after a long pass landed: the patterns the owner pinned in
+ * `current` first (never dropped, never replaced), then the pass's own
+ * patterns of `fresh` whose shape (whitespace collapsed, case ignored) is not
+ * pinned, filling what `room` (`variety.longMaxPatterns`) leaves beside the
+ * pins; `room` not an integer >= 0 caps nothing. Pure.
+ * @param {unknown} current  The stored long list's patterns.
+ * @param {unknown} fresh    The pass's patterns.
+ * @param {number} [room]
+ * @returns {object[]}
+ */
+export function carryPinned(current, fresh, room) {
+  const pinned = normalizePatterns(current).filter((p) => p.pinned === true);
+  const keys = new Set(pinned.map(shapeKey));
+  const own = normalizePatterns(fresh).filter((p) => p.pinned !== true && !keys.has(shapeKey(p)));
+  const cap = Number.isInteger(room) && room >= 0 ? Math.max(0, room - pinned.length) : own.length;
+  return [...pinned, ...own.slice(0, cap)];
+}
+
+/**
+ * `patterns` with `shape` pinned: a pattern of the same shape (whitespace
+ * collapsed, case ignored) is marked in place, else a new one `{ shape,
+ * examples: [], count: 0, pinned: true }` joins the pins, ahead of the
+ * pass's own patterns. `shape` is put on one line. Pure.
+ * @param {unknown} patterns
+ * @param {string} shape
+ * @returns {{ patterns: object[], added: boolean }}
+ */
+export function pinPattern(patterns, shape) {
+  const list = normalizePatterns(patterns);
+  const text = oneLine(shape);
+  const key = text.toLowerCase();
+  const existing = list.find((p) => shapeKey(p) === key);
+  if (existing) return { patterns: list.map((p) => (p === existing ? { ...p, pinned: true } : p)), added: false };
+  const entry = { shape: text, examples: [], count: 0, pinned: true };
+  return { patterns: [...list.filter((p) => p.pinned === true), entry, ...list.filter((p) => p.pinned !== true)], added: true };
+}
+
+/**
+ * `patterns` without the one of `shape` (whitespace collapsed, case ignored). Pure.
+ * @param {unknown} patterns
+ * @param {string} shape
+ * @returns {{ patterns: object[], removed: object|null }}
+ */
+export function dropPattern(patterns, shape) {
+  const list = normalizePatterns(patterns);
+  const key = oneLine(shape).toLowerCase();
+  const removed = list.find((p) => shapeKey(p) === key) ?? null;
+  return { patterns: removed ? list.filter((p) => p !== removed) : list, removed };
+}
+
+/**
  * The stored history of passes (guild memory `wornHistory`) made safe to
  * read: `{ at, channelId, lines, patterns: [{ shape, count }] }` (shapes only,
  * never examples), oldest first, broken entries dropped.
@@ -525,7 +606,7 @@ export function renderWorn(patterns, labels, config) {
   const settings = varietySettings(config);
   const list = normalizePatterns(patterns).slice(0, settings.maxPatterns + settings.longMaxPatterns);
   if (list.length === 0) return '';
-  const lines = list.map((p) => `- ${p.shape} (${p.examples.map((e) => `"${e}"`).join(', ')})`);
+  const lines = list.map((p) => (p.examples.length > 0 ? `- ${p.shape} (${p.examples.map((e) => `"${e}"`).join(', ')})` : `- ${p.shape}`));
   return [intro, ...lines].join('\n');
 }
 
@@ -576,7 +657,9 @@ export function renderVarietyReport(worn, history, config, now, wornLong = null)
   const lines = [varietyStatusLine(worn, config, now)];
   const listed = (patterns) => {
     if (patterns.length === 0) lines.push('  (nothing named)');
-    for (const p of patterns) lines.push(`  - ${p.shape} x${p.count}: ${p.examples.map((e) => `"${e}"`).join(', ')}`);
+    for (const p of patterns) {
+      lines.push(p.pinned === true ? `  - ${p.shape} (pinned)` : `  - ${p.shape} x${p.count}: ${p.examples.map((e) => `"${e}"`).join(', ')}`);
+    }
   };
   const current = normalizeWorn(worn);
   if (current?.at) {
@@ -586,6 +669,10 @@ export function renderVarietyReport(worn, history, config, now, wornLong = null)
   const long = normalizeWornLong(wornLong);
   if (long?.at) {
     lines.push(`long (${minuteUtc(long.at)} UTC, ${long.lines} lines):`);
+    listed(long.patterns);
+  } else if (long && long.patterns.length > 0) {
+    // Only the owner's pins so far: the long pass has not run yet.
+    lines.push('long (no pass yet):');
     listed(long.patterns);
   }
   const passes = normalizeWornHistory(history).reverse();

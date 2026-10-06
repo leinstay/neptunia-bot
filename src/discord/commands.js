@@ -114,6 +114,9 @@ function choicesOf(values) {
   return values.map((value) => ({ name: value, value }));
 }
 
+/** The lists of `/nep variety list|add|remove`. */
+const VARIETY_TYPES = Object.freeze(['pattern', 'filler']);
+
 const ROUTE_ROLES = MODEL_SET_ROLES;
 const PING_ROLES = Object.freeze([...ROUTE_ROLES, 'classifier']);
 
@@ -184,7 +187,39 @@ export function buildCommandTree(commandName) {
           ],
         },
         { type: SUBCOMMAND, name: 'reload', description: 'Reload config and prompts now.' },
-        { type: SUBCOMMAND, name: 'variety', description: 'Worn devices: latest list and history.' },
+        {
+          type: SUBCOMMAND_GROUP,
+          name: 'variety',
+          description: 'Worn patterns and filler words.',
+          options: [
+            { type: SUBCOMMAND, name: 'show', description: 'Worn devices: latest list and history.' },
+            {
+              type: SUBCOMMAND,
+              name: 'list',
+              description: 'Numbered patterns or fillers.',
+              options: [{ type: STRING, name: 'type', description: 'Which list.', required: true, choices: choicesOf(VARIETY_TYPES) }],
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'add',
+              description: 'Pin an entry (filler: trailing * = prefix).',
+              options: [
+                { type: STRING, name: 'type', description: 'Which list.', required: true, choices: choicesOf(VARIETY_TYPES) },
+                { type: STRING, name: 'text', description: 'Shape, or filler word/phrase.', required: true },
+              ],
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'remove',
+              description: 'Remove an entry by number or text.',
+              options: [
+                { type: STRING, name: 'type', description: 'Which list.', required: true, choices: choicesOf(VARIETY_TYPES) },
+                { type: INTEGER, name: 'id', description: 'Number from the list.', required: false, min_value: 1 },
+                { type: STRING, name: 'text', description: 'Or the entry text.', required: false },
+              ],
+            },
+          ],
+        },
         {
           type: SUBCOMMAND,
           name: 'pause',
@@ -879,7 +914,14 @@ const OPTION_MAPPERS = {
     userId: options.getUser('user')?.id,
   }),
   'access.list': () => ({}),
-  variety: () => ({}),
+  'variety.show': () => ({}),
+  'variety.list': (options) => ({ type: options.getString('type', true) }),
+  'variety.add': (options) => ({ type: options.getString('type', true), text: options.getString('text', true) }),
+  'variety.remove': (options) => ({
+    type: options.getString('type', true),
+    id: options.getInteger('id') ?? undefined,
+    text: options.getString('text') ?? undefined,
+  }),
 };
 
 function buildArgs(commandKey, interaction) {

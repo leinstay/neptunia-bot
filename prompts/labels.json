@@ -83,7 +83,7 @@
     "stickerBlind": "Stickers and custom emoji appear as a name — you cannot see what they depict.",
     "lottie": "Discord's built-in animated stickers are Lottie animations, not pictures — they are always only a name.",
     "customEmoji": "You can use this server's custom emoji by writing :name: exactly as they appear in the chat or the emoji list. The engine turns a known name into the real emoji; an unknown name stays as plain text.",
-    "gifs": "You can post one GIF per turn from the list, by handle. The list comes from what members share most. An unknown handle posts nothing.",
+    "gifs": "You can post one GIF per turn from the list, by handle. The list comes from what members share most. When one on the list says what your short line would say, send the GIF instead of the line. A GIF you posted recently is a repeat; you see your own recent messages in the chat, and a mark next to ones you sent within the last day. An unknown handle posts nothing.",
     "draw": "You can draw — hand a scene to your drawing sub-process and it produces a picture. Whether to draw is your call; you can refuse. You never see the result while it works, and you barely control the look: the style is the sub-process's own. The sub-process already knows what you look like, so when you are in the picture just mark it in the format — do not describe your own appearance. A drawing takes a while and is posted on its own after your words.",
     "drawSpent": "Your daily picture quota is spent. You cannot draw until tomorrow.",
     "drawSpentUser": "This person has used up their pictures for today.",
@@ -128,14 +128,15 @@
     "entry": "{title} — {text}"
   },
   "emoji": {
-    "header": "Custom emoji on this server:",
+    "header": "Custom emoji the chat uses most. An emoji in a line is part of how people talk here, one per message at most, when it fits. Not every message needs one.",
     "entry": ":{name}: — {text}",
     "entryNoText": ":{name}:"
   },
   "gifs": {
     "header": "GIFs the chat uses:",
     "entry": "{id} — {text}",
-    "entryNoText": "{id}"
+    "entryNoText": "{id}",
+    "ownMark": "(you, {ago})"
   },
   "lookup": {
     "header": "Looked up: {query}",

@@ -30,6 +30,8 @@
     "mentor": false,
     "variety": true,
     "varietyPrecompute": true,
+    "fillerGuard": true,
+    "patternGuard": true,
     "portraitRefresh": true,
     "recent": true,
     "memoryTwoStage": false,
@@ -284,8 +286,8 @@
     "openai": { "quality": "medium", "background": "auto", "moderation": "low" },
     "google": { "resolution": "1K" }
   },
-  "gifs": { "max": 40, "listChars": 70, "storeMax": 300, "halfLifeDays": 30, "maxPerDay": 40, "backfillMessages": 500, "backfillDescribe": 20, "recachePerRun": 50 },
-  "variety": { "window": 16, "recentMinutes": 180, "minLines": 3, "contextChars": 120, "maxPatterns": 4, "shapeChars": 140, "maxOutputTokens": 500, "timeoutMs": 8000, "requestTimeoutMs": 30000, "history": 20, "longLines": 300, "longEveryHours": 6, "longMinLines": 60, "longMaxPatterns": 3 },
+  "gifs": { "max": 40, "listChars": 70, "ownMarkHours": 24, "storeMax": 300, "halfLifeDays": 30, "maxPerDay": 40, "backfillMessages": 500, "backfillDescribe": 20, "recachePerRun": 50 },
+  "variety": { "window": 16, "recentMinutes": 180, "minLines": 3, "contextChars": 120, "maxPatterns": 4, "shapeChars": 140, "maxOutputTokens": 500, "timeoutMs": 8000, "requestTimeoutMs": 30000, "history": 20, "longLines": 300, "longEveryHours": 6, "longMinLines": 60, "longMaxPatterns": 3, "fillers": { "cooldownHours": 36, "cooldownMessages": 300, "maxOutputTokens": 400, "max": 12, "halfLifeDays": 14 }, "patternCheck": { "minChars": 15, "maxOutputTokens": 40 } },
   "private": { "minAffinity": 5, "maxPerUserPerDay": 100, "maxPerOwnerPerDay": 200, "purgeMaxMessages": 5000 },
   "mentor": {
     "model": null,

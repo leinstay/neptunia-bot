@@ -222,3 +222,38 @@ test('buildRequest: a library gif in the chat carries its handle; a reposted lin
   assert.ok(text.includes('[gif g2: a cat dancing]'));
   assert.ok(text.includes('[gif g3: Danse 3]'));
 });
+
+const HOUR = 3_600_000;
+
+/** THREE with g2 posted by the persona `agoMs` before NOW and g3 posted 30 h before. */
+function withOwnPosts(agoMs) {
+  return library([
+    linkEntry(1, 2),
+    { ...linkEntry(2, 9), ownLast: NOW - agoMs, ownUses: 2 },
+    { ...linkEntry(3, 5), ownLast: NOW - 30 * HOUR, ownUses: 1 },
+  ]);
+}
+
+test('buildRequest: <gifs> marks a gif the persona posted within gifs.ownMarkHours with labels.gifs.ownMark', () => {
+  const config = fakeConfig({ gifs: { ownMarkHours: 24 } });
+  const lines = gifsBlock(buildRequest(baseInput({ config, gifs: withOwnPosts(2 * HOUR) })));
+  assert.deepEqual(lines, [labels.gifs.header, 'g2 (you, 2 h)', 'g3', 'g1']);
+
+  const mediaCache = { k2: { text: 'a cat', ts: NOW } };
+  const captioned = gifsBlock(buildRequest(baseInput({ config, gifs: withOwnPosts(5 * 60_000), mediaCache })));
+  assert.equal(captioned[1], 'g2 -- a cat (you, 5 min)');
+});
+
+test('buildRequest: gifs.ownMarkHours 0 marks nothing', () => {
+  const config = fakeConfig({ gifs: { ownMarkHours: 0 } });
+  const lines = gifsBlock(buildRequest(baseInput({ config, gifs: withOwnPosts(2 * HOUR) })));
+  assert.deepEqual(lines, [labels.gifs.header, 'g2', 'g3', 'g1']);
+});
+
+test('buildRequest: a labels.json without gifs.ownMark marks nothing', () => {
+  const { ownMark, ...gifsLabels } = labels.gifs;
+  const older = { ...labels, gifs: gifsLabels };
+  const config = fakeConfig({ gifs: { ownMarkHours: 24 } });
+  const lines = gifsBlock(buildRequest(baseInput({ config, gifs: withOwnPosts(2 * HOUR), prompts: { ...baseInput().prompts, labels: older } })));
+  assert.deepEqual(lines, [older.gifs.header, 'g2', 'g3', 'g1']);
+});

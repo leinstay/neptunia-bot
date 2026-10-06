@@ -9,11 +9,14 @@
 // the shared one of src/memory/ranking.js (as for custom emoji): `count` is
 // the weight, `last` (the ts of the latest use) drives the decay. A history
 // recount resets every count to 0 and counts again (resetGifCounts), so
-// handles survive it; an entry left at 0 ranks below every used one.
+// handles survive it; an entry left at 0 ranks below every used one. The
+// persona's own posts of a GIF are kept apart (markOwnGif: `ownLast`, the ts
+// of its latest post, and `ownUses`), never counted into `count` and never
+// reset, so the `<gifs>` list can show it which ones it posted lately.
 //
 // Shape: `{ nextId, entries: { [key]: { id, kind: 'link'|'attachment', url,
-// site?, name?, itemId, messageId, channelId, count, last, firstSeen } },
-// backfill }`. `messageId`/`channelId` point at the latest message carrying
+// site?, name?, itemId, messageId, channelId, count, last, firstSeen,
+// ownLast?, ownUses? } }, backfill }`. `messageId`/`channelId` point at the latest message carrying
 // the GIF, so the poster can re-fetch an attachment's fresh CDN URL (Discord
 // attachment URLs expire).
 
@@ -65,7 +68,8 @@ export function emptyGifs() {
  * `url` or a finite `count` of at least 0 is dropped (count 0 is a reset
  * entry, see resetGifCounts); `last`/`firstSeen` default to 0 /
  * `last`; `itemId` defaults to the key; optional `site`/`name` are kept only
- * as strings. A missing, malformed or duplicate handle gets a fresh one;
+ * as strings, optional `ownLast` only as a positive finite number and `ownUses`
+ * only as a count of at least 1 (floored). A missing, malformed or duplicate handle gets a fresh one;
  * `nextId` always ends above every handle in use. Never mutates `value`.
  * @param {unknown} value
  * @returns {{ nextId: number, entries: Record<string, object>, backfill: object|null }}
@@ -94,6 +98,8 @@ export function normalizeGifs(value) {
       count,
       last,
       firstSeen: Number.isFinite(entry.firstSeen) ? entry.firstSeen : last,
+      ...(Number.isFinite(entry.ownLast) && entry.ownLast > 0 ? { ownLast: entry.ownLast } : {}),
+      ...(Number.isFinite(entry.ownUses) && entry.ownUses >= 1 ? { ownUses: Math.floor(entry.ownUses) } : {}),
     };
     const match = HANDLE_RE.exec(out.id);
     if (match) maxHandle = Math.max(maxHandle, Number(match[1]));
@@ -179,6 +185,24 @@ export function resetGifCounts(gifs) {
   const next = normalizeGifs(gifs);
   for (const entry of Object.values(next.entries)) entry.count = 0;
   return next;
+}
+
+/**
+ * `gifs` with the persona's own post of the entry under `key` recorded:
+ * `ownLast` set to `ts`, `ownUses` one higher. The members' `count`/`last`
+ * are not touched. `marked` is false (and the library unchanged) when `key`
+ * is not in it. Never mutates `gifs`.
+ * @param {unknown} gifs  A stored library (normalised here).
+ * @param {string} key    The entry's library key (findGif's `key`).
+ * @param {number} ts     When the persona posted it (epoch ms).
+ * @returns {{ gifs: { nextId: number, entries: Record<string, object>, backfill: object|null }, marked: boolean }}
+ */
+export function markOwnGif(gifs, key, ts) {
+  const next = normalizeGifs(gifs);
+  const entry = typeof key === 'string' ? next.entries[key] : undefined;
+  if (!entry || !Number.isFinite(ts)) return { gifs: next, marked: false };
+  next.entries[key] = { ...entry, ownLast: ts, ownUses: (entry.ownUses ?? 0) + 1 };
+  return { gifs: next, marked: true };
 }
 
 /**
