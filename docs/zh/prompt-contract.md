@@ -304,7 +304,7 @@ task.added                               {added}: later messages from the author
 `features.reactions: false` 移除 `<react>`，`features.multiMessage: false` 仅保留第一个 `<msg>`；
 `features.gifs: false` 或空库移除 `<gif>`；`features.imageGeneration: false` 或无图像客户端时移除 `<draw>`；`drawFailed` 回合中 `<draw>` 也被移除。提示无需知道这些。
 
-`format.stripDashes` 开启时（默认 true；缺失 = 开；仅 `false` 关闭），`<msg>` 文本中的所有全角破折号和半角破折号在发送前被删除，破折号及其周围的空格变为一个空格。清除后变空的消息不发送。连字符保留。`<draw>`、`<react>`、`<gif>` 和回复 id 不受影响。日志记录为 `turn: dashes stripped`，包含 `channel` 和 `count`，文本本身不记录。
+`format.stripDashes` 开启时（默认 true；缺失 = 开；仅 `false` 关闭），`<msg>` 文本中的所有全角破折号和半角破折号在发送前被删除，破折号及其周围的空格变为一个空格，且每个尖角引号（`«`、`»`）替换为普通 `"`。清除后变空的消息不发送。连字符保留。`<draw>`、`<react>`、`<gif>` 和回复 id 不受影响。日志记录为 `turn: dashes stripped`，包含 `channel` 和 `count`，文本本身不记录。
 
 ## 分析器
 

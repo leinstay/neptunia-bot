@@ -315,7 +315,7 @@ task.added                               {added}: later messages from the author
 `features.reactions: false` は `<react>` を無効化、`features.multiMessage: false` は最初の `<msg>` のみを保持。
 `features.imageGeneration: false` またはイメージクライアントなしの場合は `<draw>` を無効化。`drawFailed` ターンでも `<draw>` は無効化されます。プロンプトが知る必要はありません。
 
-`format.stripDashes` がオン（デフォルト true、未設定 = オン、`false` のみオフにする）の場合、`<msg>` テキストのすべてのエムダッシュとエンダッシュが投稿前に除去される。ダッシュとその周囲のスペースは 1 つのスペースになる。除去後に空になったメッセージは送信されない。ハイフンはそのまま残る。`<draw>`、`<react>`、`<gif>` とリプライ id は影響を受けない。`turn: dashes stripped` として `channel` と `count` でログされ、テキスト自体はログされない。
+`format.stripDashes` がオン（デフォルト true、未設定 = オン、`false` のみオフにする）の場合、`<msg>` テキストのすべてのエムダッシュとエンダッシュが投稿前に除去される。ダッシュとその周囲のスペースは 1 つのスペースになり、ギュメ（`«`、`»`）はプレーンな `"` に置換される。除去後に空になったメッセージは送信されない。ハイフンはそのまま残る。`<draw>`、`<react>`、`<gif>` とリプライ id は影響を受けない。`turn: dashes stripped` として `channel` と `count` でログされ、テキスト自体はログされない。
 
 ## アナライザー
 
