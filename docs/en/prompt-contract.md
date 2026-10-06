@@ -85,7 +85,7 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 | `<senses>` | What the persona can and cannot perceive RIGHT NOW, generated from the live config: which pictures they see themselves, which come as a helper's description, what they are blind and deaf to. So the persona never pretends to have watched a video and can joke about it in their own voice |
 | `<about_chat>` | How people talk here, how they start and cut into conversations, in-jokes, things people taught the persona |
 | `<emoji>` | Custom emoji the persona can use (`features.customEmoji`): at most `context.customEmoji.max` entries, ranked by member usage. Each carries `:name:` and the helper's caption when one is cached |
-| `<gifs>` | GIFs the persona can post (`features.gifs`): at most `gifs.max` (default 40) entries from the library, ranked by recency-weighted use. Each carries the handle (`g1`, `g2`, …) and the helper's caption when one is cached, cut to `gifs.listChars` (default 70; `0` = whole) at a word boundary so more entries fit the budget |
+| `<gifs>` | GIFs the persona can post (`features.gifs`): at most `gifs.max` (default 40) entries from the library, ranked by recency-weighted use. Each carries the handle (`g1`, `g2`, …) and the helper's caption when one is cached, cut to `gifs.listChars` (default 70; `0` = whole) at a word boundary so more entries fit the budget. Each entry also stores when and how often the persona posted it (`ownLast`, `ownUses`); one posted within `gifs.ownMarkHours` (default 24; `0` = off) carries `gifs.ownMark` with a short relative time |
 | `<server>` | The CURRENT channel in full (Discord category and topic, purpose, what people write, tone, activity, last message, top writers; marked with `labels.server.currentMark`) plus only the neighbour channels that fed `<other_channels>` this turn; no other channel |
 | `<lore>` | Server lore entries whose keys occur in the recent messages (plus entries marked always): events, recurring characters, long-running stories. Like a lorebook: hundreds may exist, only the relevant few are shown |
 | `<self_facts>` | What the persona has claimed about themselves |
@@ -248,6 +248,7 @@ emoji.entryNoText                        {name}: one emoji without a caption
 gifs.header                              introduces the GIF library list
 gifs.entry                               {id} {text}: one GIF with a caption
 gifs.entryNoText                         {id}: one GIF without a caption
+gifs.ownMark                             {ago}: appended to an entry the persona posted within gifs.ownMarkHours
 affinity.bands.hostile | dislike | cool | neutral | warm | fond | devoted
                                          thresholds in code: ≤-60 · ≤-25 · ≤-8 · <8 · <25 · <60 · ≥60
 affinity.ownerSet                        reason shown when the owner set a score by hand without giving one

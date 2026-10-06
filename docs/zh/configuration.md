@@ -265,6 +265,7 @@ GIF 库（`features.gifs`）的设置。使用次数在每条消息到达时统�
 | `backfillMessages` | `500` | 启动时从每个频道历史中读取的消息数以初始化库 |
 | `backfillDescribe` | `20` | 回填后立即获取说明的排名最高 GIF 数 |
 | `recachePerRun` | `50` | 每次 `/nep gifs recache` 运行时重新描述的库 GIF 数量。库外的单帧说明立即删除；然后在后台从最旧的开始观看最多此数量的库条目 |
+| `ownMarkHours` | `24` | 角色发送 GIF 后该条目在 `<gifs>` 列表中显示标记的时间（小时）。`0` 关闭标记 |
 
 ## `media`
 
