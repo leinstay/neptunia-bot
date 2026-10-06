@@ -1,10 +1,12 @@
 // The GIF picker's pure side. The `<gifs>` block of a turn shows only the top
 // of the library by popularity, so a GIF that carries the reaction of a short
-// reply is rarely in front of the persona. After the reply is written, a short
-// one (at most `gifs.pick.maxChars` code points) goes to a cheap classifier
-// (prompts/gif-pick.md) together with the WHOLE captioned library; when it names
-// a handle, the GIF is posted instead of the text (src/behavior/turn.js). This
-// module decides when the picker runs, renders the library it reads and reads
+// reply is rarely in front of the persona. After the reply is written, its
+// first message, when short (at most `gifs.pick.maxChars` code points), goes
+// to a cheap classifier (prompts/gif-pick.md) together with the chat line it
+// answers and the WHOLE captioned library; when it names a handle, the GIF is
+// posted in place of that first message and the rest follow as written
+// (src/behavior/turn.js). This module decides when the picker runs, chooses
+// the chat lines of its `<context>`, renders the library it reads and reads
 // its one-line answer.
 
 import { isPlainObject } from '../config.js';
@@ -12,15 +14,15 @@ import { gifCaption, gifLine } from './prompt.js';
 
 /** config.json's `gifs.pick` values: the fallback of a missing or unusable key. */
 export const GIF_PICK_DEFAULTS = Object.freeze({
-  maxChars: 60,
+  maxChars: 160,
   contextMessages: 4,
   maxOutputTokens: 60,
 });
 
 /**
  * The `gifs.pick` settings of the live config, key by key: `maxChars` (the
- * longest reply, in code points, the picker may replace; a finite number >= 0,
- * floored), `contextMessages` (the chat lines its `<context>` shows; >= 0,
+ * longest message, in code points, the picker may replace; a finite number >= 0,
+ * floored), `contextMessages` (the last chat lines its `<context>` shows; >= 0,
  * floored) and `maxOutputTokens` (> 0, floored); a missing or unusable key
  * takes config.json's value (GIF_PICK_DEFAULTS).
  * @param {object} config  The whole live config.
@@ -33,10 +35,10 @@ export function gifPickSettings(config) {
 }
 
 /**
- * Whether the picker runs on a reply: its text (the messages joined by a blank
- * line) is not blank and holds at most `settings.maxChars` code points, the
- * turn posts no GIF of its own, and the library has at least one captioned
- * entry. Pure.
+ * Whether the picker runs on a reply: the text it would replace (the turn's
+ * first message) is not blank and holds at most `settings.maxChars` code
+ * points, the turn posts no GIF of its own, and the library has at least one
+ * captioned entry. Pure.
  * @param {{ text: string, postsGif: boolean, captioned: number }|null} reply
  *   `captioned`: how many entries renderGifLibrary listed.
  * @param {{ maxChars: number }} settings  gifPickSettings.
@@ -50,34 +52,60 @@ export function pickCandidates(reply, settings) {
 }
 
 /**
- * The entries of `entries` that have a caption (src/behavior/prompt.js#gifCaption,
- * cut to `listChars`), in the order given: the ones the picker lists. Pure.
+ * The chat lines of the picker's `<context>`, oldest first: the last
+ * `contextMessages` lines of `history`, and before them the line the reply
+ * answers (`answeredId`) when it is in `history` but older than those; with
+ * `answeredIndex` its 1-based place among the returned lines (the `#n` the
+ * transcript gives it), or null when the answered line is unknown or not in
+ * `history`. `contextMessages` 0 -> no lines at all. Pure.
+ * @param {object[]} history  The turn's chat lines, oldest first (each with an `id`).
+ * @param {{ contextMessages: number, answeredId?: string|null }} options
+ * @returns {{ messages: object[], answeredIndex: number|null }}
+ */
+export function pickContext(history, { contextMessages, answeredId = null }) {
+  const lines = Array.isArray(history) ? history : [];
+  if (!(contextMessages > 0) || lines.length === 0) return { messages: [], answeredIndex: null };
+  const last = lines.slice(-contextMessages);
+  const answered = answeredId == null ? null : lines.find((message) => message?.id === answeredId);
+  if (!answered) return { messages: last, answeredIndex: null };
+  const inLast = last.indexOf(answered);
+  if (inLast !== -1) return { messages: last, answeredIndex: inLast + 1 };
+  return { messages: [answered, ...last], answeredIndex: 1 };
+}
+
+/**
+ * The entries of `entries` that have a caption (src/behavior/prompt.js#gifCaption),
+ * in the order given: the ones the picker lists. Pure.
  * @param {object[]} entries  The library's entries (src/memory/gifs.js#rankGifs).
  * @param {object|null} mediaCache  The describer cache (store.getMediaCache), read only.
- * @param {number} listChars  `gifs.listChars` (0 = whole caption).
+ * @param {number} actionChars  `gifs.actionChars` (0 = whole caption).
  * @returns {object[]}
  */
-export function captionedEntries(entries, mediaCache, listChars) {
-  return Array.isArray(entries) ? entries.filter((entry) => gifCaption(entry, mediaCache, listChars) !== '') : [];
+export function captionedEntries(entries, mediaCache, actionChars) {
+  return Array.isArray(entries) ? entries.filter((entry) => gifCaption(entry, mediaCache, actionChars) !== '') : [];
 }
 
 /**
  * The picker's `<gifs>` lines: one per entry of `entries` that has a caption
  * (src/behavior/prompt.js#gifCaption), in the order given, rendered as the
- * turn's `<gifs>` block renders an entry (src/behavior/prompt.js#gifLine:
+ * turn's `<gifs>` block renders an entry (src/behavior/prompt.js#gifLine: the
+ * three fields through `labels.gifs.entryFields`, an older caption through
  * `labels.gifs.entry`, the persona's own-post mark within `ownMarkHours`);
  * no header, no top slice. Entries without a caption are left out; `[]` when
  * the labels carry no `gifs.entry`. Pure.
  * @param {object[]} entries  The library's entries (src/memory/gifs.js#rankGifs).
  * @param {object|null} mediaCache  The describer cache (store.getMediaCache), read only.
  * @param {object} labels
- * @param {{ now: number, ownMarkHours: number, listChars: number }} options
- *   `listChars`: `gifs.listChars` (0 = whole caption).
+ * @param {{ now: number, ownMarkHours: number, reactionChars: number, actionChars: number }} options
+ *   `reactionChars` / `actionChars`: `gifs.reactionChars` / `gifs.actionChars`
+ *   (src/behavior/prompt.js#gifFieldChars; 0 = no cut).
  * @returns {string[]}
  */
-export function renderGifLibrary(entries, mediaCache, labels, { now, ownMarkHours, listChars }) {
+export function renderGifLibrary(entries, mediaCache, labels, { now, ownMarkHours, reactionChars, actionChars }) {
   if (!labels?.gifs?.entry) return [];
-  return captionedEntries(entries, mediaCache, listChars).map((entry) => gifLine(entry, mediaCache, labels, { listChars, ownMarkHours, now }));
+  return captionedEntries(entries, mediaCache, actionChars).map((entry) =>
+    gifLine(entry, mediaCache, labels, { reactionChars, actionChars, ownMarkHours, now }),
+  );
 }
 
 /**

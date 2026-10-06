@@ -76,7 +76,10 @@
 // (`state.data.gifWatchDay` / `gifWatchCount`, `media.gif.maxPerDay`): a GIF
 // never takes a video slot, nor a video a GIF one. The caption is cached under the
 // GIF's own item id like a picture's (so the transcript, the analyzer and
-// the GIF library read it unchanged), marked `watched: true`. A GIF that
+// the GIF library read it unchanged), marked `watched: true`, with the
+// answer's three fields beside it (`reaction`, `action`, `screen`: what reply
+// the clip expresses, what visibly happens, its on-screen text; see
+// parseGifDescription) for the `<gifs>` list. A GIF that
 // cannot be watched -- the switches, no animation, a spent daily rail, a
 // failed fetch, conversion or request -- gets the one-frame description as
 // before (marked `gif: true`, plus `watchFailed` when a watch failed). A
@@ -93,9 +96,9 @@ import {
   railReason,
   VIDEO_TOKENS_PER_SECOND_FALLBACK as STATIC_TOKENS_PER_SECOND_FALLBACK,
 } from '../llm/openrouter.js';
-import { clampText, oneLine } from './clamp.js';
+import { clampText, clampWithEllipsis, oneLine } from './clamp.js';
 import { classifierMediaModel, classifierVideoModel } from '../behavior/mention.js';
-import { fillPromptTemplate } from '../behavior/prompt.js';
+import { fillPromptTemplate, gifFieldChars } from '../behavior/prompt.js';
 import { createYoutubeCheck, isVideoVisionOn } from './youtube-check.js';
 import { gifWatchBlocker as gifWatchBlockerOf, gifWatchCap, gifWatchPrompt } from './gif-watch.js';
 import { log } from '../log.js';
@@ -147,6 +150,71 @@ function isVideoCandidate(item) {
 /** Collapse every run of whitespace to one space, then cap at `maxChars` on a word boundary. */
 function cleanVideoText(raw, maxChars) {
   return clampText(oneLine(raw), maxChars, { tolerance: 1 });
+}
+
+// One labelled line of a GIF watch's answer (prompts/describe-gif.md): `reaction:`, `action:`
+// or `text:`, in any case, a list mark or bold markers around the label tolerated.
+const GIF_FIELD_LINE = /^[\s*_•-]*(reaction|action|text)[\s*_]*:[\s*_]*(.*)$/i;
+// The answer's word for an empty field, with an optional full stop.
+const GIF_NONE = /^none\.?$/i;
+// One pair of quotes around a whole value (the on-screen text is often quoted).
+const QUOTE_PAIRS = [['"', '"'], ['«', '»'], ['“', '”'], ['„', '“'], ["'", "'"], ['‘', '’']];
+
+/** A field's value on one line, without one pair of surrounding quotes; '' for "none". */
+function gifFieldValue(raw) {
+  let value = oneLine(raw);
+  for (const [open, close] of QUOTE_PAIRS) {
+    if (value.length >= 2 && value.startsWith(open) && value.endsWith(close)) {
+      value = value.slice(open.length, -close.length).trim();
+      break;
+    }
+  }
+  return GIF_NONE.test(value) ? '' : value;
+}
+
+/**
+ * A GIF watch's answer read as its three fields (prompts/describe-gif.md):
+ * `reaction:`, `action:` and `text:` lines, labels in any case and any order,
+ * a missing line read as empty, `none` read as empty, an unlabelled line after
+ * a labelled one continuing that field. An answer with no label at all is the
+ * action alone (an older prompt's one-line account, or describe-video's).
+ * `reaction` and `screen` (the on-screen text) are cut to `reactionChars`,
+ * `action` to `actionChars` (src/memory/clamp.js#clampWithEllipsis: a word
+ * boundary, an ellipsis; 0 = no cut); `text`, the line the transcript and every other
+ * reader of the cache show, is the whole action -- the reaction, else the
+ * on-screen text, when the answer gives no action -- on one line under
+ * `descriptionChars` (clampText, a hard limit). Null when every field is
+ * empty. Pure.
+ * @param {unknown} raw  The model's answer.
+ * @param {{ reactionChars: number, actionChars: number, descriptionChars: number }} caps
+ * @returns {{ text: string, reaction: string, action: string, screen: string }|null}
+ */
+export function parseGifDescription(raw, { reactionChars, actionChars, descriptionChars }) {
+  const source = String(raw ?? '');
+  const fields = { reaction: [], action: [], text: [] };
+  let current = null;
+  let labelled = false;
+  for (const line of source.split(/\r?\n/)) {
+    const match = GIF_FIELD_LINE.exec(line);
+    if (match) {
+      current = match[1].toLowerCase();
+      labelled = true;
+      fields[current].push(match[2]);
+    } else if (current && line.trim() !== '') {
+      fields[current].push(line);
+    }
+  }
+  const reactionWhole = labelled ? gifFieldValue(fields.reaction.join(' ')) : '';
+  const actionWhole = labelled ? gifFieldValue(fields.action.join(' ')) : oneLine(source);
+  const screenWhole = labelled ? gifFieldValue(fields.text.join(' ')) : '';
+  const text = clampText(actionWhole || reactionWhole || screenWhole, descriptionChars, { tolerance: 1 });
+  if (!text) return null;
+  return {
+    text,
+    reaction: clampWithEllipsis(reactionWhole, reactionChars),
+    action: clampWithEllipsis(actionWhole, actionChars),
+    screen: clampWithEllipsis(screenWhole, reactionChars),
+  };
 }
 
 /** A positive number from the config, else `fallback`. */
@@ -482,8 +550,10 @@ export function createDescriber({
    * else the `describe-video` prompt with `{{maxChars}}` alone as before;
    * under the video token cap and output budget, and a slot of the GIF's own
    * `media.gif.maxPerDay` (never the video one) reserved before the fetch and
-   * kept on failure. A watched caption is cached under the GIF's own item id
-   * as `{ text, ts, watched: true, gif: true }`; nothing is cached otherwise.
+   * kept on failure. The answer is read as three fields (parseGifDescription,
+   * `gifs.reactionChars` / `gifs.actionChars` read now) and cached under the
+   * GIF's own item id as `{ text, reaction, action, screen, ts, watched: true,
+   * gif: true }`; nothing is cached otherwise.
    * Resolves `{ state: 'watched', text, usage, estimated }`, `{ state:
    * 'failed', reason }` (the fetch, the conversion, the request or an empty
    * answer) or `{ state: 'unavailable', reason: 'daily'|'daily-cap' }` (a
@@ -542,9 +612,10 @@ export function createDescriber({
       return report({ state: 'failed', reason }, { ...sizes, status: err.statusCode });
     }
 
-    const text = cleanVideoText(completion.text, descriptionChars);
-    if (!text) return report({ state: 'failed', reason: 'empty' }, sizes);
-    putVideoEntry(guildId, item.itemId, { text, ts: now(), watched: true, gif: true });
+    const fields = parseGifDescription(completion.text, { ...gifFieldChars(hot.config.gifs), descriptionChars });
+    if (!fields) return report({ state: 'failed', reason: 'empty' }, sizes);
+    const { text, reaction, action, screen } = fields;
+    putVideoEntry(guildId, item.itemId, { text, reaction, action, screen, ts: now(), watched: true, gif: true });
     report({ state: 'watched' }, sizes);
     return { state: 'watched', text, usage: completion.usage ?? null, estimated: completion.estimated ?? 0 };
   }
@@ -593,8 +664,10 @@ export function createDescriber({
 
   /**
    * Re-describe one GIF by watching it, for the recache
-   * (src/memory/gif-recache.js): an entry already watched is served from the
-   * cache; any other cached caption (a one-frame one) is ignored and, when
+   * (src/memory/gif-recache.js): an entry already watched with its three
+   * fields (`reaction` present) is served from the cache; any other cached
+   * caption (a one-frame one, or a watched one of the older one-line format)
+   * is ignored and, when
    * the watch succeeds, replaced -- under the same item id, so nothing else
    * has to change. A failed watch never falls back to one frame here: the
    * old caption stays and the entry is marked `watchFailed` (a GIF with no
@@ -609,7 +682,10 @@ export function createDescriber({
     const blocker = gifWatchBlocker();
     if (blocker !== null) return { state: 'unavailable', reason: blocker };
     const cached = store.getMediaCache(guildId)[item.itemId];
-    if (cached?.watched && typeof cached.text === 'string') return { state: 'watched', text: cached.text, cached: true };
+    // An old-format watched entry (no `reaction` field) is watched again for its three fields.
+    if (cached?.watched && typeof cached.text === 'string' && typeof cached.reaction === 'string') {
+      return { state: 'watched', text: cached.text, cached: true };
+    }
     if (!gifAnimationSource(item)) {
       markGifWatchFailed(guildId, item.itemId);
       log.info('describe: gif', { state: 'failed', reason: 'source' });

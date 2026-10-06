@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { createGifRecache, gifCaptionCounts, gifCaptionState, oneFrameGifKeys, recacheQueue } from '../src/memory/gif-recache.js';
+import { createGifRecache, gifCaptionCounts, gifCaptionState, gifFormatCounts, oneFrameGifKeys, recacheQueue } from '../src/memory/gif-recache.js';
 import { createStore } from '../src/memory/store.js';
 
 const T0 = Date.UTC(2026, 8, 1);
@@ -68,11 +68,57 @@ test('gifCaptionCounts: counts the library entries by their caption state', () =
   assert.deepEqual(gifCaptionCounts(gifs, cache), { watched: 1, 'one-frame': 1, failed: 1, none: 2 });
 });
 
+test('gifFormatCounts: watched with fields, watched in the old format, unwatched', () => {
+  const gifs = library([linkEntry(1), linkEntry(2), linkEntry(3), linkEntry(4), linkEntry(5)]);
+  const cache = {
+    'm1#e0': { text: 'watched', reaction: '', action: 'watched', screen: '', ts: 1, watched: true },
+    'm2#e0': { text: 'watched', ts: 1, watched: true },
+    'm3#e0': { text: 'a still', ts: 1 },
+    'm4#e0': { text: 'a still', ts: 1, watchFailed: 3 },
+  };
+  assert.deepEqual(gifFormatCounts(gifs, cache), { fields: 1, oldFormat: 1, unwatched: 3 });
+});
+
+test('recacheQueue: an old-format watched entry (no reaction field) is queued with the rest, oldest first', () => {
+  const gifs = library([linkEntry(1), linkEntry(2), linkEntry(3), linkEntry(4)]);
+  const cache = {
+    'm1#e0': { text: 'watched long ago', ts: 50, watched: true, gif: true },
+    'm2#e0': { text: 'watched', reaction: 'agreement', action: 'watched', screen: '', ts: 10, watched: true, gif: true },
+    'm3#e0': { text: 'a still', ts: 100 },
+    'm4#e0': { text: 'watched lately', ts: 500, watched: true, gif: true },
+  };
+  assert.deepEqual(recacheQueue(gifs, cache, 10).map((entry) => entry.id), ['g1', 'g3', 'g4'], 'the three-field entry is done');
+  assert.deepEqual(recacheQueue(gifs, cache, 2).map((entry) => entry.id), ['g1', 'g3'], 'under the same per-run cap');
+  const failed = { ...cache, 'm1#e0': { ...cache['m1#e0'], watchFailed: 900 } };
+  assert.deepEqual(recacheQueue(gifs, failed, 10).map((entry) => entry.id), ['g3', 'g4', 'g1'], 'a failed re-watch goes to the back');
+});
+
+test('gif recache: old-format watched captions migrate over runs and the describer is asked for them', async () => {
+  await withStore(async (store) => {
+    seed(store, [linkEntry(1), linkEntry(2)], {
+      'm1#e0': { text: 'watched before', ts: 200, watched: true, gif: true },
+      'm2#e0': { text: 'watched before', ts: 100, watched: true, gif: true },
+    });
+    const describer = fakeDescriber(store);
+    const log = silentLog();
+    const recache = createGifRecache({ hot: fakeHot({ recachePerRun: 1 }), store, client: fakeClient([rawGifMessage(1), rawGifMessage(2)]), describer, log });
+    assert.deepEqual(recache.start('g1'), { ok: true, dropped: 0, queued: 1 });
+    await recache.waitIdle();
+    assert.deepEqual(recache.start('g1'), { ok: true, dropped: 0, queued: 1 });
+    await recache.waitIdle();
+    assert.deepEqual(recache.start('g1'), { ok: true, dropped: 0, queued: 0 });
+    await recache.waitIdle();
+    assert.deepEqual(describer.calls.map((c) => c.item.itemId), ['m2#e0', 'm1#e0'], 'oldest first, one per run');
+    const started = log.entries.filter((entry) => entry.message === 'gif-recache: started').map((entry) => entry.fields);
+    assert.deepEqual(started[0], { dropped: 0, queued: 1 }, 'counts only');
+  });
+});
+
 test('recacheQueue: never-described first, then oldest-described; watched skipped; capped', () => {
   const gifs = library([linkEntry(1), linkEntry(2), linkEntry(3), linkEntry(4), linkEntry(5)]);
   const cache = {
     'm1#e0': { text: 'a still', ts: 300 },
-    'm2#e0': { text: 'watched', ts: 1, watched: true },
+    'm2#e0': { text: 'watched', reaction: '', action: 'watched', screen: '', ts: 1, watched: true },
     'm3#e0': { text: 'a still', ts: 100 },
     'm4#e0': { text: 'a still', ts: 50, watchFailed: 400 },
   };
@@ -147,7 +193,9 @@ function fakeDescriber(store, { outcome, blocker = null, gate } = {}) {
       calls.push({ guildId, item, opts });
       if (gate) await gate();
       const result = outcome ? outcome(item) : { state: 'watched', text: `watched ${item.itemId}` };
-      if (result.state === 'watched') store.getMediaCache(guildId)[item.itemId] = { text: result.text, ts: T0, watched: true, gif: true };
+      if (result.state === 'watched') {
+        store.getMediaCache(guildId)[item.itemId] = { text: result.text, reaction: '', action: result.text, screen: '', ts: T0, watched: true, gif: true };
+      }
       return result;
     },
   };

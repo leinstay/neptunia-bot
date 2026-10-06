@@ -37,7 +37,7 @@ import { normalizeTopic } from './memory/interests.js';
 import { applyAliasOps } from './memory/aliases.js';
 import { rankEmojiUsage } from './memory/emoji-usage.js';
 import { rankGifs } from './memory/gifs.js';
-import { gifCaptionCounts } from './memory/gif-recache.js';
+import { gifCaptionCounts, gifFormatCounts } from './memory/gif-recache.js';
 import { gifPostsToday, gifWatchesToday } from './memory/gif-watch.js';
 import { commandKeys, leafPaths, MEMORY_SHOW_SECTIONS, MODEL_ROLES, MODEL_SET_PATHS, MODEL_SET_ROLES } from './discord/commands.js';
 import {
@@ -3130,7 +3130,8 @@ export function createAdmin({
    * today against `media.gif.maxPerDay` (src/memory/gif-watch.js), and -- last, unless the
    * library is empty and no recache runs -- how the library's captions stand (watched /
    * one-frame / failed watch / none, see src/memory/gif-recache.js#gifCaptionCounts) with a
-   * note while a recache runs. */
+   * note while a recache runs, then the move to three-field captions (watched with fields /
+   * watched in the old format, still to re-describe / unwatched, gifFormatCounts). Counts only. */
   function cmdGifsStatus(_args, context) {
     freshenIfPaused();
     const guildId = requireGuildId(context);
@@ -3148,6 +3149,7 @@ export function createAdmin({
     const posts = gifPostsToday(data, hot.config, today);
     const watches = gifWatchesToday(data, hot.config, today);
     const captions = gifCaptionCounts(library, cache);
+    const format = gifFormatCounts(library, cache);
     const recaching = gifRecache?.isRunning?.() ? ' (recache running now)' : '';
     return [
       `library: ${ranked.length} gifs`,
@@ -3160,7 +3162,10 @@ export function createAdmin({
       `watched today: ${watches.used}/${watches.cap}`,
       // Nothing to count in an empty library, unless a recache is running.
       ...(ranked.length > 0 || recaching
-        ? [`captions: ${captions.watched} watched, ${captions['one-frame']} one-frame, ${captions.failed} failed, ${captions.none} none${recaching}`]
+        ? [
+            `captions: ${captions.watched} watched, ${captions['one-frame']} one-frame, ${captions.failed} failed, ${captions.none} none${recaching}`,
+            `caption format: ${format.fields} watched with fields, ${format.oldFormat} watched in the old format (to re-describe), ${format.unwatched} unwatched`,
+          ]
         : []),
     ].join('\n');
   }

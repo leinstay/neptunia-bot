@@ -7450,7 +7450,7 @@ function pickHot({ features = {}, prompts = {}, pickSettings = PICK_SETTINGS, ma
     { typingSimulation: typing !== null, ...features },
     {},
     {
-      gifs: { maxPerDay, listChars: 70, ownMarkHours: 24, halfLifeDays: 30, pick: pickSettings },
+      gifs: { maxPerDay, reactionChars: 40, actionChars: 70, ownMarkHours: 24, halfLifeDays: 30, pick: pickSettings },
       classifier: { text: 'cheap/classifier' },
       ...(typing ? { typing: { reactionDelayMs: [0, 0], betweenMessagesMs: [0, 0], ...typing } } : {}),
     },
@@ -7460,18 +7460,18 @@ function pickHot({ features = {}, prompts = {}, pickSettings = PICK_SETTINGS, ma
   return hot;
 }
 
-async function runPickTurn({ reply = '<msg reply="#2">ναι, φυσικά, έλα</msg>', pick = 'none', store = pickStore(), typing = null, ...hotOptions } = {}) {
-  const raws = pickHistory();
+async function runPickTurn({ reply = '<msg reply="#2">ναι, φυσικά, έλα</msg>', pick = 'none', store = pickStore(), typing = null, raws = pickHistory(), triggerRaw = raws.at(-1), failGif = false, ...hotOptions } = {}) {
   const channel = fakeTurnChannel({ historyMessages: raws });
   const sendTimes = [];
   const send = channel.send;
   channel.send = async (payload) => {
     sendTimes.push(Date.now());
+    if (failGif && String(payload.content).startsWith('https://tenor.com/')) throw new Error('Missing Permissions');
     return send(payload);
   };
   const llm = pickLlm({ reply, pick });
   const turns = createTurnRunner({ hot: pickHot({ ...hotOptions, typing }), store, llm, calibrator: identityCalibrator(), client: fakeClient(), now: () => NOW });
-  const { result, logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raws.at(-1)), triggerKind: 'mention' }));
+  const { result, logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(triggerRaw), triggerKind: 'mention' }));
   const picks = llm.calls.filter((call) => call.options?.purpose === 'gif-pick');
   const sent = () => channel.sent.map((payload) => payload.content);
   return { result, logs, channel, picks, store, sent, sendTimes };
@@ -7487,7 +7487,8 @@ test('runTurn: a short reply is shown with the whole captioned library; a picked
   const blocks = user.content.split('\n\n');
   assert.equal(blocks.length, 3);
   assert.match(blocks[0], /^<context>\n[\s\S]*καλημέρα[\s\S]*θα έρθεις απόψε;\n<\/context>$/, 'the last contextMessages lines as the transcript renders them');
-  assert.equal(blocks[1], '<reply>\nναι, φυσικά, έλα\n</reply>');
+  const marker = fill(labels.transcript.replyTo, { index: 2, author: 'Alice', quote: 'θα έρθεις απόψε;' });
+  assert.equal(blocks[1], `<reply>\n${marker} ναι, φυσικά, έλα\n</reply>`, 'the reply names the line it answers');
   const gifLines = blocks[2].replace(/^<gifs>\n/, '').replace(/\n<\/gifs>$/, '').split('\n');
   assert.equal(gifLines.length, PICK_LIBRARY_SIZE, 'the whole library, not a top slice');
   assert.deepEqual([gifLines[0], gifLines.at(-1)], ['g1 -- λεζάντα 1', 'g50 -- λεζάντα 50'], 'in rank order');
@@ -7569,6 +7570,64 @@ test('runTurn: a dry run asks the picker and logs the GIF it would post, posting
   const gif = logs.find((entry) => entry.msg === 'dry-run: would send gif');
   assert.deepEqual([gif.gif, gif.replyTo], ['g50', 'm1']);
   assert.deepEqual([store.ownGifs, store.state.data.gifCount], [[], undefined], 'nothing counted or stamped');
+});
+
+/** Four chat lines: the trigger (m1) is followed by two later lines from someone else. */
+function laterLinesHistory() {
+  return [
+    rawMessage({ id: 'm0', ts: NOW - 9000, content: 'καλημέρα' }),
+    rawMessage({ id: 'm1', ts: NOW - 7000, content: 'θα έρθεις απόψε;' }),
+    rawMessage({ id: 'm2', ts: NOW - 5000, authorId: 'u2', authorName: 'Zoé', content: 'κι εγώ ρωτάω' }),
+    rawMessage({ id: 'm3', ts: NOW - 3000, authorId: 'u2', authorName: 'Zoé', content: 'λοιπόν;' }),
+  ];
+}
+
+test('runTurn: the picker\'s context brings in an older answered trigger, first, and the reply names it', async () => {
+  const raws = laterLinesHistory();
+  const { picks } = await runPickTurn({ raws, triggerRaw: raws[1], reply: '<msg>ναι, φυσικά</msg>' });
+  assert.equal(picks.length, 1);
+  const [context, reply] = picks[0].messages[1].content.split('\n\n');
+  assert.match(context, /^<context>\n[^#\n]*\n#1 [^\n]*Alice: θα έρθεις απόψε;\n#2 [^\n]*κι εγώ ρωτάω\n#3 [^\n]*λοιπόν;\n<\/context>$/, 'the answered line with its author, then the last two lines');
+  const marker = fill(labels.transcript.replyTo, { index: 1, author: 'Alice', quote: 'θα έρθεις απόψε;' });
+  assert.equal(reply, `<reply>\n${marker} ναι, φυσικά\n</reply>`);
+});
+
+test('runTurn: the picker names the line the first message replies to, when it is not the last', async () => {
+  const raws = laterLinesHistory();
+  const { picks } = await runPickTurn({ raws, reply: '<msg reply="#3">χα, ναι</msg>' });
+  const [context, reply] = picks[0].messages[1].content.split('\n\n');
+  assert.match(context, /^<context>\n[^#\n]*\n#1 [^\n]*κι εγώ ρωτάω\n#2 [^\n]*λοιπόν;\n<\/context>$/);
+  const marker = fill(labels.transcript.replyTo, { index: 1, author: 'Zoé', quote: 'κι εγώ ρωτάω' });
+  assert.equal(reply, `<reply>\n${marker} χα, ναι\n</reply>`);
+});
+
+test('runTurn: with several messages a picked GIF replaces the first one only; the rest follow in order', async () => {
+  const reply = '<msg reply="#2">χα</msg><msg>και κάτι ακόμα πιο μακρύ από είκοσι</msg><msg>τέλος</msg>';
+  const { picks, sent, channel, store } = await runPickTurn({ reply, pick: 'g50' });
+  assert.equal(picks.length, 1, 'only the first message counts toward gifs.pick.maxChars');
+  assert.equal(picks[0].messages[1].content.split('\n\n')[1].endsWith(' χα\n</reply>'), true, 'the picker sees the message it would replace');
+  assert.deepEqual(sent(), ['https://tenor.com/view/gif-50', 'και κάτι ακόμα πιο μακρύ από είκοσι', 'τέλος']);
+  assert.equal(channel.sent[0].reply.messageReference, 'm1', 'the GIF replies where the first message would have');
+  assert.deepEqual(store.ownGifs.map((own) => own.key), ['k50']);
+
+  const dry = await runPickTurn({ reply, pick: 'g50', features: { dryRun: true } });
+  const order = dry.logs.filter((entry) => entry.msg === 'dry-run: would send gif' || entry.msg === 'dry-run: would send').map((entry) => entry.gif ?? entry.text);
+  assert.deepEqual(order, ['g50', 'και κάτι ακόμα πιο μακρύ από είκοσι', 'τέλος'], 'a dry run mirrors the same order');
+});
+
+test('runTurn: a picked GIF that fails to send leaves the first message to be posted as written, then the rest', async () => {
+  const reply = '<msg reply="#2">χα</msg><msg>τέλος</msg>';
+  const { sent, channel, logs, store } = await runPickTurn({ reply, pick: 'g50', failGif: true });
+  assert.ok(logs.some((entry) => entry.msg === 'turn: gif failed'), 'the failed GIF is logged');
+  assert.deepEqual(sent(), ['χα', 'τέλος'], 'nothing is lost');
+  assert.equal(channel.sent[0].reply.messageReference, 'm1', 'the first message replies as written');
+  assert.deepEqual(store.ownGifs, [], 'no own post recorded');
+});
+
+test('runTurn: gifs.pick.maxChars gates the first message only', async () => {
+  const long = await runPickTurn({ reply: '<msg>και κάτι ακόμα πιο μακρύ από είκοσι</msg><msg>χα</msg>', pick: 'g1' });
+  assert.equal(long.picks.length, 0, 'a long first message is never replaced');
+  assert.deepEqual(long.sent(), ['και κάτι ακόμα πιο μακρύ από είκοσι', 'χα']);
 });
 
 test('runTurn: the picker runs alongside the first message\'s typing time', async () => {
