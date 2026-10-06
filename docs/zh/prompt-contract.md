@@ -93,7 +93,7 @@
 | `<attitudes>` | 角色感受最强烈的前 `context.attitudes`（默认 6，`0` = 关）名成员，按态度评分绝对值排序，好感与反感混合。跳过呼叫者以及已在 `<people>` 中显示的成员。每人一行（`labels.attitudes.line`）：名字和态度区间。标题：`labels.attitudes.header`。上限 `context.caps.attitudes`（默认 400）。服务器回合和私聊中均显示 |
 | `<other_channels>` | 每个相邻频道最多 `context.neighborMessages` 条消息，不超过 `context.neighborMaxAgeMinutes` 的时效。`features.mediaDescriptions` 开启时，相邻频道行中的图片在描述器缓存已有说明时携带说明；不为相邻频道发起新的描述请求。`<channel_view>` 中已显示其块的频道不再出现在 `<other_channels>` 中；如果预算丢弃了拉取的块，该频道重新作为普通相邻频道出现 |
 | `<channel_view>` | 拉入本轮的另一个频道（`features.channelPull`）。每个拉取的频道一个条目：标题行（`labels.pull.header`）、适用时的只读标记（`labels.server.readOnly`）、窗口被截断时的"更早的未显示"行、"图片未查看"计数、角色的早期呼叫（带已回复/未回复/已跳过标记），然后是窗口行。行使用与 `<chat>` 相同的对话记录格式，但编号在对话后继续（对话为 `#1`..`#N`，拉取块从 `#N+1` 开始），因此每个 `#n` 在块间唯一。图片仅以说明或盲标签形式出现，不作为附加图片。没有 `labels.pull.header` 时块为空 |
-| `<worn>` | 角色过度使用的手法和词语（`features.variety`）：`labels.variety.intro`，然后每个手法一行 `- <shape> ("<example>", ...)`。长过程的手法（`wornLong`，来自 `variety-long.md`）在前，然后是短过程的，去重后最多 `variety.maxPatterns` + `variety.longMaxPatterns` 个。有冷却中的填充词条目时，手法行后跟 `labels.variety.fillersIntro`，然后每条目一行 `- <labels.variety.fillerLine>`（占位符 `{text}`、`{count}`、`{ago}`），按排名排列，最多 `variety.fillers.max` 条。两者都无结果且无冷却中的填充词，或开关关闭时省略 |
+| `<worn>` | 角色过度使用的手法和词语（`features.variety`）：`labels.variety.intro`，然后每个手法一行 `- <shape> ("<example>", ...)`。长过程的手法（`wornLong`，来自 `variety-long.md`）在前，然后是短过程的，去重后最多 `variety.maxPatterns` + `variety.longMaxPatterns` 个。有冷却中的填充词条目时，手法行后跟 `labels.variety.fillersIntro`，然后每条目一行 `- <labels.variety.fillerLine>`（占位符 `{text}`、`{count}`、`{window}`、`{ago}`），按排名排列，最多 `variety.fillers.max` 条。两者都无结果且无冷却中的填充词，或开关关闭时省略 |
 | `<lookup>` | 角色本轮查询的内容。网络搜索（`features.webLookup`）携带 `labels.lookup.webHeader`、浓缩的答案、`labels.lookup.sources`，未找到时为 `labels.lookup.none`。服务器搜索（`features.recall`）携带 `labels.lookup.serverHeader`、摘要笔记，摘要指出一段时还有逐字原文。两者都运行时 `labels.lookup.bothNote` 位于两部分之间。`labels.lookup.stretch` 行引入一段逐字原文（`{date}` `{channel}`）。仅在搜索分类器触发且至少一项搜索完成后出现 |
 | `<chat>` | 当前频道最新的 `context.channelMessages` 条消息 |
 | `<tempo>` | 10 分钟 / 1 小时 / 1 天的消息计数，不同人数，沉默时长，一个判定（活跃 / 缓慢 / 沉寂） |
@@ -157,7 +157,7 @@ transcript.gap                           {duration}
 transcript.gapWithDate                   {duration} {date}
 transcript.date | header                 {date}
 transcript.empty | replyToOld | image
-transcript.replyTo                       {index}
+transcript.replyTo                       {index} {author} {quote}: 父消息的编号、其作者和文本短引用
 transcript.file | sticker                {name}
 transcript.stickerDescribed              {name} {text}
 transcript.emojiDescribed                {name} {text}: appended to a line for a custom emoji; text keeps :name:
@@ -266,9 +266,9 @@ mentor.examples                          first line inside the `<examples>` bloc
 mentor.original                          first line inside the `<original>` block in a score request: introduces the persona's rejected answer
 room.focus                               {target} {author}: appended to the reply task when a room question triggers the turn
 address.author                           {name} {aliases}: the candidate author's display name and known aliases, shown to the address classifier when the member has aliases
-variety.intro                            first line of the `<worn>` block: tells the persona these devices are spent
+variety.intro                            first line of the `<worn>` block: a light reminder that these expressions came up often recently
 variety.fillersIntro                     separator before the filler lines; present only when filler entries on cooldown follow
-variety.fillerLine                       {text} {count} {ago}: one filler entry on cooldown; text is the word stem (trailing `*` for prefix) or the exact phrase, count is how many times it was used, ago is time since last use
+variety.fillerLine                       {text} {count} {window} {ago}: one filler entry on cooldown; text is the word stem (trailing `*` for prefix) or the exact phrase, count is uses in the recent own lines, window is how many recent lines were scanned, ago is time since last use
 recent.header                            REQUIRED {hours}: the block's first line. A missing header or a missing `recent.line` means no `<recent>` block
 recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
 recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
@@ -634,7 +634,7 @@ Mentor 沙盒为每个场景执行一次多样性过程，计入 mentor 的 toke
 
 **冷却 = 哪些条目被显示。** 条目在角色于 `variety.fillers.cooldownHours`（默认 36）小时内 OR `variety.fillers.cooldownMessages`（默认 300）条自身消息内使用过时处于冷却中（以先到者为准）；使用会重置两个计数器。固定条目始终处于冷却中。建议列表中仅显示冷却中的条目。条目分两种类型：PREFIX 条目以 `*` 结尾（至少 3 个字母），在词边界匹配以该前缀开头的所有词（任何文字系统）；EXACT 条目（无 `*`）精确匹配整个词或短语。
 
-**渲染。** 在已磨损手法行之后，有冷却中的填充词条目时：`labels.variety.fillersIntro`，然后每条目一行 `- labels.variety.fillerLine`。`fillerLine` 占位符：`{text}`（词干，前缀条目末尾带 `*`，或精确短语），`{count}`（使用或检测次数），`{ago}`（距最后使用的时间，如"3 h 12 min"，未知时为 `?:??`）。条目按排名排列，最多 `variety.fillers.max` 条。
+**渲染。** 在已磨损手法行之后，有冷却中的填充词条目时：`labels.variety.fillersIntro`，然后每条目一行 `- labels.variety.fillerLine`。`fillerLine` 占位符：`{text}`（词干，前缀条目末尾带 `*`，或精确短语），`{count}`（最近自身行中的使用次数），`{window}`（扫描的最近行数），`{ago}`（距最后使用的时间，如"3 h 12 min"，未知时为 `?:??`）。条目按排名排列，最多 `variety.fillers.max` 条。
 
 **状态。** 服务器记忆：`fillers`（条目列表）和 `ownMessageCount`（角色自身发布消息计数器，用于基于消息数的冷却）。日志：`fillers: sticky`（检测器添加了条目），`fillers: learned`（多样性过程添加或更新了条目）。
 

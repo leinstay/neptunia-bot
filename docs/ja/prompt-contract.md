@@ -93,7 +93,7 @@
 | `<attitudes>` | ペルソナが最も強く感じているメンバーの上位 `context.attitudes`（デフォルト 6、`0` = オフ）名。態度スコアの大きさで順位付け、好意と反感混在。発話者と `<people>` に既に表示されているメンバーはスキップ。メンバーごとに 1 行（`labels.attitudes.line`）: 名前と態度バンド。ヘッダー: `labels.attitudes.header`。上限 `context.caps.attitudes`（デフォルト 400）。サーバーターンとプライベートチャットの両方に表示 |
 | `<other_channels>` | 隣接チャンネルごとに最大 `context.neighborMessages` 件のメッセージ。`context.neighborMaxAgeMinutes` より古いものは含まない。`features.mediaDescriptions` がオンの場合、隣接チャンネルの行内の画像はキャッシュ済みキャプションを持つ場合にそれを付加。隣接チャンネルに対して新規の説明リクエストは行われない。`<channel_view>` にブロックが表示されているチャンネルは `<other_channels>` から除外。バジェットがプルされたブロックを落とした場合、そのチャンネルは通常の隣接チャンネルとしてここに再表示 |
 | `<channel_view>` | このターンにプルされた別のチャンネル（`features.channelPull`）。プルされたチャンネルごとにヘッダー行（`labels.pull.header`）、該当時の読み取り専用マーク（`labels.server.readOnly`）、ウィンドウがカットされた場合の「古いものは非表示」行、「画像は未確認」カウント、ペルソナへの過去の呼びかけ（応答済み/未応答/スキップマーク付き）、ウィンドウの行。行は `<chat>` と同じトランスクリプト形式だが、チャットの後に番号が続く（チャットは `#1`..`#N`、プルブロックは `#N+1` から）ため、すべての `#n` がブロック間で一意。画像はキャプションまたはブラインドタグのみ、添付画像としては含まない。`labels.pull.header` がない場合ブロックは空 |
-| `<worn>` | ペルソナが使い回している表現手法と語句（`features.variety`）: `labels.variety.intro`、続いて手法ごとに `- <shape> ("<example>", ...)`。長いパスのパターン（`wornLong`、`variety-long.md` から）が先、次に短いパス、重複は除去、最大 `variety.maxPatterns` + `variety.longMaxPatterns`。クールダウン中のフィラーエントリがある場合、パターン行の後に `labels.variety.fillersIntro`、続いてエントリごとに `- <labels.variety.fillerLine>`（プレースホルダー `{text}`、`{count}`、`{ago}`）、ランク順で最大 `variety.fillers.max` 件。どちらのパスも結果を出さず、クールダウン中のフィラーもなく、またはスイッチがオフの場合は省略 |
+| `<worn>` | ペルソナが使い回している表現手法と語句（`features.variety`）: `labels.variety.intro`、続いて手法ごとに `- <shape> ("<example>", ...)`。長いパスのパターン（`wornLong`、`variety-long.md` から）が先、次に短いパス、重複は除去、最大 `variety.maxPatterns` + `variety.longMaxPatterns`。クールダウン中のフィラーエントリがある場合、パターン行の後に `labels.variety.fillersIntro`、続いてエントリごとに `- <labels.variety.fillerLine>`（プレースホルダー `{text}`、`{count}`、`{window}`、`{ago}`）、ランク順で最大 `variety.fillers.max` 件。どちらのパスも結果を出さず、クールダウン中のフィラーもなく、またはスイッチがオフの場合は省略 |
 | `<lookup>` | ペルソナがこのターンで調べた内容。ウェブ検索（`features.webLookup`）は `labels.lookup.webHeader`、要約された回答、`labels.lookup.sources`。何も見つからなかった場合は `labels.lookup.none`。サーバー検索（`features.recall`）は `labels.lookup.serverHeader`、サマリーノート。サマリーがストレッチを指定した場合はそのストレッチの原文行。両方実行された場合は `labels.lookup.bothNote` がその間に配置。`labels.lookup.stretch` 行が原文ストレッチを導入（`{date}` `{channel}`）。検索分類器が発火し少なくとも 1 つの検索が完了した場合にのみ表示 |
 | `<chat>` | 現在のチャンネルの最新 `context.channelMessages` 件のメッセージ |
 | `<tempo>` | 10 分 / 1 時間 / 1 日のカウント、参加人数、沈黙時間、判定（live / slow / dead） |
@@ -154,7 +154,7 @@ transcript.gap                           {duration}
 transcript.gapWithDate                   {duration} {date}
 transcript.date | header                 {date}
 transcript.empty | replyToOld | image
-transcript.replyTo                       {index}
+transcript.replyTo                       {index} {author} {quote}: 親メッセージの番号、その著者、テキストの短い引用
 transcript.file | sticker                {name}
 transcript.stickerDescribed              {name} {text}
 transcript.emojiDescribed                {name} {text}: appended to a line for a custom emoji; text keeps :name:
@@ -278,9 +278,9 @@ mentor.examples                          first line inside the `<examples>` bloc
 mentor.original                          first line inside the `<original>` block in a score request: introduces the persona's rejected answer
 room.focus                               {target} {author}: appended to the reply task when a room question triggers the turn
 address.author                           {name} {aliases}: the candidate author's display name and known aliases, shown to the address classifier when the member has aliases
-variety.intro                            first line of the `<worn>` block: tells the persona these devices are spent
+variety.intro                            first line of the `<worn>` block: a light reminder that these expressions came up often recently
 variety.fillersIntro                     separator before the filler lines; present only when filler entries on cooldown follow
-variety.fillerLine                       {text} {count} {ago}: one filler entry on cooldown; text is the word stem (trailing `*` for prefix) or the exact phrase, count is how many times it was used, ago is time since last use
+variety.fillerLine                       {text} {count} {window} {ago}: one filler entry on cooldown; text is the word stem (trailing `*` for prefix) or the exact phrase, count is uses in the recent own lines, window is how many recent lines were scanned, ago is time since last use
 recent.header                            REQUIRED {hours}: the block's first line. A missing header or a missing `recent.line` means no `<recent>` block
 recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
 recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
@@ -539,7 +539,7 @@ Mentor サンドボックスは、状況ごとに 1 回の多様性パスを実�
 
 **クールダウン = どのエントリが表示されるか。** エントリは、ペルソナが `variety.fillers.cooldownHours`（デフォルト 36）時間以内 OR `variety.fillers.cooldownMessages`（デフォルト 300）件の自身の投稿以内に使用した場合、クールダウン中です（先に来た方）。使用すると両カウンターがリセットされます。固定エントリは常にクールダウン中です。アドバイスリストにはクールダウン中のエントリのみが表示されます。エントリには 2 種類: PREFIX エントリは `*` で終わり（最低 3 文字）、語境界でそのプレフィックスで始まるすべての語に一致します（任意のスクリプト）。EXACT エントリ（`*` なし）は語またはフレーズ全体に一致します。
 
-**レンダリング。** 使い古し手法の行の後、クールダウン中のフィラーエントリがある場合: `labels.variety.fillersIntro`、続いてエントリごとに `- labels.variety.fillerLine`。`fillerLine` プレースホルダー: `{text}`（語幹、プレフィックスエントリの場合は末尾に `*`、または正確なフレーズ）、`{count}`（使用または検出された回数）、`{ago}`（最終使用からの経過時間、例: 「3 h 12 min」、不明時は `?:??`）。エントリはランク順、最大 `variety.fillers.max` 件。
+**レンダリング。** 使い古し手法の行の後、クールダウン中のフィラーエントリがある場合: `labels.variety.fillersIntro`、続いてエントリごとに `- labels.variety.fillerLine`。`fillerLine` プレースホルダー: `{text}`（語幹、プレフィックスエントリの場合は末尾に `*`、または正確なフレーズ）、`{count}`（最近の自分の行での使用回数）、`{window}`（スキャンされた最近の行数）、`{ago}`（最終使用からの経過時間、例: 「3 h 12 min」、不明時は `?:??`）。エントリはランク順、最大 `variety.fillers.max` 件。
 
 **状態。** ギルドメモリ: `fillers`（エントリリスト）と `ownMessageCount`（メッセージベースのクールダウンに使用されるペルソナ自身の投稿メッセージカウンター）。ログ: `fillers: sticky`（検出器がエントリを追加）、`fillers: learned`（多様性パスがエントリを追加または更新）。
 

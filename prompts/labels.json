@@ -13,7 +13,7 @@
     "date": "--- {date} ---",
     "header": "=== {date} ===",
     "empty": "(empty)",
-    "replyTo": "(replying to #{index})",
+    "replyTo": "(reply to {author}'s #{index}: {quote})",
     "replyToOld": "(replying to an older message)",
     "image": "[image]",
     "imageAttached": "[attached image {n}]",
@@ -186,7 +186,7 @@
   },
   "triggers": {
     "mention": "mentioned you",
-    "reply": "replied to your message",
+    "reply": "replied to you",
     "name": "said your name",
     "followUp": "continued your conversation",
     "overheard": "talked about you, not to you",
@@ -229,9 +229,9 @@
     "original": "The persona's answer at the time. The owner rejected it. A known-bad reference, not an answer to score."
   },
   "variety": {
-    "intro": "Turns of phrase and moves you've leaned on lately. They're spent for now; answer without them this time, and don't announce you're avoiding them.",
+    "intro": "These expressions came up often in recent replies. Use one if it is the natural wording here. Do not invent a comparison, change the subject or bend a sentence just to avoid a repeat, and do not announce avoiding them.",
     "fillersIntro": "Words and phrases you've been reaching for:",
-    "fillerLine": "{text} ({count}x, {ago} ago)"
+    "fillerLine": "{text} ({count} of last {window}, {ago} ago)"
   },
   "address": {
     "author": "{name}, also called: {aliases}"
