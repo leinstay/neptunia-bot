@@ -59,6 +59,7 @@ export const labels = {
       size: 'too big',
       daily: 'daily limit',
       error: 'failed',
+      pending: 'still loading',
     },
   },
   senses: {

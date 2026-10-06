@@ -6088,6 +6088,75 @@ test('runTurn: pace.prepareMediaMs 0 leaves a video on the trigger under pace.pr
   watch.resolve();
 });
 
+test('runTurn: a video whose watch misses the deadline renders not watched, still loading, never as its bare still frame', async () => {
+  const watch = deferred();
+  const scene = videoPaceScene({ pace: { prepareMs: 1000, prepareMediaMs: 5000 }, watch });
+  scene.describer.describeMany = async (guildId, items) => ({
+    descriptions: new Map(items.filter((item) => item.itemId === 'va').map((item) => [item.itemId, 'μια γέφυρα'])),
+    newCount: 1,
+  });
+
+  const running = withCapturedLogs(() => scene.turns.runTurn(scene.params));
+  await settleUntil(() => scene.describer.videoCalls.length > 0 && scene.timers.live().length > 0);
+  await settleUntil();
+  assert.deepEqual(scene.timers.live().map((timer) => timer.ms), [5000]);
+  scene.timers.fire(scene.timers.live()[0]);
+  const { result, logs } = await running;
+
+  assert.equal(result.outcome, 'spoke');
+  assert.deepEqual(logs.find((l) => l.msg === 'turn: timings').late, ['videos']);
+  const text = userText(scene.llm);
+  const pending = labels.transcript.videoNotWatchedFrame
+    .replace('{name}', 'clip.mov')
+    .replace('{duration}', '0:20')
+    .replace('{reason}', labels.transcript.videoReason.pending)
+    .replace('{text}', 'μια γέφυρα');
+  assert.ok(text.includes(pending), 'the late video is named not watched, still loading, with its frame');
+  const bare = labels.transcript.videoDescribed.replace('{name}', 'clip.mov').replace('{duration}', '0:20').replace('{text}', 'μια γέφυρα');
+  assert.ok(!text.includes(bare), 'never the bare still-frame form');
+  assert.ok(!text.includes(WATCHED_TEXT));
+  watch.resolve();
+});
+
+test('runTurn: a late video stage keeps the states the cache holds; only the video still loading is pending', async () => {
+  const watch = deferred();
+  const hot = fakeHot({ mediaDescriptions: true, videoDescriptions: true, vision: false }, {}, VIDEO_TURN_CONFIG);
+  hot.config.pace = { ...TEST_PACE, prepareMs: 1000, prepareMediaMs: 5000 };
+  // An older line with a video watched on an earlier turn (served from the cache), and the call with a new one.
+  const older = videoAttachmentRaw('m1', NOW - 9000, 'vo', 'old.mp4');
+  const trigger = videoAttachmentRaw('m2', NOW - 1000, 'va', 'clip.mov');
+  trigger.cleanContent = 'το βλέπεις;';
+  const channel = fakeTurnChannel({ historyMessages: [older, trigger] });
+  const llm = fakeLlm('<msg>ok</msg>');
+  const describer = fakeVideoDescriber({});
+  describer.describeVideos = async (guildId, items, options) => {
+    describer.videoCalls.push({ guildId, items, options });
+    await watch.promise;
+    return { videos: new Map([['va', { state: 'watched', text: WATCHED_TEXT }]]), newCount: 1 };
+  };
+  describer.cachedVideos = async (guildId, items) =>
+    new Map(items.filter((item) => item.itemId === 'vo').map((item) => [item.itemId, { state: 'watched', text: 'ένα παλιό βίντεο' }]));
+  const timers = fakeSchedule();
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), describer, now: () => NOW, schedule: timers.schedule });
+
+  const running = withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(trigger), triggerKind: 'mention' }));
+  await settleUntil(() => describer.videoCalls.length > 0 && timers.live().length > 0);
+  await settleUntil();
+  timers.fire(timers.live()[0]);
+  const { logs } = await running;
+
+  assert.deepEqual(logs.find((l) => l.msg === 'turn: timings').late, ['videos']);
+  const text = userText(llm);
+  const pending = labels.transcript.videoNotWatched
+    .replace('{name}', 'clip.mov')
+    .replace('{duration}', '0:20')
+    .replace('{reason}', labels.transcript.videoReason.pending);
+  assert.ok(text.includes(pending), 'the video still loading is pending');
+  const watched = labels.transcript.videoWatched.replace('{name}', 'old.mp4').replace('{duration}', '0:20').replace('{text}', 'ένα παλιό βίντεο');
+  assert.ok(text.includes(watched), 'the older video keeps its cached watched state');
+  watch.resolve();
+});
+
 test('runTurn: a video only on an older line keeps pace.prepareMs; one on the line the trigger replies to extends it', async () => {
   const watch = deferred();
   const scene = videoPaceScene({ pace: { prepareMs: 1000, prepareMediaMs: 5000 }, where: 'history', watch });

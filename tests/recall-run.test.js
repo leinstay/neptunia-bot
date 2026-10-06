@@ -23,7 +23,7 @@ const GUILD = 'g1';
 const PROMPT = 'You are {{name}}; {{answerChars}}.';
 
 // The recall settings the runner tests rely on, pinned here instead of read from the shipped defaults.
-const RECALL_PIN = { maxForms: 8, maxPeople: 2, dateSamples: 4, clusterGapMinutes: 30, maxClusters: 8, windowMessages: 16, answerChars: 1200, stretchChars: 1500, maxPerDay: 100, timeoutMs: 30000, minSummaryMs: 2500, maxOutputTokens: 500, memoryItems: 6 };
+const RECALL_PIN = { maxForms: 8, maxPeople: 2, dateSamples: 4, clusterGapMinutes: 30, maxClusters: 8, rareHits: 0, windowMessages: 16, answerChars: 1200, stretchChars: 1500, maxPerDay: 100, timeoutMs: 30000, minSummaryMs: 2500, maxOutputTokens: 500, memoryItems: 6 };
 
 /** The shipped config.json with the recall settings pinned and the given groups merged over a fresh copy (one level deep). */
 function config(overrides = {}) {
@@ -498,6 +498,51 @@ function rankedAnswers(route, query) {
   return { total_results: 3, messages: [[rawHit('c2', GARDEN_AGAIN)], [rawHit('c1', RABBIT_LINES[3])], [rawHit('c1', RABBIT_LINES[2])]] };
 }
 const RANKED_LINES = { c1: RABBIT_LINES, c2: [...GARDEN_LINES, GARDEN_AGAIN] };
+
+test('recall: each hit carries the queries that found it; the cluster two forms meet in outranks a newer one-form hit', async () => {
+  const bothForms = (route, query) => {
+    if (route.endsWith('/members/search')) return [];
+    if (query.content === 'κουνελιού') return { total_results: 1, messages: [[rawHit('c1', RABBIT_LINES[2])]] };
+    return rankedAnswers(route, query);
+  };
+  const dense = scene({ lines: RANKED_LINES, answers: bothForms, recall: { maxClusters: 1 } });
+  await withCapturedLogs(() => dense.recaller.run({ ...dense.args, server: RABBIT_SERVER }));
+  assert.deepEqual(dense.fetches.map((f) => f.around), ['r3'], 'r2 found by both forms: the rabbit cluster counts two queries');
+  const plain = scene({ lines: RANKED_LINES, answers: rankedAnswers, recall: { maxClusters: 1 } });
+  await withCapturedLogs(() => plain.recaller.run({ ...plain.args, server: RABBIT_SERVER }));
+  assert.deepEqual(plain.fetches.map((f) => f.around), ['g9'], 'one form each: the newer cluster wins the tie');
+});
+test('recall: a form whose search totals at most recall.rareHits is rare: the old cluster it found beats a newer one-form hit', async () => {
+  const rareOld = (route, query) => {
+    if (route.endsWith('/members/search')) return [];
+    if (query.content === 'κουνέλι') return { total_results: 40, messages: [[rawHit('c2', GARDEN_AGAIN)]] };
+    if (query.content === 'κουνελιού') return { total_results: 1, messages: [[rawHit('c1', RABBIT_LINES[2])]] };
+    return { total_results: 0, messages: [] };
+  };
+  const rare = scene({ lines: RANKED_LINES, answers: rareOld, recall: { maxClusters: 1, rareHits: 5 } });
+  await withCapturedLogs(() => rare.recaller.run({ ...rare.args, server: RABBIT_SERVER }));
+  assert.deepEqual(rare.fetches.map((f) => f.around), ['r2'], 'one hit on the whole server: the rare form weighs two');
+  const off = scene({ lines: RANKED_LINES, answers: rareOld, recall: { maxClusters: 1, rareHits: 0 } });
+  await withCapturedLogs(() => off.recaller.run({ ...off.args, server: RABBIT_SERVER }));
+  assert.deepEqual(off.fetches.map((f) => f.around), ['g9'], 'rareHits 0: one form each, the newer cluster wins the tie');
+});
+test('recall: name and author queries locate the person, the forms rank: an older two-form cluster beats a newer one of the person', async () => {
+  const answers = (route, query) => {
+    if (route.endsWith('/members/search')) return [];
+    if (query.content === 'κουνέλι') return { total_results: 2, messages: [[rawHit('c1', RABBIT_LINES[3])], [rawHit('c1', RABBIT_LINES[2])]] };
+    if (query.content === 'κουνελιού') return { total_results: 1, messages: [[rawHit('c1', RABBIT_LINES[2])]] };
+    if (query.content === 'éloïse' || query.author_id === 'u3') return { total_results: 1, messages: [[rawHit('c2', GARDEN_AGAIN)]] };
+    return { total_results: 0, messages: [] };
+  };
+  const s = scene({ lines: RANKED_LINES, answers, recall: { maxClusters: 1 }, profiles: [{ id: 'u3', names: ['Éloïse'] }] });
+  await withCapturedLogs(() => s.recaller.run({ ...s.args, server: { ...RABBIT_SERVER, who: ['éloïse'] } }));
+  assert.deepEqual(
+    searches(s.calls).map((c) => c.query.content ?? c.query.author_id),
+    ['κουνέλι', 'éloïse', 'κουνελιού', 'u3'],
+    'server and name forms round-robin, then the author',
+  );
+  assert.deepEqual(s.fetches.map((f) => f.around), ['r3'], 'the newer cluster has a name and an author hit, no form');
+});
 const RANKED_STRETCH = [
   '[18:38] Βασίλης: πάμε κυνήγι',
   '[18:40] Ana: bang [image]',

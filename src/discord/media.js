@@ -357,11 +357,14 @@ function durationOrUnknown(durationSec, unknownDuration) {
 
 /**
  * The reason CODE of a not-watched video state: `'length' | 'size' | 'daily'`
- * for a `limit` state, `'error'` for an `error` state. Label-free on purpose:
- * src/discord/format.js swaps it for `labels.transcript.videoReason[code]`.
+ * for a `limit` state, `'error'` for an `error` state, `'pending'` for a
+ * `pending` one (its watch had not finished when the request was built).
+ * Label-free on purpose: src/discord/format.js swaps it for
+ * `labels.transcript.videoReason[code]`.
  */
 function videoReasonCode(video) {
-  return video.state === 'error' ? 'error' : String(video.reason ?? '');
+  if (video.state === 'error' || video.state === 'pending') return video.state;
+  return String(video.reason ?? '');
 }
 
 /**
@@ -415,11 +418,12 @@ function extraOf(...extras) {
  *
  * `context.video` is the item's video state (see collectVideos and the video
  * describer): `{ state: 'watched', text }`, `{ state: 'limit', reason:
- * 'length'|'size'|'daily' }` or `{ state: 'error' }`; null keeps the
+ * 'length'|'size'|'daily' }`, `{ state: 'error' }` or `{ state: 'pending' }`
+ * (the turn's watch missed its deadline, see lateVideoStates); null keeps the
  * still-frame behaviour above. A `video` item that was watched renders
  * `videoWatched`; one not watched renders `videoNotWatchedFrame` (a still
  * frame caption exists) or `videoNotWatched`, `values.reason` carrying the
- * reason CODE (`'length'|'size'|'daily'|'error'`, never a label -- see
+ * reason CODE (`'length'|'size'|'daily'|'error'|'pending'`, never a label -- see
  * src/discord/format.js). A `link` with a video state swaps its one extra for
  * `linkWatched` / `linkNotWatchedFrame` / `linkNotWatched`; when its
  * thumbnail is also attached, `extra` is an array: `frameAttached` first,
@@ -441,7 +445,7 @@ function extraOf(...extras) {
  * falls back to them). Every other kind ignores it.
  * @param {object} item
  * @param {{ attachedIndex?: number|null, description?: string|null, unknownDuration?: string,
- *   video?: { state: 'watched'|'limit'|'error', text?: string, reason?: string,
+ *   video?: { state: 'watched'|'limit'|'error'|'pending', text?: string, reason?: string,
  *     answer?: { question: string, text: string } }|null, read?: string|null, gifHandle?: string|null }} [context]
  * @returns {{ key: string, values: object,
  *   extra?: { key: string, values: object }|{ key: string, values: object }[] }}
@@ -695,6 +699,34 @@ function partVideos(part, messageId, videoSites) {
  */
 export function collectVideos(message, { videoSites = [] } = {}) {
   return mediaParts(message).flatMap((part) => partVideos(part, message.id, videoSites));
+}
+
+/**
+ * The video states of a turn whose video stage missed its deadline, in the
+ * shape of describeVideos' `videos` (src/memory/describe.js): every state
+ * `known` holds (the describer's cache) is kept, and the first `maxNew`
+ * candidates it lacks -- the ones the stage was watching or had yet to
+ * start, as describeVideos picks them -- become `{ state: 'pending' }`, so
+ * the transcript says they were not watched rather than showing a bare
+ * still frame. The candidates past `maxNew` are left out, as a finished
+ * stage would leave them.
+ * @param {{ itemId: string }[]} candidates  collectVideos candidates, in the stage's order.
+ * @param {Map<string, object>|null|undefined} known  itemId -> cached video state.
+ * @param {number} maxNew  The stage's media.video.maxPerTurn.
+ * @returns {Map<string, object>}
+ */
+export function lateVideoStates(candidates, known, maxNew) {
+  const states = new Map();
+  let pending = 0;
+  for (const item of candidates) {
+    const state = known?.get(item.itemId);
+    if (state) states.set(item.itemId, state);
+    else if (pending < maxNew) {
+      states.set(item.itemId, { state: 'pending' });
+      pending += 1;
+    }
+  }
+  return states;
 }
 
 /**

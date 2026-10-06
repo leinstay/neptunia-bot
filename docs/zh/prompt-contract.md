@@ -109,7 +109,7 @@
 `imageDescribed` / `gifDescribed` / `videoDescribed`；其他情况使用盲形式 `image` / `gif` / `video`。
 当视频视觉开启时（`features.mediaDescriptions` 和 `features.videoDescriptions` 同时启用），视频或视频站点链接
 会获得一个状态：`videoWatched`（亲自观看，看到并听到）、`videoNotWatchedFrame`（未观看但静帧已描述）或
-`videoNotWatched`（未观看，无帧）。原因代码（`length` / `size` / `daily` / `error`）在进入对话记录前会被替换
+`videoNotWatched`（未观看，无帧）。原因代码（`length` / `size` / `daily` / `error` / `pending`）在进入对话记录前会被替换
 为 `transcript.videoReason.*` 中的人类可读短语。链接保留其基础标签（`link` / `linkText`）并添加视频附加标签：
 `linkWatched`、`linkNotWatchedFrame` 或 `linkNotWatched`。当静帧作为图片附加时，还会添加 `frameAttached`。
 链接使用 `link` / `linkText`，取自 Discord 的嵌入（站点、标题、摘要）；当 `features.webLookup` 开启且链接已被阅读时，`linkRead` 追加在链接的其他附加标签（视频、缩略图）之后。文本文件通过 `filePreview` 显示开头
@@ -168,7 +168,7 @@ transcript.videoWatched                  {name} {duration} {text}: first-hand, t
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
 transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
-transcript.videoReason.length | size | daily | error    human phrases for the four reason codes
+transcript.videoReason.length | size | daily | error | pending    human phrases for the five reason codes; pending = the clip was still loading when the request went out
 transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
 transcript.linkNotWatched                {reason}: extra tag after a link tag, not watched with reason
 transcript.linkNotWatchedFrame           {reason} {text}: extra tag after a link tag, not watched but preview described
@@ -565,7 +565,7 @@ task.added                               {added}: later messages from the author
 
 `web:` 命中时，Brave Search 运行查询（`web.search.results` 个结果，默认 5），编号的结果通过 `classifier.text` 经 `search-summary.md`（`{{today}}`、`{{query}}`、`{{maxChars}}` = `web.search.summaryChars`，默认 900）浓缩，网络部分渲染在 `<lookup>` 块中：`labels.lookup.header` 附带查询词，浓缩文本，以及 `labels.lookup.sources` 附带不同的站点名称。搜索无结果或浓缩器未找到有用内容时，显示 `labels.lookup.none`。
 
-`server:` 命中（可附带 `who:` 和 `when:` 行）时，引擎通过 Discord 搜索 API 搜索服务器消息历史。词形成为有序的搜索查询列表（内容词形轮转，然后作者名），仅有 `when:` 时为日期范围采样。命中项经过过滤（排除其他机器人和受众规则拒绝的频道），按频道和时间分组为聚类（`recall.clusterGapMinutes`），每个聚类获取 `recall.windowMessages` 条消息的窗口。分类器的词形和名称词形还会与已存储记忆匹配（不含私有层）：成员的回忆、世界书条目、所学内容和近期行。每个匹配的条目成为 `<memory>` 块中的一行：`kind | date | name | text`，kind 为 `episode`、`lore`、`learned`、`recent`。`when:` 日期范围排除无日期的种类（lore、learned）。最多 `recall.memoryItems`（默认 6）条，按匹配的词形数和权重排名。`<memory>` 块在 `<people>` 之后、`<found>` 之前；其条目不能被指定为 `stretch`。有记忆匹配但无聊天命中的运行仍会询问摘要。日志记录在 `recall: searched` 行的 `stats.memory` 上。
+`server:` 命中（可附带 `who:` 和 `when:` 行）时，引擎通过 Discord 搜索 API 搜索服务器消息历史。词形成为有序的搜索查询列表（内容词形轮转，然后作者名），仅有 `when:` 时为日期范围采样。命中项经过过滤（排除其他机器人和受众规则拒绝的频道），按频道和时间分组为聚类（`recall.clusterGapMinutes`），按主题得分排名（聚类中每个有命中的不同 `server:` 词形，若其在整个服务器上的命中数不超过 `recall.rareHits` 则计 2，否则计 1），其次按所有不同查询的命中数，再按最新优先，保留排名前 `recall.maxClusters` 个聚类。仅有名称或作者命中的聚类排在任何有主题命中的聚类之后。`recall.keepOldest` 为主题得分至少为 2 的最旧聚类保留槽位。每个保留的聚类获取 `recall.windowMessages` 条消息的窗口。分类器的词形和名称词形还会与已存储记忆匹配（不含私有层）：成员的回忆、世界书条目、所学内容和近期行。每个匹配的条目成为 `<memory>` 块中的一行：`kind | date | name | text`，kind 为 `episode`、`lore`、`learned`、`recent`。`when:` 日期范围排除无日期的种类（lore、learned）。最多 `recall.memoryItems`（默认 6）条，按匹配的词形数和权重排名。`<memory>` 块在 `<people>` 之后、`<found>` 之前；其条目不能被指定为 `stretch`。有记忆匹配但无聊天命中的运行仍会询问摘要。日志记录在 `recall: searched` 行的 `stats.memory` 上。
 
 摘要辅助（`recall-summary.md`，使用 `classifier.text`，块 `<people>`、`<memory>`、`<found>`、`<question>`）读取窗口、已存储记忆和问题并写出笔记。摘要可以指出最佳回答问题的一段原文（`stretch: <n>`）；如果是，该段的逐字内容（上限 `recall.stretchChars`）与笔记一起出现。摘要说 `nothing` 时，`<lookup>` 块无服务器部分。摘要失败或超时时回退到排名最高窗口的逐字原文段，不附笔记。
 

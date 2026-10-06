@@ -25,6 +25,7 @@ import {
 import { Embed, MessageReferenceType, OverwriteType, PermissionFlagsBits, PermissionsBitField, SnowflakeUtil } from 'discord.js';
 import { videoUrlCacheKey } from '../src/discord/video-sites.js';
 import { collectPictures, collectVideos } from '../src/discord/media.js';
+import { audienceCovers } from '../src/behavior/elsewhere.js';
 import { emptyGifs, mergeGifs } from '../src/memory/gifs.js';
 
 function flagsWith(names) {
@@ -931,9 +932,10 @@ const BOT_ID = '630000000000000001';
  * views at the guild level; every other role adds nothing at that level.
  * `overwrites`: `{ id, type, allow?, deny? }` with bigint flags. `meId` is
  * the bot member's id (guild.members.me), `clientUserId` the logged-in
- * user's (channel.client.user); both absent by default.
+ * user's (channel.client.user); both absent by default. `members`: the
+ * guild's member cache as `{ id, bot }`; absent by default (no cache).
  */
-function audienceChannel({ roles = Object.values(ROLE), overwrites = [], thread = false, meId = null, clientUserId = null } = {}) {
+function audienceChannel({ roles = Object.values(ROLE), overwrites = [], thread = false, meId = null, clientUserId = null, members = null } = {}) {
   const everyone = { id: GUILD_ID, permissions: new PermissionsBitField(VIEW) };
   const all = [everyone, ...roles.map((id) => ({ id, permissions: new PermissionsBitField(0n) }))];
   const cache = new Map(
@@ -954,7 +956,10 @@ function audienceChannel({ roles = Object.values(ROLE), overwrites = [], thread 
     id: 'c-audience',
     guild: {
       id: GUILD_ID,
-      members: { me: meId ? { id: meId } : null },
+      members: {
+        me: meId ? { id: meId } : null,
+        ...(members ? { cache: new Map(members.map(({ id, bot }) => [id, { id, user: { id, bot } }])) } : {}),
+      },
       roles: { everyone, cache: new Map(all.map((role) => [role.id, role])) },
     },
     client: { user: clientUserId ? { id: clientUserId } : null },
@@ -1021,6 +1026,51 @@ test("audienceOf: the bot's own member overwrite is not part of the audience", (
     new Set([BOT_ID]),
     'with no bot id known, nothing is left out',
   );
+});
+
+const OTHER_BOT = { first: '640000000000000001', second: '640000000000000002', third: '640000000000000003' };
+
+test('audienceOf: a bot member overwrite is not part of the audience, a human or uncached member stays', () => {
+  const channel = audienceChannel({
+    members: [
+      { id: OTHER_BOT.first, bot: true },
+      { id: OTHER_BOT.second, bot: true },
+      { id: MEMBER.zoe, bot: false },
+      { id: MEMBER.iason, bot: false },
+    ],
+    overwrites: [
+      { id: OTHER_BOT.first, type: OverwriteType.Member, allow: VIEW },
+      { id: OTHER_BOT.second, type: OverwriteType.Member, deny: VIEW },
+      { id: MEMBER.zoe, type: OverwriteType.Member, allow: VIEW },
+      { id: MEMBER.iason, type: OverwriteType.Member, deny: VIEW },
+      { id: MEMBER.nefeli, type: OverwriteType.Member, allow: VIEW },
+    ],
+  });
+  const audience = audienceOf(channel);
+  assert.deepEqual(audience.memberAllow, new Set([MEMBER.zoe, MEMBER.nefeli]), "a bot's allow is ignored; a human's and an uncached member's stay");
+  assert.deepEqual(audience.memberDeny, new Set([MEMBER.iason]), "a bot's deny is ignored; a human's stays");
+});
+
+test('audienceOf: two channels differing only by bot member allows cover each other', () => {
+  const BOT_ROLE = '610000000000000009';
+  const bots = Object.values(OTHER_BOT);
+  const shared = { roles: [...Object.values(ROLE), BOT_ROLE], members: bots.map((id) => ({ id, bot: true })) };
+  const botRoleDeny = { id: BOT_ROLE, type: OverwriteType.Role, deny: VIEW };
+  const main = audienceOf(
+    audienceChannel({ ...shared, overwrites: [botRoleDeny, ...bots.map((id) => ({ id, type: OverwriteType.Member, allow: VIEW }))] }),
+  );
+  const memes = audienceOf(audienceChannel({ ...shared, overwrites: [botRoleDeny] }));
+  assert.equal(audienceCovers(main, memes), true, 'the memes channel is a source for the main chat');
+  assert.equal(audienceCovers(memes, main), true, 'and the other way round');
+
+  const humanAllow = audienceOf(
+    audienceChannel({
+      ...shared,
+      members: [{ id: MEMBER.zoe, bot: false }],
+      overwrites: [botRoleDeny, { id: MEMBER.zoe, type: OverwriteType.Member, allow: VIEW }],
+    }),
+  );
+  assert.equal(audienceCovers(humanAllow, memes), false, "a human's allow by name still has to be proven on the source");
 });
 
 test('audienceOf: a channel without a guild or a thread has no audience', () => {

@@ -42,6 +42,7 @@ import {
   collectVideos,
   collectReadableLinks,
   isDescribable,
+  lateVideoStates,
   selectPictures,
 } from '../discord/media.js';
 import { avatarReference, createImageFetcher } from '../discord/fetch-image.js';
@@ -2775,7 +2776,16 @@ export function createTurnRunner({
       for (const name of PREPARE_STAGES.slice(1)) timings[name] = stages.get(name)?.done ? stages.get(name).ms : null;
       history = previewed();
       const descriptions = captions?.done ? captions.value?.descriptions : undefined;
-      const videos = rewatchStage?.done && rewatchStage.value ? rewatchStage.value : videoStage?.done ? videoStage.value?.videos : undefined;
+      // A video stage past the deadline: the cached states stay, and the videos it was still
+      // watching render not watched (`pending`) instead of as a bare still frame.
+      const videos =
+        rewatchStage?.done && rewatchStage.value
+          ? rewatchStage.value
+          : videoStage?.done
+            ? videoStage.value?.videos
+            : videoStage
+              ? lateVideoStates(videoCandidates, await videosSoFar(), config.media?.video?.maxPerTurn ?? 1)
+              : undefined;
       const reads = linksStage?.done ? linksStage.value : undefined;
       const lookupResult = lookupStage?.done ? (lookupStage.value ?? null) : null;
       const neighborsFound = neighborsStage?.done ? neighborsStage.value : null;

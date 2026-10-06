@@ -14,6 +14,7 @@ import {
   collectPictures,
   collectEmojiItems,
   collectVideos,
+  lateVideoStates,
   collectReadableLinks,
   isDescribable,
   selectPictures,
@@ -540,6 +541,23 @@ test('mediaLabelFor: a video not watched but with a still-frame caption renders 
   assert.deepEqual(mediaLabelFor(clip, { description: 'a café terrace', video: { state: 'limit', reason: 'size' } }), {
     key: 'videoNotWatchedFrame',
     values: { name: 'clip.mp4', duration: '1:05', reason: 'size', text: 'a café terrace' },
+  });
+});
+
+test('mediaLabelFor: a pending video (its watch missed the deadline) renders not watched with the pending reason', () => {
+  assert.deepEqual(mediaLabelFor(clip, { description: 'a café terrace', video: { state: 'pending' } }), {
+    key: 'videoNotWatchedFrame',
+    values: { name: 'clip.mp4', duration: '1:05', reason: 'pending', text: 'a café terrace' },
+  });
+  assert.deepEqual(mediaLabelFor(clip, { video: { state: 'pending' } }), {
+    key: 'videoNotWatched',
+    values: { name: 'clip.mp4', duration: '1:05', reason: 'pending' },
+  });
+  const item = { kind: 'link', site: 's', title: 't' };
+  assert.deepEqual(mediaLabelFor(item, { video: { state: 'pending' } }), {
+    key: 'link',
+    values: { site: 's', title: 't' },
+    extra: { key: 'linkNotWatched', values: { reason: 'pending' } },
   });
 });
 
@@ -1215,4 +1233,23 @@ test('discordCdnVideo: a malformed path, protocol or URL is rejected', () => {
   assert.equal(discordCdnVideo('ftp://cdn.discordapp.com/attachments/111/222/clip.mp4'), null);
   assert.equal(discordCdnVideo('not a url'), null);
   assert.equal(discordCdnVideo(null), null);
+});
+
+// --- lateVideoStates -------------------------------------------------------------
+
+test('lateVideoStates: known states kept, the first maxNew unknown candidates pending, the rest left out', () => {
+  const candidates = [{ itemId: 'v1' }, { itemId: 'v2' }, { itemId: 'v3' }, { itemId: 'v4' }];
+  const known = new Map([['v2', { state: 'watched', text: 'ένα ποτάμι' }], ['zz', { state: 'error' }]]);
+  const states = lateVideoStates(candidates, known, 2);
+  assert.deepEqual([...states], [
+    ['v1', { state: 'pending' }],
+    ['v2', { state: 'watched', text: 'ένα ποτάμι' }],
+    ['v3', { state: 'pending' }],
+  ]);
+});
+
+test('lateVideoStates: no known states and no candidates', () => {
+  assert.deepEqual([...lateVideoStates([{ itemId: 'v1' }, { itemId: 'v2' }], undefined, 1)], [['v1', { state: 'pending' }]]);
+  assert.deepEqual([...lateVideoStates([], new Map(), 1)], []);
+  assert.deepEqual([...lateVideoStates([{ itemId: 'v1' }], null, 0)], []);
 });
