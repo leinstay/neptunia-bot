@@ -6557,7 +6557,7 @@ function liveScene({ dm = false, talk = () => '<msg>ok</msg>', split, merge, lab
     deepMerge(
       {
         features: { typingSimulation: false, memory: false, privateMessages: true, imageGeneration: false, mediaDescriptions: false, channelPull: false, recent: false },
-        split: { minChars: 20, maxTasks: 4, contextMessages: 2, maxOutputTokens: 50 },
+        split: { minChars: 20, minPartChars: 0, maxTasks: 4, contextMessages: 2, maxOutputTokens: 50 },
         mention: { ignoreChance: 0, repeatPenalty: 0, spamThreshold: 50, maxPending: 6, pendingMinutes: 10 },
       },
       overrides,
