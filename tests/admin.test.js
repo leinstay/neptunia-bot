@@ -3699,6 +3699,22 @@ test('run: gifs.rescan is refused while paused and without the backfill', async 
   assert.equal(await bare.run('gifs.rescan', {}, { guildId: 'g1' }), 'the GIF backfill is not available');
 });
 
+test('run: gifs.status counts the library by caption format: watched with fields, old format, unwatched', async () => {
+  const rootDir = makeRoot();
+  const store = makeStore();
+  const entry = (n) => ({ id: `g${n}`, kind: 'link', url: `https://tenor.com/view/danse-${n}`, itemId: `m${n}#e0`, count: 5 - n, last: 1 });
+  store.getGifs = () => ({ nextId: 5, entries: Object.fromEntries([1, 2, 3, 4].map((n) => [`m${n}#e0`, entry(n)])), backfill: null });
+  store.getMediaCache = () => ({
+    'm1#e0': { text: 'a cat lifts its chin', reaction: 'agreement', action: 'a cat lifts its chin', screen: 'oui.', ts: 1, watched: true, gif: true },
+    'm2#e0': { text: 'a caracal stares', ts: 1, watched: true, gif: true },
+    'm3#e0': { text: 'a still', ts: 1, gif: true },
+  });
+  const { admin } = makeAdmin(rootDir, { store });
+  const out = await admin.run('gifs.status', {}, { guildId: 'g1' });
+  assert.ok(out.includes('caption format: 1 watched with fields, 1 watched in the old format (to re-describe), 2 unwatched'), out);
+  assert.equal(out.includes('oui.'), false, 'counts only, no field text');
+});
+
 // gifs.recache -- the GIF library re-described by watching
 
 function fakeGifRecache(result = { ok: true, dropped: 4, queued: 50 }, { running = false } = {}) {

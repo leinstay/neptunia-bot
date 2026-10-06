@@ -162,10 +162,10 @@ function longCaption(n) {
   return `Un chat roux numéro ${n} danse sur une table de cuisine en agitant les pattes, puis il glisse lentement et tombe sur le dos pendant que quelqu'un rit derrière la caméra du téléphone.`;
 }
 
-test('buildRequest: <gifs> cuts a long caption to gifs.listChars at a word boundary with an ellipsis; the stored caption is untouched', () => {
+test('buildRequest: <gifs> cuts an older one-line caption to gifs.actionChars at a word boundary with an ellipsis; the stored caption is untouched', () => {
   const caption = longCaption(2);
   const mediaCache = { k2: { text: caption, ts: NOW } };
-  const config = fakeConfig({ gifs: { listChars: 40 } });
+  const config = fakeConfig({ gifs: { actionChars: 40 } });
   const lines = gifsBlock(buildRequest(baseInput({ config, gifs: THREE, mediaCache })));
   const line = lines[1];
   assert.ok(line.startsWith('g2 -- '), line);
@@ -181,11 +181,46 @@ test('buildRequest: <gifs> cuts a long caption to gifs.listChars at a word bound
   assert.equal(gifsBlock(buildRequest(baseInput({ config, gifs: THREE, mediaCache: short })))[1], 'g2 -- a cat');
 });
 
-test('buildRequest: with gifs.listChars the same context.caps.gifs holds more entries than with full captions', () => {
+test('buildRequest: <gifs> renders a three-field caption through labels.gifs.entryFields', () => {
+  const mediaCache = {
+    k2: { text: 'a cat lifts its chin', reaction: 'firm agreement', action: 'a cat lifts its chin', screen: 'ναί.', ts: NOW, watched: true, gif: true },
+    k3: { text: 'a man runs', ts: NOW, watched: true, gif: true },
+  };
+  const lines = gifsBlock(buildRequest(baseInput({ gifs: THREE, mediaCache })));
+  assert.deepEqual(lines, [labels.gifs.header, 'g2 -- firm agreement; a cat lifts its chin; "ναί."', 'g3 -- a man runs', 'g1'], 'an older caption keeps labels.gifs.entry');
+});
+
+test('buildRequest: empty fields leave no dangling separator or empty quotes', () => {
+  const entryOf = (fields) => {
+    const mediaCache = { k2: { text: fields.action || fields.reaction || fields.screen, ...fields, ts: NOW, watched: true, gif: true } };
+    return gifsBlock(buildRequest(baseInput({ gifs: library([linkEntry(2, 9)]), mediaCache })))[1];
+  };
+  assert.equal(entryOf({ reaction: '', action: 'a caracal stares', screen: 'j\'attends' }), 'g2 -- a caracal stares; "j\'attends"', 'no reaction');
+  assert.equal(entryOf({ reaction: 'waiting', action: 'a caracal stares', screen: '' }), 'g2 -- waiting; a caracal stares', 'no on-screen text');
+  assert.equal(entryOf({ reaction: 'waiting', action: '', screen: 'j\'attends' }), 'g2 -- waiting; "j\'attends"', 'no action');
+  assert.equal(entryOf({ reaction: '', action: 'a caracal stares', screen: '' }), 'g2 -- a caracal stares', 'the action alone');
+});
+
+test('buildRequest: entryFields keeps the label as written around the fields; a brace in a caption stays text', () => {
+  const custom = { ...labels, gifs: { ...labels.gifs, entryFields: '[{id}] {action} ({reaction}) «{text}» end' } };
+  const mediaCache = { k2: { text: 'a {id} sign', reaction: '', action: 'a {id} sign', screen: 'όχι', ts: NOW, watched: true, gif: true } };
+  const input = baseInput({ gifs: library([linkEntry(2, 9)]), mediaCache });
+  input.prompts = { ...input.prompts, labels: custom };
+  assert.equal(gifsBlock(buildRequest(input))[1], '[g2] a {id} sign «όχι» end');
+});
+
+test('buildRequest: gifs.reactionChars and gifs.actionChars cut a three-field caption at render time, the cache untouched', () => {
+  const mediaCache = { k2: { text: 'a cat lifts its chin', reaction: 'quiet firm agreement', action: 'a cat lifts its chin slowly', screen: 'yes yes yes', ts: NOW, watched: true, gif: true } };
+  const config = fakeConfig({ gifs: { reactionChars: 8, actionChars: 14 } });
+  assert.equal(gifsBlock(buildRequest(baseInput({ config, gifs: library([linkEntry(2, 9)]), mediaCache })))[1], 'g2 -- quiet…; a cat lifts…; "yes yes…"');
+  assert.equal(mediaCache.k2.reaction, 'quiet firm agreement');
+});
+
+test('buildRequest: with gifs.actionChars the same context.caps.gifs holds more entries than with full captions', () => {
   const many = library(Array.from({ length: 40 }, (_, i) => linkEntry(i + 1, 80 - i)));
   const mediaCache = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`k${i + 1}`, { text: longCaption(i + 1), ts: NOW }]));
-  const shownWith = (listChars) => {
-    const config = fakeConfig({ gifs: { max: 40, listChars }, caps: { gifs: 900 } });
+  const shownWith = (actionChars) => {
+    const config = fakeConfig({ gifs: { max: 40, actionChars }, caps: { gifs: 900 } });
     return gifsBlock(buildRequest(baseInput({ config, gifs: many, mediaCache }))).length - 1;
   };
   const full = shownWith(0);

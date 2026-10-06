@@ -5,8 +5,10 @@
 // media cache that belong to no library entry are dropped at once (each is
 // described again, watched, the next time it appears in a transcript); then,
 // in the background, at most `gifs.recachePerRun` library entries not yet
-// watched -- oldest-described first, so repeated runs work through the whole
-// library -- are watched again from their message, re-read over the Discord
+// watched, or watched in the older one-line format (no `reaction` field, so
+// the library moves to the three-field captions run by run) -- oldest-described
+// first, so repeated runs work through the whole library -- are watched again
+// from their message, re-read over the Discord
 // API for a fresh animation URL. A failed watch keeps the old caption, marked
 // `watchFailed`, which sends it to the back of the queue. One run at a time;
 // refused while paused, during a warmup or while GIFs are not watched; a run
@@ -52,8 +54,40 @@ export function gifCaptionCounts(gifs, cache) {
 }
 
 /**
+ * Whether a cached GIF caption is watched in the older one-line format: no
+ * `reaction` field (src/memory/describe.js#parseGifDescription writes it,
+ * '' included, on every watch since GIFs are described in three fields).
+ * @param {object|undefined} entry
+ * @returns {boolean}
+ */
+function watchedOldFormat(entry) {
+  return gifCaptionState(entry) === 'watched' && typeof entry.reaction !== 'string';
+}
+
+/**
+ * How far the library is in the move to three-field captions, by its
+ * entries' `itemId` in the media cache: `fields` watched with a `reaction`
+ * field, `oldFormat` watched without one (the recache re-describes them),
+ * `unwatched` everything else (one-frame, failed watch, no caption).
+ * @param {unknown} gifs   A stored library (normalised here).
+ * @param {object} cache   The guild's media cache.
+ * @returns {{ fields: number, oldFormat: number, unwatched: number }}
+ */
+export function gifFormatCounts(gifs, cache) {
+  const counts = { fields: 0, oldFormat: 0, unwatched: 0 };
+  for (const entry of Object.values(normalizeGifs(gifs).entries)) {
+    const cached = cache?.[entry.itemId];
+    if (gifCaptionState(cached) !== 'watched') counts.unwatched += 1;
+    else if (watchedOldFormat(cached)) counts.oldFormat += 1;
+    else counts.fields += 1;
+  }
+  return counts;
+}
+
+/**
  * The library entries a run re-describes, as `[{ key, ...entry }]`: every
- * entry not watched yet, oldest-described first -- by the cache entry's
+ * entry not watched yet, and every one watched in the older one-line format
+ * (no `reaction` field), oldest-described first -- by the cache entry's
  * `watchFailed` (a failed watch counts as described then), else its `ts`;
  * an entry with no cache entry at all comes first -- ties in library order,
  * at most `limit` of them.
@@ -70,7 +104,7 @@ export function recacheQueue(gifs, cache, limit) {
     return Number.isFinite(cached.ts) ? cached.ts : 0;
   };
   return Object.entries(normalizeGifs(gifs).entries)
-    .filter(([, entry]) => gifCaptionState(cache?.[entry.itemId]) !== 'watched')
+    .filter(([, entry]) => gifCaptionState(cache?.[entry.itemId]) !== 'watched' || watchedOldFormat(cache?.[entry.itemId]))
     .map(([key, entry]) => ({ key, ...entry }))
     .sort((a, b) => describedAt(a) - describedAt(b))
     .slice(0, Math.max(0, limit));

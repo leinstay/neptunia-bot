@@ -3,12 +3,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { GIF_PICK_DEFAULTS, captionedEntries, gifPickSettings, parseGifPick, pickCandidates, renderGifLibrary } from '../src/behavior/gif-pick.js';
+import { GIF_PICK_DEFAULTS, captionedEntries, gifPickSettings, parseGifPick, pickCandidates, pickContext, renderGifLibrary } from '../src/behavior/gif-pick.js';
 import { labels } from './fixtures/labels.js';
 
 const NOW = Date.UTC(2026, 9, 6, 12, 0, 0);
 const HOUR = 3_600_000;
 const SETTINGS = { maxChars: 20, contextMessages: 4, maxOutputTokens: 60 };
+// The per-field caps off: every caption whole.
+const WHOLE = { reactionChars: 0, actionChars: 0 };
 
 /** A ranked library entry (rankGifs' shape) with its handle and item id. */
 function entry(id, fields = {}) {
@@ -38,6 +40,13 @@ test('pickCandidates: the length counts code points and maxChars is inclusive', 
   assert.equal(pickCandidates({ text: '😀'.repeat(20), postsGif: false, captioned: 1 }, SETTINGS), true, 'an emoji is one code point');
 });
 
+test('pickCandidates: under gifs.pick.maxChars 160 a 160-character message is a candidate, 161 is not', () => {
+  const settings = gifPickSettings({ gifs: { pick: { maxChars: 160 } } });
+  const long = 'ά'.repeat(160);
+  assert.equal(pickCandidates({ text: long, postsGif: false, captioned: 1 }, settings), true);
+  assert.equal(pickCandidates({ text: `${long}ά`, postsGif: false, captioned: 1 }, settings), false);
+});
+
 test('pickCandidates: a turn posting a GIF, an empty library or an empty reply skip the picker', () => {
   assert.equal(pickCandidates({ text: 'ναι', postsGif: true, captioned: 3 }, SETTINGS), false);
   assert.equal(pickCandidates({ text: 'ναι', postsGif: false, captioned: 0 }, SETTINGS), false);
@@ -57,7 +66,7 @@ test('renderGifLibrary: every captioned entry, in the given order, through label
   const entries = Array.from({ length: 50 }, (_, i) => entry(`g${i + 1}`));
   const mediaCache = Object.fromEntries(entries.filter((_, i) => i !== 1).map((e) => [e.itemId, { text: `κάτι ${e.id}` }]));
   mediaCache['item-g3'] = { miss: true };
-  const lines = renderGifLibrary(entries, mediaCache, labels, { now: NOW, ownMarkHours: 24, listChars: 0 });
+  const lines = renderGifLibrary(entries, mediaCache, labels, { now: NOW, ownMarkHours: 24, ...WHOLE });
   assert.equal(lines.length, 48, 'the whole library, not a top slice; g2 has no caption, g3 a miss');
   assert.equal(lines[0], 'g1 -- κάτι g1');
   assert.equal(lines[1], 'g4 -- κάτι g4');
@@ -67,21 +76,60 @@ test('renderGifLibrary: every captioned entry, in the given order, through label
 test('renderGifLibrary: the persona\'s recent post carries the own mark within ownMarkHours, not past it', () => {
   const entries = [entry('g1', { ownLast: NOW - 2 * HOUR }), entry('g2', { ownLast: NOW - 30 * HOUR })];
   const mediaCache = { 'item-g1': { text: 'χαμόγελο' }, 'item-g2': { text: 'νεύμα' } };
-  assert.deepEqual(renderGifLibrary(entries, mediaCache, labels, { now: NOW, ownMarkHours: 24, listChars: 0 }), ['g1 -- χαμόγελο (you, 2 h)', 'g2 -- νεύμα']);
-  assert.deepEqual(renderGifLibrary(entries, mediaCache, labels, { now: NOW, ownMarkHours: 0, listChars: 0 }), ['g1 -- χαμόγελο', 'g2 -- νεύμα'], '0 = never');
+  assert.deepEqual(renderGifLibrary(entries, mediaCache, labels, { now: NOW, ownMarkHours: 24, ...WHOLE }), ['g1 -- χαμόγελο (you, 2 h)', 'g2 -- νεύμα']);
+  assert.deepEqual(renderGifLibrary(entries, mediaCache, labels, { now: NOW, ownMarkHours: 0, ...WHOLE }), ['g1 -- χαμόγελο', 'g2 -- νεύμα'], '0 = never');
 });
 
-test('renderGifLibrary: a caption is cut to listChars at a word boundary, marked with an ellipsis', () => {
+test('renderGifLibrary: an older one-line caption is cut to actionChars at a word boundary, marked with an ellipsis', () => {
   const mediaCache = { 'item-g1': { text: 'ένας γάτος χορεύει πάνω στο τραπέζι' } };
-  const [line] = renderGifLibrary([entry('g1')], mediaCache, labels, { now: NOW, ownMarkHours: 24, listChars: 12 });
+  const [line] = renderGifLibrary([entry('g1')], mediaCache, labels, { now: NOW, ownMarkHours: 24, reactionChars: 0, actionChars: 12 });
   assert.equal(line, 'g1 -- ένας γάτος…');
 });
 
+test('renderGifLibrary: a three-field caption renders as the main request does, through labels.gifs.entryFields', () => {
+  const entries = [entry('g1', { ownLast: NOW - 2 * HOUR }), entry('g2')];
+  const mediaCache = {
+    'item-g1': { text: 'a cat lifts its chin', reaction: 'firm agreement', action: 'a cat lifts its chin', screen: 'yes.', watched: true, gif: true },
+    'item-g2': { text: 'a caracal stares ahead', reaction: 'waiting', action: 'a caracal stares ahead', screen: '', watched: true, gif: true },
+  };
+  assert.deepEqual(renderGifLibrary(entries, mediaCache, labels, { now: NOW, ownMarkHours: 24, reactionChars: 40, actionChars: 70 }), [
+    'g1 -- firm agreement; a cat lifts its chin; "yes." (you, 2 h)',
+    'g2 -- waiting; a caracal stares ahead',
+  ]);
+});
+
 test('renderGifLibrary: no entries, no cache or labels without gifs.entry list nothing', () => {
-  assert.deepEqual(renderGifLibrary([], {}, labels, { now: NOW, ownMarkHours: 24, listChars: 0 }), []);
-  assert.deepEqual(renderGifLibrary([entry('g1')], null, labels, { now: NOW, ownMarkHours: 24, listChars: 0 }), []);
+  assert.deepEqual(renderGifLibrary([], {}, labels, { now: NOW, ownMarkHours: 24, ...WHOLE }), []);
+  assert.deepEqual(renderGifLibrary([entry('g1')], null, labels, { now: NOW, ownMarkHours: 24, ...WHOLE }), []);
   const noEntry = { ...labels, gifs: { ...labels.gifs, entry: undefined } };
-  assert.deepEqual(renderGifLibrary([entry('g1')], { 'item-g1': { text: 'χαμόγελο' } }, noEntry, { now: NOW, ownMarkHours: 24, listChars: 0 }), []);
+  assert.deepEqual(renderGifLibrary([entry('g1')], { 'item-g1': { text: 'χαμόγελο' } }, noEntry, { now: NOW, ownMarkHours: 24, ...WHOLE }), []);
+});
+
+/** A chat line of the picker's history. */
+function line(id) {
+  return { id, ts: NOW, authorName: 'Zoé', content: `λόγια ${id}` };
+}
+
+test('pickContext: the last contextMessages lines; the answered line among them is named by its place', () => {
+  const history = ['m1', 'm2', 'm3', 'm4', 'm5'].map(line);
+  const last = pickContext(history, { contextMessages: 3, answeredId: 'm5' });
+  assert.deepEqual([last.messages.map((m) => m.id), last.answeredIndex], [['m3', 'm4', 'm5'], 3]);
+  const inside = pickContext(history, { contextMessages: 3, answeredId: 'm4' });
+  assert.deepEqual([inside.messages.map((m) => m.id), inside.answeredIndex], [['m3', 'm4', 'm5'], 2], 'not the last line');
+});
+
+test('pickContext: an older answered line comes first, before the last lines', () => {
+  const history = ['m1', 'm2', 'm3', 'm4', 'm5'].map(line);
+  const older = pickContext(history, { contextMessages: 2, answeredId: 'm1' });
+  assert.deepEqual([older.messages.map((m) => m.id), older.answeredIndex], [['m1', 'm4', 'm5'], 1]);
+});
+
+test('pickContext: an unknown answered line, none, or 0 context lines mark nothing', () => {
+  const history = ['m1', 'm2', 'm3'].map(line);
+  assert.deepEqual(pickContext(history, { contextMessages: 2, answeredId: 'elsewhere' }), { messages: history.slice(1), answeredIndex: null });
+  assert.deepEqual(pickContext(history, { contextMessages: 2 }), { messages: history.slice(1), answeredIndex: null });
+  assert.deepEqual(pickContext(history, { contextMessages: 0, answeredId: 'm1' }), { messages: [], answeredIndex: null });
+  assert.deepEqual(pickContext(null, { contextMessages: 2, answeredId: 'm1' }), { messages: [], answeredIndex: null });
 });
 
 test('parseGifPick: a single line equal to a listed handle, trimmed and in any case, returns the listed handle', () => {
