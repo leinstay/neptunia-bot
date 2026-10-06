@@ -6163,7 +6163,7 @@ function splitHot({ features = {}, split = {}, labels: ownLabels } = {}) {
     { typingSimulation: false, ...features },
     {},
     {
-      split: { minChars: 20, maxTasks: 4, contextMessages: 2, maxOutputTokens: 50, ...split },
+      split: { minChars: 20, minPartChars: 0, maxTasks: 4, contextMessages: 2, maxOutputTokens: 50, ...split },
       pace: { prepareMs: 5000, prepareSearchMs: 5000, dropAfterMs: 60000, typingWhilePreparing: false },
     },
   );
