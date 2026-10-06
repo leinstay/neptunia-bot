@@ -34,6 +34,7 @@ import { createVarietyPass } from '../src/behavior/variety-pass.js';
 import { buildRequest } from '../src/behavior/prompt.js';
 import { createStore } from '../src/memory/store.js';
 import { labels } from './fixtures/labels.js';
+import { fill } from '../src/discord/format.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 const NOW = Date.UTC(2026, 9, 1, 12, 0, 0);
@@ -257,6 +258,90 @@ test('renderWorn: at most variety.maxPatterns + variety.longMaxPatterns lines, r
   assert.equal(renderWorn(PATTERNS, labels, { variety: { maxPatterns: 1, longMaxPatterns: 0 } }).split('\n').length, 2);
   assert.equal(renderWorn(PATTERNS, labels, { variety: { maxPatterns: 0, longMaxPatterns: 1 } }).split('\n').length, 2);
   assert.equal(renderWorn(PATTERNS, labels, { variety: { maxPatterns: 1, longMaxPatterns: 1 } }).split('\n').length, 3);
+});
+
+// ---- the resting fillers in <worn> ------------------------------------------------------------
+
+const FILLER_CONFIG = { variety: { fillers: { cooldownHours: 36, cooldownMessages: 300, max: 12, halfLifeDays: 14 } } };
+
+/** A stored filler entry: never used, unpinned, seen now, unless `fields` say otherwise. */
+function filler(text, prefix, fields = {}) {
+  return { text, prefix, pinned: false, weight: 2, lastSeen: new Date(NOW).toISOString(), lastUsedAt: null, lastUsedAtMessage: null, uses: 0, ...fields };
+}
+
+/** One filler line as the fixture's labels render it. */
+function fillerLine(text, count, ago) {
+  return `- ${fill(labels.variety.fillerLine, { text, count, ago })}`;
+}
+
+/** Used `hoursAgo` hours and `messagesAgo` own messages before the count of 100: resting under FILLER_CONFIG. */
+function used(hoursAgo, messagesAgo = 1, fields = {}) {
+  return { lastUsedAt: NOW - hoursAgo * HOUR, lastUsedAtMessage: 100 - messagesAgo, ...fields };
+}
+
+const fillersAt = (list) => ({ list, ownMessages: 100, now: NOW });
+
+test('renderWorn: resting fillers follow the patterns under fillersIntro, each with its count and age', () => {
+  const list = [filler('honest', true, used(3, 1, { uses: 5, weight: 7 })), filler('éclair', false, used(1, 1, { uses: 0, weight: 2.6 }))];
+  assert.equal(
+    renderWorn(PATTERNS, labels, FILLER_CONFIG, fillersAt(list)),
+    [
+      labels.variety.intro,
+      '- mock promise ending in (no) ("promise to behave (no)", "fix it (no)")',
+      '- names what was said ("what a surprise")',
+      labels.variety.fillersIntro,
+      fillerLine('honest*', 5, '3 h'),
+      fillerLine('éclair', 3, '1 h'),
+    ].join('\n'),
+    'a prefix entry keeps its *; no uses -> the rounded weight; rank order (weight)',
+  );
+});
+
+test('renderWorn: a filler past its cooldown (hours or own messages) or never used is left out', () => {
+  const list = [
+    filler('past', false, used(40)),
+    filler('talked', false, used(1, 300)),
+    filler('never', false),
+    filler('still', false, used(2)),
+  ];
+  assert.equal(renderWorn(PATTERNS, labels, FILLER_CONFIG, fillersAt(list)).split('\n').slice(3).join('\n'), [labels.variety.fillersIntro, fillerLine('still', 2, '2 h')].join('\n'));
+});
+
+test('renderWorn: a pinned filler is always listed, aged from lastSeen when never used, ranked first', () => {
+  const seen = new Date(NOW - 2 * 24 * HOUR).toISOString();
+  const list = [filler('resting', false, used(1, 1, { uses: 2, weight: 9 })), filler('pinned', false, { pinned: true, lastSeen: seen, weight: 1 })];
+  assert.equal(renderWorn([], labels, FILLER_CONFIG, fillersAt(list)), [labels.variety.intro, labels.variety.fillersIntro, fillerLine('pinned', 1, '2 d'), fillerLine('resting', 2, '1 h')].join('\n'));
+});
+
+test('renderWorn: no stamp at all fills {ago} with transcript.unknownDuration', () => {
+  const list = [filler('bare', false, { pinned: true, lastSeen: null })];
+  assert.ok(renderWorn([], labels, FILLER_CONFIG, fillersAt(list)).endsWith(fillerLine('bare', 2, labels.transcript.unknownDuration)));
+});
+
+test('renderWorn: at most variety.fillers.max filler lines, read now', () => {
+  const list = ['alpha', 'beta', 'gamma'].map((text, i) => filler(text, false, used(1, 1, { weight: 10 - i })));
+  const config = { variety: { fillers: { ...FILLER_CONFIG.variety.fillers, max: 2 } } };
+  assert.deepEqual(renderWorn([], labels, config, fillersAt(list)).split('\n').slice(2), [fillerLine('alpha', 10, '1 h'), fillerLine('beta', 9, '1 h')]);
+});
+
+test('renderWorn: a missing or blank fillersIntro or fillerLine leaves the filler lines out', () => {
+  const list = [filler('still', false, used(2))];
+  for (const key of ['fillersIntro', 'fillerLine']) {
+    const blanked = { ...labels, variety: { ...labels.variety, [key]: '  ' } };
+    assert.equal(renderWorn(PATTERNS, blanked, FILLER_CONFIG, fillersAt(list)), renderWorn(PATTERNS, labels, FILLER_CONFIG), key);
+    assert.equal(renderWorn([], blanked, FILLER_CONFIG, fillersAt(list)), '', `${key}: no pattern, no filler line -> no block`);
+    const { [key]: _omit, ...rest } = labels.variety;
+    assert.equal(renderWorn([], { ...labels, variety: rest }, FILLER_CONFIG, fillersAt(list)), '', `${key} missing`);
+  }
+});
+
+test('renderWorn: fillers alone make the block; no fillers input or nothing resting leaves patterns only', () => {
+  const list = [filler('still', false, used(2))];
+  assert.equal(renderWorn(null, labels, FILLER_CONFIG, fillersAt(list)), [labels.variety.intro, labels.variety.fillersIntro, fillerLine('still', 2, '2 h')].join('\n'));
+  assert.equal(renderWorn(PATTERNS, labels, FILLER_CONFIG, null), renderWorn(PATTERNS, labels, FILLER_CONFIG));
+  assert.equal(renderWorn(PATTERNS, labels, FILLER_CONFIG, fillersAt([filler('never', false)])), renderWorn(PATTERNS, labels, FILLER_CONFIG));
+  assert.equal(renderWorn(null, labels, FILLER_CONFIG, fillersAt([])), '');
+  assert.equal(renderWorn(null, labels, { ...FILLER_CONFIG, features: { variety: false } }, fillersAt(list)), '', 'the switch off');
 });
 
 // ---- storage --------------------------------------------------------------------------------

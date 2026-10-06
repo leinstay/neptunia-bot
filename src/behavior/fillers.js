@@ -1,23 +1,20 @@
-// The filler guard: a mechanical rail against the persona's filler words. The
-// guild keeps a short ranked list of fillers -- a PREFIX entry (`honest*`)
-// catches every word starting with it, an EXACT entry (`well`, `to be fair`)
-// the word or phrase as a whole. The owner pins entries (`/nep filler add`);
-// the variety passes feed it by themselves: a word-type habit they name
-// (`word` on a pattern) is added or bumped, the weakest unpinned entry evicted
-// past `variety.fillers.max`, rank = weight with recency decay
-// (src/memory/ranking.js). A filler the persona used may come back only after
-// a long silence -- `variety.fillers.cooldownHours` OR
-// `variety.fillers.cooldownMessages` of its own messages since the last use,
-// whichever comes first. A reply that still holds a resting filler is asked
-// once to be rewritten without it (prompts/reword.md), so the main prompt
-// never lists the words and never primes them. The same rewrite covers the
-// pattern post-check: a cheap judge (prompts/pattern-check.md) reads the reply
-// against the worn patterns the variety pass named (`<worn>`), and the shapes
-// it names go into that one rewrite too. This module is the pure side: the
+// The filler list: the persona's filler words, kept as data and shown to the
+// persona as advice BEFORE it writes, never used to rewrite a reply after it
+// was written. The guild keeps a short ranked list of fillers -- a PREFIX
+// entry (`honest*`) catches every word starting with it, an EXACT entry
+// (`well`, `to be fair`) the word or phrase as a whole. The owner pins
+// entries (`/nep filler add`); the variety passes feed it by themselves: a
+// word-type habit they name (`word` on a pattern) is added or bumped, the
+// weakest unpinned entry evicted past `variety.fillers.max`, rank = weight
+// with recency decay (src/memory/ranking.js). A filler the persona used rests
+// for a while -- until `variety.fillers.cooldownHours` passed OR
+// `variety.fillers.cooldownMessages` of its own messages were posted since
+// the last use, whichever comes first -- and the resting ones are listed in
+// the turn's `<worn>` block next to the worn patterns
+// (src/behavior/variety.js#renderWorn). This module is the pure side: the
 // settings, the entry syntax, the match, the cooldown, the use stamp, the
-// ranked list, the learning from patterns, the judge's block and answer, the
-// parse of the rewrite and the running count of the persona's own messages.
-// The requests and the bookkeeping after posting live in
+// ranked list, the learning from patterns and the running count of the
+// persona's own messages. The bookkeeping after posting lives in
 // src/behavior/turn.js, the learning's wiring in src/behavior/variety-pass.js,
 // the stored state (`fillers`, `ownMessageCount` on guild.json) in
 // src/memory/store.js.
@@ -31,7 +28,6 @@ import { HOUR_MS } from '../time.js';
 export const FILLERS_DEFAULTS = Object.freeze({
   cooldownHours: 36,
   cooldownMessages: 300,
-  maxOutputTokens: 400,
   max: 12,
   halfLifeDays: 14,
 });
@@ -48,12 +44,12 @@ const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 /**
  * The `variety.fillers` settings of the live config, key by key:
  * `cooldownHours` (a finite number >= 0), `cooldownMessages` (>= 0, floored),
- * `maxOutputTokens` (> 0, floored), `max` (the list's capacity, >= 0, floored)
+ * `max` (the list's capacity, >= 0, floored)
  * and `halfLifeDays` (the rank's decay, >= 0; 0 = no decay); a missing or
  * unusable key takes config.json's value (FILLERS_DEFAULTS). A cooldown of 0
  * releases every filler at once.
  * @param {object} config  The whole live config.
- * @returns {{ cooldownHours: number, cooldownMessages: number, maxOutputTokens: number, max: number, halfLifeDays: number }}
+ * @returns {{ cooldownHours: number, cooldownMessages: number, max: number, halfLifeDays: number }}
  */
 export function fillersSettings(config) {
   const group = isPlainObject(config?.variety?.fillers) ? config.variety.fillers : {};
@@ -65,7 +61,6 @@ export function fillersSettings(config) {
   return {
     cooldownHours: atLeast('cooldownHours', 0, false),
     cooldownMessages: atLeast('cooldownMessages', 0, true),
-    maxOutputTokens: atLeast('maxOutputTokens', 1, true),
     max: atLeast('max', 0, true),
     halfLifeDays: atLeast('halfLifeDays', 0, false),
   };
@@ -73,7 +68,7 @@ export function fillersSettings(config) {
 
 // ---- the entry ------------------------------------------------------------------
 
-/** `text` as the guard compares it: composed (NFC), lowercase, trimmed, inner whitespace collapsed. */
+/** `text` as the list compares it: composed (NFC), lowercase, trimmed, inner whitespace collapsed. */
 function folded(text) {
   return String(text).normalize('NFC').toLowerCase().trim().replace(/\s+/gu, ' ');
 }
@@ -142,7 +137,7 @@ function freshEntry({ text, prefix }, { pinned, weight, lastSeen }) {
 }
 
 /**
- * A stored `fillers` list as the guard reads it: entries `{ text, prefix,
+ * A stored `fillers` list as it is read: entries `{ text, prefix,
  * pinned, weight, lastSeen, lastUsedAt, lastUsedAtMessage, uses }`, the text
  * re-parsed (a hand-written `honest*` text becomes a prefix entry; one that no
  * longer parses is dropped), `pinned` only when true, `weight` a finite number
@@ -353,33 +348,6 @@ export function learnFillers(list, patterns, { now, max, halfLifeDays }) {
   };
 }
 
-// ---- the rewrite ------------------------------------------------------------------
-
-/** Whether the rewrite answered `keep`: the one word, quotes, backticks and end punctuation aside. */
-function isKeep(answer) {
-  return answer.replace(/^[\s`"'*]+|[\s`"'*.!]+$/g, '').toLowerCase() === 'keep';
-}
-
-/**
- * The reply after the rewrite: `rewritten` (the reword request's answer, the
- * messages separated by a blank line) replaces the texts of `messages` one by
- * one, each trimmed, their `replyTo` kept, when it holds exactly as many
- * non-empty messages. `keep`, an empty answer, another count or no string give
- * `messages` itself (the same array), so the caller can tell nothing changed.
- * @param {{ text: string }[]} messages
- * @param {unknown} rewritten
- * @returns {{ text: string }[]}
- */
-export function applyReword(messages, rewritten) {
-  if (typeof rewritten !== 'string' || rewritten.trim() === '' || isKeep(rewritten)) return messages;
-  const parts = rewritten
-    .split(/\n[^\S\n]*\n/u)
-    .map((part) => part.trim())
-    .filter((part) => part !== '');
-  if (parts.length !== messages.length) return messages;
-  return messages.map((message, i) => ({ ...message, text: parts[i] }));
-}
-
 // ---- the own-message count --------------------------------------------------------
 
 /**
@@ -401,73 +369,4 @@ export function normalizeOwnMessageCount(value) {
  */
 export function ownMessageCounter(count, posted) {
   return normalizeOwnMessageCount(count) + (Number.isInteger(posted) && posted > 0 ? posted : 0);
-}
-
-// ---- the pattern post-check -----------------------------------------------------
-
-/** The `variety.patternCheck` group when a key is missing or unusable: config.json's values. */
-export const PATTERN_CHECK_DEFAULTS = Object.freeze({
-  minChars: 15,
-  maxOutputTokens: 200,
-});
-
-/**
- * The `variety.patternCheck` settings of the live config, key by key:
- * `minChars` (the reply's code points below which it is not judged; a finite
- * number >= 0, floored) and `maxOutputTokens` (> 0, floored); a missing or
- * unusable key takes config.json's value (PATTERN_CHECK_DEFAULTS).
- * @param {object} config  The whole live config.
- * @returns {{ minChars: number, maxOutputTokens: number }}
- */
-export function patternCheckSettings(config) {
-  const group = isPlainObject(config?.variety?.patternCheck) ? config.variety.patternCheck : {};
-  return {
-    minChars: finite(group.minChars) && group.minChars >= 0 ? Math.floor(group.minChars) : PATTERN_CHECK_DEFAULTS.minChars,
-    maxOutputTokens:
-      finite(group.maxOutputTokens) && group.maxOutputTokens >= 1 ? Math.floor(group.maxOutputTokens) : PATTERN_CHECK_DEFAULTS.maxOutputTokens,
-  };
-}
-
-/**
- * The body of the judge's `<patterns>` block (prompts/pattern-check.md): one
- * line per worn pattern, numbered from 1, `n. <shape> — "<example>", ...`
- * (the dash and the examples only when it has some). '' for no pattern.
- * @param {{ shape: string, examples?: string[] }[]|null|undefined} patterns
- * @returns {string}
- */
-export function patternCheckBody(patterns) {
-  return (Array.isArray(patterns) ? patterns : [])
-    .map((pattern, i) => {
-      const examples = Array.isArray(pattern?.examples) ? pattern.examples : [];
-      const tail = examples.length > 0 ? ` — ${examples.map((example) => `"${example}"`).join(', ')}` : '';
-      return `${i + 1}. ${pattern?.shape ?? ''}${tail}`;
-    })
-    .join('\n');
-}
-
-/**
- * The judge's answer read strictly: its first non-empty line, backticks,
- * quotes and end punctuation aside, is `none` (no match) or numbers separated
- * by commas or spaces. `matched` holds the 0-based indices of the listed
- * patterns, each once, in the order named; a number outside 1..`count` is
- * dropped. Anything else -- prose, an empty answer, no string -- is
- * `parsed: false` with no match.
- * @param {unknown} answer
- * @param {number} count  How many patterns were listed.
- * @returns {{ matched: number[], parsed: boolean }}
- */
-export function parsePatternCheck(answer, count) {
-  const none = { matched: [], parsed: false };
-  if (typeof answer !== 'string') return none;
-  const line = answer.split('\n').map((text) => text.trim()).find((text) => text !== '');
-  if (!line) return none;
-  const bare = line.replace(/^[\s`"'*]+|[\s`"'*.!]+$/g, '');
-  if (bare.toLowerCase() === 'none') return { matched: [], parsed: true };
-  if (!/^\d+(?:[\s,]+\d+)*$/.test(bare)) return none;
-  const matched = [];
-  for (const number of bare.split(/[\s,]+/).map(Number)) {
-    const index = number - 1;
-    if (index >= 0 && index < count && !matched.includes(index)) matched.push(index);
-  }
-  return { matched, parsed: true };
 }

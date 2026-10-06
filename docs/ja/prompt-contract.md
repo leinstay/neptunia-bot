@@ -55,8 +55,6 @@
 | `mentor-diagnose.md` | いいえ | Mentor: スコアリング後に弱い回答の原因をペルソナのコンテキスト内の具体的なテキストで説明（`features.mentor`）。結果は未検証の仮説としてランの `diagnosis` に保存。`mentor.diagnose` が false またはファイルがない場合は省略 | `{{name}}` |
 | `variety.md` | いいえ | `classifier.text` リクエスト: ペルソナの最近のメッセージで繰り返されている表現手法を特定（`features.variety`）。キャラクターカードなし | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `variety-long.md` | いいえ | 長い多様性パス: 全チャンネルにわたるペルソナ自身の行のリング全体での使い回し手法を特定（`features.variety`、`variety.longLines`）。プレースホルダー、`<lines>` ブロック、回答フォーマットは `variety.md` と同じ。`classifier.text` モデルを使用。キャラクターカードなし。ファイルがない場合、長いパスは実行されない | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
-| `reword.md` | いいえ | フィラーガードとパターンガード用の書き直しリクエスト: クールダウン中の語句を置換し、使い古し手法に一致する習慣を言い換える。返答をユーザーメッセージとして受け取る。キャラクターカードなし | `{{name}}` `{{words}}` `{{patterns}}` |
-| `pattern-check.md` | いいえ | `classifier.text` リクエスト: 返答が現在の使い古し手法のいずれかに該当するか確認（`features.patternGuard`）。番号付き手法と返答を受け取る。キャラクターカードなし | `{{name}}` |
 | `gif-pick.md` | いいえ | 分類器: 短いテキスト返答の代わりにライブラリから GIF を選ぶ（`features.gifPicker`）。直近の `gifs.pick.contextMessages` チャット行、ペルソナの返答、キャプション付きのフルライブラリを受け取る。出力はライブラリのハンドル 1 つまたは `none`。キャラクターカードなし | `{{name}}` |
 | `split.md` | いいえ | 分類器: 直接呼びかけに複数の独立したリクエストが含まれるか（`features.splitTasks`）。短い `<transcript>` と新しいメッセージを `<candidate>` として受け取る。出力は `one` という語、または 2 行から `{{maxTasks}}` 行で各行 `- ` で始まり著者自身の言葉でパートを示す。キャラクターカードなし。このファイルがない場合スプリッターはオフ | `{{name}}` `{{maxTasks}}` |
 | `merge.md` | いいえ | 分類器: 待機中の項目を持つ著者からの新しいメッセージがそのいずれかに属するか。番号付き `<waiting>` リストと新しいメッセージを `<candidate>` として受け取る。出力は 1 行: リストの番号または `new` という語。キャラクターカードなし。このファイルがない場合、新しい呼びかけは常に独自の項目としてキューされる | `{{name}}` |
@@ -70,7 +68,7 @@
 `overheard` ターンでは、`overheard.md` がモードプロンプトを置き換えます（追加ではなくタスクテキストそのもの）。`overheard.md` が存在しないか空の場合、モードプロンプトが代わりに使用されます（劣化: モードプロンプトはメッセージをペルソナ宛として扱い、実際と異なる）。
 プライベートチャットでは、`private.md` がモードプロンプトの後（`forced.md` の前）に同じ `{{name}}` と `{{author}}` プレースホルダーで追加されます。
 アナライザーとウォームアップの `profile.md` および `server.md` はキャラクターカードと `rules.md` をユーザーメッセージ内の
-`<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`describe-video.md`、`describe-gif.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md`、`recall-summary.md`、`room.md`、`route-channel.md`、`elsewhere.md`、`variety.md`、`variety-long.md`、`reword.md`、`pattern-check.md` はカードを受け取りません。
+`<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`describe-video.md`、`describe-gif.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md`、`recall-summary.md`、`room.md`、`route-channel.md`、`elsewhere.md`、`variety.md`、`variety-long.md` はカードを受け取りません。
 
 `{{guildFieldChars}}` は `fieldChars * 2` で、コードがギルドレベルのパターンとスターターをクランプする上限です。
 `{{maxEpisodes}}` はメンバーごとに保持されるエピソードの総数です。どちらも config から設定されますが、デフォルトプロンプトでは
@@ -95,7 +93,7 @@
 | `<attitudes>` | ペルソナが最も強く感じているメンバーの上位 `context.attitudes`（デフォルト 6、`0` = オフ）名。態度スコアの大きさで順位付け、好意と反感混在。発話者と `<people>` に既に表示されているメンバーはスキップ。メンバーごとに 1 行（`labels.attitudes.line`）: 名前と態度バンド。ヘッダー: `labels.attitudes.header`。上限 `context.caps.attitudes`（デフォルト 400）。サーバーターンとプライベートチャットの両方に表示 |
 | `<other_channels>` | 隣接チャンネルごとに最大 `context.neighborMessages` 件のメッセージ。`context.neighborMaxAgeMinutes` より古いものは含まない。`features.mediaDescriptions` がオンの場合、隣接チャンネルの行内の画像はキャッシュ済みキャプションを持つ場合にそれを付加。隣接チャンネルに対して新規の説明リクエストは行われない。`<channel_view>` にブロックが表示されているチャンネルは `<other_channels>` から除外。バジェットがプルされたブロックを落とした場合、そのチャンネルは通常の隣接チャンネルとしてここに再表示 |
 | `<channel_view>` | このターンにプルされた別のチャンネル（`features.channelPull`）。プルされたチャンネルごとにヘッダー行（`labels.pull.header`）、該当時の読み取り専用マーク（`labels.server.readOnly`）、ウィンドウがカットされた場合の「古いものは非表示」行、「画像は未確認」カウント、ペルソナへの過去の呼びかけ（応答済み/未応答/スキップマーク付き）、ウィンドウの行。行は `<chat>` と同じトランスクリプト形式だが、チャットの後に番号が続く（チャットは `#1`..`#N`、プルブロックは `#N+1` から）ため、すべての `#n` がブロック間で一意。画像はキャプションまたはブラインドタグのみ、添付画像としては含まない。`labels.pull.header` がない場合ブロックは空 |
-| `<worn>` | ペルソナが最近のメッセージで使い回している表現手法（`features.variety`）: `labels.variety.intro`、続いて手法ごとに `- <shape> ("<example>", ...)`。長いパスのパターン（`wornLong`、`variety-long.md` から）が先、次に短いパス、重複は除去、最大 `variety.maxPatterns` + `variety.longMaxPatterns`。どちらのパスも結果を出さなかった場合またはスイッチがオフの場合は省略 |
+| `<worn>` | ペルソナが使い回している表現手法と語句（`features.variety`）: `labels.variety.intro`、続いて手法ごとに `- <shape> ("<example>", ...)`。長いパスのパターン（`wornLong`、`variety-long.md` から）が先、次に短いパス、重複は除去、最大 `variety.maxPatterns` + `variety.longMaxPatterns`。クールダウン中のフィラーエントリがある場合、パターン行の後に `labels.variety.fillersIntro`、続いてエントリごとに `- <labels.variety.fillerLine>`（プレースホルダー `{text}`、`{count}`、`{ago}`）、ランク順で最大 `variety.fillers.max` 件。どちらのパスも結果を出さず、クールダウン中のフィラーもなく、またはスイッチがオフの場合は省略 |
 | `<lookup>` | ペルソナがこのターンで調べた内容。ウェブ検索（`features.webLookup`）は `labels.lookup.webHeader`、要約された回答、`labels.lookup.sources`。何も見つからなかった場合は `labels.lookup.none`。サーバー検索（`features.recall`）は `labels.lookup.serverHeader`、サマリーノート。サマリーがストレッチを指定した場合はそのストレッチの原文行。両方実行された場合は `labels.lookup.bothNote` がその間に配置。`labels.lookup.stretch` 行が原文ストレッチを導入（`{date}` `{channel}`）。検索分類器が発火し少なくとも 1 つの検索が完了した場合にのみ表示 |
 | `<chat>` | 現在のチャンネルの最新 `context.channelMessages` 件のメッセージ |
 | `<tempo>` | 10 分 / 1 時間 / 1 日のカウント、参加人数、沈黙時間、判定（live / slow / dead） |
@@ -281,6 +279,8 @@ mentor.original                          first line inside the `<original>` bloc
 room.focus                               {target} {author}: appended to the reply task when a room question triggers the turn
 address.author                           {name} {aliases}: the candidate author's display name and known aliases, shown to the address classifier when the member has aliases
 variety.intro                            first line of the `<worn>` block: tells the persona these devices are spent
+variety.fillersIntro                     separator before the filler lines; present only when filler entries on cooldown follow
+variety.fillerLine                       {text} {count} {ago}: one filler entry on cooldown; text is the word stem (trailing `*` for prefix) or the exact phrase, count is how many times it was used, ago is time since last use
 recent.header                            REQUIRED {hours}: the block's first line. A missing header or a missing `recent.line` means no `<recent>` block
 recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
 recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
@@ -529,15 +529,19 @@ task.added                               {added}: later messages from the author
 
 Mentor サンドボックスは、状況ごとに 1 回の多様性パスを実行し、mentor のトークン予算から差し引かれます（`llm.maxRequestsPerDay` にはカウントされません）。サンドボックスは `variety.timeoutMs` をリクエストタイムアウトとして使用します（遅延した結果を使える次のターンがないため）。特定された手法は状況レコードの `worn` として保存されます。ジャッジは `<worn>` ブロックを見ることはありません。
 
-## フィラーガードとパターンガード
+## フィラーアドバイスリスト
 
-ボイスモデルが返答を書いた後、投稿前にペルソナの言語的習慣を検出する 2 つのポストジェネレーションレール。
+ペルソナが多用する語句のランク付きリスト。返答の前に `<worn>` ブロック内に表示され、ペルソナが自ら避けられるようにします。モデルが返答を書いた後に書き直すものはありません。
 
-**フィラーガード**（`features.fillerGuard`、未設定 = オン）。ペルソナが多用する語句のランク付きリスト。主に多様性パスが供給します（パスが見つけた語タイプの習慣がそのカウントに等しいウェイトのエントリになります）。機械的検出器（`features.stickyGuard`）も投稿ごとにリストを供給し、3+ 件の直近行で繰り返されるが古いリングでは稀なフレーズを見つけ、既に開始されたクールダウン付きの正確なエントリとして追加します（ログ `fillers: sticky`）。オーナーは `/nep variety add type:filler` でフォールバックとしてエントリを固定できます。エントリには 2 種類: PREFIX エントリは `*` で終わり（最低 3 文字）、語境界でそのプレフィックスで始まるすべての語に一致します（任意のスクリプト）。EXACT エントリ（`*` なし）は語またはフレーズ全体に一致します。エントリは `variety.fillers.cooldownHours`（デフォルト 36）時間 OR `variety.fillers.cooldownMessages`（デフォルト 300）ペルソナ自身の投稿メッセージ数の先に来た方が過ぎるまで再使用できません。使用すると両カウンターがリセットされます。リストはランキングと削除で管理: 容量 `variety.fillers.max`（デフォルト 12）、時間減衰付きウェイト（`variety.fillers.halfLifeDays`、デフォルト 14）、満杯時に最弱を削除。オーナー追加のエントリは固定（削除・減衰なし）。クールダウン中のエントリを含む返答があると、発話モデル（`llm.model`、目的 `reword`、`variety.fillers.maxOutputTokens` 400、プロンプト `prompts/reword.md`）がそのエントリなしに返答を書き直します。メインのペルソナリクエストはフィラーリストを見ません。ギルドメモリ内の状態: `fillers` と `ownMessageCount`。ログ: `fillers: reworded`、`fillers: reword failed`、`fillers: reword skipped`。
+**データソース。** 多様性パスが主な供給源です: パスが見つけた語タイプの習慣がそのカウントに等しいウェイトのエントリになります。機械的検出器（`features.stickyGuard`）も投稿ごとにリストを供給し、3+ 件の直近行で繰り返されるが古いリングでは稀なフレーズを見つけ、既に開始されたクールダウン付きの正確なエントリとして追加します（ログ `fillers: sticky`）。オーナーは `/nep variety add type:filler` でフォールバックとしてエントリを固定できます。
 
-**パターンガード**（`features.patternGuard`、未設定 = オン）。投稿前に、返答が `variety.patternCheck.minChars`（デフォルト 15）文字以上で使い古しリストが空でない場合、分類器（`classifier.text`、目的 `pattern-check`、`variety.patternCheck.maxOutputTokens` 40、プロンプト `prompts/pattern-check.md`）が返答がどの使い古し手法（短いリストと長いリスト）に該当するかを判定します。一致した場合、同じ書き直しリクエストがその手法なしに返答を書き直します。分類器は最初のメッセージのタイピングシミュレーション中に実行されるため、目に見える遅延を追加しません。書き直しのみが遅延を追加します。ログ: `patterns: checked`、`patterns: check failed`。
+**ランキング。** リストはインタレストと同様のランキングと削除で管理: 容量 `variety.fillers.max`（デフォルト 12）、時間減衰付きウェイト（`variety.fillers.halfLifeDays`、デフォルト 14）、満杯時に最弱を削除。オーナー追加のエントリは固定（削除・減衰なし）。
 
-両ガードは `prompts/reword.md` を共有し、2 つのプレースホルダーを取ります: `{{words}}`（クールダウン中の語、語幹またはフレーズ、カンマ区切り。なしの場合は空）と `{{patterns}}`（一致した習慣のシェイプ、`; ` で結合。なしの場合は空）。両方が同じ返答で発火できます: フィラーガードが先に書き直し、パターンガードが書き直されたテキストをチェックします。
+**クールダウン = どのエントリが表示されるか。** エントリは、ペルソナが `variety.fillers.cooldownHours`（デフォルト 36）時間以内 OR `variety.fillers.cooldownMessages`（デフォルト 300）件の自身の投稿以内に使用した場合、クールダウン中です（先に来た方）。使用すると両カウンターがリセットされます。固定エントリは常にクールダウン中です。アドバイスリストにはクールダウン中のエントリのみが表示されます。エントリには 2 種類: PREFIX エントリは `*` で終わり（最低 3 文字）、語境界でそのプレフィックスで始まるすべての語に一致します（任意のスクリプト）。EXACT エントリ（`*` なし）は語またはフレーズ全体に一致します。
+
+**レンダリング。** 使い古し手法の行の後、クールダウン中のフィラーエントリがある場合: `labels.variety.fillersIntro`、続いてエントリごとに `- labels.variety.fillerLine`。`fillerLine` プレースホルダー: `{text}`（語幹、プレフィックスエントリの場合は末尾に `*`、または正確なフレーズ）、`{count}`（使用または検出された回数）、`{ago}`（最終使用からの経過時間、例: 「3 h 12 min」、不明時は `?:??`）。エントリはランク順、最大 `variety.fillers.max` 件。
+
+**状態。** ギルドメモリ: `fillers`（エントリリスト）と `ownMessageCount`（メッセージベースのクールダウンに使用されるペルソナ自身の投稿メッセージカウンター）。ログ: `fillers: sticky`（検出器がエントリを追加）、`fillers: learned`（多様性パスがエントリを追加または更新）。
 
 ## タスクスプリッター
 
