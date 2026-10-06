@@ -462,7 +462,7 @@ test('renderRecallWindows: hit lines carry the mark; captions render; unindexed 
   };
   const [indexed] = renderRecallWindows([window], { labels, timezone: 'UTC', selfName: 'Zoë', indexed: true });
   assert.equal(indexed.lines[0].text, '#1 [18:40] Ana: line m1 [image: a rabbit in the grass]');
-  assert.equal(indexed.lines[1].text, `${HIT_MARK}#2 [18:44] Βασίλης: τον πυροβόλησες (replying to #1)`);
+  assert.equal(indexed.lines[1].text, `${HIT_MARK}#2 [18:44] Βασίλης: τον πυροβόλησες (replying to #1, Ana: "line m1")`);
   assert.deepEqual(indexed.lines.map((l) => l.hit), [false, true]);
   const [plain] = renderRecallWindows([window], { labels, timezone: 'UTC', indexed: false });
   assert.equal(plain.lines[1].text, `${HIT_MARK}[18:44] Βασίλης: τον πυροβόλησες`);

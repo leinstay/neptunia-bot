@@ -17,7 +17,7 @@ export const labels = {
     date: '--- {date} ---',
     header: '=== {date} ===',
     empty: '(empty)',
-    replyTo: '(replying to #{index})',
+    replyTo: '(replying to #{index}, {author}: "{quote}")',
     replyToOld: '(replying to an older message)',
     image: '[image]',
     imageAttached: '[picture #{n}, attached]',
@@ -136,6 +136,7 @@ export const labels = {
     header: 'custom emoji of this server, most used first:',
     entry: ':{name}: -- {text}',
     entryNoText: ':{name}:',
+    seenInChat: 'Also in the chat:',
   },
   gifs: {
     header: 'gifs of this server, most used first:',
@@ -228,7 +229,7 @@ export const labels = {
   variety: {
     intro: 'devices you used in your last lines, do not repeat them:',
     fillersIntro: 'filler words still resting, leave them out:',
-    fillerLine: '{text} -- {count} uses, last {ago} ago',
+    fillerLine: '{text} -- {count} of the last {window} lines, last {ago} ago',
   },
   mentor: {
     intended: ['a limit notice is a feature'],

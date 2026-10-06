@@ -3388,7 +3388,35 @@ test('runTurn: the variety pass gets the turn\'s history and channel; its answer
   assert.equal(input.privateChat, false);
   assert.equal(input.selfName, 'Bot');
   assert.deepEqual(input.history.filter((m) => m.self).map((m) => m.id), ['m0']);
-  assert.equal(wornBlockOf(llm), [labels.variety.intro, '- mock promise ending in (no) ("(no)")'].join('\n'));
+  assert.equal(wornBlockOf(llm), [labels.variety.intro, '- mock promise ending in (no)'].join('\n'));
+});
+
+// ---- format.stripDashes ------------------------------------------------------------------
+
+/** One reply turn answered with `reply` under `format`; what was posted and the logs. */
+async function dashTurn(reply, format) {
+  const raw = rawMessage({ id: 'm1' });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const turns = createTurnRunner({ hot: fakeHot({}, {}, { format }), store: fakeStore(), llm: fakeLlm(reply), calibrator: identityCalibrator(), client: fakeClient() });
+  const { logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' }));
+  return { sent: channel.sent.map((payload) => payload.content), logs };
+}
+
+test('runTurn: format.stripDashes on posts a reply without its em/en dashes, drops a message left empty and logs the count', async () => {
+  const { sent, logs } = await dashTurn('<msg>ωραίο — πολύ–ωραίο, peut-être</msg><msg>—</msg>', { stripDashes: true });
+  assert.deepEqual(sent, ['ωραίο πολύ ωραίο, peut-être']);
+  const line = logs.find((entry) => entry.msg === 'turn: dashes stripped');
+  assert.ok(line, 'logged once');
+  assert.equal(line.count, 3);
+  assert.equal(line.channel, 'c1');
+  assert.equal(logs.filter((entry) => entry.msg === 'turn: dashes stripped').length, 1);
+  assert.ok(!JSON.stringify(line).includes('ωραίο'), 'never the text');
+});
+
+test('runTurn: format.stripDashes false posts the dashes as written, no log', async () => {
+  const { sent, logs } = await dashTurn('<msg>ωραίο — πολύ</msg>', { stripDashes: false });
+  assert.deepEqual(sent, ['ωραίο — πολύ']);
+  assert.equal(logs.some((entry) => entry.msg === 'turn: dashes stripped'), false);
 });
 
 test('runTurn: no variety pass, a null answer or a rejecting one -> the turn speaks without <worn>', async () => {
@@ -7214,26 +7242,39 @@ test('runTurn: a reply holding a resting filler and a worn pattern is posted exa
   assert.equal(logs.some((entry) => /^(fillers: reword|fillers: guard|patterns:)/.test(entry.msg)), false);
 });
 
-test('runTurn: the request\'s <worn> lists the resting fillers after the worn patterns', async () => {
-  const { llm } = await runFillerTurn({ guild: RESTING, variety: passNaming(), reply: '<msg>και τέλος</msg>' });
+// The guild's ring of the persona's own lines: the filler stands in two of the three.
+const RESTING_LINES = {
+  ...RESTING,
+  ownLines: [
+    { id: 'o1', ts: NOW - 3 * 60_000, channelId: 'c1', text: 'ειλικρινά όχι' },
+    { id: 'o2', ts: NOW - 2 * 60_000, channelId: 'c1', text: 'καλά' },
+    { id: 'o3', ts: NOW - 60_000, channelId: 'c1', text: 'Ειλικρινής απάντηση' },
+  ],
+};
+
+test('runTurn: the request\'s <worn> lists the resting fillers after the worn patterns, counted in the own-line ring', async () => {
+  const { llm } = await runFillerTurn({ guild: RESTING_LINES, variety: passNaming(), reply: '<msg>και τέλος</msg>' });
   const [request] = llm.calls;
   assert.equal(
     wornOfCall(request),
     [
       labels.variety.intro,
-      '- ends on a rhetorical question ("σωστά;")',
-      '- opens with a sigh ("αχ", "ουφ")',
+      '- ends on a rhetorical question',
+      '- opens with a sigh',
       labels.variety.fillersIntro,
-      `- ${fill(labels.variety.fillerLine, { text: 'ειλικρ*', count: 4, ago: '1 h' })}`,
+      `- ${fill(labels.variety.fillerLine, { text: 'ειλικρ*', count: 2, window: 3, ago: '1 h' })}`,
     ].join('\n'),
   );
 });
 
 test('runTurn: resting fillers alone make the <worn> block; a guild with none shows no filler line', async () => {
   const alone = await runFillerTurn({ guild: RESTING, reply: '<msg>και τέλος</msg>' });
-  assert.equal(wornOfCall(alone.llm.calls[0]), [labels.variety.intro, labels.variety.fillersIntro, `- ${fill(labels.variety.fillerLine, { text: 'ειλικρ*', count: 4, ago: '1 h' })}`].join('\n'));
+  assert.equal(
+    wornOfCall(alone.llm.calls[0]),
+    [labels.variety.intro, labels.variety.fillersIntro, `- ${fill(labels.variety.fillerLine, { text: 'ειλικρ*', count: 0, window: 0, ago: '1 h' })}`].join('\n'),
+  );
   const none = await runFillerTurn({ variety: passNaming(), reply: '<msg>και τέλος</msg>' });
-  assert.equal(wornOfCall(none.llm.calls[0]), [labels.variety.intro, '- ends on a rhetorical question ("σωστά;")', '- opens with a sigh ("αχ", "ουφ")'].join('\n'));
+  assert.equal(wornOfCall(none.llm.calls[0]), [labels.variety.intro, '- ends on a rhetorical question', '- opens with a sigh'].join('\n'));
 });
 
 test('runTurn: an exact filler is stamped only as a whole word', async () => {

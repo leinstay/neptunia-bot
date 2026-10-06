@@ -450,6 +450,7 @@ export function createMessageHandler({
       labels,
       seeReactions: config.features?.seeReactions !== false,
       reactionsPerMessage: config.context.reactionsPerMessage,
+      replyQuoteChars: config.context.replyQuoteChars,
       descriptions,
       videos,
     });

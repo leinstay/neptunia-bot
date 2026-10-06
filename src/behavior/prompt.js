@@ -49,7 +49,7 @@ import { isConfirmed, isStale } from '../memory/interests.js';
 import { topByRank } from '../memory/ranking.js';
 import { rankEmojiUsage } from '../memory/emoji-usage.js';
 import { gifHandleMap, normalizeGifs, rankGifs } from '../memory/gifs.js';
-import { clampText } from '../memory/clamp.js';
+import { clampWithEllipsis } from '../memory/clamp.js';
 import { sortEpisodesForDisplay, topEpisodes } from '../memory/episodes.js';
 import { RECENT_EPISODES_PER_MEMBER, episodeKey, memberIdOf, recentSettings, recentView } from '../memory/recent.js';
 import { matchLore } from '../memory/lore.js';
@@ -640,21 +640,26 @@ function loreItems(loreEntries, history, trigger, labels, loreCfg, nameOf) {
  * name is the index's current one. A helper caption cached under
  * `emoji:<id>` (the describer's cache; a `miss` entry has no text) renders
  * through `labels.emoji.entry` (`{name}`/`{text}`), otherwise
- * `labels.emoji.entryNoText` (`{name}`). `[]` when the index is empty or
- * the labels lack `header`/`entryNoText` (an older labels.json).
+ * `labels.emoji.entryNoText` (`{name}`); a caption this request's
+ * `describe(id)` knows comes first. Then, when `seen` is given and
+ * `labels.emoji.seenInChat` and `entry` are set, the custom emoji of this
+ * request's transcript (seenEmoji) not listed above that have a caption:
+ * `seenInChat` as a sub-heading, one `entry` line each. `[]` when the index
+ * is empty or the labels lack `header`/`entryNoText` (an older labels.json).
  * @param {{ id: string, name: string }[]} index  The index's emoji (createEmojiIndex().list()).
  * @param {unknown} usage           `guild.emojiUsage`.
  * @param {object|null} mediaCache  The describer cache (store.getMediaCache), read only.
  * @param {object} labels
  * @param {{ max?: number, halfLifeDays?: number }} [emojiCfg]  `context.customEmoji`.
+ * @param {{ seen?: { id: string, name: string }[], describe?: (id: string) => string }} [extra]
  * @returns {string[]}
  */
-function emojiItems(index, usage, mediaCache, labels, emojiCfg) {
+function emojiItems(index, usage, mediaCache, labels, emojiCfg, { seen = [], describe = () => '' } = {}) {
   const e = labels.emoji;
   if (!e?.header || !e.entryNoText) return [];
   const list = Array.isArray(index) ? index.filter((emoji) => emoji?.id && emoji.name) : [];
   if (list.length === 0) return [];
-  const max = Number.isInteger(emojiCfg?.max) && emojiCfg.max >= 0 ? emojiCfg.max : 30;
+  const max = emojiMax(emojiCfg);
   const byId = new Map(list.map((emoji) => [String(emoji.id), emoji]));
   const chosen = [];
   const taken = new Set();
@@ -666,12 +671,60 @@ function emojiItems(index, usage, mediaCache, labels, emojiCfg) {
   for (const used of rankEmojiUsage(usage, emojiCfg?.halfLifeDays ?? 30)) take(byId.get(used.id));
   for (const emoji of list) take(emoji);
   if (chosen.length === 0) return [];
+  const captionOf = (id) => {
+    const known = describe(String(id));
+    if (known) return known;
+    const cached = mediaCache?.[`emoji:${id}`];
+    return cached && !cached.miss && typeof cached.text === 'string' ? cached.text.trim() : '';
+  };
   const lines = chosen.map((emoji) => {
-    const cached = mediaCache?.[`emoji:${emoji.id}`];
-    const text = cached && !cached.miss && typeof cached.text === 'string' ? cached.text.trim() : '';
+    const text = captionOf(emoji.id);
     return text && e.entry ? fill(e.entry, { name: emoji.name, text }) : fill(e.entryNoText, { name: emoji.name });
   });
-  return [e.header, ...lines];
+  const more = [];
+  if (e.seenInChat && e.entry) {
+    for (const emoji of seen) {
+      const text = taken.has(String(emoji.id)) ? '' : captionOf(emoji.id);
+      if (text) more.push(fill(e.entry, { name: emoji.name, text }));
+    }
+  }
+  return [e.header, ...lines, ...(more.length > 0 ? [e.seenInChat, ...more] : [])];
+}
+
+/** The first non-blank caption under `key` in `maps` (each a Map or nothing), trimmed; '' when none. */
+function emojiCaption(key, maps) {
+  for (const map of maps) {
+    const text = map instanceof Map ? map.get(key) : null;
+    if (typeof text === 'string' && text.trim()) return text.trim();
+  }
+  return '';
+}
+
+/** `context.customEmoji.max` (30, config.json's value, when missing or unusable). */
+function emojiMax(emojiCfg) {
+  return Number.isInteger(emojiCfg?.max) && emojiCfg.max >= 0 ? emojiCfg.max : 30;
+}
+
+/**
+ * The custom emoji used in `messageSets` (arrays of normalized messages, a
+ * forwarded snapshot's emoji included), each id once, in order of first use.
+ * @param {object[][]} messageSets
+ * @returns {{ id: string, name: string }[]}
+ */
+function seenEmoji(messageSets) {
+  const out = new Map();
+  const add = (emojis) => {
+    for (const emoji of Array.isArray(emojis) ? emojis : []) {
+      if (emoji?.id && emoji.name && !out.has(String(emoji.id))) out.set(String(emoji.id), { id: String(emoji.id), name: emoji.name });
+    }
+  };
+  for (const messages of messageSets) {
+    for (const message of Array.isArray(messages) ? messages : []) {
+      add(message?.emojis);
+      for (const snapshot of message?.forwarded ?? []) add(snapshot?.emojis);
+    }
+  }
+  return [...out.values()];
 }
 
 /**
@@ -680,8 +733,8 @@ function emojiItems(index, usage, mediaCache, labels, emojiCfg) {
  * (src/memory/gifs.js#rankGifs, `gifsCfg.halfLifeDays`, default 30). A helper
  * caption cached under the entry's `itemId` (the describer's cache; a `miss`
  * entry has no text) renders through `labels.gifs.entry` (`{id}`/`{text}`),
- * cut to `gifsCfg.listChars` (default 70; 0 = whole) at a word boundary
- * (src/memory/clamp.js#clampText, a hard limit) -- only here: the cached
+ * cut to `gifsCfg.listChars` (default 70; 0 = whole) at a word boundary with
+ * an ellipsis (gifCaption, a hard limit) -- only here: the cached
  * caption stays whole -- otherwise `labels.gifs.entryNoText` (`{id}`). A GIF
  * the persona itself posted (`ownLast`, see src/memory/gifs.js#markOwnGif) no
  * longer than `gifsCfg.ownMarkHours` (default 24; 0 = never) before `now`
@@ -709,8 +762,10 @@ function gifItems(gifs, mediaCache, labels, gifsCfg, now) {
 /**
  * The caption of a GIF library entry: the helper caption cached under its
  * `itemId` (the describer's cache; a `miss` entry has none), cut to
- * `listChars` (0 = whole) at a word boundary (src/memory/clamp.js#clampText,
- * a hard limit); '' when there is none. Pure.
+ * `listChars` (0 = whole) at a word boundary, a cut marked with an ellipsis
+ * (src/memory/clamp.js#clampWithEllipsis, a hard limit); '' when there is
+ * none. Render time only, so a caption stored whole or stored cut renders the
+ * same way. Pure.
  * @param {{ itemId: string }} entry
  * @param {object|null} mediaCache  The describer cache (store.getMediaCache), read only.
  * @param {number} listChars
@@ -718,7 +773,7 @@ function gifItems(gifs, mediaCache, labels, gifsCfg, now) {
  */
 export function gifCaption(entry, mediaCache, listChars) {
   const cached = mediaCache?.[entry?.itemId];
-  return cached && !cached.miss && typeof cached.text === 'string' ? clampText(cached.text, listChars, { tolerance: 1 }) : '';
+  return cached && !cached.miss && typeof cached.text === 'string' ? clampWithEllipsis(cached.text, listChars) : '';
 }
 
 /**
@@ -827,6 +882,7 @@ export function classifierTranscript(messages, { config, selfName, labels, descr
     labels,
     seeReactions: config.features?.seeReactions !== false,
     reactionsPerMessage: config.context?.reactionsPerMessage,
+    replyQuoteChars: config.context?.replyQuoteChars,
     descriptions,
     videos,
     reads,
@@ -1599,7 +1655,10 @@ function pulledAuthors(pulledFits) {
  *   guild's custom emoji (src/discord/emoji.js#createEmojiIndex's `list()`). With
  *   `features.customEmoji` on (a missing key counts as on) and a non-empty list, `<emoji>`
  *   renders (ranked by `guildMemory.emojiUsage`, see `emojiItems`) and `<senses>` carries
- *   `senses.customEmoji`. Omitted or [] -> neither.
+ *   `senses.customEmoji`. Omitted or [] -> neither. With `labels.emoji.seenInChat` (and
+ *   `entry`) set, the transcript's lines keep a custom emoji as a bare `:name:` and `<emoji>`
+ *   describes the described ones not in its top list once, under that sub-heading; without
+ *   it they keep the inline `transcript.emojiDescribed` tag.
  * @param {object|null} [input.mediaCache]  The describer cache (store.getMediaCache), read only
  *   for the `emoji:<id>` captions of `<emoji>` and the GIF captions of `<gifs>`.
  * @param {object|null} [input.gifs]  The guild's GIF library (store.getGifs). With `features.gifs`
@@ -1724,6 +1783,15 @@ export function buildRequest(input) {
   // The GIF library: the switch (a missing key counts as on) and at least one entry.
   const gifLibrary = config.features?.gifs !== false && input.gifs ? normalizeGifs(input.gifs) : null;
   const gifsOn = Boolean(gifLibrary) && Object.keys(gifLibrary.entries).length > 0;
+  // The server's custom emoji: the switch (a missing key counts as on) and a non-empty index.
+  const customEmoji = config.features?.customEmoji !== false && Array.isArray(input.customEmoji) ? input.customEmoji : [];
+  // A custom emoji of the transcript is described once, in `<emoji>` (emojiItems), when that
+  // block can carry it; otherwise its lines keep the inline `transcript.emojiDescribed` tag.
+  const emojiLabels = labels.emoji;
+  const emojiOnce =
+    Boolean(emojiLabels?.header && emojiLabels.entryNoText && emojiLabels.entry && emojiLabels.seenInChat) &&
+    emojiMax(config.context.customEmoji) > 0 &&
+    customEmoji.some((emoji) => emoji?.id && emoji.name);
   const formatOptions = {
     timezone,
     gapMinutes: config.context.gapMarkerMinutes,
@@ -1732,6 +1800,8 @@ export function buildRequest(input) {
     labels,
     seeReactions: config.features?.seeReactions !== false,
     reactionsPerMessage: config.context.reactionsPerMessage,
+    replyQuoteChars: config.context.replyQuoteChars,
+    emojiInline: !emojiOnce,
     attachedIndex,
     descriptions,
     videos,
@@ -1840,8 +1910,6 @@ export function buildRequest(input) {
   // room for it (see fitPulledChannel); checked once the budget is spent.
   const fittedTask = composeTask(true);
 
-  // The server's custom emoji: the switch (a missing key counts as on) and a non-empty index.
-  const customEmoji = config.features?.customEmoji !== false && Array.isArray(input.customEmoji) ? input.customEmoji : [];
   const sensesText = renderSenses(config, labels, {
     searchAvailable: input.searchAvailable === true,
     recallAvailable: input.recallAvailable === true,
@@ -2240,7 +2308,10 @@ export function buildRequest(input) {
         name: 'emoji',
         cap: caps.emoji ?? 800,
         keep: 'first',
-        items: emojiItems(customEmoji, input.guildMemory?.emojiUsage, input.mediaCache ?? null, labels, config.context.customEmoji),
+        items: emojiItems(customEmoji, input.guildMemory?.emojiUsage, input.mediaCache ?? null, labels, config.context.customEmoji, {
+          seen: emojiOnce ? seenEmoji([history, ...pulledChannels.map((channel) => channel.messages), ...offeredNeighbors.map((neighbor) => neighbor.messages)]) : [],
+          describe: (id) => emojiCaption(`emoji:${id}`, [descriptions, input.neighborDescriptions, ...pulledChannels.map((channel) => channel.entry.descriptions)]),
+        }),
       },
       // Below even the emoji: the GIF library, trimmed the same way (least used last).
       {
@@ -2255,6 +2326,8 @@ export function buildRequest(input) {
   );
   const { kept, stats } = budgetFit;
   let { used } = budgetFit;
+  // The emoji seen in the chat lost to the cap leave no sub-heading of their own behind.
+  if (emojiOnce && kept.emoji.length > 0 && kept.emoji.at(-1) === labels.emoji.seenInChat) kept.emoji = kept.emoji.slice(0, -1);
   // The header alone, or entries without their header, make no block.
   if (kept.emoji.length < 2 || kept.emoji[0] !== labels.emoji?.header) kept.emoji = [];
   if (kept.gifs.length < 2 || kept.gifs[0] !== labels.gifs?.header) kept.gifs = [];

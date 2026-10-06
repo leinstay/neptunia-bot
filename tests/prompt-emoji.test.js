@@ -167,3 +167,53 @@ test('buildRequest: <emoji> sits after <about_chat> and before <server>', () => 
   assert.ok(aboutIdx !== -1 && emojiIdx !== -1 && serverIdx !== -1);
   assert.ok(aboutIdx < emojiIdx && emojiIdx < serverIdx);
 });
+
+// ---- a custom emoji of the chat is described once, in <emoji> ----------------
+
+function chatLine(id, content, emojis, ts = NOW - 60_000) {
+  return { id, ts, authorId: 'a', authorName: 'Zoé', self: false, content, attachments: [], stickers: [], emojis, replyToId: null };
+}
+
+function chatBlock(request) {
+  const match = /<chat>\n([\s\S]*?)\n<\/chat>/.exec(userText(request));
+  return match ? match[1] : '';
+}
+
+test('buildRequest: a described emoji of the chat not in the top list is described once under emoji.seenInChat; its lines stay bare', () => {
+  const history = [
+    chatLine('1', 'ωραίο :pog:', [{ id: '9', name: 'pog' }], NOW - 120_000),
+    chatLine('2', 'πάλι :pog: :alpha:', [{ id: '9', name: 'pog' }, { id: '1', name: 'alpha' }]),
+  ];
+  const descriptions = new Map([
+    ['emoji:9', 'a surprised cat face'],
+    ['emoji:1', 'a waving hand'],
+  ]);
+  const config = fakeConfig({ customEmoji: { max: 1 } });
+  const request = buildRequest(baseInput({ config, customEmoji: INDEX, history, descriptions }));
+  assert.deepEqual(emojiBlock(request), [labels.emoji.header, ':alpha: -- a waving hand', labels.emoji.seenInChat, ':pog: -- a surprised cat face']);
+  const chat = chatBlock(request);
+  assert.ok(chat.includes('Zoé: ωραίο :pog:\n'), chat);
+  assert.ok(chat.endsWith('Zoé: πάλι :pog: :alpha:'), chat);
+  assert.ok(!chat.includes('a surprised cat face') && !chat.includes('a waving hand'));
+});
+
+test('buildRequest: an emoji of the chat already listed, or with no description known, adds no seenInChat part', () => {
+  const history = [chatLine('1', ':alpha: :pog:', [{ id: '1', name: 'alpha' }, { id: '9', name: 'pog' }])];
+  const descriptions = new Map([['emoji:1', 'a waving hand']]);
+  const request = buildRequest(baseInput({ customEmoji: INDEX.slice(0, 2), history, descriptions }));
+  assert.deepEqual(emojiBlock(request), [labels.emoji.header, ':alpha: -- a waving hand', ':beta:']);
+  assert.ok(chatBlock(request).endsWith('Zoé: :alpha: :pog:'));
+});
+
+test('buildRequest: with no <emoji> block possible a chat line keeps the inline emojiDescribed tag', () => {
+  const history = [chatLine('1', 'ωραίο :pog:', [{ id: '9', name: 'pog' }])];
+  const descriptions = new Map([['emoji:9', 'a surprised cat face']]);
+  const inline = 'Zoé: ωραίο :pog: [:pog: a surprised cat face]';
+  const off = fakeConfig({ features: { customEmoji: false } });
+  assert.ok(chatBlock(buildRequest(baseInput({ config: off, customEmoji: INDEX, history, descriptions }))).endsWith(inline), 'switch off');
+  assert.ok(chatBlock(buildRequest(baseInput({ customEmoji: [], history, descriptions }))).endsWith(inline), 'empty index');
+  const noSeen = { ...labels, emoji: { ...labels.emoji, seenInChat: undefined } };
+  const older = buildRequest(baseInput({ customEmoji: INDEX, history, descriptions, prompts: { ...baseInput().prompts, labels: noSeen } }));
+  assert.ok(chatBlock(older).endsWith(inline), 'labels without emoji.seenInChat');
+  assert.ok(!emojiBlock(older).includes(':pog: -- a surprised cat face'));
+});
