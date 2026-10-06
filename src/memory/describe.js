@@ -32,7 +32,10 @@
 // provider can open itself (`media.video.directUrlSites`, and only when
 // `media.video.provider` is a real provider object), passed by URL -- and
 // summarised by a
-// video-capable model into one line. A public URL goes out with OpenRouter's
+// video-capable model into one line. A YouTube link goes out by its canonical
+// `watch?v=<id>` URL, its playlist, timestamp and tracking params dropped
+// (src/discord/video-sites.js#publicVideoUrl); another site's as posted. A
+// public URL goes out with OpenRouter's
 // processing mode (`media.video.urlProcessing`); every video request carries
 // `media.video.reasoning` so reasoning does not eat the output budget. A link's duration comes from yt-dlp;
 // when yt-dlp fails on a YouTube link, from the YouTube Data API (with a
@@ -90,7 +93,7 @@ import { isPlainObject } from '../config.js';
 import { mediaProxyUrl } from '../discord/media.js';
 import { createImageFetcher } from '../discord/fetch-image.js';
 import { createVideoFetcher } from '../discord/fetch-video.js';
-import { isDirectUrlSite, safeLocation, youtubeVideoId } from '../discord/video-sites.js';
+import { isDirectUrlSite, publicVideoUrl, safeLocation, youtubeVideoId } from '../discord/video-sites.js';
 import {
   helperRequestOptions,
   railReason,
@@ -947,14 +950,15 @@ export function createDescriber({
       });
       if (youtube.ok) probe = youtube;
     }
-    // The public URL goes out only with a pinned provider that can open it;
+    // The public URL goes out only with a pinned provider that can open it
+    // (a YouTube link in its canonical watch form, see publicVideoUrl);
     // without one the clip is downloaded like any other site's.
     const pinnable = isPinnableLink(item, videoCfg);
     if (!probe.ok) {
       // No duration at all: only the owner's explicit switch sends the URL,
       // billed as the longest allowed video.
       if (pinnable && videoCfg.directUrlUnknownDuration === true) {
-        return { ok: true, url: item.url, seconds: maxSeconds, bytes: null, pinned: true };
+        return { ok: true, url: publicVideoUrl(item.url), seconds: maxSeconds, bytes: null, pinned: true };
       }
       return probe;
     }
@@ -962,7 +966,7 @@ export function createDescriber({
     // A direct-URL video has its own cap (directUrlMaxSeconds, see lengthCap);
     // past it the clip route below still gets the first maxSeconds.
     if (pinnable && durationSec != null && durationSec <= lengthCap(item, videoCfg, hot.config.llm)) {
-      return { ok: true, url: item.url, seconds: durationSec, bytes: null, pinned: true };
+      return { ok: true, url: publicVideoUrl(item.url), seconds: durationSec, bytes: null, pinned: true };
     }
     const clip = await videoFetcher.fetchSiteClip(item.url, {
       ytdlpPath,
