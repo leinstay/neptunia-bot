@@ -237,8 +237,9 @@ Settings for the server-history search (`features.recall`). When the lookup clas
 | `maxPeople` | `2` | People the `who:` line may name |
 | `dateSamples` | `4` | Date-only queries sampled across a `when:` range when no content forms are given |
 | `clusterGapMinutes` | `30` | Gap between hits that separates them into clusters |
-| `maxClusters` | `5` | Clusters kept, ranked by the count of distinct queries with hits in each cluster (descending; ties newest first) |
-| `keepOldest` | `0` | Of the `maxClusters` kept, this many slots go to the oldest clusters whose hits come from at least two distinct queries. A cluster hit by only one query never gets a reserved slot. `0` = ranked order only |
+| `maxClusters` | `5` | Clusters kept, ranked by topic score (each distinct `server:` form with hits in the cluster adds 2 when rare, 1 otherwise), then by all distinct queries, then newest first. A cluster with only name or author hits ranks below any cluster with a topic hit |
+| `keepOldest` | `0` | Of the `maxClusters` kept, this many slots go to the oldest clusters with a topic score of at least 2. A cluster scoring below 2 never gets a reserved slot. `0` = ranked order only |
+| `rareHits` | `5` | A `server:` form whose search returned at most this many hits on the whole server counts double in a cluster's topic score. `0` = no rarity bonus |
 | `windowMessages` | `16` | Messages fetched around each cluster centre |
 | `answerChars` | `1200` | Max characters for the summary note; fills `{{answerChars}}` in `recall-summary.md` |
 | `stretchChars` | `1500` | Max characters of the verbatim stretch shown to the persona |
