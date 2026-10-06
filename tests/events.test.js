@@ -2473,12 +2473,13 @@ test('follow-up: a held message is dropped when a "no" streak closed the window'
   assert.equal(llm.calls.length, 1, 'the one "no" closed the window, nothing left to classify');
 });
 
-test('follow-up: a held message is dropped when the channel is busy by the time the call ends', async () => {
+test('follow-up: with mention.classifyWhileBusy off, a held message is dropped when the channel is busy by the time the call ends', async () => {
   let busy = false;
   const turns = fakeTurns({ isBusy: () => busy, isAnyBusy: () => busy });
   const llm = fakeFollowUpLlm();
   const spontaneous = fakeSpontaneous();
-  const handler = makeHandler({ turns, spontaneous, llm, prompts: fakeAddressPrompts() });
+  const config = baseConfig({ mention: { classifyWhileBusy: false } });
+  const handler = makeHandler({ config, turns, spontaneous, llm, prompts: fakeAddressPrompts() });
   const guild = fakeGuild();
   const channel = fakeChannelWithHistory('c1', guild, []);
   await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
@@ -3612,11 +3613,12 @@ test('follow-up author: reading the profile writes nothing', async () => {
 // Audit fixes: the follow-up gate and one attention, the drain under a pause,
 // forwards, classifier failures, the drain re-checking switches, embed text.
 
-test('follow-up: with one attention, a turn running in another channel skips the classifier (no paid call)', async () => {
+test('follow-up: with one attention and mention.classifyWhileBusy off, a turn running in another channel skips the classifier (no paid call)', async () => {
   const llm = fakeFollowUpLlm();
   const spontaneous = fakeSpontaneous();
   const turns = fakeTurns({ isBusy: () => false, isAnyBusy: () => true });
-  const handler = makeHandler({ turns, spontaneous, llm, prompts: fakeAddressPrompts() });
+  const config = baseConfig({ mention: { classifyWhileBusy: false } });
+  const handler = makeHandler({ config, turns, spontaneous, llm, prompts: fakeAddressPrompts() });
   const guild = fakeGuild();
   const channel = fakeChannelWithHistory('c1', guild, []);
   await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
@@ -3644,11 +3646,12 @@ test('follow-up: with mention.oneAtATime off, a turn in another channel does not
   await p;
 });
 
-test('follow-up: a "yes" that finds a turn started elsewhere runs no turn now: it is deferred, and the held message says busy', async () => {
+test('follow-up: a "yes" that finds a turn started elsewhere runs no turn now: it is deferred, and with mention.classifyWhileBusy off the held message says busy', async () => {
   const llm = fakeFollowUpLlm();
   let anyBusy = false;
   const turns = recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => anyBusy });
-  const handler = makeHandler({ turns, llm, prompts: fakeAddressPrompts() });
+  const config = baseConfig({ mention: { classifyWhileBusy: false } });
+  const handler = makeHandler({ config, turns, llm, prompts: fakeAddressPrompts() });
   const guild = fakeGuild();
   const channel = fakeChannelWithHistory('c1', guild, []);
   await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
@@ -4163,9 +4166,10 @@ for (const [when, reason, makeBlocker] of WAITING_LINE_BLOCKERS) {
   });
 }
 
-test('follow-up: a held message dropped as busy drops the overheard line waiting on it as busy too', async () => {
+test('follow-up: with mention.classifyWhileBusy off, a held message dropped as busy drops the overheard line waiting on it as busy too', async () => {
   let anyBusy = false;
   const { llm, turns, logs } = await overheardWithHeld({
+    config: baseConfig({ mention: { classifyWhileBusy: false } }),
     turns: recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => anyBusy }),
     beforeAnswer: () => (anyBusy = true),
   });
@@ -7024,4 +7028,192 @@ test('private: DMs queue and fold the same way; one incoming message counts once
   assert.equal(scene.calls.talk.length, 4, 'three parts, then the queued DM; the folded one has no turn');
   assert.ok(liveTask(scene.calls.talk[3]).endsWith(fill(labels.task.added, { added: 'λοιπόν;' })));
   assert.deepEqual(scene.store.bumps.map(([, userId]) => userId), ['u1', 'u1'], 'the split DM once, the queued DM once');
+});
+
+// ---------------------------------------------------------------------------
+// A follow-up candidate that arrives while a turn is already running is still
+// classified (mention.classifyWhileBusy); a "yes" waits in the pending queue.
+
+/**
+ * A follow-up window opened in c1 at FOLLOW_UP_T0, then a turn already running in `busyIn` before
+ * any candidate arrives. `send(id, content)` hands one plain line by u1 to the handler, a second
+ * after the previous one, and returns the handler's promise.
+ */
+async function busyFollowUpScene({ busyIn = 'c9', config = baseConfig() } = {}) {
+  const clock = mutableNow(FOLLOW_UP_T0);
+  const llm = fakeFollowUpLlm();
+  const spontaneous = fakeSpontaneous();
+  const turns = attentionTurns(busyIn);
+  const handler = makeHandler({ config, turns, llm, spontaneous, now: clock, sleep: async () => {}, rng: () => 0.5, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: FOLLOW_UP_T0 });
+  turns.busy = true;
+  let sent = 0;
+  const send = (id, content = 'and then?') => {
+    sent += 1;
+    const ts = FOLLOW_UP_T0 + sent * 1000;
+    clock.set(ts);
+    channel.messages.cache.set(id, {});
+    return handler(plainFollowUpMessage({ id, guild, channel, content, authorId: 'u1', authorName: 'Élodie', ts }));
+  };
+  return { clock, llm, spontaneous, turns, handler, guild, channel, send };
+}
+
+/** Sends `id` into a busy scene and answers its classifier call with `answer`: resolves the logs. */
+async function busyCandidate(scene, id, answer) {
+  const { logs } = await withCapturedLogs(async () => {
+    const p = scene.send(id);
+    await tick();
+    scene.llm.respond(answer);
+    await p;
+    await tick();
+  });
+  return logs;
+}
+
+const deferredOf = (logs) =>
+  logs.filter((l) => l.msg === 'follow-up: deferred').map(({ channel, message, runningIn, sameChannel }) => [channel, message, runningIn, sameChannel]);
+
+test('follow-up: a candidate arriving during a turn in another channel is classified; a "yes" is deferred, then answered when the turn ends', async () => {
+  const scene = await busyFollowUpScene();
+  const logs = await busyCandidate(scene, 'm1', 'yes');
+  assert.equal(scene.llm.calls.length, 1, 'the classifier is asked while the turn runs');
+  assert.equal(scene.turns.calls.length, 0, 'no turn while the attention is taken');
+  assert.equal(scene.spontaneous.onMessageCalls.length, 0, 'handled by the follow-up path');
+  assert.deepEqual(deferredOf(logs), [['c1', 'm1', 'c9', false]]);
+
+  const drain = await endTurnAndDrain(scene);
+  assert.deepEqual(followUpDropped(drain), []);
+  assert.equal(drain.some((l) => l.msg === 'mention: decided'), false, 'never rolled for the ignore chance');
+  assert.deepEqual(startedTurns(scene.turns), [['m1', 'followUp']]);
+});
+
+test('follow-up: a candidate arriving during a turn in its own channel is classified; a "yes" is deferred under pendingSameChannel and answered after it', async () => {
+  const scene = await busyFollowUpScene({ busyIn: 'c1' });
+  const logs = await busyCandidate(scene, 'm1', 'yes');
+  assert.equal(scene.llm.calls.length, 1);
+  assert.deepEqual(deferredOf(logs), [['c1', 'm1', 'c1', true]]);
+
+  const drain = await endTurnAndDrain(scene);
+  assert.deepEqual(followUpDropped(drain), []);
+  assert.deepEqual(startedTurns(scene.turns), [['m1', 'followUp']]);
+});
+
+test('follow-up: with mention.pendingSameChannel off, a candidate in its own busy channel is not classified (its "yes" could not wait)', async () => {
+  const scene = await busyFollowUpScene({ busyIn: 'c1', config: baseConfig({ mention: { pendingSameChannel: false } }) });
+  await scene.send('m1');
+  await tick();
+  assert.equal(scene.llm.calls.length, 0);
+  assert.equal(scene.spontaneous.onMessageCalls.length, 1, 'falls back to the usual handling');
+});
+
+test('follow-up: a "no" on a candidate classified during a busy turn defers nothing and starts nothing', async () => {
+  const scene = await busyFollowUpScene();
+  const logs = await busyCandidate(scene, 'm1', 'no');
+  assert.deepEqual(deferredOf(logs), []);
+  assert.deepEqual(followUpDropped(logs), []);
+  assert.deepEqual(
+    logs.filter((l) => l.msg === 'follow-up: verdict').map((l) => [l.author, l.answer]),
+    [['u1', 'no']],
+  );
+  assert.equal(scene.spontaneous.onMessageCalls.length, 0);
+  await endTurnAndDrain(scene);
+  assert.equal(scene.turns.calls.length, 0);
+});
+
+test('follow-up: an "overheard" on a candidate classified during a busy turn is dropped as busy, not deferred', async () => {
+  const scene = await busyFollowUpScene();
+  const logs = await busyCandidate(scene, 'm1', 'overheard');
+  assert.equal(scene.llm.calls.length, 1);
+  assert.deepEqual(deferredOf(logs), []);
+  assert.deepEqual(followUpDropped(logs), [['m1', 'busy']]);
+  await endTurnAndDrain(scene);
+  assert.equal(scene.turns.calls.length, 0);
+});
+
+test('follow-up: with mention.classifyWhileBusy off (read hot), a candidate during a busy turn skips the classifier as before', async () => {
+  const config = baseConfig();
+  const scene = await busyFollowUpScene({ config });
+  config.mention.classifyWhileBusy = false;
+  await scene.send('m1');
+  await tick();
+  assert.equal(scene.llm.calls.length, 0, 'no paid call');
+  assert.equal(scene.spontaneous.onMessageCalls.length, 1, 'falls back to the usual handling');
+
+  // Switched back on: the next candidate is classified again.
+  config.mention.classifyWhileBusy = true;
+  const p = scene.send('m2');
+  await tick();
+  assert.equal(scene.llm.calls.length, 1);
+  scene.llm.respond('no');
+  await p;
+});
+
+test('follow-up: a missing mention.classifyWhileBusy counts as on', async () => {
+  const config = baseConfig();
+  delete config.mention.classifyWhileBusy;
+  const scene = await busyFollowUpScene({ config });
+  await busyCandidate(scene, 'm1', 'yes');
+  assert.equal(scene.llm.calls.length, 1);
+  await endTurnAndDrain(scene);
+  assert.deepEqual(startedTurns(scene.turns), [['m1', 'followUp']]);
+});
+
+test('follow-up: a burst of three candidates during one busy turn costs one classifier call at a time; the newest held one wins', async () => {
+  const scene = await busyFollowUpScene();
+  const { logs } = await withCapturedLogs(async () => {
+    const p1 = scene.send('m1', 'first');
+    await tick();
+    await scene.send('m2', 'second');
+    await scene.send('m3', 'third');
+    assert.equal(scene.llm.calls.length, 1, 'the two later lines are held, not classified');
+
+    scene.llm.respond('yes');
+    await p1;
+    await tick();
+    assert.equal(scene.llm.calls.length, 2, 'the newest held line is classified next');
+    assert.match(scene.llm.calls[1].messages[1].content, /<candidate>[\s\S]*third[\s\S]*<\/candidate>/);
+
+    scene.llm.respond('yes');
+    await tick();
+    await tick();
+  });
+  assert.equal(scene.llm.calls.length, 2, 'the replaced line is never classified');
+  assert.deepEqual(
+    logs.filter((l) => l.msg === 'follow-up: held while a classifier call is in flight').map((l) => [l.message, l.replaced]),
+    [
+      ['m2', false],
+      ['m3', true],
+    ],
+  );
+  assert.deepEqual(
+    deferredOf(logs).map((row) => row[1]),
+    ['m1', 'm3'],
+  );
+  assert.deepEqual(followUpDropped(logs), [['m1', 'newer']]);
+  assert.equal(scene.turns.calls.length, 0);
+
+  await endTurnAndDrain(scene);
+  assert.deepEqual(startedTurns(scene.turns), [['m3', 'followUp']]);
+});
+
+test('follow-up: a "yes" classified during the turn is dropped as answered at pickup when that turn answered its channel', async () => {
+  const scene = await busyFollowUpScene({ busyIn: 'c1' });
+  await busyCandidate(scene, 'm1', 'yes');
+  // The running turn in c1 posts after the candidate: the window's last answer moves past it.
+  await openFollowUpWindow(scene.handler, { guild: scene.guild, channel: scene.channel, ts: FOLLOW_UP_T0 + 5000 });
+  const drain = await endTurnAndDrain(scene);
+  assert.equal(scene.turns.calls.length, 0, 'not answered a second time');
+  assert.deepEqual(followUpDropped(drain), [['m1', 'answered']]);
+});
+
+test('follow-up: a "yes" classified during the turn is dropped as closed at pickup when a "no" streak closed the window meanwhile', async () => {
+  const scene = await busyFollowUpScene({ config: baseConfig({ mention: { followUpNoStreak: 2 } }) });
+  await busyCandidate(scene, 'm1', 'yes');
+  await busyCandidate(scene, 'm2', 'no');
+  await busyCandidate(scene, 'm3', 'no');
+  const drain = await endTurnAndDrain(scene);
+  assert.equal(scene.turns.calls.length, 0);
+  assert.deepEqual(followUpDropped(drain), [['m1', 'closed']]);
 });

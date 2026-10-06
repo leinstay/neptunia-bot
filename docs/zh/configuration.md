@@ -383,6 +383,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `affinityLikeBonus` | `0.08` | 态度 +100 时减少的最大忽略概率 |
 | `oneAtATime` | `true` | 全服务器同一时间只处理一条回复 |
 | `pendingSameChannel` | `true` | 当同一频道中正在执行回合时挂起该频道的直接提及；回合结束后以通常的忽略概率回复。缺失键 = 开启 |
+| `classifyWhileBusy` | `true` | 在回合执行期间仍将后续候选发送给地址分类器。候选通过相同的窗口、no-streak 和预过滤检查；每个频道同时最多一个分类器调用，较新的候选替换等候中的。遇到繁忙注意力的 `yes` 在挂起队列中等候（每频道一个）；`overheard` 作为 `busy` 丢弃。关闭该开关时，候选跳过分类器调用。当 `mention.pendingSameChannel` 关闭且候选自身频道繁忙时也跳过。每次调用计为 `llm.maxRequestsPerDay` 下的一次 `classifier.text` 请求。缺失键 = 开启 |
 | `maxPending` | `6` | 跨所有频道和作者挂起的呼叫总数。满员时淘汰最早的一个（`mention: dropped`，原因 `full`） |
 | `pendingMinutes` | `10` | 挂起的提及过期时间（分钟） |
 | `switchDelayMs` | `[2000, 9000]` | 在下一个频道回复前的暂停时间（毫秒） |

@@ -506,7 +506,7 @@ export function createMessageHandler({
    * The checks in front of the classifier, read from the hot config now:
    * `{ kind: 'skip', reason }` when the classifier does not apply (feature
    * off, no open window, a turn that would refuse this one -- see
-   * turnBlocked -- cannot send), `{ kind: 'handled' }` when the pre-filter
+   * turnBlocked -- whose "yes" could not be deferred, cannot send), `{ kind: 'handled' }` when the pre-filter
    * already gave a "no" (logged, streak bumped), `{ kind: 'classify', config,
    * state }` when the model must be asked.
    */
@@ -522,8 +522,15 @@ export function createMessageHandler({
       if (state) closeFollowUpWindow(channelId); // expired: forget it here and in state.json
       return { kind: 'skip', reason: 'closed' };
     }
-    // The paid classifier is not asked for a "yes" runTurn would refuse anyway.
-    if (turnBlocked(channelId, config)) return { kind: 'skip', reason: 'busy' };
+    // A turn that blocks this one (turnBlocked) does not stop the classifier
+    // (mention.classifyWhileBusy, missing = on): its "yes" waits in the
+    // pending queue (startFollowUpTurn -> deferFollowUp). The paid call is
+    // skipped only when that "yes" could not wait: the switch off, or its
+    // own channel busy with mention.pendingSameChannel off.
+    if (turnBlocked(channelId, config)) {
+      const sameChannelDrop = turns.isBusy(channelId) && mentionCfg.pendingSameChannel === false;
+      if (mentionCfg.classifyWhileBusy === false || sameChannelDrop) return { kind: 'skip', reason: 'busy' };
+    }
     if (!canSend(channel)) return { kind: 'skip', reason: 'cannot-send' };
 
     const startedAt = now();
@@ -542,7 +549,8 @@ export function createMessageHandler({
    * caller must then NOT also hand it to the spontaneous scheduler. Never
    * throws: an LLM/context-building error is treated as a "no" per the
    * contract. `false` means none of this applied (feature off, no open
-   * window, a turn running that blocks this one) and the caller falls back to its usual
+   * window, a turn running that blocks this one with mention.classifyWhileBusy
+   * off -- see followUpGate) and the caller falls back to its usual
    * handling. `ownPrefill` is the message's picture prefill from
    * warmMediaCache (or null), awaited before its classifier request is built.
    */
