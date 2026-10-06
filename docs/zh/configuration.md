@@ -127,12 +127,14 @@
 | `otherProfiles` | `6` | 显示的其他档案最大数量 |
 | `askedAboutProfiles` | `3` | 在近期消息中被提及的成员以完整档案显示，排在其他参与者之前 |
 | `askedAboutEpisodes` | `3` | 被问及的成员显示的回忆数。`0` 隐藏被问及成员的回忆。私聊中始终隐藏 |
+| `attitudes` | `6` | `<attitudes>` 块中显示的成员数，按态度评分强度排序，好感与反感混合。`0` 关闭该块 |
 | `tempo.liveMessages10min` | `4` | 10 分钟内的消息数 = “活跃” |
 | `tempo.deadSilenceMinutes` | `45` | 沉默分钟数 = “沉寂” |
 | `caps.interlocutor` | `6000` | Token 上限：呼叫者的档案与回忆 |
 | `caps.aboutChat` | `2500` | Token 上限：服务器习惯/自述事实 |
 | `caps.lore` | `1500` | Token 上限：世界书条目 |
 | `caps.people` | `9000` | Token 上限：其他档案 |
+| `caps.attitudes` | `400` | Token 上限：态度列表 |
 | `caps.neighbors` | `3000` | Token 上限：相邻频道 |
 | `caps.server` | `4000` | Token 上限：频道地图 |
 | `caps.emoji` | `800` | Token 上限：自定义表情 |

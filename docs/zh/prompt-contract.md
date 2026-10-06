@@ -89,6 +89,7 @@
 | `<self_facts>` | 角色声称过的关于自身的事实 |
 | `<recent>` | 服务器最近 `memory.recentHours`（默认 72）小时内发生的事情：分析器写入的近期记事（短事件）和成员的窗口内回忆（按引用显示）。记事仅来自本轮自身的频道或此处所有人都能阅读的频道；私聊中仅来自所有服务器成员都能阅读的频道，不含回忆。本轮提及的人的条目排在前面；已在 `<people>` 中渲染的回忆不再出现，每人最多 2 条。从最旧到最新。标题无条目则不渲染。开关 `features.recent`（缺失 = 开）；上限 `context.caps.recent`（默认 1200） |
 | `<people>` | 成员档案；呼叫者排首位，以 `labels.profile.interlocutorMark` 标记（`overheard` 回合中省略：作者在谈论角色而非对角色说话）；每个档案包含角色的态度，其后跟最多 `relationships.shownMoves` 条形成该态度的变动（按绝对变动量从大到小，块内从旧到新，正负均保留（如两者都有），不重复当前原因），呼叫者还包含**回忆**：角色记住的关于两人之间的时刻，附带日期和简短引用 |
+| `<attitudes>` | 角色感受最强烈的前 `context.attitudes`（默认 6，`0` = 关）名成员，按态度评分绝对值排序，好感与反感混合。跳过呼叫者以及已在 `<people>` 中显示的成员。每人一行（`labels.attitudes.line`）：名字和态度区间。标题：`labels.attitudes.header`。上限 `context.caps.attitudes`（默认 400）。服务器回合和私聊中均显示 |
 | `<other_channels>` | 每个相邻频道最多 `context.neighborMessages` 条消息，不超过 `context.neighborMaxAgeMinutes` 的时效。`features.mediaDescriptions` 开启时，相邻频道行中的图片在描述器缓存已有说明时携带说明；不为相邻频道发起新的描述请求。`<channel_view>` 中已显示其块的频道不再出现在 `<other_channels>` 中；如果预算丢弃了拉取的块，该频道重新作为普通相邻频道出现 |
 | `<channel_view>` | 拉入本轮的另一个频道（`features.channelPull`）。每个拉取的频道一个条目：标题行（`labels.pull.header`）、适用时的只读标记（`labels.server.readOnly`）、窗口被截断时的"更早的未显示"行、"图片未查看"计数、角色的早期呼叫（带已回复/未回复/已跳过标记），然后是窗口行。行使用与 `<chat>` 相同的对话记录格式，但编号在对话后继续（对话为 `#1`..`#N`，拉取块从 `#N+1` 开始），因此每个 `#n` 在块间唯一。图片仅以说明或盲标签形式出现，不作为附加图片。没有 `labels.pull.header` 时块为空 |
 | `<worn>` | 角色在近期消息中过度使用的手法（`features.variety`）：`labels.variety.intro`，然后每个手法一行 `- <shape> ("<example>", ...)`。长过程的手法（`wornLong`，来自 `variety-long.md`）在前，然后是短过程的，去重后最多 `variety.maxPatterns` + `variety.longMaxPatterns` 个。两者都无结果或开关关闭时省略 |
@@ -101,7 +102,7 @@
 （永不裁剪）-> 呼叫者的档案含回忆 -> 查询结果（整体保留或丢弃；可包含网络部分、服务器部分或两者）-> 聊天习惯 -> 自述事实 -> 世界书 -> 服务器 -> 对话记录（最新优先）->
 拉取的频道（`<channel_view>`，上限 `context.caps.pulled`；回答只读频道呼叫的回合中拉取块在对话记录之前而非之后）->
 近期记事（上限 `context.caps.recent`）->
-其他档案 -> worn（整体保留或丢弃）-> 相邻频道 -> 表情符号（从底部删除条目，然后删除整个块；`context.caps.emoji`）-> GIF（同样的裁剪；`context.caps.gifs`）。
+其他档案 -> attitudes（上限 `context.caps.attitudes`）-> worn（整体保留或丢弃）-> 相邻频道 -> 表情符号（从底部删除条目，然后删除整个块；`context.caps.emoji`）-> GIF（同样的裁剪；`context.caps.gifs`）。
 
 对话记录行中的媒体，使用可用的最具信息量的形式：附加在当前请求上的图片 →
 `transcript.imageAttached`（按图片在文本后的顺序编号）；已描述的 →
@@ -265,6 +266,8 @@ recent.header                            REQUIRED {hours}: the block's first lin
 recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
 recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
 recent.episode                           OPTIONAL {date} {name} {what}: a moment the persona remembers with {name} on {date}; no quote, no feeling. Without it the block shows notes only
+attitudes.header                         the block's first line: who these members are and how to use the list
+attitudes.line                           {name} {band}: one member and their attitude band
 task.part                                {index} {total} {part} {others}: this turn answers one part of a split message. {index} is 1-based, {part} is the text of this part, {others} lists the remaining parts and any queued calls as numbered items joined by `; `. Without this key the splitter is off even when the prompt file exists
 task.queued                              {others}: the trigger author has other calls waiting, listed as numbered items joined by `; `. Shown only when there is no `task.part` for this turn. Without this key the waiting calls are not named and the seen-in-history drop rule applies to them
 task.queuedOthers                        {others}: other members have calls waiting in this channel, listed as `<n>. <author>: <text>` items joined by `; `. Without this key those calls are not named

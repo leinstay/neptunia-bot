@@ -127,12 +127,14 @@ The three helper model roles, grouped under one key. Each is set independently, 
 | `otherProfiles` | `6` | Max other profiles shown |
 | `askedAboutProfiles` | `3` | Members named in recent messages whose profiles are shown in full, ahead of the other participants |
 | `askedAboutEpisodes` | `3` | Episodes shown per member who is asked about. `0` hides episodes for asked-about members. Private chats always hide them |
+| `attitudes` | `6` | Members shown in the `<attitudes>` block, ranked by attitude score strength, warm and cool mixed. `0` turns the block off |
 | `tempo.liveMessages10min` | `4` | Messages in 10 min = "live" |
 | `tempo.deadSilenceMinutes` | `45` | Silence minutes = "dead" |
 | `caps.interlocutor` | `6000` | Token cap: caller's profile with episodes |
 | `caps.aboutChat` | `2500` | Token cap: server habits / self-facts |
 | `caps.lore` | `1500` | Token cap: lore entries |
 | `caps.people` | `9000` | Token cap: other profiles |
+| `caps.attitudes` | `400` | Token cap: attitude list |
 | `caps.neighbors` | `3000` | Token cap: neighbour channels |
 | `caps.server` | `4000` | Token cap: channel map |
 | `caps.emoji` | `800` | Token cap: custom emoji |
