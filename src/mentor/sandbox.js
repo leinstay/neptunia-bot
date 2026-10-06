@@ -365,6 +365,7 @@ export function sandboxRequestInput({
     currentChannelId: channel.id,
     descriptions: descriptions instanceof Map ? descriptions : new Map(),
     videos: videos instanceof Map ? videos : new Map(),
+    imageAnswers: null,
     searchAvailable: searchAvailable === true,
     customEmoji: Array.isArray(customEmoji) ? customEmoji : [],
     gifs,
