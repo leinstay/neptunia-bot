@@ -56,6 +56,8 @@ const SLOW_COMMANDS = new Set([
   'gifs.rescan',
   'private.forget',
   'private.purge',
+  'diary.set',
+  'diary.post',
   'draw',
   'mentor.add',
   'mentor.anchor',
@@ -392,7 +394,7 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'wipe',
-              description: 'Delete ALL server memory: profiles, private memory, habits, learned list, channels, analyzer lore.',
+              description: 'Delete ALL server memory (profiles, private memory, habits, channels, lore).',
               options: [
                 {
                   type: STRING,
@@ -405,7 +407,7 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'refresh',
-              description: "Rewrite a member's portrait (character/style) now, ignoring the refresh-hours rail.",
+              description: "Rewrite a member's portrait now, ignoring the refresh-hours rail.",
               options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
             },
           ],
@@ -430,8 +432,45 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'purge',
-              description: "Delete the bot's messages in the member's DMs, then their private memory.",
+              description: "Delete the bot's DMs with the member, then their private memory.",
               options: [{ type: USER, name: 'user', description: 'Member.', required: true }],
+            },
+          ],
+        },
+        {
+          type: SUBCOMMAND_GROUP,
+          name: 'diary',
+          description: 'The diary.',
+          options: [
+            {
+              type: SUBCOMMAND,
+              name: 'set',
+              description: 'Set the diary channel.',
+              options: [
+                {
+                  type: CHANNEL,
+                  name: 'channel',
+                  description: 'Channel.',
+                  required: true,
+                  channel_types: [GUILD_TEXT],
+                },
+              ],
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'show',
+              description: 'Diary state today.',
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'off',
+              description: 'Stop the diary.',
+            },
+            {
+              type: SUBCOMMAND,
+              name: 'post',
+              description: 'Post one diary entry now.',
+              options: [{ type: STRING, name: 'kind', description: 'Post kind.', required: false }],
             },
           ],
         },
@@ -525,7 +564,7 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'rescan',
-              description: 'Clear and recount the ranking from recent history (Discord reads only).',
+              description: 'Clear and recount the ranking from recent history.',
             },
           ],
         },
@@ -538,7 +577,7 @@ export function buildCommandTree(commandName) {
             {
               type: SUBCOMMAND,
               name: 'rescan',
-              description: 'Reset the use counts (entries kept) and recount from recent history, then caption the top ones.',
+              description: 'Reset the use counts and recount from recent history, then caption the top ones.',
             },
             { type: SUBCOMMAND, name: 'recache', description: 'Re-describe GIFs by watching them (background, per-run cap).' },
           ],
@@ -637,7 +676,7 @@ export function buildCommandTree(commandName) {
         {
           type: SUBCOMMAND_GROUP,
           name: 'mentor',
-          description: 'Cases of wanted behaviour, measured in a sandbox, reported to the admin channel.',
+          description: 'Behaviour cases measured in a sandbox, reported to the admin channel.',
           options: [
             {
               type: SUBCOMMAND,
@@ -856,6 +895,10 @@ const OPTION_MAPPERS = {
   'private.show': (options) => ({ userId: options.getUser('user', true).id }),
   'private.forget': (options) => ({ userId: options.getUser('user', true).id }),
   'private.purge': (options) => ({ userId: options.getUser('user', true).id }),
+  'diary.set': (options) => ({ channelId: options.getChannel('channel', true).id }),
+  'diary.show': () => ({}),
+  'diary.off': () => ({}),
+  'diary.post': (options) => ({ kind: options.getString('kind') ?? undefined }),
   'alias.add': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),
   'alias.remove': (options) => ({ userId: options.getUser('user', true).id, name: options.getString('name', true) }),
   'lore.add': (options) => ({

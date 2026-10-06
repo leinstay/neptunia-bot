@@ -504,7 +504,7 @@ function currentChannelFallback(currentChannelId, history) {
  * carries `labels.server.readOnly` (src/memory/channels.js#renderChannel,
  * never on the current channel).
  */
-function serverItems(channels, currentChannelId, neighborChannelIds, history, now, activityCfg, labels, nameOf, readOnlyIds = new Set()) {
+function serverItems(channels, currentChannelId, neighborChannelIds, history, now, activityCfg, labels, nameOf, readOnlyIds = new Set(), diaryChannelId = null) {
   const byId = new Map(channels.map((channel) => [channel.id, channel]));
   const current = byId.get(currentChannelId) ?? currentChannelFallback(currentChannelId, history);
   const neighborEntries = [...new Set(neighborChannelIds)]
@@ -527,6 +527,8 @@ function serverItems(channels, currentChannelId, neighborChannelIds, history, no
         now,
         nameOf,
         readOnly: readOnlyIds.has(channel.id),
+        // The persona's own diary (diary.channelId): marked so it is found by name like any channel.
+        diary: diaryChannelId !== null && channel.id === diaryChannelId,
       },
     ),
   );
@@ -2141,6 +2143,7 @@ export function buildRequest(input) {
             labels,
             nameOf,
             readOnlyIds,
+            config.diary?.channelId || null,
           ),
     },
   ];
@@ -2695,7 +2698,7 @@ export function buildDiaryPlanRequest(input) {
         name: 'server',
         cap: caps.server ?? 4000,
         keep: 'first',
-        items: serverItems(channels, currentChannelId, channelIds, history, now, config.context?.channelActivity, labels, nameOf),
+        items: serverItems(channels, currentChannelId, channelIds, history, now, config.context?.channelActivity, labels, nameOf, new Set(), config.diary?.channelId || null),
       },
       {
         name: 'recent',

@@ -21,7 +21,7 @@ import { createChannelRouter } from './behavior/route-channel.js';
 import { createRecall } from './behavior/recall-run.js';
 import { createEmojiIndex } from './discord/emoji.js';
 import { createSpontaneous } from './behavior/spontaneous.js';
-import { createDiary } from './behavior/diary.js';
+import { backfillDiary, createDiary } from './behavior/diary.js';
 import { createMemoryUpdater } from './memory/update.js';
 import { createWarmup } from './memory/warmup.js';
 import { createPortraitScheduler } from './memory/portrait.js';
@@ -182,7 +182,7 @@ const warmup = createWarmup({ hot, store, client, llm, calibrator, getSelfName, 
 const isWarmingUp = warmup.isWarmingUp;
 const spontaneous = createSpontaneous({ hot, store, client, turns, getGuildId, isWarmingUp });
 // The persona's diary (diary.channelId): its own posts on a day plan, ticked below.
-const diary = createDiary({ hot, store, client, turns, getGuildId, isWarmingUp });
+const diary = createDiary({ hot, store, client, turns, getGuildId, isWarmingUp, backfill: backfillDiary });
 // The stream analyzer's "the stored portrait misses something" cue -- src/memory/warmup.js's
 // own rails (hours/day/mute) decide whether a refresh actually runs; never awaited here.
 const memory = createMemoryUpdater({
