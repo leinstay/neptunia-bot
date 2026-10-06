@@ -86,7 +86,7 @@ function intAtLeast(value, fallback, min) {
  *   requestTimeoutMs: number, history: number, longLines: number, longEveryHours: number,
  *   longMinLines: number, longMaxPatterns: number, fillers: { cooldownHours: number, cooldownMessages: number,
  *   maxOutputTokens: number, max: number, halfLifeDays: number }, patternCheck: { minChars: number,
- *   maxOutputTokens: number }, sticky: { minRepeats: number, lines: number, maxWords: number, minChars: number,
+ *   maxOutputTokens: number }, sticky: { minRepeats: number, minRepeatsWord: number, lines: number, maxWords: number, minChars: number,
  *   baselineMax: number, baselineMin: number, ignore: string[] } }}  `fillers` and `patternCheck`: the reply guard's groups
  *   (src/behavior/fillers.js#fillersSettings, #patternCheckSettings); `sticky`: the sticky-phrase
  *   detector's (src/behavior/sticky.js#stickySettings).

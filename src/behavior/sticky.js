@@ -6,7 +6,8 @@
 // module counts instead, looking for a burst: a phrase of one to
 // `variety.sticky.maxWords` words is sticky when it occurs in at least
 // `variety.sticky.minRepeats` of the persona's last `variety.sticky.lines`
-// own lines (the recent window) and in at most `variety.sticky.baselineMax`
+// own lines (the recent window; a single word without a digit needs
+// `variety.sticky.minRepeatsWord`) and in at most `variety.sticky.baselineMax`
 // of the older lines before them (the baseline) -- ordinary vocabulary is
 // frequent in both, a stuck token only lately. While the baseline is shorter
 // than `variety.sticky.baselineMin` lines (a young ring) a single word counts
@@ -21,6 +22,7 @@ import { FILLER_MAX_CHARS } from './fillers.js';
 /** The `variety.sticky` group when a key is missing or unusable: config.json's values. */
 export const STICKY_DEFAULTS = Object.freeze({
   minRepeats: 3,
+  minRepeatsWord: 4,
   lines: 40,
   maxWords: 3,
   minChars: 4,
@@ -53,6 +55,7 @@ function readGroup(group) {
   const d = STICKY_DEFAULTS;
   return {
     minRepeats: intAtLeast(group.minRepeats, 2, d.minRepeats),
+    minRepeatsWord: intAtLeast(group.minRepeatsWord, 2, d.minRepeatsWord),
     lines: intAtLeast(group.lines, 1, d.lines),
     maxWords: intAtLeast(group.maxWords, 1, d.maxWords),
     minChars: intAtLeast(group.minChars, 0, d.minChars),
@@ -65,6 +68,8 @@ function readGroup(group) {
 /**
  * The `variety.sticky` settings of the live config, key by key: `minRepeats`
  * (in how many distinct recent lines a phrase must occur; an integer >= 2),
+ * `minRepeatsWord` (the same for a single word without a digit, a topical
+ * word of the hour being commoner than a stuck phrase or number; >= 2),
  * `lines` (the recent window: how many of the persona's newest own lines;
  * >= 1), `maxWords` (the longest phrase, in words; >= 1), `minChars` (a word
  * with fewer letters is weak unless it holds a digit and is at least two
@@ -74,7 +79,7 @@ function readGroup(group) {
  * array -> []). A missing or unusable key takes config.json's value
  * (STICKY_DEFAULTS).
  * @param {object} config  The whole live config.
- * @returns {{ minRepeats: number, lines: number, maxWords: number, minChars: number, baselineMax: number,
+ * @returns {{ minRepeats: number, minRepeatsWord: number, lines: number, maxWords: number, minChars: number, baselineMax: number,
  *   baselineMin: number, ignore: string[] }}
  */
 export function stickySettings(config) {
@@ -138,7 +143,7 @@ function textOf(line) {
  * `2` is); a phrase of weak words only never counts.
  *
  * A phrase is sticky when it occurs in at least `minRepeats` recent lines
- * and -- with at least `baselineMin` baseline lines holding text -- in at
+ * (a single word without a digit: `minRepeatsWord`) and -- with at least `baselineMin` baseline lines holding text -- in at
  * most `baselineMax` baseline lines: a burst, not the persona's ordinary
  * vocabulary. With a shorter baseline (a young ring) the baseline is not
  * read and a single word is sticky only when it holds a digit (as above); a
@@ -169,7 +174,7 @@ export function stickyPhrases(lines, settings) {
       counts.set(phrase, seen);
     }
   }
-  const frequent = [...counts].filter(([, { count }]) => count >= s.minRepeats);
+  const frequent = [...counts].filter(([text, { count, words }]) => count >= (words === 1 && !hasDigit(text) ? s.minRepeatsWord : s.minRepeats));
   const older = all.slice(0, split).map(textOf).filter((text) => text !== null);
   const young = older.length < s.baselineMin;
   // The baseline: in how many older lines each frequent phrase occurs (read only for a grown ring).
