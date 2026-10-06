@@ -61,6 +61,7 @@ export const SANDBOX_OMITS = Object.freeze({
   privateProfile: 'never a private chat: the private layer is out of bounds',
   reads: 'no web lookup: no link is read',
   lookup: 'no web lookup: no search is run',
+  imageAnswers: 'no second look at a picture is run: no imageAnswered line',
   recallAvailable: 'no server search is run: <senses> does not offer it',
   drawQuota: 'no drawing is offered: a sandbox never draws, so <senses> has no drawing line',
   drawReason: 'a failed drawing\'s reason is not stored with a moment',
