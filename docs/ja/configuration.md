@@ -632,7 +632,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `historyPosts` | `150` | `diary.json` に保持され、プランナーと作成者に `<diary>` ブロックで表示される過去の投稿数。超過時は最も古いものが削除 |
 | `gistChars` | `200` | 日記履歴の投稿要約と画像シーンあたりの文字数 |
 | `seedSets` | `2` | `prompts/diary-seeds.md` から引かれ、プランナーに `<seeds>` ブロックで表示されるランダムシード組み合わせ数。`0` でブロック省略 |
-| `kinds` | `{ "selfPicture": 3, "picture": 2, "meme": 1, "thought": 2, "news": 2, "facts": 1, "status": 3 }` | 投稿種類と重み。重み 0 の種類は選ばれない。プランナーは重みと最近の投稿で各種類が何回使われたかを見る。ホットリロードなのでオーナーはいつでもバランスを変えられる |
+| `kinds` | `{ "selfPicture": 3, "picture": 2, "meme": 1, "thought": 2, "people": 2, "news": 2, "facts": 1, "status": 3 }` | 投稿種類と重み。重み 0 の種類は選ばれない。プランナーは重みと最近の投稿で各種類が何回使われたかを見る。ホットリロードなのでオーナーはいつでもバランスを変えられる |
 | `searchKinds` | `["news", "facts"]` | ウェブ検索をトリガーできる種類。プランナーはこれらの種類のみクエリを書く |
 | `pictureKinds` | `["selfPicture", "picture", "meme"]` | プランナーがランダム種類にフォールバックした時にデフォルトで描画する種類 |
 | `planMaxOutputTokens` | `300` | 計画リクエストの最大出力トークン数 |

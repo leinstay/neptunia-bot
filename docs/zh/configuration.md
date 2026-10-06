@@ -632,7 +632,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `historyPosts` | `150` | `diary.json` 中保留并在 `<diary>` 块中展示给计划器和生成器的历史帖子数。超出上限时最旧的被删除 |
 | `gistChars` | `200` | 日记历史中每篇帖子摘要和图片场景的字符数 |
 | `seedSets` | `2` | 从 `prompts/diary-seeds.md` 抽取并在 `<seeds>` 块中展示给计划器的随机种子组合数。`0` 省略该块 |
-| `kinds` | `{ "selfPicture": 3, "picture": 2, "meme": 1, "thought": 2, "news": 2, "facts": 1, "status": 3 }` | 帖子种类与权重。权重为 0 的种类永不被选择。计划器看到权重和最近帖子中每种类型的使用次数。热重载，拥有者可随时调整 |
+| `kinds` | `{ "selfPicture": 3, "picture": 2, "meme": 1, "thought": 2, "people": 2, "news": 2, "facts": 1, "status": 3 }` | 帖子种类与权重。权重为 0 的种类永不被选择。计划器看到权重和最近帖子中每种类型的使用次数。热重载，拥有者可随时调整 |
 | `searchKinds` | `["news", "facts"]` | 可触发网络搜索的种类。计划器仅为这些种类编写搜索查询 |
 | `pictureKinds` | `["selfPicture", "picture", "meme"]` | 计划器回退到随机种类时默认带图的种类 |
 | `planMaxOutputTokens` | `300` | 计划请求的最大输出 token 数 |

@@ -54,6 +54,7 @@ Every model request in a diary post counts against `llm.maxRequestsPerDay`. With
 | `picture` | 2 | A drawing without the persona: a place, an animal, something about a person here |
 | `meme` | 1 | A meme the persona drew |
 | `thought` | 2 | A longer reflection, a review, an opinion |
+| `people` | 2 | A post about one person on the server: what they did or said lately, how the persona feels about them |
 | `news` | 2 | Something found on the internet that the server's people care about |
 | `facts` | 1 | A curious fact, an iceberg entry, a conspiracy theory told as such |
 | `status` | 3 | One short line: mood, a plan, boredom |
