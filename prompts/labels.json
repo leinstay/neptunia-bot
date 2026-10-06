@@ -141,7 +141,7 @@
     "sources": "Sources: {list}",
     "none": "Nothing useful found.",
     "webHeader": "Online (web search):",
-    "serverHeader": "This server (message history):",
+    "serverHeader": "This server (message history). Anything these results do not show was not found; say so, do not fill the gap.",
     "bothNote": "A web search and a server search both ran. They may answer different things; which one fits is yours to call.",
     "stretch": "{date} in #{channel}:"
   },
