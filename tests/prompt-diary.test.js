@@ -233,3 +233,20 @@ test('buildDiaryPlanRequest: no world block with diary.world off, no seeds block
   assert.ok(!text.includes('<world>') && !text.includes('<seeds>') && !text.includes('<diary>'));
   assert.ok(text.includes('<kinds>'));
 });
+
+test('buildRequest: the server block marks the diary channel', () => {
+  const channel = (id, name) => ({ id, name, purpose: '', topics: '', tone: '', days: {}, topWriters: [] });
+  const channels = [channel('c-talk', 'agora'), channel('c-diary', 'journal-κ')];
+  const input = { channels, currentChannelId: 'c-talk', neighbors: [{ channelId: 'c-diary', messages: [] }] };
+  const mark = fill(labels.server.diary, { channel: 'journal-κ' });
+
+  const on = userText(buildRequest(baseInput({ ...input, config: fakeConfig({ diary: { channelId: 'c-diary' } }) })));
+  const entries = on.slice(on.indexOf('<server>'), on.indexOf('</server>')).split('\n\n');
+  const diaryEntry = entries.find((entry) => entry.includes('# journal-κ'));
+  const talkEntry = entries.find((entry) => entry.includes('# agora'));
+  assert.ok(diaryEntry && diaryEntry.includes(mark), on);
+  assert.ok(talkEntry && !talkEntry.includes(mark), 'another channel does not carry the mark');
+
+  const off = userText(buildRequest(baseInput({ ...input })));
+  assert.ok(off.includes('# journal-κ') && !off.includes(mark), 'no mark without diary.channelId');
+});
