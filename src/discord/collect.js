@@ -770,8 +770,14 @@ export async function fetchNeighbors(channel, config, selfId, now = Date.now(), 
  *   `channel.client.user`): what the bot can view is not the audience the
  *   rail protects (canRead decides that), and a destination that admits the
  *   bot by name would otherwise cover no source. With no bot id known,
- *   nothing is left out.
- * Member roles are not resolved (no member intent). Null for a channel
+ *   nothing is left out. Any other bot's overwrite is left out too: a bot
+ *   reads nothing the persona pulls, so it is no audience. A member is a bot
+ *   when `guild.members.cache` holds it with `user.bot`; a member missing
+ *   from the cache counts as a human (kept).
+ * Member roles are not resolved (no member intent), and roles held only by
+ * bots stay in the audience: `Role#members` filters the member cache, which
+ * without the member intent misses members, so "every holder is a bot"
+ * cannot be told. Null for a channel
  * without a guild (a private chat) and for a thread (overwrites do not
  * describe its audience: a private thread admits by membership); a null
  * audience never covers.
@@ -787,6 +793,7 @@ export function audienceOf(channel) {
   const everyoneRole = guild.roles?.everyone ?? null;
   const everyoneId = everyoneRole?.id ?? guild.id; // the @everyone role's id is the guild's
   const botId = guild.members?.me?.id ?? channel.client?.user?.id ?? null;
+  const isBotMember = (id) => (botId !== null && id === botId) || guild.members?.cache?.get?.(id)?.user?.bot === true;
   const roles = new Set();
   for (const role of guild.roles?.cache?.values?.() ?? []) {
     if (canView(role)) roles.add(role.id);
@@ -799,7 +806,7 @@ export function audienceOf(channel) {
     const target = sets[overwrite.type];
     if (!target) continue;
     if (overwrite.type === OverwriteType.Role && overwrite.id === everyoneId) continue;
-    if (overwrite.type === OverwriteType.Member && botId !== null && overwrite.id === botId) continue;
+    if (overwrite.type === OverwriteType.Member && isBotMember(overwrite.id)) continue;
     if (overwrite.allow?.has?.(view)) target.allow.add(overwrite.id);
     if (overwrite.deny?.has?.(view)) target.deny.add(overwrite.id);
   }
