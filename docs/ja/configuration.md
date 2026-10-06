@@ -237,7 +237,8 @@ OpenRouter アカウント自体が許可プロバイダーを制限している
 | `maxPeople` | `2` | `who:` 行に含められる人数 |
 | `dateSamples` | `4` | コンテンツフォームがない `when:` 範囲でサンプルされる日付のみクエリ数 |
 | `clusterGapMinutes` | `30` | ヒットを別のクラスターに分割するギャップ（分） |
-| `maxClusters` | `5` | 保持されるクラスター数（残りは新しい順にドロップ） |
+| `maxClusters` | `5` | 保持されるクラスター数（超過分はドロップ） |
+| `keepOldest` | `1` | `maxClusters` のうち、この数が最も古いクラスターに割り当てられ、残りは新しい順に埋められる。`0` = すべて新しい順 |
 | `windowMessages` | `16` | 各クラスター中心の周辺でフェッチするメッセージ数 |
 | `answerChars` | `1200` | サマリーノートの最大文字数。`recall-summary.md` の `{{answerChars}}` に使用 |
 | `stretchChars` | `1500` | ペルソナに表示される原文ストレッチの最大文字数 |

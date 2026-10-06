@@ -237,7 +237,8 @@
 | `maxPeople` | `2` | `who:` 行可列出的人数 |
 | `dateSamples` | `4` | 仅给出 `when:` 范围而无内容词形时跨范围采样的仅日期查询数 |
 | `clusterGapMinutes` | `30` | 将命中项分入不同聚类的时间间隔 |
-| `maxClusters` | `5` | 保留的聚类数（多余的从最新开始丢弃） |
+| `maxClusters` | `5` | 保留的聚类数（超出部分丢弃） |
+| `keepOldest` | `1` | 保留的 `maxClusters` 个聚类中，此数量的槽位分配给最旧的；其余从最新开始填充。`0` = 全部从最新开始 |
 | `windowMessages` | `16` | 每个聚类中心周围获取的消息数 |
 | `answerChars` | `1200` | 摘要笔记的最大字符数；填充 `recall-summary.md` 中的 `{{answerChars}}` |
 | `stretchChars` | `1500` | 向角色展示的原文段的最大字符数 |
