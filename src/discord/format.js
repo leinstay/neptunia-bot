@@ -292,7 +292,7 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  *   `transcript.imageAttachedDescribed` when `descriptions` also has a caption for it.
  * @param {Map<string, string>} [options.descriptions]  Item id -> a describer
  *   caption (src/memory/describe.js); renders the `*Described` label forms.
- * @param {Map<string, { state: 'watched'|'limit'|'error', text?: string, reason?: string }>} [options.videos]
+ * @param {Map<string, { state: 'watched'|'limit'|'error'|'pending', text?: string, reason?: string }>} [options.videos]
  *   Item id -> a video state (the video describer); renders the
  *   `videoWatched`/`videoNotWatched*`/`linkWatched`/`linkNotWatched*` forms.
  *   Ignored when the labels have no `transcript.videoWatched` key.
