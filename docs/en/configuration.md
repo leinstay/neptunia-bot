@@ -218,6 +218,7 @@ Settings for the task splitter (`features.splitTasks`). When a direct call (ment
 | Key | Default | Meaning |
 |---|---|---|
 | `minChars` | `80` | Minimum characters (links and Discord tokens excluded) before the splitter is asked |
+| `minPartChars` | `20` | A returned part shorter than this (characters, links and Discord tokens excluded, like `minChars`) is folded into the next part (the last into the previous). When fewer than two parts remain the message is one request. `0` = no folding |
 | `maxTasks` | `4` | Maximum parts the splitter may return. Below 2 the splitter is off |
 | `contextMessages` | `6` | Recent channel messages rendered for the classifier alongside the candidate |
 | `maxOutputTokens` | `300` | Max output tokens for the classifier |

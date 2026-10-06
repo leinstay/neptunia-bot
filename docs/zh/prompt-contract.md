@@ -614,11 +614,11 @@ Mentor 沙盒为每个场景执行一次多样性过程，计入 mentor 的 toke
 
 ## 任务分拆器
 
-足够长且有结构的直接呼叫（提及、回复、名字、跟进、私信）（`split.minChars` 字符，排除链接和 Discord token，至少两段分隔符）会在回合准备过程中一并交给分类器（`prompts/split.md`，使用 `classifier.text`，用途标记 `split`）。分类器读取最近 `split.contextMessages` 条消息的短 `<transcript>`（角色自身的行以 `labels.self` 标记），然后是新消息作为 `<candidate>`（`<作者名>: <文本>`）。回答为 `one`，或 2 到 `split.maxTasks`（默认 4）行，每行以 `- ` 开头，用作者自己的话表述一个部分。空白、无法解析或迟到的回答（回合准备先完成）视为单个请求，记录 `split: failed`。开关 `features.splitTasks`（缺失 = 开启）。
+足够长且有结构的直接呼叫（提及、回复、名字、跟进、私信）（`split.minChars` 字符，排除链接和 Discord token，至少两段分隔符）会在回合准备过程中一并交给分类器（`prompts/split.md`，使用 `classifier.text`，用途标记 `split`）。分类器读取最近 `split.contextMessages` 条消息的短 `<transcript>`（角色自身的行以 `labels.self` 标记），然后是新消息作为 `<candidate>`（`<作者名>: <文本>`）。回答为 `one`，或 2 到 `split.maxTasks`（默认 4）行，每行以 `- ` 开头，用作者自己的话表述一个部分。解析后，短于 `split.minPartChars`（默认 20）字符的部分（排除链接和 Discord token，与 `minChars` 相同）折叠到下一个部分（最后一个折叠到前一个）；当剩余不足两个部分时视为单个请求（`folded`）。空白、无法解析或迟到的回答（回合准备先完成）视为单个请求，记录 `split: failed`。开关 `features.splitTasks`（缺失 = 开启）。
 
 各部分成为同一消息上的普通回合链（`turn: part`）。每个部分的辅助（搜索分类器、recall、路由、重看）以该部分的文本为判断对象，请求中指出正在回答的部分和其余部分（`labels.task.part`，含 `{index}`、`{total}`、`{part}`、`{others}`）。第一个部分复用整条消息的回合已获取的历史记录并回复消息；后续部分重新获取历史记录并发布为普通消息。每个部分有自己的截止时间和丢弃限制；失败或被拒绝的部分不会阻止下一个。忽略概率、私聊每日上限和环标记在每条消息上只计一次。暂停或预热在下一个部分前结束链（`turn: chain stopped`）。链运行期间，未开始的部分是作者的等候条目（回合执行器上的 `waitingParts`）；作者稍后的消息折叠进其中一个（`addToPart`）会通过 `tasks.added` 到达该部分的请求。注意力从第一个回合到结束一直保持；空闲通知在结束时只触发一次。
 
-没有 `prompts/split.md` 时分拆器关闭（`split: skipped`，`no-prompt`）。没有 `labels.task.part` 时分拆器也关闭：解析出的回答被丢弃。设置：`split.minChars`（默认 80）、`split.maxTasks`（默认 4）、`split.contextMessages`（默认 6）、`split.maxOutputTokens`（默认 300）。
+没有 `prompts/split.md` 时分拆器关闭（`split: skipped`，`no-prompt`）。没有 `labels.task.part` 时分拆器也关闭：解析出的回答被丢弃。设置：`split.minChars`（默认 80）、`split.minPartChars`（默认 20）、`split.maxTasks`（默认 4）、`split.contextMessages`（默认 6）、`split.maxOutputTokens`（默认 300）。
 
 ## 合并分类器
 
