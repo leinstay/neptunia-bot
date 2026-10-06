@@ -3,6 +3,9 @@
 // <seeds> renderings, URL stripping, gists) and the store's diary file.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   localDayKey,
   planDay,
@@ -20,6 +23,7 @@ import {
 import { localHour } from '../src/discord/format.js';
 import { MINUTE_MS, HOUR_MS } from '../src/time.js';
 import { labels } from './fixtures/labels.js';
+import { createStore } from '../src/memory/store.js';
 
 const seq = (values) => {
   let i = 0;
@@ -256,4 +260,53 @@ test('gistOf: one line cut at a word boundary', () => {
   assert.equal(gistOf('short\n\npost', 200), 'short post');
   const gist = gistOf('alpha beta gamma delta', 13);
   assert.equal(gist, 'alpha beta');
+});
+
+// ---- store: the diary file (data/guilds/<id>/diary.json) ----
+
+function tmpDataDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'nep-diary-'));
+}
+
+const post = (n) => ({ at: n * 1000, kind: 'status', gist: `post ${n}`, picture: null, messageIds: [`m${n}`], search: '' });
+
+test('store: getDiary returns the empty default', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  assert.deepEqual(store.getDiary('g1'), { posts: [], updatedAt: 0 });
+});
+
+test('store: appendDiaryPost keeps the newest max posts and stamps updatedAt', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  for (let n = 1; n <= 4; n += 1) store.appendDiaryPost('g1', post(n), { max: 3, now: 5000 + n });
+  const diary = store.getDiary('g1');
+  assert.deepEqual(diary.posts.map((p) => p.gist), ['post 2', 'post 3', 'post 4']);
+  assert.equal(diary.updatedAt, 5004);
+  diary.posts.length = 0; // a copy: changing it changes nothing stored
+  assert.equal(store.getDiary('g1').posts.length, 3);
+});
+
+test('store: setDiaryPosts replaces the list and keeps the newest max', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.appendDiaryPost('g1', post(1), { max: 10, now: 1 });
+  store.setDiaryPosts('g1', [post(5), post(6), post(7)], { max: 2, now: 9 });
+  const diary = store.getDiary('g1');
+  assert.deepEqual(diary.posts.map((p) => p.gist), ['post 6', 'post 7']);
+  assert.equal(diary.updatedAt, 9);
+});
+
+test('store: diary survives flush and reload', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.appendDiaryPost('g1', { ...post(1), gist: 'Ελένη at the café' }, { max: 150, now: 42 });
+  store.flush();
+  assert.ok(fs.existsSync(path.join(dir, 'guilds', 'g1', 'diary.json')));
+  const again = createStore({ dataDir: dir });
+  assert.deepEqual(again.getDiary('g1'), { posts: [{ ...post(1), gist: 'Ελένη at the café' }], updatedAt: 42 });
+});
+
+test('store: a malformed diary file reads as the empty default', () => {
+  const dir = tmpDataDir();
+  fs.mkdirSync(path.join(dir, 'guilds', 'g1'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'guilds', 'g1', 'diary.json'), '[1, 2]');
+  assert.deepEqual(createStore({ dataDir: dir }).getDiary('g1'), { posts: [], updatedAt: 0 });
 });
