@@ -109,7 +109,6 @@ const PENDING_LABELS = {
   'recent.episode': 'the <recent> view (spec-recall R3): its wording is the writer\'s next task',
   'variety.fillersIntro': 'the resting fillers in <worn>: its wording is the writer\'s next task',
   'variety.fillerLine': 'the resting fillers in <worn>: its wording is the writer\'s next task',
-  'emoji.seenInChat': 'the chat\'s own custom emoji described once in <emoji>: its wording is the writer\'s next task',
 };
 
 const SYSTEM = ['system-prompt', 'character-card', 'rules', 'format'];

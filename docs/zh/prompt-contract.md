@@ -82,8 +82,8 @@
 |---|---|
 | `<now>` | 日期、星期、`config.bot.timezone` 中的时间，使用 `labels.locale` 格式化 |
 | `<senses>` | 角色此刻能感知和不能感知的内容，根据实时配置生成：哪些图片由角色自己看到，哪些通过辅助描述获得，对什么视而不见、听而不闻。使角色不会假装看过视频，并能用自己的语气开玩笑 |
-| `<emoji>` | 角色可以使用的自定义表情（`features.customEmoji`）：最多 `context.customEmoji.max` 条，按成员使用率排名。每条包含 `:name:` 和辅助已缓存的说明 |
-| `<gifs>` | 角色可以发送的 GIF（`features.gifs`）：最多 `gifs.max`（默认 40）条，按近期加权使用排名。每条包含 handle（`g1`、`g2`、…）和辅助已缓存的说明，在词边界截断至 `gifs.listChars`（默认 70；`0` = 完整），以便更多条目适合预算。每条还记录角色自己的发送时间和次数（`ownLast`、`ownUses`）；在 `gifs.ownMarkHours`（默认 24；`0` = 关）内发送的条目带有 `gifs.ownMark` 和简短的相对时间 |
+| `<emoji>` | 角色可以使用的自定义表情（`features.customEmoji`）：最多 `context.customEmoji.max` 条，按成员使用率排名。每条包含 `:name:` 和辅助已缓存的说明。当 `labels.emoji.seenInChat` 存在时，出现在对话记录、拉取频道或相邻频道中但不在排名列表内的已描述自定义表情会列在该小标题下；对话记录行中所有自定义表情保留为裸 `:name:`。没有该标签（或没有该块）时，行内标签 `transcript.emojiDescribed` 照旧使用 |
+| `<gifs>` | 角色可以发送的 GIF（`features.gifs`）：最多 `gifs.max`（默认 40）条，按近期加权使用排名。每条包含 handle（`g1`、`g2`、…）和辅助已缓存的说明，在词边界截断至 `gifs.listChars`（默认 70；`0` = 完整），截断处非句末时标记 `…`，以便更多条目适合预算。每条还记录角色自己的发送时间和次数（`ownLast`、`ownUses`）；在 `gifs.ownMarkHours`（默认 24；`0` = 关）内发送的条目带有 `gifs.ownMark` 和简短的相对时间 |
 | `<about_chat>` | 人们在这里如何交谈，如何发起和插入对话，内部梗，人们教给角色的东西 |
 | `<server>` | 当前频道的完整信息（Discord 分类和话题、用途、人们写什么、氛围、活跃度、最后一条消息、最活跃作者；以 `labels.server.currentMark` 标记），加上仅限本轮向 `<other_channels>` 提供了消息的相邻频道；不包含其他频道 |
 | `<lore>` | 关键词出现在近期消息中的服务器世界书条目（加上标记为 always 的条目）：事件、常驻角色、长期故事。如同世界书：可存在数百个，仅显示相关的少数 |
@@ -93,7 +93,7 @@
 | `<attitudes>` | 角色感受最强烈的前 `context.attitudes`（默认 6，`0` = 关）名成员，按态度评分绝对值排序，好感与反感混合。跳过呼叫者以及已在 `<people>` 中显示的成员。每人一行（`labels.attitudes.line`）：名字和态度区间。标题：`labels.attitudes.header`。上限 `context.caps.attitudes`（默认 400）。服务器回合和私聊中均显示 |
 | `<other_channels>` | 每个相邻频道最多 `context.neighborMessages` 条消息，不超过 `context.neighborMaxAgeMinutes` 的时效。`features.mediaDescriptions` 开启时，相邻频道行中的图片在描述器缓存已有说明时携带说明；不为相邻频道发起新的描述请求。`<channel_view>` 中已显示其块的频道不再出现在 `<other_channels>` 中；如果预算丢弃了拉取的块，该频道重新作为普通相邻频道出现 |
 | `<channel_view>` | 拉入本轮的另一个频道（`features.channelPull`）。每个拉取的频道一个条目：标题行（`labels.pull.header`）、适用时的只读标记（`labels.server.readOnly`）、窗口被截断时的"更早的未显示"行、"图片未查看"计数、角色的早期呼叫（带已回复/未回复/已跳过标记），然后是窗口行。行使用与 `<chat>` 相同的对话记录格式，但编号在对话后继续（对话为 `#1`..`#N`，拉取块从 `#N+1` 开始），因此每个 `#n` 在块间唯一。图片仅以说明或盲标签形式出现，不作为附加图片。没有 `labels.pull.header` 时块为空 |
-| `<worn>` | 角色过度使用的手法和词语（`features.variety`）：`labels.variety.intro`，然后每个手法一行 `- <shape> ("<example>", ...)`。长过程的手法（`wornLong`，来自 `variety-long.md`）在前，然后是短过程的，去重后最多 `variety.maxPatterns` + `variety.longMaxPatterns` 个。有冷却中的填充词条目时，手法行后跟 `labels.variety.fillersIntro`，然后每条目一行 `- <labels.variety.fillerLine>`（占位符 `{text}`、`{count}`、`{window}`、`{ago}`），按排名排列，最多 `variety.fillers.max` 条。两者都无结果且无冷却中的填充词，或开关关闭时省略 |
+| `<worn>` | 角色过度使用的手法和词语（`features.variety`）：`labels.variety.intro`，然后每个手法一行 `- <shape>`。`variety.examplesInBlock` 开启时（默认 false，缺失 = false），示例随形一起出现为 `- <shape> ("<example>", ...)`；否则仅显示形。长过程的手法（`wornLong`，来自 `variety-long.md`）在前，然后是短过程的，去重后最多 `variety.maxPatterns` + `variety.longMaxPatterns` 个。有冷却中的填充词条目时，手法行后跟 `labels.variety.fillersIntro`，然后每条目一行 `- <labels.variety.fillerLine>`（占位符 `{text}`、`{count}`、`{window}`、`{ago}`。`{count}` 为角色最近 `variety.window` 条自身消息中包含该条目的行数，`{window}` 为扫描的行数；窗口内不存在的条目 count 为 0），按排名排列，最多 `variety.fillers.max` 条。两者都无结果且无冷却中的填充词，或开关关闭时省略 |
 | `<lookup>` | 角色本轮查询的内容。网络搜索（`features.webLookup`）携带 `labels.lookup.webHeader`、浓缩的答案、`labels.lookup.sources`，未找到时为 `labels.lookup.none`。服务器搜索（`features.recall`）携带 `labels.lookup.serverHeader`、摘要笔记，摘要指出一段时还有逐字原文。两者都运行时 `labels.lookup.bothNote` 位于两部分之间。`labels.lookup.stretch` 行引入一段逐字原文（`{date}` `{channel}`）。仅在搜索分类器触发且至少一项搜索完成后出现 |
 | `<chat>` | 当前频道最新的 `context.channelMessages` 条消息 |
 | `<tempo>` | 10 分钟 / 1 小时 / 1 天的消息计数，不同人数，沉默时长，一个判定（活跃 / 缓慢 / 沉寂） |
@@ -157,10 +157,10 @@ transcript.gap                           {duration}
 transcript.gapWithDate                   {duration} {date}
 transcript.date | header                 {date}
 transcript.empty | replyToOld | image
-transcript.replyTo                       {index} {author} {quote}: 父消息的编号、其作者和文本短引用
+transcript.replyTo                       {index} {author} {quote}: 父消息的编号、其作者（父消息为角色自己的时使用 self 标签）和父文本的引用（在词边界截断至 `context.replyQuoteChars`（默认 80；`0` = 完整）；仅含媒体的父消息引用其媒体标签）
 transcript.file | sticker                {name}
 transcript.stickerDescribed              {name} {text}
-transcript.emojiDescribed                {name} {text}: appended to a line for a custom emoji; text keeps :name:
+transcript.emojiDescribed                {name} {text}: 已描述自定义表情的行内标签，附加在聊天行上。仅在 `<emoji>` 块不存在或 `labels.emoji.seenInChat` 未设置时使用；有 `seenInChat` 时行中保留裸 `:name:`，描述移至块中
 transcript.imageAttached                 {n}: this picture is attached to the request, the persona sees it
 transcript.imageDescribed                {text}
 transcript.gif                           {name}
@@ -237,6 +237,13 @@ profile.episodes                         heading line above the caller's episode
 profile.episode                          {date} {what} {quote} {feeling}: one remembered moment
 profile.episodeNoQuote                   {date} {what} {feeling}: the same without a quote
 lore.entry                               {title} {text}
+emoji.header                             自定义表情列表的引言
+emoji.entry                              {name} {text}: 带说明的表情一条
+emoji.entryNoText                        {name}: 无说明的表情一条
+emoji.seenInChat                         出现在对话记录中但不在排名列表内的已描述自定义表情之前的小标题。缺少此标签时保留行内的 `transcript.emojiDescribed` 标签
+gifs.header                              GIF 库列表的引言
+gifs.entry                               {id} {text}: 带说明的 GIF 一条
+gifs.entryNoText                         {id}: 无说明的 GIF 一条
 gifs.ownMark                             {ago}: appended to an entry the persona posted within gifs.ownMarkHours
 affinity.bands.hostile | dislike | cool | neutral | warm | fond | devoted
                                          thresholds in code: ≤-60 · ≤-25 · ≤-8 · <8 · <25 · <60 · ≥60
@@ -268,7 +275,7 @@ room.focus                               {target} {author}: appended to the repl
 address.author                           {name} {aliases}: the candidate author's display name and known aliases, shown to the address classifier when the member has aliases
 variety.intro                            first line of the `<worn>` block: a light reminder that these expressions came up often recently
 variety.fillersIntro                     separator before the filler lines; present only when filler entries on cooldown follow
-variety.fillerLine                       {text} {count} {window} {ago}: one filler entry on cooldown; text is the word stem (trailing `*` for prefix) or the exact phrase, count is uses in the recent own lines, window is how many recent lines were scanned, ago is time since last use
+variety.fillerLine                       {text} {count} {window} {ago}: 冷却中的填充词条目一条。text 为词干（前缀条目末尾带 `*`）或精确短语。count 为角色最近 `variety.window` 条自身消息中包含该条目的行数（窗口中不存在时为 0）。window 为扫描的行数。ago 为距最后使用的时间
 recent.header                            REQUIRED {hours}: the block's first line. A missing header or a missing `recent.line` means no `<recent>` block
 recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
 recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
@@ -295,6 +302,8 @@ task.added                               {added}: later messages from the author
 
 `features.reactions: false` 移除 `<react>`，`features.multiMessage: false` 仅保留第一个 `<msg>`；
 `features.gifs: false` 或空库移除 `<gif>`；`features.imageGeneration: false` 或无图像客户端时移除 `<draw>`；`drawFailed` 回合中 `<draw>` 也被移除。提示无需知道这些。
+
+`format.stripDashes` 开启时（默认 true；缺失 = 开；仅 `false` 关闭），`<msg>` 文本中的所有全角破折号和半角破折号在发送前被删除，破折号及其周围的空格变为一个空格。清除后变空的消息不发送。连字符保留。`<draw>`、`<react>`、`<gif>` 和回复 id 不受影响。日志记录为 `turn: dashes stripped`，包含 `channel` 和 `count`，文本本身不记录。
 
 ## 分析器
 
@@ -634,7 +643,7 @@ Mentor 沙盒为每个场景执行一次多样性过程，计入 mentor 的 toke
 
 **冷却 = 哪些条目被显示。** 条目在角色于 `variety.fillers.cooldownHours`（默认 36）小时内 OR `variety.fillers.cooldownMessages`（默认 300）条自身消息内使用过时处于冷却中（以先到者为准）；使用会重置两个计数器。固定条目始终处于冷却中。建议列表中仅显示冷却中的条目。条目分两种类型：PREFIX 条目以 `*` 结尾（至少 3 个字母），在词边界匹配以该前缀开头的所有词（任何文字系统）；EXACT 条目（无 `*`）精确匹配整个词或短语。
 
-**渲染。** 在已磨损手法行之后，有冷却中的填充词条目时：`labels.variety.fillersIntro`，然后每条目一行 `- labels.variety.fillerLine`。`fillerLine` 占位符：`{text}`（词干，前缀条目末尾带 `*`，或精确短语），`{count}`（最近自身行中的使用次数），`{window}`（扫描的最近行数），`{ago}`（距最后使用的时间，如"3 h 12 min"，未知时为 `?:??`）。条目按排名排列，最多 `variety.fillers.max` 条。
+**渲染。** 在已磨损手法行之后，有冷却中的填充词条目时：`labels.variety.fillersIntro`，然后每条目一行 `- labels.variety.fillerLine`。`fillerLine` 占位符：`{text}`（词干，前缀条目末尾带 `*`，或精确短语），`{count}`（角色最近 `variety.window` 条自身消息中包含该条目的行数；窗口中不存在时为 0），`{window}`（扫描的行数），`{ago}`（距最后使用的时间，如"3 h 12 min"，未知时为 `?:??`）。条目按排名排列，最多 `variety.fillers.max` 条。
 
 **状态。** 服务器记忆：`fillers`（条目列表）和 `ownMessageCount`（角色自身发布消息计数器，用于基于消息数的冷却）。日志：`fillers: sticky`（检测器添加了条目），`fillers: learned`（多样性过程添加或更新了条目）。
 

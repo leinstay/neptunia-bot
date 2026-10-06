@@ -128,6 +128,7 @@
 | `maxMessageChars` | `800` | 超出此长度的消息会被截断（字符） |
 | `gapMarkerMinutes` | `20` | 时间间隔标记阈值（分钟） |
 | `reactionsPerMessage` | `6` | 对话记录中每条消息列出的最大反应数，按频率降序 |
+| `replyQuoteChars` | `80` | 回复标签中显示的父消息文本字符数。引用在词边界截断。`0` 显示全文 |
 | `otherProfiles` | `6` | 显示的其他档案最大数量 |
 | `askedAboutProfiles` | `3` | 在近期消息中被提及的成员以完整档案显示，排在其他参与者之前 |
 | `askedAboutEpisodes` | `3` | 被问及的成员显示的回忆数。`0` 隐藏被问及成员的回忆。私聊中当 `features.privateLikeServer` 开启时（默认）显示，否则隐藏 |
@@ -206,6 +207,14 @@
 | `replyHedgeMs` | `20000` | 在回答直接呼叫的回合中，如果回复请求在此毫秒数后仍无结果，发送第二个相同的请求。先完成的获胜，另一个中止。第二次尝试计入 `llm.maxRequestsPerDay`。`dropAfterMs` 限制仍然终止一切。`0` 或非数字 = 仅一次尝试。非呼叫回合（`unpromptedWaits`）不发送第二次尝试 |
 | `typingWhilePreparing` | `false` | 从回答直接呼叫（提及、回复、名字、跟进、私信）的回合开始就显示输入指示器，而非仅在打字阶段显示。必须严格为 `true` 才能启用 |
 | `unpromptedWaits` | `true` | 非呼叫回合（插话、发起话题、注意到的评论、全体提问、旁听）等待所有阶段完成后再发布，忽略 `prepareMs`、`prepareSearchMs` 和 `dropAfterMs`。`false` 对所有回合施加相同截止时间。缺失的键视为开启 |
+
+## `format`
+
+模型输出发送至 Discord 前的后处理。所有设置均热重载。
+
+| Key | Default | Meaning |
+|---|---|---|
+| `stripDashes` | `true` | 发送前移除 `<msg>` 文本中的全角破折号和半角破折号。破折号及其周围的空格变为一个空格。清除后变空的消息不发送。连字符保留。`<draw>`、`<react>`、`<gif>` 和回复 id 不受影响。缺失键视为开启；仅 `false` 关闭 |
 
 ## `route`
 
@@ -609,6 +618,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `contextChars` | `120` | 每条消息所回复内容保留的字符数（`(to: ...)` 上下文） |
 | `maxPatterns` | `4` | 一次过程最多可识别的手法数 |
 | `shapeChars` | `140` | 一个手法描述的最大字符数 |
+| `examplesInBlock` | `false` | 在 `<worn>` 块中随形显示示例引用。关闭时块仅列形。缺失键视为关闭 |
 | `maxOutputTokens` | `500` | 过程的最大输出 token 数 |
 | `timeoutMs` | `8000` | 回合等待过程结果的时间（毫秒）。超过此等待的过程继续运行至 `requestTimeoutMs`；迟到的结果会保存并在下一回合使用。Mentor 沙盒将此值用作请求超时 |
 | `requestTimeoutMs` | `30000` | 多样性模型调用的请求超时（毫秒）。过程在此时间截止；`variety.timeoutMs` 仅为回合的等待时间 |

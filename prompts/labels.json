@@ -131,7 +131,8 @@
   "emoji": {
     "header": "Custom emoji the chat uses most. An emoji in a line is part of how people talk here, one per message at most, when it fits. Not every message needs one.",
     "entry": ":{name}: — {text}",
-    "entryNoText": ":{name}:"
+    "entryNoText": ":{name}:",
+    "seenInChat": "Also in this conversation:"
   },
   "gifs": {
     "header": "GIFs the chat uses:",

@@ -128,6 +128,7 @@ The three helper model roles, grouped under one key. Each is set independently, 
 | `maxMessageChars` | `800` | Truncate messages beyond this (chars) |
 | `gapMarkerMinutes` | `20` | Time-gap marker threshold (min) |
 | `reactionsPerMessage` | `6` | Max reactions listed per message in the transcript, most frequent first |
+| `replyQuoteChars` | `80` | Code points of the parent message's text shown in a reply tag. The quote is cut at a word boundary. `0` shows the whole text |
 | `otherProfiles` | `6` | Max other profiles shown |
 | `askedAboutProfiles` | `3` | Members named in recent messages whose profiles are shown in full, ahead of the other participants |
 | `askedAboutEpisodes` | `3` | Episodes shown per member who is asked about. `0` hides episodes for asked-about members. In a private chat, shown when `features.privateLikeServer` is on (the default); hidden otherwise |
@@ -206,6 +207,14 @@ How long each stage of a turn may take when someone is waiting for the answer. A
 | `replyHedgeMs` | `20000` | On a turn answering a direct call, when the reply request has no answer after this many milliseconds, a second identical request is sent. The first to finish wins and the other is aborted. The second attempt counts against `llm.maxRequestsPerDay`. The `dropAfterMs` bar still ends everything. `0` or a non-number = one attempt only. Turns nobody waits for (`unpromptedWaits`) never send a second attempt |
 | `typingWhilePreparing` | `false` | Show the typing indicator from the start of a turn answering a direct call (mention, reply, name, follow-up, private), not only while the finished answer is being typed out. Must be exactly `true` to enable |
 | `unpromptedWaits` | `true` | A turn nobody waits for (interjecting, starting a topic, noticed comment, room question, overheard) waits for every stage and posts when ready, ignoring `prepareMs`, `prepareSearchMs` and `dropAfterMs`. `false` applies the same deadlines to every turn. A missing key counts as on |
+
+## `format`
+
+Post-processing applied to the model's output before it is sent to Discord. All hot-reloaded.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `stripDashes` | `true` | Remove em dashes and en dashes from `<msg>` texts before posting. The dash and the spaces around it become one space. A message left empty after stripping is not sent. Hyphens stay. `<draw>`, `<react>`, `<gif>` and reply ids are not touched. A missing key counts as on; only `false` turns it off |
 
 ## `route`
 
@@ -609,6 +618,7 @@ Settings for the variety pass (`features.variety`). The persona's own recent lin
 | `contextChars` | `120` | Characters kept from the message each line answered (the `(to: ...)` context) |
 | `maxPatterns` | `4` | Most patterns one pass may name |
 | `shapeChars` | `140` | Max characters for one shape description |
+| `examplesInBlock` | `false` | Show example quotes alongside the shape in the `<worn>` block. Off: the block lists only the shape. A missing key counts as off |
 | `maxOutputTokens` | `500` | Max output tokens for the pass |
 | `timeoutMs` | `8000` | How long a turn waits for a pass result (ms). A pass that outlives this wait keeps running to `requestTimeoutMs`; a late answer is stored and serves the next turn. The mentor sandbox uses this value as its request timeout |
 | `requestTimeoutMs` | `30000` | Request timeout for the variety model call (ms). The pass is cut at this time; `variety.timeoutMs` is only how long a turn waits for it |

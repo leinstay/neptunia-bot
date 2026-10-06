@@ -83,8 +83,8 @@
 | `<now>` | 日付、曜日、`config.bot.timezone` の時刻。`labels.locale` でフォーマット |
 | `<senses>` | ペルソナが今この瞬間に何を知覚でき何を知覚できないか。ライブ設定から生成: どの画像をペルソナ自身が見て、どれがヘルパーの説明文として届き、何が見えず聞こえないか。ペルソナが動画を見たと偽ることなく、自分の声でネタにできるようにする |
 | `<about_chat>` | 人々がここでどう話すか、会話の始め方と割り込み方、内輪ネタ、人々がペルソナに教えたこと |
-| `<emoji>` | ペルソナが使えるカスタム絵文字（`features.customEmoji`）: 最大 `context.customEmoji.max` エントリ、メンバーの使用頻度でランク付け。各エントリは `:name:` とキャッシュ済みのヘルパーキャプション（ある場合） |
-| `<gifs>` | ペルソナが投稿できる GIF（`features.gifs`）: 最大 `gifs.max`（デフォルト 40）エントリ、使用頻度と新しさでランク付け。各エントリはハンドル（`g1`、`g2`、...）とキャッシュ済みのヘルパーキャプション（ある場合）。キャプションは `gifs.listChars`（デフォルト 70、`0` で全文）でカットされ、より多くのエントリがバジェットに収まるようにする。各エントリはペルソナ自身の投稿時刻と回数も記録し（`ownLast`、`ownUses`）、`gifs.ownMarkHours`（デフォルト 24、`0` = オフ）以内に投稿されたものには `gifs.ownMark` が短い相対時間とともに付く |
+| `<emoji>` | ペルソナが使えるカスタム絵文字（`features.customEmoji`）: 最大 `context.customEmoji.max` エントリ、メンバーの使用頻度でランク付け。各エントリは `:name:` とキャッシュ済みのヘルパーキャプション（ある場合）。`labels.emoji.seenInChat` がある場合、トランスクリプト・プルされたチャンネル・隣接チャンネルに出現したがトップリストに含まれない説明付きカスタム絵文字がそのサブ見出しの下に表示される。トランスクリプト行ではすべてのカスタム絵文字が素の `:name:` のまま残る。ラベルがない場合（またはブロックがない場合）はインラインの `transcript.emojiDescribed` タグがそのまま使用される |
+| `<gifs>` | ペルソナが投稿できる GIF（`features.gifs`）: 最大 `gifs.max`（デフォルト 40）エントリ、使用頻度と新しさでランク付け。各エントリはハンドル（`g1`、`g2`、...）とキャッシュ済みのヘルパーキャプション（ある場合）。キャプションは `gifs.listChars`（デフォルト 70、`0` で全文）で単語境界でカットされ、カットが文末でない場合は `…` マークが付き、より多くのエントリがバジェットに収まるようにする。各エントリはペルソナ自身の投稿時刻と回数も記録し（`ownLast`、`ownUses`）、`gifs.ownMarkHours`（デフォルト 24、`0` = オフ）以内に投稿されたものには `gifs.ownMark` が短い相対時間とともに付く |
 | `<server>` | 現在のチャンネルの詳細（Discord カテゴリとトピック、目的、投稿内容、トーン、アクティビティ、最新メッセージ、トップライター。`labels.server.currentMark` でマーク）に加え、このターンで `<other_channels>` に供給した隣接チャンネルのみ。他のチャンネルは含まない |
 | `<lore>` | 直近のメッセージにキーが出現するサーバーのロアブックエントリ（常時表示マーク付きのエントリも含む）: イベント、繰り返し登場するキャラクター、長期にわたるストーリー。ロアブックのように数百エントリが存在できるが、該当する少数だけが表示される |
 | `<self_facts>` | ペルソナが自身について主張した内容 |
@@ -93,7 +93,7 @@
 | `<attitudes>` | ペルソナが最も強く感じているメンバーの上位 `context.attitudes`（デフォルト 6、`0` = オフ）名。態度スコアの大きさで順位付け、好意と反感混在。発話者と `<people>` に既に表示されているメンバーはスキップ。メンバーごとに 1 行（`labels.attitudes.line`）: 名前と態度バンド。ヘッダー: `labels.attitudes.header`。上限 `context.caps.attitudes`（デフォルト 400）。サーバーターンとプライベートチャットの両方に表示 |
 | `<other_channels>` | 隣接チャンネルごとに最大 `context.neighborMessages` 件のメッセージ。`context.neighborMaxAgeMinutes` より古いものは含まない。`features.mediaDescriptions` がオンの場合、隣接チャンネルの行内の画像はキャッシュ済みキャプションを持つ場合にそれを付加。隣接チャンネルに対して新規の説明リクエストは行われない。`<channel_view>` にブロックが表示されているチャンネルは `<other_channels>` から除外。バジェットがプルされたブロックを落とした場合、そのチャンネルは通常の隣接チャンネルとしてここに再表示 |
 | `<channel_view>` | このターンにプルされた別のチャンネル（`features.channelPull`）。プルされたチャンネルごとにヘッダー行（`labels.pull.header`）、該当時の読み取り専用マーク（`labels.server.readOnly`）、ウィンドウがカットされた場合の「古いものは非表示」行、「画像は未確認」カウント、ペルソナへの過去の呼びかけ（応答済み/未応答/スキップマーク付き）、ウィンドウの行。行は `<chat>` と同じトランスクリプト形式だが、チャットの後に番号が続く（チャットは `#1`..`#N`、プルブロックは `#N+1` から）ため、すべての `#n` がブロック間で一意。画像はキャプションまたはブラインドタグのみ、添付画像としては含まない。`labels.pull.header` がない場合ブロックは空 |
-| `<worn>` | ペルソナが使い回している表現手法と語句（`features.variety`）: `labels.variety.intro`、続いて手法ごとに `- <shape> ("<example>", ...)`。長いパスのパターン（`wornLong`、`variety-long.md` から）が先、次に短いパス、重複は除去、最大 `variety.maxPatterns` + `variety.longMaxPatterns`。クールダウン中のフィラーエントリがある場合、パターン行の後に `labels.variety.fillersIntro`、続いてエントリごとに `- <labels.variety.fillerLine>`（プレースホルダー `{text}`、`{count}`、`{window}`、`{ago}`）、ランク順で最大 `variety.fillers.max` 件。どちらのパスも結果を出さず、クールダウン中のフィラーもなく、またはスイッチがオフの場合は省略 |
+| `<worn>` | ペルソナが使い回している表現手法と語句（`features.variety`）: `labels.variety.intro`、続いて手法ごとに `- <shape>`。`variety.examplesInBlock` がオン（デフォルト false、未設定 = false）の場合は `- <shape> ("<example>", ...)` として例も付与。オフなら形のみ。長いパスのパターン（`wornLong`、`variety-long.md` から）が先、次に短いパス、重複は除去、最大 `variety.maxPatterns` + `variety.longMaxPatterns`。クールダウン中のフィラーエントリがある場合、パターン行の後に `labels.variety.fillersIntro`、続いてエントリごとに `- <labels.variety.fillerLine>`（プレースホルダー `{text}`、`{count}`、`{window}`、`{ago}`。`{count}` はペルソナの最新 `variety.window` 件の自身の行のうちそのエントリを含む行数、`{window}` はスキャンされた行数。ウィンドウに不在のエントリは count 0）、ランク順で最大 `variety.fillers.max` 件。どちらのパスも結果を出さず、クールダウン中のフィラーもなく、またはスイッチがオフの場合は省略 |
 | `<lookup>` | ペルソナがこのターンで調べた内容。ウェブ検索（`features.webLookup`）は `labels.lookup.webHeader`、要約された回答、`labels.lookup.sources`。何も見つからなかった場合は `labels.lookup.none`。サーバー検索（`features.recall`）は `labels.lookup.serverHeader`、サマリーノート。サマリーがストレッチを指定した場合はそのストレッチの原文行。両方実行された場合は `labels.lookup.bothNote` がその間に配置。`labels.lookup.stretch` 行が原文ストレッチを導入（`{date}` `{channel}`）。検索分類器が発火し少なくとも 1 つの検索が完了した場合にのみ表示 |
 | `<chat>` | 現在のチャンネルの最新 `context.channelMessages` 件のメッセージ |
 | `<tempo>` | 10 分 / 1 時間 / 1 日のカウント、参加人数、沈黙時間、判定（live / slow / dead） |
@@ -154,10 +154,10 @@ transcript.gap                           {duration}
 transcript.gapWithDate                   {duration} {date}
 transcript.date | header                 {date}
 transcript.empty | replyToOld | image
-transcript.replyTo                       {index} {author} {quote}: 親メッセージの番号、その著者、テキストの短い引用
+transcript.replyTo                       {index} {author} {quote}: 親メッセージの番号、その著者（親がペルソナ自身の場合は self ラベル）、親テキストの引用（`context.replyQuoteChars`（デフォルト 80、`0` = 全文）で単語境界にカット。メディアのみの親はそのメディアラベルを引用する）
 transcript.file | sticker                {name}
 transcript.stickerDescribed              {name} {text}
-transcript.emojiDescribed                {name} {text}: appended to a line for a custom emoji; text keeps :name:
+transcript.emojiDescribed                {name} {text}: 説明付きカスタム絵文字のインラインタグ。チャット行に付加される。`<emoji>` ブロックがない場合、または `labels.emoji.seenInChat` が未設定の場合のみ使用。`seenInChat` がある場合は行に素の `:name:` が残り、説明はブロックに移動する
 transcript.imageAttached                 {n}: this picture is attached to the request, the persona sees it
 transcript.imageAttachedDescribed        {n} {text}: attached to the request and captioned by the helper (features.attachedDescriptions)
 transcript.imageDescribed                {text}
@@ -237,6 +237,13 @@ profile.episodes                         heading line above the caller's episode
 profile.episode                          {date} {what} {quote} {feeling}: one remembered moment
 profile.episodeNoQuote                   {date} {what} {feeling}: the same without a quote
 lore.entry                               {title} {text}
+emoji.header                             カスタム絵文字リストの導入
+emoji.entry                              {name} {text}: キャプション付きの絵文字 1 つ
+emoji.entryNoText                        {name}: キャプションなしの絵文字 1 つ
+emoji.seenInChat                         トランスクリプトに出現したがトップリストに含まれない説明付きカスタム絵文字の前のサブ見出し。なければインラインの `transcript.emojiDescribed` タグがそのまま使用される
+gifs.header                              GIF ライブラリリストの導入
+gifs.entry                               {id} {text}: キャプション付きの GIF 1 つ
+gifs.entryNoText                         {id}: キャプションなしの GIF 1 つ
 gifs.ownMark                             {ago}: appended to an entry the persona posted within gifs.ownMarkHours
 affinity.bands.hostile | dislike | cool | neutral | warm | fond | devoted
                                          thresholds in code: ≤-60 · ≤-25 · ≤-8 · <8 · <25 · <60 · ≥60
@@ -280,7 +287,7 @@ room.focus                               {target} {author}: appended to the repl
 address.author                           {name} {aliases}: the candidate author's display name and known aliases, shown to the address classifier when the member has aliases
 variety.intro                            first line of the `<worn>` block: a light reminder that these expressions came up often recently
 variety.fillersIntro                     separator before the filler lines; present only when filler entries on cooldown follow
-variety.fillerLine                       {text} {count} {window} {ago}: one filler entry on cooldown; text is the word stem (trailing `*` for prefix) or the exact phrase, count is uses in the recent own lines, window is how many recent lines were scanned, ago is time since last use
+variety.fillerLine                       {text} {count} {window} {ago}: クールダウン中のフィラーエントリ 1 件。text は語幹（プレフィックスエントリの場合末尾に `*`）または正確なフレーズ。count はペルソナの最新 `variety.window` 件の自身の行のうちそのエントリを含む行数（ウィンドウに不在なら 0）。window はスキャンされた行数。ago は最後の使用からの経過時間
 recent.header                            REQUIRED {hours}: the block's first line. A missing header or a missing `recent.line` means no `<recent>` block
 recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
 recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
@@ -306,6 +313,8 @@ task.added                               {added}: later messages from the author
 
 `features.reactions: false` は `<react>` を無効化、`features.multiMessage: false` は最初の `<msg>` のみを保持。
 `features.imageGeneration: false` またはイメージクライアントなしの場合は `<draw>` を無効化。`drawFailed` ターンでも `<draw>` は無効化されます。プロンプトが知る必要はありません。
+
+`format.stripDashes` がオン（デフォルト true、未設定 = オン、`false` のみオフにする）の場合、`<msg>` テキストのすべてのエムダッシュとエンダッシュが投稿前に除去される。ダッシュとその周囲のスペースは 1 つのスペースになる。除去後に空になったメッセージは送信されない。ハイフンはそのまま残る。`<draw>`、`<react>`、`<gif>` とリプライ id は影響を受けない。`turn: dashes stripped` として `channel` と `count` でログされ、テキスト自体はログされない。
 
 ## アナライザー
 
@@ -539,7 +548,7 @@ Mentor サンドボックスは、状況ごとに 1 回の多様性パスを実�
 
 **クールダウン = どのエントリが表示されるか。** エントリは、ペルソナが `variety.fillers.cooldownHours`（デフォルト 36）時間以内 OR `variety.fillers.cooldownMessages`（デフォルト 300）件の自身の投稿以内に使用した場合、クールダウン中です（先に来た方）。使用すると両カウンターがリセットされます。固定エントリは常にクールダウン中です。アドバイスリストにはクールダウン中のエントリのみが表示されます。エントリには 2 種類: PREFIX エントリは `*` で終わり（最低 3 文字）、語境界でそのプレフィックスで始まるすべての語に一致します（任意のスクリプト）。EXACT エントリ（`*` なし）は語またはフレーズ全体に一致します。
 
-**レンダリング。** 使い古し手法の行の後、クールダウン中のフィラーエントリがある場合: `labels.variety.fillersIntro`、続いてエントリごとに `- labels.variety.fillerLine`。`fillerLine` プレースホルダー: `{text}`（語幹、プレフィックスエントリの場合は末尾に `*`、または正確なフレーズ）、`{count}`（最近の自分の行での使用回数）、`{window}`（スキャンされた最近の行数）、`{ago}`（最終使用からの経過時間、例: 「3 h 12 min」、不明時は `?:??`）。エントリはランク順、最大 `variety.fillers.max` 件。
+**レンダリング。** 使い古し手法の行の後、クールダウン中のフィラーエントリがある場合: `labels.variety.fillersIntro`、続いてエントリごとに `- labels.variety.fillerLine`。`fillerLine` プレースホルダー: `{text}`（語幹、プレフィックスエントリの場合は末尾に `*`、または正確なフレーズ）、`{count}`（ペルソナの最新 `variety.window` 件の自身の行のうちそのエントリを含む行数。ウィンドウに不在なら 0）、`{window}`（スキャンされた行数）、`{ago}`（最終使用からの経過時間、例: 「3 h 12 min」、不明時は `?:??`）。エントリはランク順、最大 `variety.fillers.max` 件。
 
 **状態。** ギルドメモリ: `fillers`（エントリリスト）と `ownMessageCount`（メッセージベースのクールダウンに使用されるペルソナ自身の投稿メッセージカウンター）。ログ: `fillers: sticky`（検出器がエントリを追加）、`fillers: learned`（多様性パスがエントリを追加または更新）。
 
