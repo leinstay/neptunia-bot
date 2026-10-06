@@ -70,7 +70,7 @@ import { applyAliasOps } from './aliases.js';
 import { clampText } from './clamp.js';
 import { sortByRank } from './ranking.js';
 import { mergeEmojiUsage, normalizeEmojiUsage } from './emoji-usage.js';
-import { emptyGifs, findGif, mergeGifs, normalizeBackfillStamp, normalizeGifs, resetGifCounts } from './gifs.js';
+import { emptyGifs, findGif, markOwnGif, mergeGifs, normalizeBackfillStamp, normalizeGifs, resetGifCounts } from './gifs.js';
 import { FEELING_CHARS, REASON_CHARS, SELF_CHARS, forgetMember, normalizeQueue } from './voice.js';
 import { emptyRecent, mergeRecent, normalizeRecent, purgeRecentFor } from './recent.js';
 import {
@@ -2013,6 +2013,25 @@ export function createStore({ dataDir }) {
         item.dirty = true;
       }
       return counted;
+    },
+
+    /**
+     * Record the persona's own post of the library entry under `key`
+     * (src/memory/gifs.js#markOwnGif: `ownLast` = `ts`, `ownUses` + 1), after a
+     * turn sent it. Marks the file dirty only when the entry exists.
+     * @param {string} guildId
+     * @param {string} key  The entry's library key (findGif's `key`).
+     * @param {number} ts   When it was posted (epoch ms).
+     * @returns {boolean} Whether an entry was stamped.
+     */
+    recordOwnGif(guildId, key, ts) {
+      const item = gifsEntry(guildId);
+      const { gifs, marked } = markOwnGif(item.value, key, ts);
+      if (marked) {
+        item.value = gifs;
+        item.dirty = true;
+      }
+      return marked;
     },
 
     /**

@@ -1182,14 +1182,16 @@ export function createTurnRunner({
    * Post the persona's GIF (after its messages): a link GIF as its stored
    * URL (Discord embeds tenor/giphy links), an attached one as a fresh URL of
    * its attachment, the stored one when that fails. Counted against
-   * `gifs.maxPerDay` once sent. Never throws; resolves what channel.send
-   * resolved (an object, `{}` when it resolved nothing) once sent, else null.
+   * `gifs.maxPerDay` once sent, and stamped on its library entry of
+   * `guildId` (store.recordOwnGif: `ownLast`/`ownUses`, the `<gifs>` list's
+   * own-post mark). Never throws; resolves what channel.send resolved (an
+   * object, `{}` when it resolved nothing) once sent, else null.
    * `replyId`: the chat line it quotes as a Discord reply (replyTarget), or
    * null; `link`: the jump link it carries after its URL (withLink, so the
    * URL comes first and still embeds), or null.
    * @returns {Promise<object|null>}
    */
-  async function postGif(channel, gif, replyId, link) {
+  async function postGif(channel, guildId, gif, replyId, link) {
     const { entry } = gif;
     try {
       const fresh = entry.kind === 'attachment' ? await freshAttachmentUrl(channel, entry) : null;
@@ -1199,6 +1201,7 @@ export function createTurnRunner({
         allowedMentions: { parse: [] },
       });
       countGif();
+      if (entry.key && typeof store.recordOwnGif === 'function') store.recordOwnGif(guildId, entry.key, clock());
       lastPostAt.set(channel.id, clock());
       log.info('turn: gif sent', { channel: channel.id, gif: entry.id, kind: entry.kind, fresh: Boolean(fresh), ...(link ? { link: true } : {}) });
       return message ?? {};
@@ -1611,7 +1614,7 @@ export function createTurnRunner({
     if (parsed.gif) {
       if (messages.length > 0 && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
       const { replyId, pulledId } = replyTarget(parsed.gif.replyTo, { plain, idByIndex, pulledIds });
-      const sent = await postGif(channel, parsed.gif, replyId, linkFor(pulledId));
+      const sent = await postGif(channel, guildId, parsed.gif, replyId, linkFor(pulledId));
       if (sent) {
         delivered = true;
         if (pulledId) answered.add(pulledId);

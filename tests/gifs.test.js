@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { collectGifItems, findGif, mergeGifs, normalizeGifs, rankGifs, resetGifCounts } from '../src/memory/gifs.js';
+import { collectGifItems, findGif, markOwnGif, mergeGifs, normalizeGifs, rankGifs, resetGifCounts } from '../src/memory/gifs.js';
 import { createStore } from '../src/memory/store.js';
 import { createMemoryUpdater } from '../src/memory/update.js';
 import { createCalibrator } from '../src/llm/tokens.js';
@@ -312,6 +312,54 @@ test('store.getGifs: a hand-broken file is normalised on read, never wiped on di
   });
 });
 
+test('markOwnGif: stamps ownLast and counts ownUses on the entry; an unknown key changes nothing; never mutates', () => {
+  const { gifs } = mergeGifs(null, [msg({ links: [gifLink('m1#e0')] })]);
+  const once = markOwnGif(gifs, 'm1#e0', T0 + DAY);
+  assert.equal(once.marked, true);
+  assert.equal(once.gifs.entries['m1#e0'].ownLast, T0 + DAY);
+  assert.equal(once.gifs.entries['m1#e0'].ownUses, 1);
+  assert.equal(once.gifs.entries['m1#e0'].count, 1, 'the members\' count is not touched');
+  assert.equal('ownLast' in gifs.entries['m1#e0'], false);
+  const twice = markOwnGif(once.gifs, 'm1#e0', T0 + 2 * DAY);
+  assert.equal(twice.gifs.entries['m1#e0'].ownLast, T0 + 2 * DAY);
+  assert.equal(twice.gifs.entries['m1#e0'].ownUses, 2);
+  const unknown = markOwnGif(gifs, 'nope', T0);
+  assert.equal(unknown.marked, false);
+  assert.deepEqual(unknown.gifs, normalizeGifs(gifs));
+});
+
+test('normalizeGifs: ownLast/ownUses survive a member\'s use and a recount; bad values are dropped', () => {
+  const { gifs } = mergeGifs(null, [msg({ links: [gifLink('m1#e0')] })]);
+  const marked = markOwnGif(gifs, 'm1#e0', T0 + DAY).gifs;
+  const again = mergeGifs(marked, [msg({ id: 'm2', ts: T0 + 2 * DAY, links: [gifLink('m2#e0')] })]).gifs;
+  assert.equal(again.entries['m1#e0'].count, 2);
+  assert.equal(again.entries['m1#e0'].ownLast, T0 + DAY);
+  assert.equal(again.entries['m1#e0'].ownUses, 1);
+  const reset = resetGifCounts(again);
+  assert.equal(reset.entries['m1#e0'].ownLast, T0 + DAY);
+  assert.equal(reset.entries['m1#e0'].ownUses, 1);
+  const broken = normalizeGifs({ entries: { a: { kind: 'link', url: TENOR, count: 1, last: T0, ownLast: 'x', ownUses: -3 } } });
+  assert.equal('ownLast' in broken.entries.a, false);
+  assert.equal('ownUses' in broken.entries.a, false);
+  const fractional = normalizeGifs({ entries: { a: { kind: 'link', url: TENOR, count: 1, last: T0, ownLast: T0, ownUses: 2.7 } } });
+  assert.equal(fractional.entries.a.ownUses, 2);
+});
+
+test('store.recordOwnGif: persists the stamp; an unknown key writes nothing', () => {
+  withStore((store, dir) => {
+    assert.equal(store.recordOwnGif('g1', 'm1#e0', T0), false);
+    store.flush();
+    assert.equal(fs.existsSync(path.join(dir, 'guilds', 'g1', 'gifs.json')), false, 'nothing marked, nothing written');
+    store.recordGifs('g1', [msg({ links: [gifLink('m1#e0')] })]);
+    assert.equal(store.recordOwnGif('g1', 'm1#e0', T0 + DAY), true);
+    store.flush();
+    const reopened = createStore({ dataDir: dir });
+    const entry = reopened.findGif('g1', 'g1');
+    assert.equal(entry.ownLast, T0 + DAY);
+    assert.equal(entry.ownUses, 1);
+  });
+});
+
 // --- the live pipeline -------------------------------------------------------
 
 function hotFor(features = {}, gifs = undefined) {
@@ -501,7 +549,7 @@ async function runGifTurn({ output, features = {}, config = {}, clientChannels =
     };
     const turns = createTurnRunner({ hot: fakeHot(features, config), store, llm: fakeLlm(output), calibrator: calibrator(), client, now: () => NOW });
     const { result, logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: trigger(raw), triggerKind }));
-    return { result, logs, channel, state: store.state.data };
+    return { result, logs, channel, state: store.state.data, gifs: store.getGifs('g1') };
   });
 }
 
@@ -515,6 +563,14 @@ test('turn <gif>: a link handle sends the stored url after the messages, as a re
   assert.deepEqual(channel.sent[1].allowedMentions, { parse: [] });
   assert.equal(state.gifCount, 1);
   assert.equal(state.gifDay, '2026-09-20');
+});
+
+test('turn <gif>: a sent gif stamps ownLast and ownUses on its library entry', async () => {
+  const { gifs } = await runGifTurn({ output: '<msg>ha</msg><gif>g1</gif>' });
+  assert.equal(gifs.entries['m-old#e0'].ownLast, NOW);
+  assert.equal(gifs.entries['m-old#e0'].ownUses, 1);
+  assert.equal(gifs.entries['m-old#e0'].count, 1, 'the members\' count is not touched');
+  assert.equal('ownLast' in gifs.entries.att1, false);
 });
 
 test('turn <gif>: a gif alone is a turn; a follow-up never replies', async () => {
@@ -603,6 +659,12 @@ test('turn <gif>: dry-run logs the handle and url, sends nothing, counts nothing
   assert.equal(line.url, TENOR);
   assert.equal(line.replyTo, 'm1');
   assert.equal(state.gifCount, undefined);
+});
+
+test('turn <gif>: a dry run stamps nothing on the library', async () => {
+  const { gifs } = await runGifTurn({ output: '<gif>g1</gif>', features: { dryRun: true } });
+  assert.equal('ownLast' in gifs.entries['m-old#e0'], false);
+  assert.equal('ownUses' in gifs.entries['m-old#e0'], false);
 });
 
 test('turn request: the library reaches the prompt as <gifs> with cached captions, gated by features.gifs', async () => {

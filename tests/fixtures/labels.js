@@ -140,6 +140,7 @@ export const labels = {
     header: 'gifs of this server, most used first:',
     entry: '{id} -- {text}',
     entryNoText: '{id}',
+    ownMark: '(you, {ago})',
   },
   lookup: {
     header: 'searched for: {query}',

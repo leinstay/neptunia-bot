@@ -43,7 +43,7 @@ import {
   renderTempo,
   renderTranscript,
 } from '../discord/format.js';
-import { zonedDay } from '../time.js';
+import { HOUR_MS, zonedDay } from '../time.js';
 import { affinityBand, roundScore, strongestMoves } from '../memory/affinity.js';
 import { isConfirmed, isStale } from '../memory/interests.js';
 import { topByRank } from '../memory/ranking.js';
@@ -682,26 +682,36 @@ function emojiItems(index, usage, mediaCache, labels, emojiCfg) {
  * entry has no text) renders through `labels.gifs.entry` (`{id}`/`{text}`),
  * cut to `gifsCfg.listChars` (default 70; 0 = whole) at a word boundary
  * (src/memory/clamp.js#clampText, a hard limit) -- only here: the cached
- * caption stays whole -- otherwise `labels.gifs.entryNoText` (`{id}`). `[]`
+ * caption stays whole -- otherwise `labels.gifs.entryNoText` (`{id}`). A GIF
+ * the persona itself posted (`ownLast`, see src/memory/gifs.js#markOwnGif) no
+ * longer than `gifsCfg.ownMarkHours` (default 24; 0 = never) before `now`
+ * gets ` ` + `labels.gifs.ownMark` appended, `{ago}` = that time through
+ * formatDuration (`labels.units`); no mark without that label. `[]`
  * when the library is empty or the labels lack `header`/`entryNoText` (an
  * older labels.json).
  * @param {unknown} gifs            The library (store.getGifs).
  * @param {object|null} mediaCache  The describer cache (store.getMediaCache), read only.
  * @param {object} labels
- * @param {{ max?: number, halfLifeDays?: number, listChars?: number }} [gifsCfg]  `config.gifs`.
+ * @param {{ max?: number, halfLifeDays?: number, listChars?: number, ownMarkHours?: number }} [gifsCfg]  `config.gifs`.
+ * @param {number} now
  * @returns {string[]}
  */
-function gifItems(gifs, mediaCache, labels, gifsCfg) {
+function gifItems(gifs, mediaCache, labels, gifsCfg, now) {
   const g = labels.gifs;
   if (!g?.header || !g.entryNoText) return [];
   const max = Number.isInteger(gifsCfg?.max) && gifsCfg.max >= 0 ? gifsCfg.max : 40;
   const listChars = gifsCfg?.listChars ?? 70;
+  const ownMarkHours = gifsCfg?.ownMarkHours ?? 24;
+  const markOn = Boolean(g.ownMark && labels.units) && Number.isFinite(ownMarkHours) && ownMarkHours > 0;
   const chosen = rankGifs(gifs, gifsCfg?.halfLifeDays ?? 30).slice(0, max);
   if (chosen.length === 0) return [];
   const lines = chosen.map((entry) => {
     const cached = mediaCache?.[entry.itemId];
     const text = cached && !cached.miss && typeof cached.text === 'string' ? clampText(cached.text, listChars, { tolerance: 1 }) : '';
-    return text && g.entry ? fill(g.entry, { id: entry.id, text }) : fill(g.entryNoText, { id: entry.id });
+    const line = text && g.entry ? fill(g.entry, { id: entry.id, text }) : fill(g.entryNoText, { id: entry.id });
+    const age = Math.max(0, now - entry.ownLast);
+    if (!markOn || !(entry.ownLast > 0) || age > ownMarkHours * HOUR_MS) return line;
+    return `${line} ${fill(g.ownMark, { ago: formatDuration(age, labels.units) })}`;
   });
   return [g.header, ...lines];
 }
@@ -2198,7 +2208,7 @@ export function buildRequest(input) {
         name: 'gifs',
         cap: caps.gifs ?? 900,
         keep: 'first',
-        items: gifsOn ? gifItems(gifLibrary, input.mediaCache ?? null, labels, config.gifs) : [],
+        items: gifsOn ? gifItems(gifLibrary, input.mediaCache ?? null, labels, config.gifs, now) : [],
       },
     ],
     limit,
