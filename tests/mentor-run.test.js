@@ -1937,7 +1937,7 @@ test('run: a reply situation with enough own lines gets one variety pass, its <w
     assert.equal('worn' in run.situations[1], false, 'too few own lines: nothing saved');
 
     const talks = llm.calls.filter((c) => c.kind === 'talk' && c.options.role === 'voice');
-    const withBlock = talks.filter((c) => c.user.includes(`<worn>\n${labels.variety.intro}\n- mock promise ending in (no) ("fix it (no)")\n</worn>`));
+    const withBlock = talks.filter((c) => c.user.includes(`<worn>\n${labels.variety.intro}\n- mock promise ending in (no)\n</worn>`));
     assert.equal(withBlock.length, 2, 'both samples of the first situation carry the block');
     assert.equal(talks.length - withBlock.length, 2, 'the second situation has no block');
     for (const score of llm.calls.filter((c) => c.kind === 'score')) assert.ok(!score.user.includes('<worn>'), 'the judge never sees it');

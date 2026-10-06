@@ -71,10 +71,10 @@ test('renderGifLibrary: the persona\'s recent post carries the own mark within o
   assert.deepEqual(renderGifLibrary(entries, mediaCache, labels, { now: NOW, ownMarkHours: 0, listChars: 0 }), ['g1 -- χαμόγελο', 'g2 -- νεύμα'], '0 = never');
 });
 
-test('renderGifLibrary: a caption is cut to listChars at a word boundary', () => {
+test('renderGifLibrary: a caption is cut to listChars at a word boundary, marked with an ellipsis', () => {
   const mediaCache = { 'item-g1': { text: 'ένας γάτος χορεύει πάνω στο τραπέζι' } };
   const [line] = renderGifLibrary([entry('g1')], mediaCache, labels, { now: NOW, ownMarkHours: 24, listChars: 12 });
-  assert.equal(line, 'g1 -- ένας γάτος');
+  assert.equal(line, 'g1 -- ένας γάτος…');
 });
 
 test('renderGifLibrary: no entries, no cache or labels without gifs.entry list nothing', () => {

@@ -605,6 +605,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       mode: 'chat',
       seeReactions: config.features?.seeReactions !== false,
       reactionsPerMessage: config.context?.reactionsPerMessage,
+      replyQuoteChars: config.context?.replyQuoteChars,
       descriptions: media?.descriptions,
       videos: media?.videos,
       reads: media?.reads instanceof Map ? media.reads : undefined,

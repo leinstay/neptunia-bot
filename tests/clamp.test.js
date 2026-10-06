@@ -2,7 +2,7 @@
 // token-safe replacement for a blind `.slice(0, limit)`. Pure, no I/O.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clampChars, clampText, oneLine } from '../src/memory/clamp.js';
+import { clampChars, clampText, clampWithEllipsis, countDashes, oneLine, stripDashes } from '../src/memory/clamp.js';
 
 // ---- non-string / empty --------------------------------------------------
 
@@ -193,4 +193,68 @@ test('clampChars: a max that is not a finite non-negative number leaves the text
     assert.equal(clampChars('abc', max), 'abc', `max ${String(max)}`);
   }
   assert.equal(clampChars(null, 5), '');
+});
+
+// ---- clampWithEllipsis ----------------------------------------------------
+
+test('clampWithEllipsis: a cut text ends at a word boundary with an ellipsis, within the limit', () => {
+  const out = clampWithEllipsis('ένας γάτος χορεύει πάνω στο τραπέζι', 14);
+  assert.equal(out, 'ένας γάτος…');
+  assert.ok([...out].length <= 14);
+});
+
+test('clampWithEllipsis: a text within the limit is returned trimmed, no ellipsis', () => {
+  assert.equal(clampWithEllipsis('  café crème  ', 20), 'café crème');
+  assert.equal(clampWithEllipsis('café crème', 10), 'café crème');
+});
+
+test('clampWithEllipsis: a cut at a complete sentence gets no ellipsis', () => {
+  assert.equal(clampWithEllipsis('Il pleut. Le chat dort sur le canapé depuis midi', 14), 'Il pleut.');
+});
+
+test('clampWithEllipsis: a limit that is not a positive number leaves the text whole; a non-string is empty', () => {
+  assert.equal(clampWithEllipsis('café crème brûlée', 0), 'café crème brûlée');
+  assert.equal(clampWithEllipsis('café crème brûlée', undefined), 'café crème brûlée');
+  assert.equal(clampWithEllipsis(null, 10), '');
+});
+
+// ---- stripDashes / countDashes ---------------------------------------------
+
+test('stripDashes: an em or en dash between words becomes one space, spaced or not', () => {
+  assert.equal(stripDashes('λέξη — λέξη'), 'λέξη λέξη');
+  assert.equal(stripDashes('λέξη—λέξη'), 'λέξη λέξη');
+  assert.equal(stripDashes('café – crème'), 'café crème');
+  assert.equal(stripDashes('café–crème'), 'café crème');
+  assert.equal(stripDashes('un  —  deux — — trois'), 'un deux trois');
+});
+
+test('stripDashes: a dash at the start or end goes with its space; a dash-only text becomes empty', () => {
+  assert.equal(stripDashes('— όχι'), 'όχι');
+  assert.equal(stripDashes('ναι —'), 'ναι');
+  assert.equal(stripDashes('—'), '');
+  assert.equal(stripDashes(' – — '), '');
+});
+
+test('stripDashes: a dash-only line inside a text becomes empty, other lines keep their breaks', () => {
+  assert.equal(stripDashes('πρώτη\n—\nτρίτη — τέλος'), 'πρώτη\n\nτρίτη τέλος');
+});
+
+test('stripDashes: hyphens are untouched -- compounds, times and links stay', () => {
+  const text = 'peut-être à 10-12 h, voir https://example.com/a-b-c -- ok - non';
+  assert.equal(stripDashes(text), text);
+});
+
+test('stripDashes: mixed scripts, and a non-string reads as empty', () => {
+  assert.equal(stripDashes('Ζωή—Zoé – Ελένη — Hélène'), 'Ζωή Zoé Ελένη Hélène');
+  assert.equal(stripDashes(null), '');
+});
+
+test('countDashes: em and en dashes counted, hyphens not', () => {
+  assert.equal(countDashes('a — b – c - d —— e'), 4);
+  assert.equal(countDashes('peut-être'), 0);
+  assert.equal(countDashes(undefined), 0);
+});
+
+test('clampWithEllipsis: a limit of 1 is a hard cut with no room for the ellipsis', () => {
+  assert.equal(clampWithEllipsis('café crème', 1), 'c');
 });

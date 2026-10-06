@@ -52,7 +52,7 @@ import { avatarReference, createImageFetcher } from '../discord/fetch-image.js';
 import { renderCustomEmoji, resolveReactionEmoji } from '../discord/emoji.js';
 import { fill } from '../discord/format.js';
 import { log } from '../log.js';
-import { clampChars, oneLine } from '../memory/clamp.js';
+import { clampChars, countDashes, oneLine, stripDashes } from '../memory/clamp.js';
 import { gifPostsToday } from '../memory/gif-watch.js';
 import { rankGifs } from '../memory/gifs.js';
 import { liveRecent, recentSettings } from '../memory/recent.js';
@@ -1278,29 +1278,31 @@ export function createTurnRunner({
   }
 
   /**
-   * The guild's filler list (`fillers`, src/behavior/fillers.js) and its count
-   * of the persona's own messages; null when the list is empty. `known`: the
-   * guild memory the caller already read, else it is read here.
+   * The guild's filler list (`fillers`, src/behavior/fillers.js), its count
+   * of the persona's own messages and its ring of the persona's own lines (`ownLines`,
+   * what `<worn>` counts a filler in); null when the list is empty. `known`:
+   * the guild memory the caller already read, else it is read here.
    * @param {string} guildId
    * @param {object|null} [known]
-   * @returns {{ list: object[], ownMessages: number }|null}
+   * @returns {{ list: object[], ownMessages: number, ring: object[] }|null}
    */
   function guildFillers(guildId, known = null) {
     const guild = known ?? (typeof store.getGuild === 'function' ? store.getGuild(guildId) : null);
     const list = Array.isArray(guild?.fillers) ? guild.fillers : [];
     if (list.length === 0) return null;
-    return { list, ownMessages: Number.isInteger(guild.ownMessageCount) ? guild.ownMessageCount : 0 };
+    const ring = Array.isArray(guild.ownLines) ? guild.ownLines : [];
+    return { list, ownMessages: Number.isInteger(guild.ownMessageCount) ? guild.ownMessageCount : 0, ring };
   }
 
   /**
    * The request's `fillers` input (src/behavior/variety.js#renderWorn): the
-   * guild's filler list and own-message count (guildFillers, over `known`
-   * when the turn already read the guild memory) with the turn's `now`; null
-   * when the list is empty.
+   * guild's filler list, own-message count and own-line ring (guildFillers,
+   * over `known` when the turn already read the guild memory) with the turn's
+   * `now`; null when the list is empty.
    * @param {string} guildId
    * @param {object|null} known
    * @param {number} now
-   * @returns {{ list: object[], ownMessages: number, now: number }|null}
+   * @returns {{ list: object[], ownMessages: number, ring: object[], now: number }|null}
    */
   function requestFillers(guildId, known, now) {
     const fillers = guildFillers(guildId, known);
@@ -3283,6 +3285,15 @@ export function createTurnRunner({
         .map((reaction) => ({ ...reaction, emoji: resolveReactionEmoji(reaction.emoji, lookupEmoji) }))
         .filter((reaction) => reaction.emoji);
       if (features.multiMessage === false) parsed.messages = parsed.messages.slice(0, 1);
+      // format.stripDashes (a missing key counts as on): no em/en dash in a <msg> text; a message
+      // left empty is not posted. Hyphens, <draw>, <react>, <gif> and reply ids are untouched.
+      if (hot.config.format?.stripDashes !== false) {
+        const dashes = parsed.messages.reduce((sum, message) => sum + countDashes(message.text), 0);
+        if (dashes > 0) {
+          parsed.messages = parsed.messages.map((message) => ({ ...message, text: stripDashes(message.text) })).filter((message) => message.text !== '');
+          log.info('turn: dashes stripped', { channel: channel.id, count: dashes });
+        }
+      }
       // No image client, drawing off, no Attach Files, or already answering a failed picture: the <draw> is dropped.
       if (!drawOn) parsed.draw = null;
       // features.gifs off, an unknown handle or gifs.maxPerDay spent: the <gif> is dropped.

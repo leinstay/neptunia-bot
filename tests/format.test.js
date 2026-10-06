@@ -194,9 +194,9 @@ test('formatTranscript: indexOffset shifts every index and reply target', () => 
     items.map((item) => item.text),
     [
       '#8 [13:00] Nick: πρώτο',
-      '#9 [13:01] Nick: δεύτερο (replying to #8)',
+      '#9 [13:01] Nick: δεύτερο (replying to #8, Nick: "πρώτο")',
       '#10 [13:02] Nick: τρίτο (replying to an older message)',
-      '#11 [13:03] Nick: café (replying to #9)',
+      '#11 [13:03] Nick: café (replying to #9, Nick: "δεύτερο")',
     ],
   );
 });
@@ -204,14 +204,49 @@ test('formatTranscript: indexOffset shifts every index and reply target', () => 
 test('formatTranscript: no offset keeps 1..N', () => {
   const expected = [
     { id: 'a', index: 1, ts: Date.UTC(2026, 8, 20, 10, 0, 0), text: '#1 [13:00] Nick: πρώτο' },
-    { id: 'b', index: 2, ts: Date.UTC(2026, 8, 20, 10, 1, 0), text: '#2 [13:01] Nick: δεύτερο (replying to #1)' },
+    { id: 'b', index: 2, ts: Date.UTC(2026, 8, 20, 10, 1, 0), text: '#2 [13:01] Nick: δεύτερο (replying to #1, Nick: "πρώτο")' },
     { id: 'c', index: 3, ts: Date.UTC(2026, 8, 20, 10, 2, 0), text: '#3 [13:02] Nick: τρίτο (replying to an older message)' },
-    { id: 'd', index: 4, ts: Date.UTC(2026, 8, 20, 10, 3, 0), text: '#4 [13:03] Nick: café (replying to #2)' },
+    { id: 'd', index: 4, ts: Date.UTC(2026, 8, 20, 10, 3, 0), text: '#4 [13:03] Nick: café (replying to #2, Nick: "δεύτερο")' },
   ];
   assert.deepEqual(formatTranscript(offsetMessages(), offsetOptions), expected);
   assert.deepEqual(formatTranscript(offsetMessages(), { ...offsetOptions, indexOffset: undefined }), expected);
   assert.deepEqual(formatTranscript(offsetMessages(), { ...offsetOptions, indexOffset: null }), expected);
   assert.deepEqual(formatTranscript(offsetMessages(), { ...offsetOptions, indexOffset: 0 }), expected);
+});
+
+// --- formatTranscript: a reply quotes its parent ---------------------------
+
+test('formatTranscript: a reply to the persona names its self label and quotes its line', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, { self: true, authorName: 'Nept', content: 'πάμε για καφέ' }),
+    msg('b', t0 + MIN, { content: 'ναι!', replyToId: 'a' }),
+  ];
+  const items = formatTranscript(messages, { ...offsetOptions, replyQuoteChars: 40 });
+  assert.equal(items[1].text, '#2 [13:01] Nick: ναι! (replying to #1, Nept (you): "πάμε για καφέ")');
+});
+
+test('formatTranscript: a long parent is quoted on one line, cut at a word boundary with an ellipsis', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, { authorName: 'Éloïse', content: 'je préfère\nles penalties à la dernière minute, toujours' }),
+    msg('b', t0 + MIN, { content: 'ok', replyToId: 'a' }),
+  ];
+  const items = formatTranscript(messages, { ...offsetOptions, replyQuoteChars: 24 });
+  assert.equal(items[1].text, '#2 [13:01] Nick: ok (replying to #1, Éloïse: "je préfère les…")');
+});
+
+test('formatTranscript: a media-only parent quotes its media label; one with nothing quotes an empty string', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [
+    msg('a', t0, { content: '', attachments: [{ id: 'p1', kind: 'image' }] }),
+    msg('b', t0 + MIN, { content: '' }),
+    msg('c', t0 + 2 * MIN, { content: 'ωραίο', replyToId: 'a' }),
+    msg('d', t0 + 3 * MIN, { content: 'τι;', replyToId: 'b' }),
+  ];
+  const items = formatTranscript(messages, { ...offsetOptions, replyQuoteChars: 40 });
+  assert.equal(items[2].text, '#3 [13:02] Nick: ωραίο (replying to #1, Nick: "[image]")');
+  assert.equal(items[3].text, '#4 [13:03] Nick: τι; (replying to #2, Nick: "")');
 });
 
 test('formatTranscript: an indexOffset given but not a whole number of at least 0 throws a RangeError', () => {
@@ -666,6 +701,21 @@ test('formatTranscript: an older labels.json with no emojiDescribed key renders 
   assert.ok(!items[0].text.includes('  '));
 });
 
+test('formatTranscript: emojiInline false keeps the bare :name: with no description tag', () => {
+  const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
+  const messages = [msg('a', t0, { content: 'nice :pog:', emojis: [{ id: 'e1', name: 'pog' }] })];
+  const items = formatTranscript(messages, {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 100,
+    selfName: 'Nept',
+    labels,
+    descriptions: new Map([['emoji:e1', 'a surprised cat face']]),
+    emojiInline: false,
+  });
+  assert.equal(items[0].text, '#1 [13:00] Nick: nice :pog:');
+});
+
 test('formatTranscript: a forwarded message-snapshot wraps its content and media in labels.transcript.forwarded', () => {
   const t0 = Date.UTC(2026, 8, 20, 10, 0, 0);
   const messages = [
@@ -937,6 +987,12 @@ test('format: the code fallbacks equal the values in config.json', () => {
     formatTranscript([msg('1', T, { reactions })], options),
     formatTranscript([msg('1', T, { reactions })], { ...options, reactionsPerMessage: shipped.reactionsPerMessage }),
   );
+  // The reply quote: the omitted option reads as the shipped length.
+  const long = Array.from({ length: shipped.replyQuoteChars }, (_, i) => `λέξη${i}`).join(' ');
+  const thread = [msg('1', T, { content: long }), msg('2', T + MIN, { replyToId: '1' })];
+  const withShipped = formatTranscript(thread, { ...options, maxChars: 0, replyQuoteChars: shipped.replyQuoteChars });
+  assert.notEqual(withShipped[1].text, formatTranscript(thread, { ...options, maxChars: 0, replyQuoteChars: shipped.replyQuoteChars + 10 })[1].text);
+  assert.equal(formatTranscript(thread, { ...options, maxChars: 0 })[1].text, withShipped[1].text);
 });
 
 // --- formatTranscript: a second look on a question (videoAnswered) -----------------

@@ -106,6 +106,17 @@ test('buildRequest: system message is system-prompt + character-card + rules + f
   assert.equal(request.messages[0].content, 'SYSTEM_TEXT for Nept\n\nCARD_TEXT\n\nRULES_TEXT\n\nFORMAT_TEXT');
 });
 
+test('buildRequest: a reply in <chat> quotes its parent cut to context.replyQuoteChars', () => {
+  const history = [
+    makeMessage('1', NOW - 2 * MIN, { self: true, content: 'je préfère les penalties' }),
+    makeMessage('2', NOW - MIN, { replyToId: '1', content: 'ah bon' }),
+  ];
+  const request = buildRequest(baseInput({ history, config: fakeConfig({ context: { replyQuoteChars: 14 } }) }));
+  const content = request.messages[1].content;
+  const text = Array.isArray(content) ? content.find((part) => part.type === 'text').text : content;
+  assert.ok(text.includes(`User2: ah bon ${fill(labels.transcript.replyTo, { index: 1, author: 'Nept (you)', quote: 'je préfère…' })}`), text);
+});
+
 test('buildRequest: {{name}} is filled with selfName in every system part', () => {
   const request = buildRequest(
     baseInput({ prompts: fakePrompts({ 'system-prompt': 'Hi, I am {{name}}.', 'character-card': 'card of {{name}}' }) }),
@@ -2758,7 +2769,7 @@ test('buildRequest: pulled lines continue the chat\'s numbering and map back thr
   assert.deepEqual([...request.idByIndex], [[1, 'd1'], [2, 'd2'], [3, 'p1'], [4, 'p2'], [5, 'q1']]);
   assert.deepEqual([...request.pulledIds], [['p1', SRC], ['p2', SRC], ['q1', 'other']]);
   const view = bodyOf(userText(request), 'channel_view');
-  assert.ok(view.includes(`#4 [${formatClock(NOW - 25 * MIN, TZ)}] Zoé: content of message p2 ${fill(labels.transcript.replyTo, { index: 3 })}`), view);
+  assert.ok(view.includes(`#4 [${formatClock(NOW - 25 * MIN, TZ)}] Zoé: content of message p2 ${fill(labels.transcript.replyTo, { index: 3, author: 'Zoé', quote: 'content of message p1' })}`), view);
   assert.ok(view.includes('#5 ['));
   assert.ok(view.indexOf('#journal-de-zoé') < view.indexOf('#carnet-de-björn'), 'channels in the order given');
 });

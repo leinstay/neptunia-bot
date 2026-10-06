@@ -162,7 +162,7 @@ function longCaption(n) {
   return `Un chat roux numéro ${n} danse sur une table de cuisine en agitant les pattes, puis il glisse lentement et tombe sur le dos pendant que quelqu'un rit derrière la caméra du téléphone.`;
 }
 
-test('buildRequest: <gifs> cuts a long caption to gifs.listChars at a word boundary; the stored caption is untouched', () => {
+test('buildRequest: <gifs> cuts a long caption to gifs.listChars at a word boundary with an ellipsis; the stored caption is untouched', () => {
   const caption = longCaption(2);
   const mediaCache = { k2: { text: caption, ts: NOW } };
   const config = fakeConfig({ gifs: { listChars: 40 } });
@@ -171,8 +171,10 @@ test('buildRequest: <gifs> cuts a long caption to gifs.listChars at a word bound
   assert.ok(line.startsWith('g2 -- '), line);
   const shown = line.slice('g2 -- '.length);
   assert.ok([...shown].length <= 40, shown);
-  assert.ok(caption.startsWith(shown), 'a prefix of the caption');
-  assert.equal(caption[shown.length], ' ', 'cut where a word ends');
+  assert.ok(shown.endsWith('…'), 'the cut is marked');
+  const kept = shown.slice(0, -1);
+  assert.ok(caption.startsWith(kept), 'a prefix of the caption');
+  assert.equal(caption[kept.length], ' ', 'cut where a word ends');
   assert.equal(mediaCache.k2.text, caption);
 
   const short = { k2: { text: 'a cat', ts: NOW } };
