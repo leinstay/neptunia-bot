@@ -285,6 +285,7 @@ const SWITCHES_ON = {
   videoDescriptions: true,
   attachedDescriptions: true,
   vision: true,
+  privateLikeServer: true,
 };
 
 function fakeHot(featureOverrides = {}, botOverrides = {}, configOverrides = {}) {
@@ -2048,13 +2049,13 @@ function fakeRecall({ available = true, result = { text: RECALL_TEXT, stretch: n
 }
 
 /** One reply turn (`dm`: a private chat served for g1) with a web lookup and a recall wired. */
-async function runRecallTurn({ hot = lookupHot(), llm, lookup = fakeLookup(), recall = fakeRecall(), dm = false } = {}) {
+async function runRecallTurn({ hot = lookupHot(), llm, lookup = fakeLookup(), recall = fakeRecall(), dm = false, client = fakeClient() } = {}) {
   const messages = [
     rawMessage({ id: 'm1', ts: NOW - 5000, content: 'καλημέρα' }),
     rawMessage({ id: 'm2', ts: NOW - 1000, authorName: 'Zoë', content: 'ποιος σκότωσε το κουνέλι;' }),
   ];
   const channel = fakeTurnChannel({ historyMessages: messages, ...(dm ? { id: 'dm1', dm: true } : {}) });
-  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), lookup, recall, now: () => NOW });
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client, lookup, recall, now: () => NOW });
   const trigger = normalizedTrigger(messages[1]);
   const { result, logs } = await withCapturedLogs(() =>
     turns.runTurn({ channel, ...(dm ? { guildId: 'g1' } : {}), mode: 'reply', trigger, triggerKind: dm ? 'private' : 'mention' }),
@@ -2149,7 +2150,49 @@ test('createTurnRunner: recall -- with the web search unable to run, the classif
   }
 });
 
-test('createTurnRunner: recall -- a private chat never runs recall', async () => {
+/** A client serving g1, where the DM partner u1 (the trigger's author) is fetched as `partner`. */
+function partnerClient() {
+  const guild = { id: 'g1', members: { me: { displayName: 'Bot' } }, channels: { cache: new Map() } };
+  const partner = { id: 'u1', guild };
+  guild.members.fetch = async (id) => (id === 'u1' ? partner : null);
+  return { client: fakeClient({ guilds: { cache: new Map([['g1', guild]]) } }), guild, partner };
+}
+
+test('createTurnRunner: recall -- a private chat runs recall on its partner\'s behalf in the served guild', async () => {
+  const { client, guild, partner } = partnerClient();
+  const { result, recall, channel, lookup, llm } = await runRecallTurn({ llm: lookupLlm('server: κουνέλι'), dm: true, client });
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(recall.runCalls.length, 1);
+  const args = recall.runCalls[0];
+  assert.equal(args.channel, channel);
+  assert.equal(args.guild, guild);
+  assert.equal(args.guildId, 'g1');
+  assert.equal(args.partner, partner);
+  assert.deepEqual(args.server, { forms: ['κουνέλι'], who: [], from: null, to: null });
+  assert.equal(lookup.searchCalls.length, 0);
+  assert.equal(turnLookupOf(llm), [labels.lookup.serverHeader, RECALL_TEXT].join('\n'));
+});
+
+test('createTurnRunner: recall -- features.privateLikeServer off: a private chat never runs recall, its partner at hand or not', async () => {
+  const { client } = partnerClient();
+  const off = await runRecallTurn({ hot: lookupHot({ privateLikeServer: false }), llm: lookupLlm('web: champions final\nserver: κουνέλι'), dm: true, client });
+  assert.equal(off.result.outcome, 'spoke');
+  assert.equal(off.recall.runCalls.length, 0);
+  assert.equal(off.lookup.searchCalls.length, 1);
+  assert.equal(turnLookupOf(off.llm), webPartOf('champions final'));
+
+  const noWeb = await runRecallTurn({
+    hot: lookupHot({ webLookup: false, privateLikeServer: false }),
+    llm: lookupLlm('server: κουνέλι'),
+    lookup: null,
+    dm: true,
+    client: partnerClient().client,
+  });
+  assert.equal(noWeb.llm.classifierCalls.length, 0, 'nothing can run: no classifier');
+  assert.equal(noWeb.recall.runCalls.length, 0);
+});
+
+test('createTurnRunner: recall -- a private chat without its partner as a guild member never runs recall', async () => {
   const withWeb = await runRecallTurn({ llm: lookupLlm('web: champions final\nserver: κουνέλι'), dm: true });
   assert.equal(withWeb.result.outcome, 'spoke');
   assert.equal(withWeb.recall.runCalls.length, 0);
@@ -4019,7 +4062,7 @@ test('runTurn: a failed, refused or throwing pull never fails the turn', async (
   assert.ok(thrown.logs.some((l) => l.msg === 'pull: route failed' && l.channel === 'c1'));
 });
 
-test('runTurn: a private chat never pulls a channel', async () => {
+test('runTurn: a private chat whose partner cannot be fetched as a guild member never pulls a channel', async () => {
   let asked = 0;
   const raw = rawMessage({ id: 'm1', authorId: 'u1', authorName: 'Alice', content: 'hey' });
   const channel = fakeTurnChannel({ id: 'dm1', dm: true, historyMessages: [raw] });
@@ -4045,6 +4088,126 @@ test('runTurn: a private chat never pulls a channel', async () => {
   assert.equal(asked, 0);
   assert.equal(userTextOf(llm.calls[0]).includes('<channel_view>'), false);
   assert.equal(logs.some((l) => l.msg.startsWith('pull: ')), false);
+});
+
+/**
+ * A private chat (dm1) served for g1, whose guild holds #diary (DIARY). Alice (u1), the partner,
+ * is fetched from the guild (`memberFetches`); `canView`: whether she has View Channel on #diary.
+ * `mention`: her call names #diary with a real `<#id>`.
+ */
+function privatePullScene({ features = {}, canView = true, mention = false, routeChannels } = {}) {
+  const server = fakeTurnChannel({ id: 'c1' });
+  const guild = server.guild;
+  const partner = { id: 'u1', guild };
+  const memberFetches = [];
+  guild.members.fetch = async (id) => {
+    memberFetches.push(id);
+    return partner;
+  };
+  const diary = addChannel(server, { id: DIARY, name: 'diary', messages: diaryLines() });
+  const botView = diary.permissionsFor;
+  diary.permissionsFor = (target) => (target === partner ? { has: (flag) => canView || flag !== PermissionFlagsBits.ViewChannel } : botView(target));
+  const call = lineIn('dm1', { id: 'p1', authorId: 'u1', authorName: 'Alice', ts: NOW - 1000, content: 'τι γράφει το ημερολόγιο;' });
+  const channel = fakeTurnChannel({ id: 'dm1', dm: true, historyMessages: [call] });
+  const llm = sequenceLlm(['<msg>ok</msg>']);
+  const client = fakeClient({ guilds: { cache: new Map([['g1', guild]]) } });
+  const turns = createTurnRunner({
+    hot: privateHot(features),
+    store: privateStore(),
+    llm,
+    calibrator: identityCalibrator(),
+    client,
+    images: fakeImages(),
+    imageFetcher: fakeImageFetcher(),
+    routeChannels,
+    now: () => NOW,
+  });
+  const trigger = { ...normalizedTrigger(call), ...(mention ? { mentionedChannelIds: [DIARY] } : {}) };
+  const run = () => withCapturedLogs(() => turns.runTurn({ channel, guildId: 'g1', mode: 'reply', trigger, triggerKind: 'private' }));
+  return { channel, diary, guild, partner, memberFetches, llm, run };
+}
+
+/** A route hook that names #diary and records its arguments. */
+function diaryHook() {
+  const calls = [];
+  const hook = async (args) => {
+    calls.push(args);
+    return [DIARY];
+  };
+  return { calls, hook };
+}
+
+test('runTurn: a private chat asks the route hook for its partner and pulls the picked channel the partner can view', async () => {
+  const { calls, hook } = diaryHook();
+  const scene = privatePullScene({ routeChannels: hook });
+
+  const { result, logs } = await scene.run();
+
+  assert.equal(result.outcome, 'spoke');
+  assert.deepEqual(scene.memberFetches, ['u1']);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].channel, scene.channel);
+  assert.equal(calls[0].guild, scene.guild, 'judged in the served guild');
+  assert.equal(calls[0].partner, scene.partner);
+  assert.equal(calls[0].triggerKind, 'private');
+  assert.deepEqual(calls[0].history.map((m) => m.id), ['p1']);
+  assert.ok(scene.diary.fetches.length > 0, 'the picked channel was fetched');
+  const pulled = logs.find((l) => l.msg === 'pull: channel');
+  assert.deepEqual([pulled?.channel, pulled?.source, pulled?.pullReason], ['dm1', DIARY, 'route']);
+});
+
+test('runTurn: a private chat never pulls a picked channel its partner cannot view', async () => {
+  const { calls, hook } = diaryHook();
+  const scene = privatePullScene({ routeChannels: hook, canView: false });
+
+  const { result, logs } = await scene.run();
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(calls.length, 1);
+  assert.deepEqual(scene.diary.fetches, []);
+  assert.equal(logs.some((l) => l.msg === 'pull: channel'), false);
+  const skipped = logs.find((l) => l.msg === 'pull: skipped');
+  assert.deepEqual([skipped?.source, skipped?.reason, skipped?.pullReason], [DIARY, 'audience', 'route']);
+});
+
+test('runTurn: a private chat pulls an explicitly mentioned channel only when its partner can view it', async () => {
+  const seen = await privatePullScene({ mention: true }).run();
+  assert.ok(seen.logs.some((l) => l.msg === 'pull: channel' && l.source === DIARY && l.pullReason === 'mention'));
+
+  const hidden = privatePullScene({ mention: true, canView: false });
+  const { logs } = await hidden.run();
+  assert.deepEqual(hidden.diary.fetches, []);
+  const skipped = logs.find((l) => l.msg === 'pull: skipped');
+  assert.deepEqual([skipped?.source, skipped?.reason, skipped?.pullReason], [DIARY, 'audience', 'mention']);
+});
+
+test('runTurn: features.privateLikeServer off -- a private chat asks no route hook, pulls no mention and fetches no partner', async () => {
+  const { calls, hook } = diaryHook();
+  const scene = privatePullScene({ features: { privateLikeServer: false }, mention: true, routeChannels: hook });
+
+  const { result, logs } = await scene.run();
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(calls.length, 0);
+  assert.deepEqual(scene.memberFetches, []);
+  assert.deepEqual(scene.diary.fetches, []);
+  assert.equal(logs.some((l) => l.msg.startsWith('pull: ')), false);
+});
+
+test('runTurn: a private chat whose partner left the guild pulls nothing and logs the failed fetch', async () => {
+  const { calls, hook } = diaryHook();
+  const scene = privatePullScene({ mention: true, routeChannels: hook });
+  scene.guild.members.fetch = async () => {
+    throw new Error('Unknown Member');
+  };
+
+  const { result, logs } = await scene.run();
+
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(calls.length, 0);
+  assert.deepEqual(scene.diary.fetches, []);
+  const failed = logs.find((l) => l.msg === 'turn: partner failed');
+  assert.deepEqual([failed?.guildId, failed?.userId], ['g1', 'u1']);
 });
 
 /**

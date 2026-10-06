@@ -26,6 +26,7 @@
     "recall": true,
     "imageGeneration": false,
     "privateMessages": false,
+    "privateLikeServer": true,
     "mentor": false,
     "variety": true,
     "varietyPrecompute": true,

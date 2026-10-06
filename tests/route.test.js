@@ -319,6 +319,26 @@ test('createChannelRouter: overheard, drawFailed and private turns, and the swit
   assert.equal(logs.length, 0);
 });
 
+test('createChannelRouter: a private chat with its partner lists the server channels the partner can view; without one it makes no call', async () => {
+  const { router, llm, args } = routerScene({ answer: '2' });
+  const dm = { id: 'dm1', guild: null };
+  const partner = { id: 'u9', guild: args.guild };
+  args.guild.channels.cache.get('c3').permissionsFor = (target) => ({ has: () => target !== partner });
+  const history = args.history.map((m) => ({ ...m, channelId: 'dm1' }));
+  const turn = { ...args, channel: dm, partner, history, trigger: history[1], triggerKind: 'private' };
+  const { result, logs } = await withCapturedLogs(() => router(turn));
+  assert.deepEqual(result, ['c2']);
+  const user = llm.calls[0].messages[1].content;
+  assert.ok(user.includes('<channels>\n1 | #general |  |\n2 | #journal | Éloïse (Élo) | a diary\n</channels>'), user);
+  assert.equal(logs.find((l) => l.msg === 'route: classified').kind, 'private');
+
+  const alone = routerScene();
+  const refused = await withCapturedLogs(() => alone.router({ ...turn, guild: alone.args.guild, partner: null }));
+  assert.deepEqual(refused.result, []);
+  assert.equal(alone.llm.calls.length, 0);
+  assert.equal(refused.logs.length, 0);
+});
+
 test('createChannelRouter: a spontaneous turn judges the newest member line; no candidate is skipped', async () => {
   const { router, llm, args } = routerScene();
   const own = line('m3', { self: true, authorName: 'Zoë', content: 'εγώ' });

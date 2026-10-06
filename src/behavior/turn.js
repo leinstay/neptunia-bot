@@ -4,7 +4,8 @@
 // Used for answering a call ('reply') and for spontaneous turns
 // ('interject' / 'initiate'), in a server channel or in a private chat (a
 // channel without a guild, served on behalf of the one pinned guild). A
-// server turn may also show other channels it is about (`<channel_view>`):
+// server turn -- and a private chat, on its partner's behalf -- may also show
+// other channels it is about (`<channel_view>`):
 // the read-only channel a call came from, a channel named with an explicit
 // <#id>, or one a route hook names. The turn still speaks only here: a
 // reaction on a shown line of another channel lands in that channel, and a
@@ -705,7 +706,8 @@ function taskInput({ part, queued, added, labels, channelId }) {
  *
  * `recall` (src/behavior/recall-run.js#createRecall) is optional too: the
  * search of the server's own history beside the web search. Absent, or its
- * `available()` false, or a private chat, no server search is made. The one
+ * `available()` false, or a private chat without its partner (see runTurn),
+ * no server search is made. The one
  * lookup classifier serves both (maybeLookup) and the request's `lookup`
  * input carries both parts: the web search's result as it is
  * (src/web/lookup.js#search, `{ query, text, sources, cached? }`), with a
@@ -763,10 +765,13 @@ function taskInput({ part, queued, added, labels, channelId }) {
  *
  * `routeChannels` (the route classifier's hook; src/index.js passes
  * src/behavior/route-channel.js#createChannelRouter's) is optional:
- * `({ guildId, channel, history, trigger, triggerKind, selfName, config }) => Promise<string[]>`,
+ * `({ guildId, channel, guild, partner, history, trigger, triggerKind, selfName, config }) => Promise<string[]>`,
  * the ids of channels the conversation is about; `triggerKind` is the turn's
  * TriggerKind (null on a turn without a trigger), so the hook can decline
- * kinds it does not serve (src/behavior/route.js#routeAllowed). It is asked on a server turn
+ * kinds it does not serve (src/behavior/route.js#routeAllowed); `guild` is the
+ * guild the ids are judged in, `partner` a private chat's partner (null on a
+ * server turn). It is asked on a server turn, or a private chat with its
+ * partner (features.privateLikeServer, see runTurn),
  * (never a drawFailed one) with features.channelPull on and the labels able
  * to render the block (`labels.pull.header`) while a
  * `<channel_view>` slot (`context.pull.maxChannels`) is left after the turn's
@@ -1536,6 +1541,29 @@ export function createTurnRunner({
   }
 
   /**
+   * A private chat's partner as a member of the served guild (a discord.js
+   * GuildMember), for a private chat that works like a server turn on their
+   * behalf: features.privateLikeServer (read from `config`, the turn's live
+   * config; a missing key counts as on, only false turns it off). The member
+   * is fetched from the pinned guild (`guild.members.fetch`, the cache first).
+   * Null with the switch off, without a user id, a cached guild or a member
+   * fetch; a fetch that fails (the member left) logs `turn: partner failed`
+   * and is null too. Never rejects.
+   * @returns {Promise<object|null>}
+   */
+  async function privatePartner({ guildId, userId, config }) {
+    if (config.features?.privateLikeServer === false || !userId) return null;
+    const guild = client.guilds?.cache?.get?.(guildId) ?? null;
+    if (typeof guild?.members?.fetch !== 'function') return null;
+    try {
+      return (await guild.members.fetch(userId)) ?? null;
+    } catch (err) {
+      log.warn('turn: partner failed', { guildId, userId, error: err });
+      return null;
+    }
+  }
+
+  /**
    * `work()` as a promise that never rejects: a throw or a rejection logs
    * `lookup: failed` with the `part` it was (`web` / `server`) and gives null.
    */
@@ -1552,7 +1580,8 @@ export function createTurnRunner({
    * The searches on a question: the web search (`webOn`: features.webLookup,
    * web.search.enabled, a lookup with `search`) and the search of the
    * server's own history (`serverOn`: recall wired and available, a server
-   * turn). One cheap classifier call (prompts.lookup, `{{name}}` = the
+   * turn or a private chat with its `partner`; `guild` is the guild searched,
+   * the served one in a private chat). One cheap classifier call (prompts.lookup, `{{name}}` = the
    * persona's display name, `{{today}}` = the injected clock's date
    * `YYYY-MM-DD` in `bot.timezone`, the zone its `when:` range is read in;
    * on classifierTextModel, its answer capped at
@@ -1581,7 +1610,7 @@ export function createTurnRunner({
    * is called once the answer asks for a search that runs, before it starts
    * (the turn's deadline grows to pace.prepareSearchMs).
    */
-  async function maybeLookup({ config, guildId, channel, selfId, selfName, history, chatHistory, trigger, descriptions, videos, reads, webOn, serverOn, onSearch }) {
+  async function maybeLookup({ config, guildId, channel, guild = channel.guild, partner = null, selfId, selfName, history, chatHistory, trigger, descriptions, videos, reads, webOn, serverOn, onSearch }) {
     const channelId = channel.id;
     const prompt = hot.prompts?.lookup;
     const searchCfg = config.web?.search ?? {};
@@ -1655,7 +1684,7 @@ export function createTurnRunner({
       runWeb ? settleLookupPart(() => lookup.search(guildId, parsed.web), channelId, 'web') : null,
       runServer
         ? settleLookupPart(
-            () => recall.run({ guild: channel.guild, guildId, channel, selfId, selfName, history: chatHistory, candidate: trigger, server }),
+            () => recall.run({ guild, guildId, channel, partner, selfId, selfName, history: chatHistory, candidate: trigger, server }),
             channelId,
             'server',
           )
@@ -1809,11 +1838,14 @@ export function createTurnRunner({
    * drawFailed turn. Settings come from `config`, the turn's live config.
    * `candidate` (default: the trigger) is what the route hook judges: on a
    * turn answering one part of a split message, the trigger with that part's text.
+   * A private chat with its `partner` (privatePartner) pulls the same way from
+   * `guild`, the served guild, every rail judged against the partner instead of
+   * an audience (checkPull: their View Channel on the candidate); it has no
+   * source.
    * @returns {Promise<{ pulled: object[], sourceSkip: string|null }>}  The PulledChannel records,
    *   source first; `sourceSkip` is the skip code of a source that could not be pulled.
    */
-  async function pullChannels({ channel, guildId, history, trigger, candidate = trigger, triggerKind = null, source, selfId, selfName, config, now, certain, drawFailure, labelled }) {
-    const guild = channel.guild;
+  async function pullChannels({ channel, guildId, guild = channel.guild, partner = null, history, trigger, candidate = trigger, triggerKind = null, source, selfId, selfName, config, now, certain, drawFailure, labelled }) {
     const settings = pullSettings(config);
     const channelPull = channelPullOn(config) && labelled;
     // Every candidate judged once: its skip code (null = pullable) and why it was a candidate.
@@ -1821,7 +1853,7 @@ export function createTurnRunner({
     let judging = 'mention';
     const judge = (id) => {
       try {
-        return checkPull({ guild, channelId: id, destination: channel, config, now }).skip;
+        return checkPull({ guild, channelId: id, destination: channel, partner, config, now }).skip;
       } catch (err) {
         log.warn('pull: failed', { channel: channel.id, source: id, pullReason: judging, error: err });
         return 'error';
@@ -1862,6 +1894,7 @@ export function createTurnRunner({
         guildId,
         channelId: target.channelId,
         destination: channel,
+        partner,
         reason: target.reason,
         trigger: target.reason === 'routed' ? trigger : null,
         pings,
@@ -1885,7 +1918,7 @@ export function createTurnRunner({
     }
     if (typeof routeChannels === 'function' && channelPull && !drawFailure && targets.length < settings.maxChannels) {
       const routedLines = source?.reason === 'routed' ? sourcePulled?.messages : null;
-      const ids = await routeIds({ guildId, channel, history: routedLines ?? history, trigger: candidate, triggerKind, selfName, config });
+      const ids = await routeIds({ guildId, channel, guild, partner, history: routedLines ?? history, trigger: candidate, triggerKind, selfName, config });
       judging = 'route';
       if (ids.length > 0) targets = targetsWith(ids);
     }
@@ -2021,6 +2054,16 @@ export function createTurnRunner({
    *   named and the old rule holds for it.
    * @param {{ id: string, text: string, ts: number }[]|null} [params.added]  Later messages of the
    *   author folded into this call (src/discord/events.js): `labels.task.added` names them.
+   *
+   * A private chat (`channel` without a guild) works like a server turn on behalf of its partner
+   * (the trigger's author, fetched as a member of the served guild: privatePartner) with
+   * features.privateLikeServer on (a missing key counts as on): the explicit `<#id>` mentions and
+   * the route hook's ids are pulled from the served guild when the partner has View Channel on
+   * them (checkPull), and the search classifier may ask for the server search (recall), its hits
+   * judged by the same rule. It never has neighbours, a source or a focus, and the channels it
+   * shows move no seen mark, stamp no call of the ring and count for no pending ping there: the
+   * persona answered in private, not on the server. The switch off, or no partner: no pull, no
+   * route hook, no server search, as before.
    * @returns {Promise<{ outcome: TurnOutcome, mode?: string, dryRun?: boolean, drawFailed?: string,
    *   delivered?: boolean, limit?: { key: string, used: number, cap: number }|null }>}
    *   `drawFailed` (the reason) when the persona's picture could not be posted; `delivered` on a
@@ -2321,6 +2364,11 @@ export function createTurnRunner({
       // A direct call sees the persona typing while the turn prepares.
       stopTyping = typingWhilePreparing(channel, triggerKind, config);
 
+      // A private chat's partner as a guild member (features.privateLikeServer), fetched beside
+      // the history; null on a server turn, with the switch off or when the fetch fails.
+      const partnerPending = isPrivate
+        ? privatePartner({ guildId, userId: trigger?.authorId ?? channel.recipientId ?? null, config })
+        : Promise.resolve(null);
       const historyStartedAt = clock();
       // The first part of a split message reuses the history its message's turn fetched.
       const rawHistory =
@@ -2334,6 +2382,10 @@ export function createTurnRunner({
           }),
         ));
       const historyMs = clock() - historyStartedAt;
+      const partner = await beforeBar(partnerPending);
+      // A private chat on its partner's behalf: pulls and the server search from the served guild.
+      const likeServer = isPrivate && partner !== null;
+      const servedGuild = isPrivate ? (likeServer ? (client.guilds?.cache?.get?.(guildId) ?? null) : null) : channel.guild;
       // What the helpers judge: the trigger, or on a part of a split message the trigger with
       // that part's text (same id, author and time).
       const candidate = part && trigger ? { ...trigger, content: part.parts[part.index - 1] ?? trigger.content } : trigger;
@@ -2344,7 +2396,8 @@ export function createTurnRunner({
       // before the mode is chosen so a chooser sees them. Fresh captions only for a turn certain
       // to run: with the fetch when no chooser can still say not-now, else once it chose
       // (captionAll). A turn about another channel, or one with a chooser, waits for them here;
-      // any other turn fetches them alongside the preparation below. Never in a private chat.
+      // any other turn fetches them alongside the preparation below. A private chat only on its
+      // partner's behalf (likeServer), judged against the partner.
       // The block renders only under `labels.pull.header` (read now, as buildRequest reads it):
       // without it no channel is fetched for a mention or the route hook and no fresh caption
       // is paid for; a turn's source is still pulled (its chooser and a routed call's search
@@ -2352,9 +2405,9 @@ export function createTurnRunner({
       const certain = mode !== 'auto';
       const pullLabelled = Boolean(hot.prompts?.labels?.pull?.header);
       const pullStartedAt = clock();
-      const pullsPending = isPrivate
+      const pullsPending = isPrivate && !likeServer
         ? Promise.resolve({ pulled: [], sourceSkip: null })
-        : pullChannels({ channel, guildId, history, trigger, candidate, triggerKind, source, selfId, selfName, config, now, certain, drawFailure: answersDrawFailure, labelled: pullLabelled })
+        : pullChannels({ channel, guildId, guild: servedGuild, partner, history, trigger, candidate, triggerKind, source, selfId, selfName, config, now, certain, drawFailure: answersDrawFailure, labelled: pullLabelled })
             // Never fails the turn: anything unexpected is no pull (and no source).
             .catch((err) => {
               log.warn('pull: failed', { channel: channel.id, error: err });
@@ -2553,8 +2606,8 @@ export function createTurnRunner({
       // key). The links: the newest readable links of the history, at most
       // web.links.maxPerTurn NEW reads (cached excerpts are free). Beside them, on a
       // direct address only (not an overheard line), the search classifier
-      // when the web search or the server search (recall, never in a private
-      // chat) can run, and what its answer asks for of the two, in parallel.
+      // when the web search or the server search (recall; a private chat only
+      // on its partner's behalf) can run, and what its answer asks for of the two, in parallel.
       let linksStage = null;
       const webCfg = config.web ?? {};
       // Cache only: no fetch, no model request, no daily slot (src/web/lookup.js#cachedReads).
@@ -2585,9 +2638,9 @@ export function createTurnRunner({
       // reads once done). A routed call is read in its source (routedPull), with its captions.
       let lookupStage = null;
       let lookupChain = null;
-      // The server search is possible this turn (never in a private chat): the lookup stage runs it
-      // and `<senses>` says it exists. Asked once, so both agree.
-      const serverOn = !isPrivate && recallAvailable();
+      // The server search is possible this turn (a private chat only on its partner's behalf): the
+      // lookup stage runs it and `<senses>` says it exists. Asked once, so both agree.
+      const serverOn = (!isPrivate || likeServer) && recallAvailable();
       if (asked && !answersDrawFailure) {
         const webOn = webLookupOn && webCfg.search?.enabled !== false && typeof lookup.search === 'function';
         if (webOn || serverOn) {
@@ -2603,6 +2656,8 @@ export function createTurnRunner({
                     config,
                     guildId,
                     channel,
+                    guild: servedGuild,
+                    partner,
                     selfId,
                     selfName,
                     history: routedPull ? routedPull.messages : chat,
@@ -2644,7 +2699,7 @@ export function createTurnRunner({
             return { neighbors: found, hidden };
           });
       // The pulled channels and the variety pass started earlier: timed from their own start.
-      const pulledStage = isPrivate ? null : track('pulled', () => pulledPending, pullStartedAt);
+      const pulledStage = isPrivate && !likeServer ? null : track('pulled', () => pulledPending, pullStartedAt);
       const varietyStage = wornPending ? track('variety', () => wornPending, varietyStartedAt) : null;
 
       // Parts in time end the wait at once: the whole message's preparation is set aside.
@@ -2902,7 +2957,9 @@ export function createTurnRunner({
       // The pulled channels whose block was in the request sent (a skip and a dry run included):
       // their seen marks move to the newest line shown; a block the budget dropped moves none.
       const shownPulled = request.pulledKept ?? [];
-      markPulledSeen(shownPulled);
+      // What a private chat showed of the server stays there: no seen mark, no stamp, no pending ping.
+      const serverShown = isPrivate ? [] : shownPulled;
+      markPulledSeen(serverShown);
       store.state.data.calibration = calibrator.ratio;
       store.state.markDirty();
       // The calls of the ring this turn showed follow its decision (stampShownCalls), except a
@@ -2910,7 +2967,7 @@ export function createTurnRunner({
       const ownCallId = source?.reason === 'routed' ? (trigger?.id ?? null) : null;
 
       if (parsed.skip || nothingToDo) {
-        stampShownCalls({ shown: shownPulled, pulled, answered: new Set(), exceptId: ownCallId });
+        stampShownCalls({ shown: serverShown, pulled, answered: new Set(), exceptId: ownCallId });
         return { outcome: 'skip', mode: finalMode };
       }
 
@@ -2945,7 +3002,7 @@ export function createTurnRunner({
       // and whether to actually post is the very last decision of a turn.
       if (hot.config.features?.dryRun === true) {
         await dryAct({ channel, parsed, idByIndex, mode: finalMode, triggerKind, selfName, part, ...routing });
-        noteSpokeSaw(channel, history, shownPulled, pulled, notAnswered);
+        noteSpokeSaw(channel, history, serverShown, pulled, notAnswered);
         return { outcome: 'spoke', mode: finalMode, dryRun: true };
       }
       const acted = await act({
@@ -2963,8 +3020,8 @@ export function createTurnRunner({
         ...routing,
         sourceId: isPrivate ? null : (source?.channelId ?? null),
       });
-      noteSpokeSaw(channel, history, shownPulled, pulled, notAnswered);
-      stampShownCalls({ shown: shownPulled, pulled, answered: acted.answered ?? new Set(), exceptId: ownCallId });
+      noteSpokeSaw(channel, history, serverShown, pulled, notAnswered);
+      stampShownCalls({ shown: serverShown, pulled, answered: acted.answered ?? new Set(), exceptId: ownCallId });
       const spoke = { outcome: 'spoke', mode: finalMode, delivered: acted.delivered === true };
       if (!acted.drawFailed) return spoke;
       // The same predicate as runTurn's hand-off: an unasked turn notifies right here.

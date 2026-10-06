@@ -323,6 +323,36 @@ test('recall: the switch off, a private chat or nothing asked make no request', 
   assert.equal(dm.calls.length, 0);
 });
 
+test('recall: a private chat with its partner searches the server, keeps only what the partner can view, and its own chat bounds nothing', async () => {
+  const s = scene({
+    lines: { c1: RABBIT_LINES, c2: GARDEN_LINES, c4: PRIVATE_LINES },
+    answers: rabbitAnswers,
+    memory: {
+      getRecent: () => ({
+        nextId: 3,
+        lines: [
+          { id: 1, at: NOW - 2 * HOUR, addedAt: null, channelId: 'c2', text: 'κουνέλι in garden', who: [], weight: 2 },
+          { id: 2, at: NOW - 2 * HOUR, addedAt: null, channelId: 'c4', text: 'μυστικό κουνέλι', who: [], weight: 3 },
+        ],
+      }),
+    },
+  });
+  const dm = { id: 'dm1', guild: null };
+  const partner = { id: 'u5', guild: s.args.guild };
+  const history = [{ id: 'p1', channelId: 'dm1', ts: NOW - MINUTE, self: false, bot: false, authorName: 'Nikos', content: 'ποιος σκότωσε το κουνέλι;' }];
+  const { result } = await withCapturedLogs(() =>
+    s.recaller.run({ ...s.args, channel: dm, partner, history, candidate: history[0], server: RABBIT_SERVER }),
+  );
+  assert.deepEqual(searches(s.calls).map((c) => c.query.content), ['κουνέλι', 'κουνελιού']);
+  assert.ok(searches(s.calls).every((c) => c.query.max_id === undefined), 'the private chat is not the server: no search stops at its oldest line');
+  assert.ok(!s.fetches.some((f) => f.channel === 'c4'), 'no window of a channel the partner cannot view');
+  const user = s.llmCalls[0].messages[1].content;
+  assert.ok(user.includes('#general') && user.includes('#garden'), user);
+  assert.ok(user.includes('κουνέλι in garden'), user);
+  assert.ok(!user.includes('μυστικό'), 'neither a hit nor a recent line of the channel the partner cannot view');
+  assert.equal(result.text, 'Ana did it on October 1.');
+});
+
 /** Timers fired by hand: `fire(ms)` runs the pending one that was set for `ms`. */
 function manualTimers() {
   const all = [];

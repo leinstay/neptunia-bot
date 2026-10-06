@@ -1047,7 +1047,7 @@ function renderSenses(
   // The search of the server's own message history (`recallAvailable`: a server
   // turn where the runner is available; its own switch, not the web one); an
   // older labels.json without the line shows nothing.
-  if (!privateChat && recallAvailable === true && senses.recall) lines.push(senses.recall);
+  if (recallAvailable === true && senses.recall) lines.push(senses.recall);
   // Drawing (features.imageGeneration, a missing key counts as on) needs the
   // image client (`drawQuota` present): one line, the spent forms first. An
   // older labels.json without senses.draw shows nothing.
@@ -1706,7 +1706,7 @@ export function buildRequest(input) {
   // map back through idByIndex and pulledIds. A routed turn answers a call that lives there.
   const source = privateChat ? null : (input.source ?? null);
   const routed = source?.reason === 'routed';
-  const offered = privateChat ? [] : usablePulled(input.pulled, currentChannelId);
+  const offered = usablePulled(input.pulled, currentChannelId);
   const pulledChannels = labels.pull?.header ? offered : [];
   const chatTrigger = trigger ? (chatItems.find((item) => item.id === trigger.id) ?? null) : null;
   const pulledTriggerId = trigger && !chatTrigger ? trigger.id : null;
@@ -1968,7 +1968,7 @@ export function buildRequest(input) {
   // Each member asked about shows their top `context.askedAboutEpisodes` episodes (0 = off;
   // none in a private chat: another member's moments never reach it; none with an older labels
   // file that cannot render one).
-  const askedAboutEpisodes = privateChat ? 0 : (config.context.askedAboutEpisodes ?? 3);
+  const askedAboutEpisodes = privateChat && config.features?.privateLikeServer === false ? 0 : (config.context.askedAboutEpisodes ?? 3);
   const episodeCount = (profile) => (Array.isArray(profile?.episodes) ? profile.episodes.length : 0);
   const episodeLabelsOn = Boolean(labels.profile?.episodes && labels.profile?.episode && labels.profile?.episodeNoQuote);
   const askedEpisodesOn =

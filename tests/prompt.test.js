@@ -2027,13 +2027,16 @@ test('people: next to a pulled block near the request limit an asked-about membe
   assert.ok(request.stats.used <= request.stats.limit);
 });
 
-test('people: a private chat renders no episodes for an asked-about member', () => {
+test("people: a private chat shows an asked-about member's episodes like the server; privateLikeServer off hides them", () => {
   const zoe = { id: 'z1', names: ['Zoé'], character: 'rêveuse', episodes: askedEpisodes() };
   const history = [makeMessage(1, NOW - MIN, { authorId: 'u1', authorName: 'Alice', content: 'τι έκανε η Zoé χθες;' })];
-  const user = userText(buildRequest(privateScene({ history, trigger: history[0], candidateProfiles: [zoe] })));
+  const shown = bodyOf(userText(buildRequest(privateScene({ history, trigger: history[0], candidateProfiles: [zoe] }))), 'people');
+  assert.ok(shown.includes('## Zoé') && shown.includes('ε5'), 'a missing switch counts as on: the episodes show');
+  const off = fakeConfig({ features: { privateLikeServer: false } });
+  const user = userText(buildRequest(privateScene({ history, trigger: history[0], candidateProfiles: [zoe], config: off })));
   const people = bodyOf(user, 'people');
   assert.ok(people.includes('## Zoé') && people.includes('character: rêveuse'));
-  assert.ok(!people.includes('στιγμή'), "another member's episodes never reach a private chat");
+  assert.ok(!people.includes('στιγμή'), "with the switch off another member's episodes do not reach a private chat");
   const server = bodyOf(userText(buildRequest(privateScene({ history, trigger: history[0], candidateProfiles: [zoe], privateChat: null }))), 'people');
   assert.ok(server.includes('ε5'), 'the same member on the server shows them');
 });
@@ -2292,9 +2295,11 @@ test('buildRequest: no recall line unless recallAvailable is true -- false, omit
   }
 });
 
-test('buildRequest: a private chat shows no recall line even when recallAvailable is true', () => {
-  const senses = sensesOf(buildRequest(privateScene({ recallAvailable: true }))).split('\n');
-  assert.ok(!senses.includes(labels.senses.recall));
+test('buildRequest: a private chat shows the recall line when the turn says recall is available, none otherwise', () => {
+  const on = sensesOf(buildRequest(privateScene({ recallAvailable: true }))).split('\n');
+  assert.ok(on.includes(labels.senses.recall));
+  const off = sensesOf(buildRequest(privateScene({ recallAvailable: false }))).split('\n');
+  assert.ok(!off.includes(labels.senses.recall));
 });
 
 test('buildRequest: an older labels set without senses.recall renders no recall line and no gap', () => {
@@ -2996,19 +3001,12 @@ test('buildRequest: senses carry the channels line on server turns and the elsew
   assert.equal(older.at(-1), labels.senses.files, 'an older labels.json adds no line');
 });
 
-test('buildRequest: a private chat ignores pulled input', () => {
-  const extra = {
-    pulled: [pulledChannel()],
-    source: { channelId: SRC, reason: 'routed' },
-    focus: makeMessage(1, NOW - MIN),
-    readOnlyIds: new Set([SRC]),
-  };
+test('buildRequest: a private chat renders a pulled channel like the server', () => {
+  const pulled = buildRequest(privateScene({ pulled: [pulledChannel()] }));
+  assert.ok(userText(pulled).includes('<channel_view>'));
+  assert.ok(pulled.pulledIds.size > 0);
   const plain = buildRequest(privateScene());
-  const pulled = buildRequest(privateScene(extra));
-  assert.deepEqual(pulled.messages, plain.messages);
-  assert.deepEqual(pulled.idByIndex, plain.idByIndex);
-  assert.deepEqual(pulled.pulledIds, new Map());
-  assert.ok(!userText(pulled).includes('<channel_view>'));
+  assert.ok(!userText(plain).includes('<channel_view>'));
 });
 
 test('buildRequest: textFallback re-renders pulled lines without attachment markers', () => {
