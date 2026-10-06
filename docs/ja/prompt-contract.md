@@ -55,6 +55,8 @@
 | `mentor-diagnose.md` | いいえ | Mentor: スコアリング後に弱い回答の原因をペルソナのコンテキスト内の具体的なテキストで説明（`features.mentor`）。結果は未検証の仮説としてランの `diagnosis` に保存。`mentor.diagnose` が false またはファイルがない場合は省略 | `{{name}}` |
 | `variety.md` | いいえ | `classifier.text` リクエスト: ペルソナの最近のメッセージで繰り返されている表現手法を特定（`features.variety`）。キャラクターカードなし | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `variety-long.md` | いいえ | 長い多様性パス: 全チャンネルにわたるペルソナ自身の行のリング全体での使い回し手法を特定（`features.variety`、`variety.longLines`）。プレースホルダー、`<lines>` ブロック、回答フォーマットは `variety.md` と同じ。`classifier.text` モデルを使用。キャラクターカードなし。ファイルがない場合、長いパスは実行されない | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
+| `reword.md` | いいえ | フィラーガードとパターンガード用の書き直しリクエスト: クールダウン中の語句を置換し、使い古し手法に一致する習慣を言い換える。返答をユーザーメッセージとして受け取る。キャラクターカードなし | `{{name}}` `{{words}}` `{{patterns}}` |
+| `pattern-check.md` | いいえ | `classifier.text` リクエスト: 返答が現在の使い古し手法のいずれかに該当するか確認（`features.patternGuard`）。番号付き手法と返答を受け取る。キャラクターカードなし | `{{name}}` |
 | `split.md` | いいえ | 分類器: 直接呼びかけに複数の独立したリクエストが含まれるか（`features.splitTasks`）。短い `<transcript>` と新しいメッセージを `<candidate>` として受け取る。出力は `one` という語、または 2 行から `{{maxTasks}}` 行で各行 `- ` で始まり著者自身の言葉でパートを示す。キャラクターカードなし。このファイルがない場合スプリッターはオフ | `{{name}}` `{{maxTasks}}` |
 | `merge.md` | いいえ | 分類器: 待機中の項目を持つ著者からの新しいメッセージがそのいずれかに属するか。番号付き `<waiting>` リストと新しいメッセージを `<candidate>` として受け取る。出力は 1 行: リストの番号または `new` という語。キャラクターカードなし。このファイルがない場合、新しい呼びかけは常に独自の項目としてキューされる | `{{name}}` |
 | `labels.json` | はい | コードがプロンプトに挿入するすべての文字列。キーは以下で固定、値はライターが記述する | 以下参照 |
@@ -67,7 +69,7 @@
 `overheard` ターンでは、`overheard.md` がモードプロンプトを置き換えます（追加ではなくタスクテキストそのもの）。`overheard.md` が存在しないか空の場合、モードプロンプトが代わりに使用されます（劣化: モードプロンプトはメッセージをペルソナ宛として扱い、実際と異なる）。
 プライベートチャットでは、`private.md` がモードプロンプトの後（`forced.md` の前）に同じ `{{name}}` と `{{author}}` プレースホルダーで追加されます。
 アナライザーとウォームアップの `profile.md` および `server.md` はキャラクターカードと `rules.md` をユーザーメッセージ内の
-`<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`describe-video.md`、`describe-gif.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md`、`recall-summary.md`、`room.md`、`route-channel.md`、`elsewhere.md`、`variety.md`、`variety-long.md` はカードを受け取りません。
+`<character>` ブロックとして受け取ります。`channel.md`、`describe.md`、`describe-video.md`、`describe-gif.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md`、`recall-summary.md`、`room.md`、`route-channel.md`、`elsewhere.md`、`variety.md`、`variety-long.md`、`reword.md`、`pattern-check.md` はカードを受け取りません。
 
 `{{guildFieldChars}}` は `fieldChars * 2` で、コードがギルドレベルのパターンとスターターをクランプする上限です。
 `{{maxEpisodes}}` はメンバーごとに保持されるエピソードの総数です。どちらも config から設定されますが、デフォルトプロンプトでは
@@ -501,10 +503,10 @@ task.added                               {added}: later messages from the author
 1 つの裸の JSON オブジェクト:
 
 ```
-{ "patterns": [ { "shape": "", "examples": ["", ""], "count": 0 } ] }
+{ "patterns": [ { "shape": "", "examples": ["", ""], "count": 0, "word": "" } ] }
 ```
 
-`shape`: 手法の説明、3 から `variety.shapeChars` 文字、メッセージの言語で記述。`examples`: 1 から 3 つの、ペルソナ自身の言葉からそのまま取った断片（`(to: ...)` コンテキストからではない）。各最大 80 文字。送信されたメッセージに出現する場合のみ保持（大文字小文字を区別しない）。`count`: 最低 2、送信されたメッセージ数が上限。最大 `variety.maxPatterns` 個の有効な手法。空のリストが通常の結果。期待される JSON でない回答はブロックを生成しません。
+`shape`: 手法の説明、3 から `variety.shapeChars` 文字、メッセージの言語で記述。`examples`: 1 から 3 つの、ペルソナ自身の言葉からそのまま取った断片（`(to: ...)` コンテキストからではない）。各最大 80 文字。送信されたメッセージに出現する場合のみ保持（大文字小文字を区別しない）。`count`: 最低 2、送信されたメッセージ数が上限。`word`: 習慣がフィラー、タグ、強調語またはサインオフとして使われる語またはフレーズの場合、その基本形（メッセージの言語で）。構文、態度または素材源の場合は空文字列。最大 `variety.maxPatterns` 個の有効な手法。空のリストが通常の結果。期待される JSON でない回答はブロックを生成しません。
 
 ### キャッシュとストレージ
 
@@ -519,6 +521,16 @@ task.added                               {added}: later messages from the author
 ### Mentor
 
 Mentor サンドボックスは、状況ごとに 1 回の多様性パスを実行し、mentor のトークン予算から差し引かれます（`llm.maxRequestsPerDay` にはカウントされません）。サンドボックスは `variety.timeoutMs` をリクエストタイムアウトとして使用します（遅延した結果を使える次のターンがないため）。特定された手法は状況レコードの `worn` として保存されます。ジャッジは `<worn>` ブロックを見ることはありません。
+
+## フィラーガードとパターンガード
+
+ボイスモデルが返答を書いた後、投稿前にペルソナの言語的習慣を検出する 2 つのポストジェネレーションレール。
+
+**フィラーガード**（`features.fillerGuard`、未設定 = オン）。ペルソナが多用する語句のランク付きリスト。主に多様性パスが供給します（パスが見つけた語タイプの習慣がそのカウントに等しいウェイトのエントリになります）。オーナーは `/nep variety add type:filler` でフォールバックとしてエントリを固定できます。エントリには 2 種類: PREFIX エントリは `*` で終わり（最低 3 文字）、語境界でそのプレフィックスで始まるすべての語に一致します（任意のスクリプト）。EXACT エントリ（`*` なし）は語またはフレーズ全体に一致します。エントリは `variety.fillers.cooldownHours`（デフォルト 36）時間 OR `variety.fillers.cooldownMessages`（デフォルト 300）ペルソナ自身の投稿メッセージ数の先に来た方が過ぎるまで再使用できません。使用すると両カウンターがリセットされます。リストはランキングと削除で管理: 容量 `variety.fillers.max`（デフォルト 12）、時間減衰付きウェイト（`variety.fillers.halfLifeDays`、デフォルト 14）、満杯時に最弱を削除。オーナー追加のエントリは固定（削除・減衰なし）。クールダウン中のエントリを含む返答があると、発話モデル（`llm.model`、目的 `reword`、`variety.fillers.maxOutputTokens` 400、プロンプト `prompts/reword.md`）がそのエントリなしに返答を書き直します。メインのペルソナリクエストはフィラーリストを見ません。ギルドメモリ内の状態: `fillers` と `ownMessageCount`。ログ: `fillers: reworded`、`fillers: reword failed`、`fillers: reword skipped`。
+
+**パターンガード**（`features.patternGuard`、未設定 = オン）。投稿前に、返答が `variety.patternCheck.minChars`（デフォルト 15）文字以上で使い古しリストが空でない場合、分類器（`classifier.text`、目的 `pattern-check`、`variety.patternCheck.maxOutputTokens` 40、プロンプト `prompts/pattern-check.md`）が返答がどの使い古し手法（短いリストと長いリスト）に該当するかを判定します。一致した場合、同じ書き直しリクエストがその手法なしに返答を書き直します。分類器は最初のメッセージのタイピングシミュレーション中に実行されるため、目に見える遅延を追加しません。書き直しのみが遅延を追加します。ログ: `patterns: checked`、`patterns: check failed`。
+
+両ガードは `prompts/reword.md` を共有し、2 つのプレースホルダーを取ります: `{{words}}`（クールダウン中の語、語幹またはフレーズ、カンマ区切り。なしの場合は空）と `{{patterns}}`（一致した習慣のシェイプ、`; ` で結合。なしの場合は空）。両方が同じ返答で発火できます: フィラーガードが先に書き直し、パターンガードが書き直されたテキストをチェックします。
 
 ## タスクスプリッター
 

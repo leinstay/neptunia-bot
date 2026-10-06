@@ -42,6 +42,8 @@
 | `pauseNotice` | `true` | 角色在暂停时被呼叫会发布一条简短通知。缺失的键视为开启。参见 `mention.pauseNoticeMinutes` 和 `labels.limits.paused` |
 | `variety` | `true` | 模型过程识别角色在近期消息中过度使用的表达手法。结果作为 `<worn>` 块包含在回合请求中。缺失的键视为开启 |
 | `varietyPrecompute` | `true` | 角色发布文本后立即启动多样性过程，使下一回合可以直接使用结果。关闭时过程仅在回合时运行，但迟到的结果仍会保存。缺失的键视为开启 |
+| `fillerGuard` | `true` | 阻止角色过度使用的词语和短语在回复中重复，直到冷却结束。多样性过程自动填充列表；所有者可通过 `/nep variety add type:filler` 固定条目。当回复包含冷却中的条目时，一次重写请求将其替换。缺失的键视为开启 |
+| `patternGuard` | `true` | 发布前将回复与当前已磨损的手法列表比对，发现匹配则重写。缺失的键视为开启 |
 | `splitTasks` | `true` | 将长且有结构的直接呼叫拆分为多个部分，每个部分在自己的回合中回答。缺失的键视为开启。需要 `prompts/split.md` 和 `labels.task.part` |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
@@ -603,6 +605,27 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `longEveryHours` | `6` | 两次长过程之间的小时数；失败也计入，避免每次发帖后重试 |
 | `longMinLines` | `60` | 环中消息少于此数时跳过长过程 |
 | `longMaxPatterns` | `3` | 长过程最多可识别的手法数 |
+
+### `variety.fillers`
+
+填充词守卫（`features.fillerGuard`）的设置。条目分两种类型：PREFIX 条目以 `*` 结尾（`*` 前至少 3 个字母），在词边界匹配所有以该前缀开头的词；EXACT 条目（无 `*`）精确匹配整个词或短语。多样性过程是主要来源：过程发现的词类习惯会成为条目，权重等于其计数。所有者可通过 `/nep variety add type:filler` 固定条目作为备选方案。列表的排名与淘汰机制类似兴趣：容量 `max`，权重带时间衰减（`halfLifeDays`），满时淘汰最弱的。所有者添加的条目被固定（不淘汰、不衰减）。条目在冷却结束前不可再次使用，冷却以小时或角色自身发布消息数为准，以先到者为准。冷却中的条目出现在回复中时，发言模型重写回复移除该条目（`prompts/reword.md`）。服务器记忆中的状态：`fillers` 和 `ownMessageCount`。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `cooldownHours` | `36` | 条目最后使用后经过的小时数，之后可再次使用 |
+| `cooldownMessages` | `300` | 条目最后使用后角色自身发布的消息数，之后可再次使用 |
+| `max` | `12` | 列表保留的条目数；满时淘汰排名最低的条目 |
+| `halfLifeDays` | `14` | 条目排名的时间衰减半衰期（天）；与兴趣相同的衰减公式 |
+| `maxOutputTokens` | `400` | 重写请求的最大输出 token 数 |
+
+### `variety.patternCheck`
+
+手法守卫（`features.patternGuard`）的设置。发布前，当回复不少于 `minChars` 个字符且已磨损列表（短过程和长过程）不为空时，分类器（`classifier.text`，`prompts/pattern-check.md`）检查回复落入哪些已磨损手法。匹配时，同一重写请求重写回复以移除该手法。分类器在第一条消息的打字模拟期间运行，不增加可见延迟；仅重写增加延迟。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `minChars` | `15` | 触发检查的回复最小字符数 |
+| `maxOutputTokens` | `40` | 手法检查分类器的最大输出 token 数 |
 
 ## `private`
 

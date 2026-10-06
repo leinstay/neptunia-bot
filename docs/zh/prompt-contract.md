@@ -55,6 +55,8 @@
 | `mentor-diagnose.md` | 否 | Mentor：评分后解释弱回答，指出角色上下文中的具体文本（`features.mentor`）。结果为未验证的假设，存储为运行中的 `diagnosis`。`mentor.diagnose` 为 false 或文件缺失时省略 | `{{name}}` |
 | `variety.md` | 否 | `classifier.text` 请求：识别角色近期消息中重复的表达手法（`features.variety`）。不接收角色卡 | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `variety-long.md` | 否 | 长多样性过程：在全部消息环中识别手法（`features.variety`、`variety.longLines`）。与 `variety.md` 相同的占位符、`<lines>` 块和回答格式。使用 `classifier.text` 模型。不接收角色卡。文件不存在则无长过程 | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
+| `reword.md` | 否 | 填充词守卫和手法守卫的重写请求：替换冷却中的词语和短语，改写匹配已磨损手法的习惯。将回复作为用户消息接收。不接收角色卡 | `{{name}}` `{{words}}` `{{patterns}}` |
+| `pattern-check.md` | 否 | `classifier.text` 请求：检查回复是否落入当前已磨损手法（`features.patternGuard`）。接收编号的手法和回复。不接收角色卡 | `{{name}}` |
 | `split.md` | 否 | 分类器：直接呼叫是否包含多个独立请求（`features.splitTasks`）。接收一段短 `<transcript>` 和新消息作为 `<candidate>`。输出为 `one`，或 2 到 `{{maxTasks}}` 行，每行以 `- ` 开头，用作者自己的话表述一个部分。不接收角色卡。没有此文件时分拆器关闭 | `{{name}}` `{{maxTasks}}` |
 | `merge.md` | 否 | 分类器：已有等候条目的作者的新消息是否属于其中一个。接收编号的 `<waiting>` 列表和新消息作为 `<candidate>`。输出为一行：列表中的一个编号或 `new`。不接收角色卡。没有此文件时新呼叫始终作为独立条目排队 | `{{name}}` |
 | `labels.json` | 是 | 代码插入提示中的所有字符串。键在下方固定，值由编写者决定 | 见下文 |
@@ -67,7 +69,7 @@
 在 `overheard` 回合中，`overheard.md` 替代模式提示（它是任务文本本身，而非追加）。当 `overheard.md` 缺失或为空时，使用模式提示代替（降级：模式提示将消息描述为对角色说话，与实际不符）。
 在私聊中，`private.md` 追加在模式提示之后（`forced.md` 之前），使用相同的 `{{name}}` 和 `{{author}}` 占位符。
 分析器和预热的 `profile.md`、`server.md` 在用户消息中以 `<character>` 块接收角色卡和 `rules.md`。
-`channel.md`、`describe.md`、`describe-video.md`、`describe-gif.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md`、`recall-summary.md`、`room.md`、`route-channel.md`、`elsewhere.md`、`variety.md` 和 `variety-long.md` 不接收角色卡。
+`channel.md`、`describe.md`、`describe-video.md`、`describe-gif.md`、`draw.md`、`rewatch.md`、`rewatch-answer.md`、`address.md`、`lookup.md`、`read-link.md`、`search-summary.md`、`recall-summary.md`、`room.md`、`route-channel.md`、`elsewhere.md`、`variety.md`、`variety-long.md`、`reword.md` 和 `pattern-check.md` 不接收角色卡。
 
 `{{guildFieldChars}}` 等于 `fieldChars * 2`，是代码对服务器级规律和开场白进行截断的上限。
 `{{maxEpisodes}}` 是每人保留的回忆总数上限。两者均从配置填充，但默认提示未使用；自定义的 `memory.md`
@@ -596,10 +598,10 @@ task.added                               {added}: later messages from the author
 一个裸 JSON 对象：
 
 ```
-{ "patterns": [ { "shape": "", "examples": ["", ""], "count": 0 } ] }
+{ "patterns": [ { "shape": "", "examples": ["", ""], "count": 0, "word": "" } ] }
 ```
 
-`shape`：手法的描述，3 到 `variety.shapeChars` 字符，使用消息的语言。`examples`：1 到 3 个从角色自身用语中逐字复制的片段（不来自 `(to: ...)` 上下文），每个最多 80 字符，仅当文本出现在发送的消息中时保留（不区分大小写）。`count`：至少 2，上限为发送的消息数。最多 `variety.maxPatterns` 个有效手法；空列表是正常结果。不是预期 JSON 的回答不产生块。
+`shape`：手法的描述，3 到 `variety.shapeChars` 字符，使用消息的语言。`examples`：1 到 3 个从角色自身用语中逐字复制的片段（不来自 `(to: ...)` 上下文），每个最多 80 字符，仅当文本出现在发送的消息中时保留（不区分大小写）。`count`：至少 2，上限为发送的消息数。`word`：当习惯是用作填充词、标签词、强化词或收尾语的词或短语时，给出其基本形式（消息的语言）；如果是句式结构、立场或素材来源则为空字符串。最多 `variety.maxPatterns` 个有效手法；空列表是正常结果。不是预期 JSON 的回答不产生块。
 
 ### 缓存与存储
 
@@ -614,6 +616,16 @@ task.added                               {added}: later messages from the author
 ### Mentor
 
 Mentor 沙盒为每个场景执行一次多样性过程，计入 mentor 的 token 预算（不计入 `llm.maxRequestsPerDay`）。沙盒使用 `variety.timeoutMs` 作为请求超时（它没有后续回合来使用迟到的结果）。识别的手法保存为场景记录上的 `worn`。评分者不会看到 `<worn>` 块。
+
+## 填充词守卫和手法守卫
+
+两个后生成轨道，在语音模型写好回复后、发布前检测角色的语言习惯。
+
+**填充词守卫**（`features.fillerGuard`，缺失 = 开启）。角色过度使用的词语和短语的排名列表，主要由多样性过程供给（过程发现的词类习惯以其计数为权重成为条目）；所有者可通过 `/nep variety add type:filler` 作为备选方案固定条目。条目分两种类型：PREFIX 条目以 `*` 结尾（至少 3 个字母），在词边界匹配以该前缀开头的所有词（任何文字系统）；EXACT 条目（无 `*`）精确匹配整个词或短语。条目在 `variety.fillers.cooldownHours`（默认 36）小时 OR `variety.fillers.cooldownMessages`（默认 300）角色自身发布消息数的先到者之后才可再次使用；使用会重置两个计数器。列表以排名和淘汰管理：容量 `variety.fillers.max`（默认 12），权重带时间衰减（`variety.fillers.halfLifeDays`，默认 14），满时淘汰最弱的；所有者添加的条目被固定（不淘汰、不衰减）。冷却中的条目出现在回复中时，发言模型（`llm.model`，用途标记 `reword`，`variety.fillers.maxOutputTokens` 400，提示 `prompts/reword.md`）重写回复移除该条目。主要角色请求不会看到填充词列表。服务器记忆中的状态：`fillers` 和 `ownMessageCount`。日志：`fillers: reworded`、`fillers: reword failed`、`fillers: reword skipped`。
+
+**手法守卫**（`features.patternGuard`，缺失 = 开启）。发布前，当回复不少于 `variety.patternCheck.minChars`（默认 15）个字符且已磨损列表不为空时，分类器（`classifier.text`，用途标记 `pattern-check`，`variety.patternCheck.maxOutputTokens` 40，提示 `prompts/pattern-check.md`）判断回复落入当前已磨损手法（短列表和长列表）中的哪些。匹配时，同一重写请求重写回复以移除该手法。分类器在第一条消息的打字模拟期间运行，不增加可见延迟；仅重写增加延迟。日志：`patterns: checked`、`patterns: check failed`。
+
+两个守卫共享 `prompts/reword.md`，接受两个占位符：`{{words}}`（冷却中的词、词干或短语，逗号分隔；无时为空）和 `{{patterns}}`（匹配习惯的形状，以 `; ` 连接；无时为空）。两者可在同一回复上触发：填充词守卫先重写，手法守卫再检查重写后的文本。
 
 ## 任务分拆器
 
