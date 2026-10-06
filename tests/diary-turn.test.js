@@ -265,7 +265,7 @@ test('diary turn: a forced kind skips the planner\'s choice', async () => {
   const planUser = userOf(llm.calls[0]);
   assert.ok(planUser.includes(fill(labels.diary.kindLine, { key: 'selfPicture', weight: 1, count: 0, window: 0 })));
   assert.ok(!planUser.includes(fill(labels.diary.kindLine, { key: 'status', weight: 1, count: 0, window: 0 })), 'the only kind offered');
-  assert.ok(userOf(llm.calls[1]).includes(JSON.stringify({ kind: 'selfPicture', brief: 'a pier in the fog', picture: false })), 'the brief is kept');
+  assert.ok(userOf(llm.calls[1]).includes(JSON.stringify({ kind: 'selfPicture', brief: 'a pier in the fog', picture: true })), 'the brief is kept');
   assert.equal(store.appended[0].post.kind, 'selfPicture');
 });
 
@@ -322,6 +322,18 @@ test('diary turn: search is not asked for a kind outside searchKinds', async () 
   const lookup = fakeLookup({ text: 'found' });
   await runner({ llm, lookup }).runTurn({ channel: diaryChannel(), mode: 'diary', diary: {} });
   assert.equal(lookup.calls.length, 0);
+});
+
+test('diary turn: a picture kind draws even when the planner said no picture', async () => {
+  const llm = fakeLlm({ kind: 'selfPicture', brief: 'a pier', search: '', picture: false }, '<msg>brume</msg><draw self="yes">a pier at night</draw>');
+  const images = fakeImages();
+  const store = fakeStore();
+  const result = await runner({ llm, store, images }).runTurn({ channel: diaryChannel(), mode: 'diary', diary: {} });
+  const compose = userOf(llm.calls[1]);
+  assert.ok(compose.includes(JSON.stringify({ kind: 'selfPicture', brief: 'a pier', picture: true })), 'the plan says picture');
+  assert.equal(images.prompts.length, 1, 'the picture is drawn');
+  assert.equal(result.diary.picture, true);
+  assert.equal(countToday(store.state.data, DIARY_PICTURES_DAILY, NOW), 1);
 });
 
 test('diary turn: picture forced off when diary.maxPicturesPerDay is spent', async () => {
