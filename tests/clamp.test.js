@@ -220,6 +220,12 @@ test('clampWithEllipsis: a limit that is not a positive number leaves the text w
 
 // ---- stripDashes / countDashes ---------------------------------------------
 
+test('stripDashes: guillemets become plain double quotes, with or without dashes', () => {
+  assert.equal(stripDashes('«μια φράση» είναι έτσι'), '"μια φράση" είναι έτσι');
+  assert.equal(stripDashes('«α» — «β»'), '"α" "β"');
+  assert.equal(stripDashes('no quotes here'), 'no quotes here');
+});
+
 test('stripDashes: an em or en dash between words becomes one space, spaced or not', () => {
   assert.equal(stripDashes('λέξη — λέξη'), 'λέξη λέξη');
   assert.equal(stripDashes('λέξη—λέξη'), 'λέξη λέξη');

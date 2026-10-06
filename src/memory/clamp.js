@@ -196,9 +196,12 @@ export function clampWithEllipsis(text, limit) {
 const DASH = /[–—]/gu;
 // A run of dashes with the spaces/tabs around them (never a line break).
 const DASH_RUN = /[^\S\n]*[–—](?:[^\S\n]*[–—])*[^\S\n]*/gu;
+// Guillemets (U+00AB, U+00BB): typographic quotes nobody types in a chat.
+const GUILLEMET = /[«»]/gu;
 
 /**
- * `text` without any em dash `—` or en dash `–`: each run of them, with the
+ * `text` with every guillemet `«` `»` turned into a plain `"`, and without
+ * any em dash `—` or en dash `–`: each run of them, with the
  * spaces around it, becomes one space, then each line that held one is
  * trimmed (a dash at a line's start or end goes with its space; a line of
  * dashes alone becomes empty) and the whole text is trimmed. Hyphens and line
@@ -210,6 +213,7 @@ const DASH_RUN = /[^\S\n]*[–—](?:[^\S\n]*[–—])*[^\S\n]*/gu;
 export function stripDashes(text) {
   if (typeof text !== 'string') return '';
   return text
+    .replace(GUILLEMET, '"')
     .split('\n')
     .map((line) => (countDashes(line) > 0 ? line.replace(DASH_RUN, ' ').trim() : line))
     .join('\n')
