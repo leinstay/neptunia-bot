@@ -389,6 +389,20 @@ function answeredExtra(video) {
   return { key: 'videoAnswered', values: { question: video.answer.question ?? '', text: video.answer.text ?? '' } };
 }
 
+/**
+ * The `imageAnswered` extra of a picture that got a second look on a
+ * question (`answer = { question, text }`, src/memory/describe.js#relookImage), else null.
+ */
+function imageAnsweredExtra(answer) {
+  if (!answer) return null;
+  return { key: 'imageAnswered', values: { question: answer.question ?? '', text: answer.text ?? '' } };
+}
+
+/** `base` with `extra` (an extraOf result) added when there is one. */
+function withExtra(base, extra) {
+  return extra ? { ...base, extra } : base;
+}
+
 /** `extras` without the nulls: none -> undefined, one -> that tag, more -> the array. */
 function extraOf(...extras) {
   const kept = extras.flatMap((extra) => (Array.isArray(extra) ? extra : extra ? [extra] : []));
@@ -443,16 +457,22 @@ function extraOf(...extras) {
  * `gifKnownNoText` (`{ id, name }`), in place of `gifDescribed`/`gif` (with
  * those keys blanked in prompts.local/labels.json, src/discord/format.js
  * falls back to them). Every other kind ignores it.
+ *
+ * `context.answer` is a picture's second look on a question (`{ question,
+ * text }`, src/memory/describe.js#relookImage): an `image` item, attached or
+ * not, appends `imageAnswered` after its own tag. Every other kind ignores it
+ * (a video's answer lives in its state, `context.video.answer`).
  * @param {object} item
  * @param {{ attachedIndex?: number|null, description?: string|null, unknownDuration?: string,
  *   video?: { state: 'watched'|'limit'|'error'|'pending', text?: string, reason?: string,
- *     answer?: { question: string, text: string } }|null, read?: string|null, gifHandle?: string|null }} [context]
+ *     answer?: { question: string, text: string } }|null, read?: string|null, gifHandle?: string|null,
+ *   answer?: { question: string, text: string }|null }} [context]
  * @returns {{ key: string, values: object,
  *   extra?: { key: string, values: object }|{ key: string, values: object }[] }}
  */
 export function mediaLabelFor(
   item,
-  { attachedIndex = null, description = null, unknownDuration = '?', video = null, read = null, gifHandle = null } = {},
+  { attachedIndex = null, description = null, unknownDuration = '?', video = null, read = null, gifHandle = null, answer = null } = {},
 ) {
   // A `link`'s attached thumbnail is handled in its own case below.
   if (attachedIndex != null && PICTURE_ATTACHMENT_KINDS.has(item.kind)) {
@@ -460,14 +480,17 @@ export function mediaLabelFor(
       const base = mediaLabelFor(item, { description, unknownDuration, video, gifHandle });
       return { ...base, extra: extraOf({ key: 'frameAttached', values: { n: attachedIndex } }, base.extra) };
     }
-    return description
+    const attached = description
       ? { key: 'imageAttachedDescribed', values: { n: attachedIndex, text: description } }
       : { key: 'imageAttached', values: { n: attachedIndex } };
+    return withExtra(attached, extraOf(imageAnsweredExtra(answer)));
   }
 
   switch (item.kind) {
-    case 'image':
-      return description ? { key: 'imageDescribed', values: { text: description } } : { key: 'image', values: {} };
+    case 'image': {
+      const base = description ? { key: 'imageDescribed', values: { text: description } } : { key: 'image', values: {} };
+      return withExtra(base, extraOf(imageAnsweredExtra(answer)));
+    }
     case 'gif': {
       const name = item.name || item.title || item.site || '';
       if (gifHandle) {

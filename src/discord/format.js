@@ -140,6 +140,9 @@ export function formatDuration(ms, units) {
  * `transcript.videoAnswered`. `context.reads` is an optional `Map` of link
  * ids to the excerpt the web lookup read from that page (src/web/lookup.js);
  * it needs `transcript.linkRead`, blanked the same way to switch it off.
+ * `context.imageAnswers` is an optional `Map` of picture ids to a second look
+ * on a question (`{ question, text }`, src/memory/describe.js#relookImage);
+ * it needs `transcript.imageAnswered`, blanked the same way to switch it off.
  * `context.gifHandles` is an optional `Map` from src/memory/gifs.js#gifHandleMap:
  * a GIF (attachment or embed) the library knows renders `transcript.gifKnown` /
  * `gifKnownNoText` with its handle; with the key in question blanked it
@@ -153,6 +156,8 @@ function mediaTags(message, labels, context = {}) {
   const answersOn = Boolean(labels.transcript.videoAnswered);
   // A read page's excerpt (linkRead): blanking the key switches it off too.
   const readsOn = Boolean(labels.transcript.linkRead);
+  // A picture's second look on a question (imageAnswered): blanking the key switches it off.
+  const answerOf = (id) => (labels.transcript.imageAnswered ? (context.imageAnswers?.get(id) ?? null) : null);
   const videoOf = (id) => {
     const video = videosOn ? (context.videos?.get(id) ?? null) : null;
     if (!video?.answer || answersOn) return video;
@@ -194,9 +199,10 @@ function mediaTags(message, labels, context = {}) {
     const description = context.descriptions?.get(attachment.id) ?? null;
     const video = videoOf(attachment.id);
     const gifHandle = handleOf(attachment, 'attachment');
-    const label = withGifFallback(mediaLabelFor(attachment, { attachedIndex, description, unknownDuration, video, gifHandle }));
+    const answer = answerOf(attachment.id);
+    const label = withGifFallback(mediaLabelFor(attachment, { attachedIndex, description, unknownDuration, video, gifHandle, answer }));
     pushLabel(
-      label.key === 'imageAttachedDescribed' && !attachedCaptionOn ? { key: 'imageAttached', values: { n: label.values.n } } : label,
+      label.key === 'imageAttachedDescribed' && !attachedCaptionOn ? { ...label, key: 'imageAttached', values: { n: label.values.n } } : label,
     );
   }
   for (const link of message.links ?? []) {
@@ -210,7 +216,8 @@ function mediaTags(message, labels, context = {}) {
     const description = canDescribe ? (context.descriptions?.get(link.id) ?? null) : null;
     const read = readsOn ? (context.reads?.get(link.id) ?? null) : null;
     const gifHandle = handleOf(link, 'link');
-    pushLabel(withGifFallback(mediaLabelFor(link, { attachedIndex, description, unknownDuration, video: videoOf(link.id), read, gifHandle })));
+    const answer = answerOf(link.id);
+    pushLabel(withGifFallback(mediaLabelFor(link, { attachedIndex, description, unknownDuration, video: videoOf(link.id), read, gifHandle, answer })));
   }
   for (const sticker of message.stickers ?? []) {
     const attachedIndex = context.attachedIndex?.get(`sticker:${sticker.id}`) ?? null;
@@ -303,6 +310,9 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  *   (src/memory/gifs.js#gifHandleMap); a GIF it knows renders `transcript.gifKnown` /
  *   `transcript.gifKnownNoText` with its handle, falling back to `gifDescribed` / `gif`
  *   when the labels lack that key.
+ * @param {Map<string, { question: string, text: string }>} [options.imageAnswers]  Picture id -> a
+ *   second look on a question (src/memory/describe.js#relookImage); renders `transcript.imageAnswered`
+ *   after the picture's tag. Ignored when the labels have no `transcript.imageAnswered` key.
  * @param {boolean} [options.seeReactions]  Default true: a message's `reactions` render as
  *   `transcript.reactions` at the end of its line. Ignored when the labels have no
  *   `transcript.reactions` key.
@@ -322,10 +332,10 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  * channel run, never across a channel switch.
  */
 export function formatTranscript(messages, options) {
-  const { timezone, gapMinutes, maxChars, selfName, labels, mode = 'chat', attachedIndex, descriptions, videos, reads, gifHandles } = options;
+  const { timezone, gapMinutes, maxChars, selfName, labels, mode = 'chat', attachedIndex, descriptions, videos, reads, gifHandles, imageAnswers } = options;
   const seeReactions = options.seeReactions ?? true;
   const reactionsPerMessage = options.reactionsPerMessage ?? 6;
-  const mediaContext = { attachedIndex, descriptions, videos, reads, gifHandles };
+  const mediaContext = { attachedIndex, descriptions, videos, reads, gifHandles, imageAnswers };
   const locale = labels.locale;
   const selfLabel = fill(labels.self, { name: selfName });
   const indexOffset = options.indexOffset ?? 0;

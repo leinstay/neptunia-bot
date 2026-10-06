@@ -2063,6 +2063,120 @@ test('rewatchVideo: logs one describe: rewatch line -- never the question, the a
   assert.ok(!all.includes('ex=secret'));
 });
 
+// --- relookImage: the second look at a picture on a question ----------------------
+
+/** rewatchHot with the picture switches on and the image settings the download reads. */
+function relookHot({ features = {}, rewatch = {}, prompts = {} } = {}) {
+  const hot = rewatchHot({ features: { vision: true, imageRelook: true, ...features }, rewatch, prompts });
+  hot.config.media.imageSize = 512;
+  return hot;
+}
+
+function relookDescriber({ hot = relookHot(), llm = fakeLlm({ text: '  pas de chargeur,   juste un reflet ' }), imageFetcher = fakeImageFetcher(), state = fakeState(), now } = {}) {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const describer = createDescriber({ hot, store, llm, imageFetcher, videoFetcher: fakeVideoFetcher(), state, ...(now ? { now } : {}) });
+  return { describer, store, llm, imageFetcher, state };
+}
+
+test('relookImage: one download and one vision request with the question; the answer is not the picture caption', async () => {
+  const { describer, store, llm, imageFetcher, state } = relookDescriber({ now: clock() });
+  const result = await describer.relookImage('g1', pictureItem('a1'), 'Y a-t-il un chargeur dans la pupille ?');
+
+  assert.deepEqual(result, { question: 'Y a-t-il un chargeur dans la pupille ?', text: 'pas de chargeur, juste un reflet' });
+  assert.equal(imageFetcher.calls.length, 1);
+  assert.ok(imageFetcher.calls[0].url.startsWith('https://media.discordapp.net/x/pic.png'), 'through the media proxy, sized');
+  assert.equal(llm.calls.length, 1);
+  const [system, user] = llm.calls[0].messages;
+  assert.equal(system.content, 'Question: Y a-t-il un chargeur dans la pupille ?. At most 1200 characters.');
+  assert.deepEqual(user.content, [{ type: 'image_url', image_url: { url: SUCCESSFUL_DOWNLOAD.dataUrl } }]);
+  const options = llm.calls[0].options;
+  assert.equal(options.model, 'x/haiku', 'the picture is looked at by the media model (classifier.media)');
+  assert.equal(options.role, 'classifier.media');
+  assert.equal(options.purpose, 'relook');
+  assert.equal(options.maxOutputTokens, 600, 'media.video.rewatch.maxOutputTokens');
+  assert.equal(options.countAgainstDailyCap, true);
+  assert.equal(state.data.rewatchCount, 1, 'the one second-look counter');
+  assert.equal(state.data.videoCount, undefined, 'a picture never takes a video slot');
+  const cache = store.getMediaCache('g1');
+  assert.equal(cache.a1, undefined, 'never stored as the picture caption');
+  const keys = Object.keys(cache).filter((k) => k.startsWith('image:a1:q:'));
+  assert.equal(keys.length, 1);
+  assert.equal(cache[keys[0]].answer, 'pas de chargeur, juste un reflet');
+});
+
+test('relookImage: the same question within an hour is free; another question asks again', async () => {
+  const now = clock();
+  const { describer, llm, imageFetcher, state } = relookDescriber({ now });
+  await describer.relookImage('g1', pictureItem('a1'), 'Quelle couleur ?');
+  assert.deepEqual(await describer.relookImage('g1', pictureItem('a1'), '  quelle   COULEUR ? '), {
+    question: 'Quelle couleur ?',
+    text: 'pas de chargeur, juste un reflet',
+  });
+  assert.equal(llm.calls.length, 1);
+  assert.equal(state.data.rewatchCount, 1);
+  await describer.relookImage('g1', pictureItem('a1'), 'Combien de singes ?');
+  assert.equal(llm.calls.length, 2);
+  assert.equal(imageFetcher.calls.length, 2);
+  now.advance(61 * 60_000);
+  await describer.relookImage('g1', pictureItem('a1'), 'Quelle couleur ?');
+  assert.equal(llm.calls.length, 3, 'an answer older than an hour is asked again');
+});
+
+test('relookImage: one daily counter with rewatchVideo -- a full counter refuses both without a download', async () => {
+  const now = clock();
+  const state = fakeState({ rewatchDay: '2026-09-23', rewatchCount: 19 });
+  const { describer, llm, imageFetcher } = relookDescriber({ state, now });
+  assert.ok(await describer.relookImage('g1', pictureItem('a1'), 'q?'));
+  assert.equal(state.data.rewatchCount, 20);
+  assert.equal(await describer.relookImage('g1', pictureItem('a2'), 'q?'), null);
+  assert.equal(await describer.rewatchVideo('g1', videoAttachment(), 'q?'), null);
+  assert.equal(imageFetcher.calls.length, 1);
+  assert.equal(llm.calls.length, 1);
+  assert.equal(describer.videoCapsLeft().rewatch, 0);
+});
+
+test('relookImage: a spent llm.maxRequestsPerDay takes no slot; a failed download or request caches nothing', async () => {
+  const capped = relookDescriber({ llm: { ...fakeLlm({ text: 'x' }), capLeft: () => 0 } });
+  assert.equal(await capped.describer.relookImage('g1', pictureItem('a1'), 'q?'), null);
+  assert.equal(capped.imageFetcher.calls.length, 0);
+  assert.equal(capped.state.data.rewatchCount, undefined, 'no slot taken');
+
+  const noDownload = relookDescriber({ imageFetcher: fakeImageFetcher(null) });
+  assert.equal(await noDownload.describer.relookImage('g1', pictureItem('a1'), 'q?'), null);
+  assert.equal(noDownload.llm.calls.length, 0);
+  assert.equal(noDownload.state.data.rewatchCount, 1, 'the slot is reserved before the download and kept');
+
+  const failed = relookDescriber({ llm: fakeLlm(new Error('boom')) });
+  assert.equal(await failed.describer.relookImage('g1', pictureItem('a1'), 'q?'), null);
+  assert.deepEqual(Object.keys(failed.store.getMediaCache('g1')), []);
+});
+
+test('relookImage: imageRelook off, vision off, no rewatch-answer prompt, a non-picture or an empty question -> null, no download', async () => {
+  const cases = [
+    { hot: relookHot({ features: { imageRelook: false } }), item: pictureItem('a1'), question: 'q?' },
+    { hot: relookHot({ features: { vision: false } }), item: pictureItem('a1'), question: 'q?' },
+    { hot: relookHot({ prompts: { 'rewatch-answer': undefined } }), item: pictureItem('a1'), question: 'q?' },
+    { hot: relookHot(), item: pictureItem('a1', { kind: 'gif' }), question: 'q?' },
+    { hot: relookHot(), item: videoAttachment(), question: 'q?' },
+    { hot: relookHot(), item: pictureItem('a1'), question: '   ' },
+  ];
+  for (const [i, { hot, item, question }] of cases.entries()) {
+    const { describer, llm, imageFetcher } = relookDescriber({ hot });
+    assert.equal(await describer.relookImage('g1', item, question), null, `case ${i}`);
+    assert.equal(imageFetcher.calls.length, 0, `case ${i}`);
+    assert.equal(llm.calls.length, 0, `case ${i}`);
+  }
+});
+
+test('relookImage: logs one describe: relook line -- never the question or the answer', async () => {
+  const { describer } = relookDescriber({ llm: fakeLlm({ text: 'a secret answer' }) });
+  const { logs } = await withCapturedLogs(() => describer.relookImage('g1', pictureItem('a1'), 'a secret question'));
+  assert.equal(logs.filter((entry) => JSON.stringify(entry).includes('describe: relook')).length, 1);
+  const all = JSON.stringify(logs);
+  assert.ok(!all.includes('a secret answer'));
+  assert.ok(!all.includes('a secret question'));
+});
+
 // --- {{today}}: the current date in every describer prompt --------------------
 
 const TODAY_NOW = Date.parse('2026-09-30T23:30:00Z');

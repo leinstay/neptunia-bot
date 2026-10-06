@@ -50,6 +50,7 @@ export const labels = {
     linkNotWatched: '[not watched: {reason}]',
     linkNotWatchedFrame: '[not watched: {reason}; thumbnail: {text}]',
     videoAnswered: '[looked again for "{question}": {text}]',
+    imageAnswered: '[picture checked again for "{question}": {text}]',
     linkRead: '[page read: {text}]',
     reactions: '[reactions: {list}]',
     reactionItem: '{emoji} x{count}',

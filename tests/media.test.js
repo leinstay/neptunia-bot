@@ -1016,6 +1016,34 @@ test('mediaLabelFor: an answer on a state that is not watched is ignored', () =>
   });
 });
 
+// --- mediaLabelFor: a second look at a picture on a question (imageAnswered) -----
+
+const picture = { kind: 'image', name: 'singes.png' };
+const pictureAnswered = { key: 'imageAnswered', values: { question: answer.question, text: answer.text } };
+
+test('mediaLabelFor: a picture with an answer appends imageAnswered after image or imageDescribed', () => {
+  assert.deepEqual(mediaLabelFor(picture, { answer }), { key: 'image', values: {}, extra: pictureAnswered });
+  assert.deepEqual(mediaLabelFor(picture, { description: 'deux singes', answer }), {
+    key: 'imageDescribed',
+    values: { text: 'deux singes' },
+    extra: pictureAnswered,
+  });
+});
+
+test('mediaLabelFor: an attached picture with an answer appends imageAnswered after imageAttached(Described)', () => {
+  assert.deepEqual(mediaLabelFor(picture, { attachedIndex: 2, answer }), { key: 'imageAttached', values: { n: 2 }, extra: pictureAnswered });
+  assert.deepEqual(mediaLabelFor(picture, { attachedIndex: 2, description: 'deux singes', answer }), {
+    key: 'imageAttachedDescribed',
+    values: { n: 2, text: 'deux singes' },
+    extra: pictureAnswered,
+  });
+});
+
+test('mediaLabelFor: an answer on anything but a picture is ignored', () => {
+  assert.deepEqual(mediaLabelFor(clip, { answer }), { key: 'video', values: { name: 'clip.mp4', duration: '1:05' } });
+  assert.deepEqual(mediaLabelFor({ kind: 'gif', name: 'a.gif' }, { answer }), { key: 'gif', values: { name: 'a.gif' } });
+});
+
 // --- mediaLabelFor: a link read by the web lookup (linkRead) -----------------------
 
 test('mediaLabelFor: a read link keeps its link tag and gets linkRead as its one extra', () => {

@@ -29,6 +29,7 @@
     "videoNotWatched": "[video: {name}, {duration} — not watched: {reason}]",
     "videoNotWatchedFrame": "[video: {name}, {duration} — not watched: {reason} — still frame: {text}]",
     "videoAnswered": "[looked again for {question}: {text}]",
+    "imageAnswered": "[looked again at the picture for {question}: {text}]",
     "videoReason": {
       "length": "over length limit",
       "size": "file too large",

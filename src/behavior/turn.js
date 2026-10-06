@@ -517,9 +517,12 @@ function withLink(text, link, labels) {
 const REWATCH_QUESTION_CHARS = 300;
 const REWATCH_SUMMARY_CHARS = 200;
 // Protocol tokens of the re-watch classifier (docs/en/prompt-contract.md), not wording:
-// the status column of a `<videos>` line and the answer that asks for a retry.
+// the kind and status columns of a `<media>` line and the answer that asks for a retry.
+const REWATCH_KIND_VIDEO = 'video';
+const REWATCH_KIND_PICTURE = 'picture';
 const REWATCH_STATUS_WATCHED = 'watched';
 const REWATCH_STATUS_NOT_LOADED = 'not loaded';
+const REWATCH_STATUS_DESCRIBED = 'described';
 const REWATCH_RETRY = /^retry$/i;
 // The ordinal column: `<n>`, tolerating a `#` before it or a `.` after it.
 const REWATCH_ORDINAL = /^#?\s*(\d+)\.?$/;
@@ -527,8 +530,9 @@ const REWATCH_ORDINAL = /^#?\s*(\d+)\.?$/;
 /**
  * Parse the re-watch classifier's answer (prompts/rewatch.md): ONE line,
  * `none` or `<n> | <question>` (`<n> | retry` asks to try a video that did
- * not load again), where `<n>` is the 1-based ordinal of a `<videos>` line
- * (1 = the newest; ordinals, not ids, because the model miscopies long ids).
+ * not load again), where `<n>` is the 1-based ordinal of a `<media>` line
+ * (1 = the first line: the newest video, the pictures after the videos;
+ * ordinals, not ids, because the model miscopies long ids).
  * `#1` and `1.` are accepted as `1`. Only the first non-empty line counts;
  * `none` (any case), anything unparsable, an ordinal outside 1..`count` or an
  * empty question -> no pick. The question is trimmed and cut to 300
@@ -538,7 +542,7 @@ const REWATCH_ORDINAL = /^#?\s*(\d+)\.?$/;
  * line), `no-bar`, `unknown-id` (not an ordinal within 1..`count`; the name
  * predates ordinals and is kept for log continuity), `no-question` or `ok`.
  * @param {string} raw
- * @param {number} count  How many videos the `<videos>` block listed.
+ * @param {number} count  How many lines the `<media>` block listed.
  * @returns {{ pick: { n: number, question: string, retry: boolean }|null,
  *   reason: 'none'|'empty'|'no-bar'|'unknown-id'|'no-question'|'ok' }}
  */
@@ -567,6 +571,19 @@ function readableLinkCandidates(history, sites) {
   const out = [];
   for (let i = history.length - 1; i >= 0; i -= 1) {
     out.push(...collectReadableLinks(history[i], { videoSites: sites ?? [] }));
+  }
+  return out;
+}
+
+/**
+ * The pictures of `history` a second look on a question may be offered for
+ * (features.imageRelook): every `image` item of collectPictures -- an attached
+ * picture, the persona's own posted drawings included -- newest message first.
+ */
+function relookCandidates(history) {
+  const out = [];
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    for (const item of collectPictures(history[i])) if (item.kind === 'image') out.push(item);
   }
   return out;
 }
@@ -1783,34 +1800,42 @@ export function createTurnRunner({
   }
 
   /**
-   * The re-watch on a question (features.videoRewatch): when the trigger
-   * asks about a video watched in the last `media.video.rewatch.recentMessages`
-   * messages (at most `media.video.rewatch.maxCandidates` of them, newest
-   * first), one cheap classifier call (prompts.rewatch, on the classifier
-   * model: classifierTextModel -- `classifier.text`, else the media model; its answer capped at
-   * `media.video.rewatch.classifierMaxOutputTokens`) picks the video and
-   * the question, then the describer looks at it again
+   * The second look on a question (features.videoRewatch for videos,
+   * features.imageRelook for pictures): when the trigger asks about a video
+   * watched, or a picture posted, in the last `media.video.rewatch.recentMessages`
+   * messages (at most `media.video.rewatch.maxCandidates` of them, the videos
+   * first, then the pictures, each newest first), one cheap classifier call
+   * (prompts.rewatch, on the classifier model: classifierTextModel --
+   * `classifier.text`, else the media model; its answer capped at
+   * `media.video.rewatch.classifierMaxOutputTokens`) picks the item and
+   * the question. For a video the describer looks at it again
    * (describer.rewatchVideo) and the answer joins that video's state as
-   * `answer: { question, text }` -- mutating `videos` in place. Videos that
+   * `answer: { question, text }` -- mutating `videos` in place. For a picture
+   * (`pictures`, relookCandidates; listed with the caption `descriptions`
+   * holds for it) the describer looks at it again (describer.relookImage) and
+   * the answer goes into `imageAnswers` under the picture's id. Videos that
    * did not load (`error` state) are candidates too whenever the describer
    * can fetch one (describer.describeVideo): the classifier's `<n> | retry`
-   * watches one again with `force` and its new state replaces the old one.
-   * The explicit request has its own slot, apart from the
-   * `media.video.maxPerTurn` new videos this turn already fetched; the
-   * describer's daily caps still apply. At most one re-watch or retry per
-   * turn. The `<videos>` lines are numbered 1.. newest first and the
-   * classifier answers with that ordinal, mapped back here. A `<transcript>` block before
-   * `<videos>` carries the last `media.video.rewatch.contextMessages` messages before the
+   * watches one again with `force` and its new state replaces the old one; a
+   * retry never applies to a picture. The explicit request has its own slot,
+   * apart from the `media.video.maxPerTurn` new videos this turn already
+   * fetched; the describer's daily caps still apply. At most one second look
+   * or retry per turn. The `<media>` lines are numbered 1.. in that order
+   * (`<n> | <kind> | <name> | <status> | <summary>`) and the classifier
+   * answers with that ordinal, mapped back here. A `<transcript>` block before
+   * `<media>` carries the last `media.video.rewatch.contextMessages` messages before the
    * trigger (0 omits it), with the video states and captions this turn already has. Never throws: any failure leaves
-   * `videos` as it was. The question and the answer are data: never logged;
+   * `videos` and `imageAnswers` as they were. The question and the answer are data: never logged;
    * every early stop logs `rewatch: skipped` with its reason. The classifier is
    * not asked when its answer could not run (`reason: 'cap'`): the describer's
-   * `videoCapsLeft()` (when it has one; read only) says no video slot is left
-   * today, or no re-watch slot is left and no failed video can be retried --
-   * with only the re-watch slots spent, only the videos that did not load are
+   * `videoCapsLeft()` (when it has one; read only) says no video can be
+   * looked at or retried today (no video slot left, or no second-look slot
+   * left and no failed video can be retried) and no picture can be looked
+   * at (no second-look slot left -- one counter for both kinds) -- with only
+   * the second-look slots spent, only the videos that did not load are
    * offered. The classifier's request is a helper's (helperRequestOptions).
    */
-  async function maybeRewatch({ config, guildId, channelId, selfName, history, trigger, videos, descriptions, candidates }) {
+  async function maybeRewatch({ config, guildId, channelId, selfName, history, trigger, videos, descriptions, candidates, pictures = [], imageAnswers }) {
     const prompt = hot.prompts?.rewatch;
     if (!prompt) {
       log.info('rewatch: skipped', { channel: channelId, reason: 'no-prompt' });
@@ -1818,10 +1843,12 @@ export function createTurnRunner({
     }
     // A retry requested by the person has its own slot, outside media.video.maxPerTurn.
     const canRetry = typeof describer.describeVideo === 'function';
-    // Today's slots, when the describer can tell: both a second look and a retry take a video slot.
+    // Today's slots, when the describer can tell: a video's second look and a retry take a video
+    // slot; a second look at a video or a picture takes the one second-look slot.
     const slots = typeof describer.videoCapsLeft === 'function' ? describer.videoCapsLeft() : null;
     const questionsOn = !slots || slots.rewatch > 0;
-    if (slots && (!(slots.video > 0) || (!questionsOn && !canRetry))) {
+    const videoSlot = !slots || slots.video > 0;
+    if (slots && (!videoSlot || (!questionsOn && !canRetry)) && (pictures.length === 0 || !questionsOn)) {
       log.info('rewatch: skipped', { channel: channelId, reason: 'cap' });
       return;
     }
@@ -1833,29 +1860,41 @@ export function createTurnRunner({
       log.info('rewatch: skipped', { channel: channelId, reason: 'no-window' });
       return;
     }
-    // `candidates` is already newest first, so the cap keeps the newest videos.
+    // `candidates` and `pictures` are each newest first: the videos come first, and the cap
+    // over the merged list keeps the newest of each.
     const maxCandidates = Math.max(1, Math.floor(rewatchCfg.maxCandidates ?? 6));
     const recentIds = new Set(history.slice(-recent).map((m) => m.id));
     const seen = new Set();
-    const watched = [];
-    for (const item of candidates) {
-      if (watched.length >= maxCandidates) break;
+    const listed = [];
+    for (const item of videoSlot ? candidates : []) {
+      if (listed.length >= maxCandidates) break;
       if (seen.has(item.itemId) || !recentIds.has(item.messageId)) continue;
       const state = videos.get(item.itemId)?.state;
       if (!(state === 'watched' && questionsOn) && !(state === 'error' && canRetry)) continue;
       seen.add(item.itemId);
-      watched.push(item);
+      listed.push({ item, kind: REWATCH_KIND_VIDEO });
     }
-    if (watched.length === 0) {
+    for (const item of questionsOn ? pictures : []) {
+      if (listed.length >= maxCandidates) break;
+      if (seen.has(item.itemId) || !recentIds.has(item.messageId)) continue;
+      seen.add(item.itemId);
+      listed.push({ item, kind: REWATCH_KIND_PICTURE });
+    }
+    if (listed.length === 0) {
       log.info('rewatch: skipped', { channel: channelId, reason: 'no-watched', watched: 0, recent });
       return;
     }
 
-    const lines = watched.map((item, index) => {
+    const lines = listed.map(({ item, kind }, index) => {
+      if (kind === REWATCH_KIND_PICTURE) {
+        const caption = descriptions?.get(item.itemId);
+        const summary = caption ? [...oneLine(caption)].slice(0, REWATCH_SUMMARY_CHARS).join('') : '';
+        return `${index + 1} | ${kind} | ${oneLine(item.name)} | ${REWATCH_STATUS_DESCRIBED} | ${summary}`.trimEnd();
+      }
       const video = videos.get(item.itemId);
       const status = video.state === 'watched' ? REWATCH_STATUS_WATCHED : REWATCH_STATUS_NOT_LOADED;
       const summary = video.state === 'watched' ? [...oneLine(video.text)].slice(0, REWATCH_SUMMARY_CHARS).join('') : '';
-      return `${index + 1} | ${oneLine(item.name)} | ${status} | ${summary}`.trimEnd();
+      return `${index + 1} | ${kind} | ${oneLine(item.name)} | ${status} | ${summary}`.trimEnd();
     });
     // The chat around the question.
     const { triggerText, transcriptBlock } = classifierContext({
@@ -1867,7 +1906,7 @@ export function createTurnRunner({
       descriptions,
       videos,
     });
-    const user = `${transcriptBlock}<videos>\n${lines.join('\n')}\n</videos>\n<candidate>\n${trigger.authorName}: ${triggerText}\n</candidate>`;
+    const user = `${transcriptBlock}<media>\n${lines.join('\n')}\n</media>\n<candidate>\n${trigger.authorName}: ${triggerText}\n</candidate>`;
 
     let completion;
     try {
@@ -1885,25 +1924,34 @@ export function createTurnRunner({
       log.warn('rewatch: classifier failed', { channel: channelId, status: err.statusCode ?? null, name: err.name });
       return;
     }
-    const { pick, reason } = parseRewatchPickDetailed(completion.text, watched.length);
-    const item = pick ? watched[pick.n - 1] : null;
-    const loaded = item ? videos.get(item.itemId).state === 'watched' : false;
-    // A retry is for a video that did not load, a question for a watched one; anything else is ignored.
-    const usable = Boolean(item) && pick.retry !== loaded;
-    const watchedCount = watched.filter((candidate) => videos.get(candidate.itemId).state === 'watched').length;
+    const { pick, reason } = parseRewatchPickDetailed(completion.text, listed.length);
+    const entry = pick ? listed[pick.n - 1] : null;
+    const item = entry?.item ?? null;
+    const isPicture = entry?.kind === REWATCH_KIND_PICTURE;
+    const loaded = item && !isPicture ? videos.get(item.itemId).state === 'watched' : false;
+    // A retry is for a video that did not load, a question for a watched one or a picture; anything else is ignored.
+    const usable = Boolean(item) && (isPicture ? !pick.retry : pick.retry !== loaded);
+    const pictureCount = listed.filter((candidate) => candidate.kind === REWATCH_KIND_PICTURE).length;
+    const watchedCount = listed.filter((candidate) => candidate.kind === REWATCH_KIND_VIDEO && videos.get(candidate.item.itemId).state === 'watched').length;
     // Codes and counts only, never the question: an answer outside the format hints at a prompt mismatch.
     const level = reason === 'unknown-id' || reason === 'no-bar' ? 'warn' : 'info';
     log[level]('rewatch: classified', {
       channel: channelId,
-      candidates: watched.length,
-      offered: { watched: watchedCount, notLoaded: watched.length - watchedCount },
+      candidates: listed.length,
+      offered: { watched: watchedCount, notLoaded: listed.length - watchedCount - pictureCount, pictures: pictureCount },
       retryAllowed: canRetry,
       parse: reason,
       kind: pick ? (pick.retry ? 'retry' : 'question') : null,
+      target: entry?.kind ?? null,
       picked: usable,
     });
     if (!usable) return;
 
+    if (isPicture) {
+      const answer = await describer.relookImage(guildId, item, pick.question);
+      if (answer) imageAnswers.set(item.itemId, answer);
+      return;
+    }
     if (pick.retry) {
       const retried = await describer.describeVideo(guildId, item, { force: true });
       if (retried) videos.set(item.itemId, retried);
@@ -2935,45 +2983,55 @@ export function createTurnRunner({
         }
         const candidates = videoCandidates;
         videoStage = track('videos', () => describer.describeVideos(guildId, candidates, { maxNew: videoCfg.maxPerTurn ?? 1 }));
+      }
 
-        // A second look when the trigger asks about a watched video: a
-        // direct address only (never a spontaneous or an overheard turn, never
-        // the drawFailed turn), switch features.videoRewatch (a missing key counts as on).
-        // A routed call asks about its source, whose videos no turn watches: the videos
-        // here belong to another conversation, so nothing is offered or retried.
-        // It needs the videos' states and its transcript the file previews; it works on a
-        // copy of the states, so a late re-watch never touches what the request was built from.
-        if (asked && !answersDrawFailure && features.videoRewatch !== false && typeof describer.rewatchVideo === 'function') {
-          if (routedPull) {
-            log.info('rewatch: skipped', { channel: channel.id, reason: 'routed' });
-          } else {
-            rewatchChain = Promise.all([videoStage.settled, previews.settled])
-              .then(() => {
-                const watched = videoStage.value?.videos;
-                if (deadline.passed || !watched) return undefined;
-                rewatchStage = track('rewatch', async () => {
-                  const own = new Map(watched);
-                  try {
-                    await maybeRewatch({
-                      config,
-                      guildId,
-                      channelId: channel.id,
-                      selfName,
-                      history: previewed(),
-                      trigger: candidate,
-                      videos: own,
-                      descriptions: captionsSoFar(),
-                      candidates,
-                    });
-                  } catch (err) {
-                    log.warn('rewatch: failed', { channel: channel.id, error: err });
-                  }
-                  return own;
-                });
-                return rewatchStage.settled;
-              })
-              .catch(chainFailed('rewatch'));
-          }
+      // A second look when the trigger asks about a watched video or a posted picture: a
+      // direct address only (never a spontaneous or an overheard turn, never the drawFailed
+      // turn). Videos under features.videoRewatch (with the video stage), pictures under
+      // features.imageRelook and features.vision (a missing key counts as on, each), the
+      // persona's own posted drawings included.
+      // A routed call asks about its source, whose media no turn looks at: the media
+      // here belong to another conversation, so nothing is offered or retried.
+      // It needs the videos' states and its transcript the file previews; it works on a
+      // copy of the states, so a late re-watch never touches what the request was built from.
+      const videoRewatchOn = Boolean(videoStage) && features.videoRewatch !== false && typeof describer.rewatchVideo === 'function';
+      const imageRelookOn = features.imageRelook !== false && features.vision !== false && typeof describer?.relookImage === 'function';
+      if (asked && !answersDrawFailure && (videoRewatchOn || imageRelookOn)) {
+        if (routedPull) {
+          log.info('rewatch: skipped', { channel: channel.id, reason: 'routed' });
+        } else {
+          const pictures = imageRelookOn ? relookCandidates(rawHistory) : [];
+          rewatchChain = Promise.all([videoStage?.settled, previews.settled])
+            .then(() => {
+              const watched = videoStage?.value?.videos;
+              const offersVideos = videoRewatchOn && Boolean(watched);
+              if (deadline.passed || (!offersVideos && !imageRelookOn)) return undefined;
+              rewatchStage = track('rewatch', async () => {
+                const own = new Map(watched ?? []);
+                const imageAnswers = new Map();
+                try {
+                  await maybeRewatch({
+                    config,
+                    guildId,
+                    channelId: channel.id,
+                    selfName,
+                    history: previewed(),
+                    trigger: candidate,
+                    videos: own,
+                    descriptions: captionsSoFar(),
+                    candidates: offersVideos ? videoCandidates : [],
+                    pictures,
+                    imageAnswers,
+                  });
+                } catch (err) {
+                  log.warn('rewatch: failed', { channel: channel.id, error: err });
+                }
+                // The video states only when videos were offered; otherwise the video stage's stand.
+                return { videos: offersVideos ? own : null, imageAnswers };
+              });
+              return rewatchStage.settled;
+            })
+            .catch(chainFailed('rewatch'));
         }
       }
       // A direct call that brought something to look at -- on its own message or the one it
@@ -2987,7 +3045,7 @@ export function createTurnRunner({
       // re-watch's answer when it is done too), else what the describer's cache holds.
       const videosSoFar = async () => {
         if (!videoStage) return undefined;
-        if (rewatchStage?.done && rewatchStage.value) return rewatchStage.value;
+        if (rewatchStage?.done && rewatchStage.value?.videos) return rewatchStage.value.videos;
         if (videoStage.done) return videoStage.value?.videos;
         try {
           return typeof describer.cachedVideos === 'function' ? await describer.cachedVideos(guildId, videoCandidates) : undefined;
@@ -3138,13 +3196,15 @@ export function createTurnRunner({
       // A video stage past the deadline: the cached states stay, and the videos it was still
       // watching render not watched (`pending`) instead of as a bare still frame.
       const videos =
-        rewatchStage?.done && rewatchStage.value
-          ? rewatchStage.value
+        rewatchStage?.done && rewatchStage.value?.videos
+          ? rewatchStage.value.videos
           : videoStage?.done
             ? videoStage.value?.videos
             : videoStage
               ? lateVideoStates(videoCandidates, await videosSoFar(), config.media?.video?.maxPerTurn ?? 1)
               : undefined;
+      // A picture's second look on a question (features.imageRelook): rendered under its line.
+      const imageAnswers = rewatchStage?.done && rewatchStage.value?.imageAnswers?.size > 0 ? rewatchStage.value.imageAnswers : null;
       const reads = linksStage?.done ? linksStage.value : undefined;
       const lookupResult = lookupStage?.done ? (lookupStage.value ?? null) : null;
       const neighborsFound = neighborsStage?.done ? neighborsStage.value : null;
@@ -3213,6 +3273,7 @@ export function createTurnRunner({
           descriptions: descriptions ?? null,
           neighborDescriptions: neighborDescriptions ?? null,
           videos: videos ?? null,
+          imageAnswers,
           reads: reads ?? null,
           lookup: lookupResult ?? null,
           searchAvailable: features.webLookup === true && typeof lookup?.hasSearch === 'function' && lookup.hasSearch() === true,

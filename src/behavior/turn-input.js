@@ -36,6 +36,7 @@ export const TURN_INPUT_KEYS = Object.freeze([
   'descriptions',
   'neighborDescriptions',
   'videos',
+  'imageAnswers',
   'reads',
   'lookup',
   'searchAvailable',
