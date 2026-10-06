@@ -161,6 +161,10 @@ export const labels = {
     },
     ownerSet: 'set without a reason',
   },
+  attitudes: {
+    header: 'members you feel strongly about, not described above:',
+    line: '{name} -- {band}',
+  },
   aboutChat: {
     patterns: 'how people talk here: {text}',
     starters: 'how people start conversations and cut in: {text}',

@@ -12,8 +12,9 @@
 // (other bots, channels the pull rail refuses for this destination, the
 // turn's own chat), clustered, the windows around the clusters fetched
 // together (channel routes, queued per channel), captioned from the media
-// cache only, then the summary. Rails: `features.recall`, server turns only,
-// the daily request cap (`llm.capLeft`), `recall.maxPerDay` runs a day
+// cache only, then the summary. Rails: `features.recall`, server turns and
+// private chats run on behalf of their partner (the pull rail then keeps what
+// the partner can view), the daily request cap (`llm.capLeft`), `recall.maxPerDay` runs a day
 // (state.json `recallDay`/`recallCount`), and `recall.timeoutMs` for the
 // whole run, after which it is abandoned. Inside that budget: no search is
 // sent once half of it is gone, a search still out at 60 % is cut (what the
@@ -30,7 +31,7 @@
 
 import { log } from '../log.js';
 import { audienceOf } from '../discord/collect.js';
-import { checkPull } from '../discord/pull-fetch.js';
+import { audienceAllows, checkPull } from '../discord/pull-fetch.js';
 import { fetchAround, searchMembers, searchMessages } from '../discord/search.js';
 import { helperRequestOptions, railReason } from '../llm/openrouter.js';
 import { oneLine } from '../memory/clamp.js';
@@ -117,7 +118,7 @@ function summaryFailure(err) {
  *   `cachedDescriptions` is used, never a fresh caption.
  * @param {() => number} [deps.now]
  * @param {{ set: Function, clear: Function }} [deps.timers]  setTimeout / clearTimeout (tests inject fakes).
- * @returns {{ run: (args: { guild: object, guildId?: string, channel: object, selfId: string, selfName: string,
+ * @returns {{ run: (args: { guild: object, guildId?: string, channel: object, partner?: object|null, selfId: string, selfName: string,
  *   history?: object[], candidate: { authorName?: string, content?: string }, server: { forms: string[], who: string[],
  *   from: number|null, to: number|null }|null }) => Promise<{ text: string|null, stretch: RecallStretch|null,
  *   people: { id: string, name: string, username: string, count: number, newestTs: number|null }[], stats: object }>,
@@ -199,19 +200,22 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
    * The recent lines this turn may show: the live ones (`memory.recentHours`,
    * none with `features.recent` off), from the turn's own channel or a channel
    * whose audience covers it -- the rule of the turn's `<recent>` block
-   * (src/behavior/turn.js recentInput, server side).
+   * (src/behavior/turn.js recentInput, server side). In a private chat: from
+   * a channel its `partner` can view (the pull rail's private-chat rule,
+   * src/discord/pull-fetch.js#audienceAllows), as its hits are.
    */
-  function shownRecentLines(config, guild, guildId, channel) {
+  function shownRecentLines(config, guild, guildId, channel, partner) {
     const settings = recentSettings(config);
     if (!settings || typeof store.getRecent !== 'function') return [];
     const lines = liveRecent(store.getRecent(guildId)?.lines, { now: now(), hours: settings.hours });
     if (lines.length === 0) return [];
-    const here = audienceOf(channel);
+    const here = channel.guild ? audienceOf(channel) : null;
+    const covers = (source) => (channel.guild ? audienceCovers(here, audienceOf(source)) : audienceAllows(channel, source, config, { partner }));
     const allowed = new Map();
     const shown = (id) => {
       if (typeof id !== 'string' || !id) return false;
       if (id === channel.id) return true;
-      if (!allowed.has(id)) allowed.set(id, audienceCovers(here, audienceOf(guild?.channels?.cache?.get?.(id) ?? null)));
+      if (!allowed.has(id)) allowed.set(id, covers(guild?.channels?.cache?.get?.(id) ?? null));
       return allowed.get(id);
     };
     return lines.filter((line) => shown(line.channelId));
@@ -226,7 +230,7 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
    * memory on (all three guild-wide), recent lines by shownRecentLines. A
    * private layer is never read. A store read that throws gives no item.
    */
-  function storedMemory({ config, settings, guild, guildId, channel, server }) {
+  function storedMemory({ config, settings, guild, guildId, channel, partner, server }) {
     const none = { items: [], nameOf: () => null };
     const forms = Array.isArray(server.forms) ? server.forms : [];
     const who = Array.isArray(server.who) ? server.who : [];
@@ -241,7 +245,7 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
         profiles: features.episodes !== false ? profiles : profiles.map((p) => ({ ...p, episodes: [] })),
         lore: features.lore !== false && typeof store.getLore === 'function' ? (store.getLore(guildId) ?? []) : [],
         learned: typeof store.getGuild === 'function' ? (store.getGuild(guildId)?.learned ?? []) : [],
-        recentLines: shownRecentLines(config, guild, guildId, channel),
+        recentLines: shownRecentLines(config, guild, guildId, channel, partner),
         from: server.from ?? null,
         to: server.to ?? null,
         max: settings.memoryItems,
@@ -274,7 +278,7 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
    * counts as failed and ends the searching). Once the windows are read,
    * `progress.fallback(kind)` gives the answer without a summary.
    */
-  async function recallWith({ config, settings, prompt, guild, guildId, channel, selfId, selfName, history, candidate, server, signal, searchSignal, progress, started, stats }) {
+  async function recallWith({ config, settings, prompt, guild, guildId, channel, partner, selfId, selfName, history, candidate, server, signal, searchSignal, progress, started, stats }) {
     const channelId = channel.id;
     const searchUntil = started + settings.timeoutMs * SEARCH_SHARE;
     let counted = false;
@@ -287,15 +291,16 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
     const result = (extra = {}) => ({ text: null, stretch: null, people: [], stats: { ...stats, ms: now() - started }, ...extra });
 
     // 0. Stored memory: no request, before the first Discord one so it always fits the budget.
-    const memory = storedMemory({ config, settings, guild, guildId, channel, server });
+    const memory = storedMemory({ config, settings, guild, guildId, channel, partner, server });
     stats.memory = memory.items.length;
 
     // 1. People.
     const people = await findPeople({ guild, guildId, who: server.who ?? [], maxPeople: settings.maxPeople, selfId, signal: searchSignal, searchUntil, beforeRequest });
     if (signal.aborted) return null;
 
-    // 2. The queries: never past the oldest line of the turn's own chat.
-    const own = (Array.isArray(history) ? history : []).filter((m) => m?.id);
+    // 2. The queries: never past the oldest line of the turn's own chat (a private chat is
+    // not part of the server: it bounds nothing).
+    const own = channel.guild && Array.isArray(history) ? history.filter((m) => m?.id) : [];
     const ownIds = new Set(own.map((m) => m.id));
     const oldest = own.reduce((min, m) => (Number.isFinite(m.ts) && m.ts < min ? m.ts : min), Infinity);
     const plan = searchPlan({
@@ -346,7 +351,7 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
       if (!judged.has(id)) {
         let source = null;
         try {
-          const verdict = checkPull({ guild, channelId: id, destination: channel, config, now: now() });
+          const verdict = checkPull({ guild, channelId: id, destination: channel, partner, config, now: now() });
           source = verdict.skip === null ? verdict.channel : null;
         } catch {
           source = null;
@@ -472,7 +477,10 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
   /**
    * One server search for a turn. Per call, with `hot.config` / `hot.prompts`
    * read at that moment: nothing (no log) with `features.recall` off; `recall:
-   * skipped` with `reason` `private-chat` (a channel without a guild),
+   * skipped` with `reason` `private-chat` (no guild, or a channel without a
+   * guild and no `partner`: a private chat searches only on behalf of its
+   * partner, the discord.js GuildMember of `guild` it talks to, keeping the
+   * hits of channels that member can view and not bounded by its own chat),
    * `no-query` (no form, name form or range), `no-prompt` (no
    * `prompts['recall-summary']`), `daily-cap` (`llm.capLeft()` spent) or
    * `daily` (`recall.maxPerDay` runs today), each before any request; later
@@ -496,7 +504,7 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
    * helper named, else null; `people` the members the name forms found,
    * with how many of their messages were kept and the newest one's time.
    */
-  async function run({ guild, guildId = guild?.id ?? null, channel, selfId, selfName, history = [], candidate = null, server = null } = {}) {
+  async function run({ guild, guildId = guild?.id ?? null, channel, partner = null, selfId, selfName, history = [], candidate = null, server = null } = {}) {
     const started = now();
     const channelId = channel?.id ?? null;
     const stats = emptyStats();
@@ -512,7 +520,7 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
       const config = hot.config;
       const settings = recallSettings(config);
       if (!settings) return empty();
-      if (!channel?.guild || !guild) return skip('private-chat');
+      if (!guild || (!channel?.guild && !partner)) return skip('private-chat');
       if (!asksServer(server)) return skip('no-query');
       const prompt = summaryPrompt();
       if (!prompt) return skip('no-prompt');
@@ -529,7 +537,7 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
       cut = timers.set(() => searching.abort(), Math.floor(settings.timeoutMs * PREPARE_SHARE));
       cut?.unref?.();
       const progress = { fallback: null };
-      const work = recallWith({ config, settings, prompt, guild, guildId, channel, selfId, selfName, history, candidate, server, signal: controller.signal, searchSignal: searching.signal, progress, started, stats });
+      const work = recallWith({ config, settings, prompt, guild, guildId, channel, partner, selfId, selfName, history, candidate, server, signal: controller.signal, searchSignal: searching.signal, progress, started, stats });
       work.catch(() => {});
       const outcome = await Promise.race([work, deadline]);
       if (outcome === TIMEOUT) {

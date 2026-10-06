@@ -89,6 +89,7 @@
 | `<self_facts>` | 角色声称过的关于自身的事实 |
 | `<recent>` | 服务器最近 `memory.recentHours`（默认 72）小时内发生的事情：分析器写入的近期记事（短事件）和成员的窗口内回忆（按引用显示）。记事仅来自本轮自身的频道或此处所有人都能阅读的频道；私聊中仅来自所有服务器成员都能阅读的频道，不含回忆。本轮提及的人的条目排在前面；已在 `<people>` 中渲染的回忆不再出现，每人最多 2 条。从最旧到最新。标题无条目则不渲染。开关 `features.recent`（缺失 = 开）；上限 `context.caps.recent`（默认 1200） |
 | `<people>` | 成员档案；呼叫者排首位，以 `labels.profile.interlocutorMark` 标记（`overheard` 回合中省略：作者在谈论角色而非对角色说话）；每个档案包含角色的态度，其后跟最多 `relationships.shownMoves` 条形成该态度的变动（按绝对变动量从大到小，块内从旧到新，正负均保留（如两者都有），不重复当前原因），呼叫者还包含**回忆**：角色记住的关于两人之间的时刻，附带日期和简短引用 |
+| `<attitudes>` | 角色感受最强烈的前 `context.attitudes`（默认 6，`0` = 关）名成员，按态度评分绝对值排序，好感与反感混合。跳过呼叫者以及已在 `<people>` 中显示的成员。每人一行（`labels.attitudes.line`）：名字和态度区间。标题：`labels.attitudes.header`。上限 `context.caps.attitudes`（默认 400）。服务器回合和私聊中均显示 |
 | `<other_channels>` | 每个相邻频道最多 `context.neighborMessages` 条消息，不超过 `context.neighborMaxAgeMinutes` 的时效。`features.mediaDescriptions` 开启时，相邻频道行中的图片在描述器缓存已有说明时携带说明；不为相邻频道发起新的描述请求。`<channel_view>` 中已显示其块的频道不再出现在 `<other_channels>` 中；如果预算丢弃了拉取的块，该频道重新作为普通相邻频道出现 |
 | `<channel_view>` | 拉入本轮的另一个频道（`features.channelPull`）。每个拉取的频道一个条目：标题行（`labels.pull.header`）、适用时的只读标记（`labels.server.readOnly`）、窗口被截断时的"更早的未显示"行、"图片未查看"计数、角色的早期呼叫（带已回复/未回复/已跳过标记），然后是窗口行。行使用与 `<chat>` 相同的对话记录格式，但编号在对话后继续（对话为 `#1`..`#N`，拉取块从 `#N+1` 开始），因此每个 `#n` 在块间唯一。图片仅以说明或盲标签形式出现，不作为附加图片。没有 `labels.pull.header` 时块为空 |
 | `<worn>` | 角色在近期消息中过度使用的手法（`features.variety`）：`labels.variety.intro`，然后每个手法一行 `- <shape> ("<example>", ...)`。长过程的手法（`wornLong`，来自 `variety-long.md`）在前，然后是短过程的，去重后最多 `variety.maxPatterns` + `variety.longMaxPatterns` 个。两者都无结果或开关关闭时省略 |
@@ -101,7 +102,7 @@
 （永不裁剪）-> 呼叫者的档案含回忆 -> 查询结果（整体保留或丢弃；可包含网络部分、服务器部分或两者）-> 聊天习惯 -> 自述事实 -> 世界书 -> 服务器 -> 对话记录（最新优先）->
 拉取的频道（`<channel_view>`，上限 `context.caps.pulled`；回答只读频道呼叫的回合中拉取块在对话记录之前而非之后）->
 近期记事（上限 `context.caps.recent`）->
-其他档案 -> worn（整体保留或丢弃）-> 相邻频道 -> 表情符号（从底部删除条目，然后删除整个块；`context.caps.emoji`）-> GIF（同样的裁剪；`context.caps.gifs`）。
+其他档案 -> attitudes（上限 `context.caps.attitudes`）-> worn（整体保留或丢弃）-> 相邻频道 -> 表情符号（从底部删除条目，然后删除整个块；`context.caps.emoji`）-> GIF（同样的裁剪；`context.caps.gifs`）。
 
 对话记录行中的媒体，使用可用的最具信息量的形式：附加在当前请求上的图片 →
 `transcript.imageAttached`（按图片在文本后的顺序编号）；已描述的 →
@@ -196,7 +197,7 @@ senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results
-senses.recall                            shown right after the search line on a server turn when the server-history search is available (never in a private chat); tells the persona that a search of the server's old messages either ran before the reply or did not, that its part of `<lookup>` is what the history holds (a helper's summary or a verbatim stretch), and that without it nothing was looked up there. An older labels file without the key renders nothing
+senses.recall                            shown right after the search line when the server-history search is available: on every server turn, and in a private chat when `features.privateLikeServer` is on (the default). Tells the persona that a search of the server's old messages either ran before the reply or did not, that its part of `<lookup>` is what the history holds (a helper's summary or a verbatim stretch), and that without it nothing was looked up there. An older labels file without the key renders nothing
 senses.customEmoji                       shown when features.customEmoji is on and the server has at least one custom emoji; tells the persona they can use server custom emoji by writing :name:
 senses.gifs                              shown when features.gifs is on and the library is not empty; tells the persona they can post one GIF per turn by handle from the list
 senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona they can draw
@@ -265,6 +266,8 @@ recent.header                            REQUIRED {hours}: the block's first lin
 recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
 recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
 recent.episode                           OPTIONAL {date} {name} {what}: a moment the persona remembers with {name} on {date}; no quote, no feeling. Without it the block shows notes only
+attitudes.header                         the block's first line: who these members are and how to use the list
+attitudes.line                           {name} {band}: one member and their attitude band
 task.part                                {index} {total} {part} {others}: this turn answers one part of a split message. {index} is 1-based, {part} is the text of this part, {others} lists the remaining parts and any queued calls as numbered items joined by `; `. Without this key the splitter is off even when the prompt file exists
 task.queued                              {others}: the trigger author has other calls waiting, listed as numbered items joined by `; `. Shown only when there is no `task.part` for this turn. Without this key the waiting calls are not named and the seen-in-history drop rule applies to them
 task.queuedOthers                        {others}: other members have calls waiting in this channel, listed as `<n>. <author>: <text>` items joined by `; `. Without this key those calls are not named
@@ -614,11 +617,11 @@ Mentor 沙盒为每个场景执行一次多样性过程，计入 mentor 的 toke
 
 ## 任务分拆器
 
-足够长且有结构的直接呼叫（提及、回复、名字、跟进、私信）（`split.minChars` 字符，排除链接和 Discord token，至少两段分隔符）会在回合准备过程中一并交给分类器（`prompts/split.md`，使用 `classifier.text`，用途标记 `split`）。分类器读取最近 `split.contextMessages` 条消息的短 `<transcript>`（角色自身的行以 `labels.self` 标记），然后是新消息作为 `<candidate>`（`<作者名>: <文本>`）。回答为 `one`，或 2 到 `split.maxTasks`（默认 4）行，每行以 `- ` 开头，用作者自己的话表述一个部分。空白、无法解析或迟到的回答（回合准备先完成）视为单个请求，记录 `split: failed`。开关 `features.splitTasks`（缺失 = 开启）。
+足够长且有结构的直接呼叫（提及、回复、名字、跟进、私信）（`split.minChars` 字符，排除链接和 Discord token，至少两段分隔符）会在回合准备过程中一并交给分类器（`prompts/split.md`，使用 `classifier.text`，用途标记 `split`）。分类器读取最近 `split.contextMessages` 条消息的短 `<transcript>`（角色自身的行以 `labels.self` 标记），然后是新消息作为 `<candidate>`（`<作者名>: <文本>`）。回答为 `one`，或 2 到 `split.maxTasks`（默认 4）行，每行以 `- ` 开头，用作者自己的话表述一个部分。解析后，短于 `split.minPartChars`（默认 20）字符的部分（排除链接和 Discord token，与 `minChars` 相同）折叠到下一个部分（最后一个折叠到前一个）；当剩余不足两个部分时视为单个请求（`folded`）。空白、无法解析或迟到的回答（回合准备先完成）视为单个请求，记录 `split: failed`。开关 `features.splitTasks`（缺失 = 开启）。
 
 各部分成为同一消息上的普通回合链（`turn: part`）。每个部分的辅助（搜索分类器、recall、路由、重看）以该部分的文本为判断对象，请求中指出正在回答的部分和其余部分（`labels.task.part`，含 `{index}`、`{total}`、`{part}`、`{others}`）。第一个部分复用整条消息的回合已获取的历史记录并回复消息；后续部分重新获取历史记录并发布为普通消息。每个部分有自己的截止时间和丢弃限制；失败或被拒绝的部分不会阻止下一个。忽略概率、私聊每日上限和环标记在每条消息上只计一次。暂停或预热在下一个部分前结束链（`turn: chain stopped`）。链运行期间，未开始的部分是作者的等候条目（回合执行器上的 `waitingParts`）；作者稍后的消息折叠进其中一个（`addToPart`）会通过 `tasks.added` 到达该部分的请求。注意力从第一个回合到结束一直保持；空闲通知在结束时只触发一次。
 
-没有 `prompts/split.md` 时分拆器关闭（`split: skipped`，`no-prompt`）。没有 `labels.task.part` 时分拆器也关闭：解析出的回答被丢弃。设置：`split.minChars`（默认 80）、`split.maxTasks`（默认 4）、`split.contextMessages`（默认 6）、`split.maxOutputTokens`（默认 300）。
+没有 `prompts/split.md` 时分拆器关闭（`split: skipped`，`no-prompt`）。没有 `labels.task.part` 时分拆器也关闭：解析出的回答被丢弃。设置：`split.minChars`（默认 80）、`split.minPartChars`（默认 20）、`split.maxTasks`（默认 4）、`split.contextMessages`（默认 6）、`split.maxOutputTokens`（默认 300）。
 
 ## 合并分类器
 
@@ -699,6 +702,7 @@ Mentor 沙盒为每个场景执行一次多样性过程，计入 mentor 的 toke
 ### DM 回合的内容和省略
 
 - `<server>`（频道地图）和 `<other_channels>` 被省略。
+- 当 `features.privateLikeServer` 开启时（默认 `true`，缺失键 = 开），频道路由分类器、频道拉取和服务器搜索（recall）均在 DM 中运行。仅当 DM 伙伴对该频道拥有 View Channel 权限时，频道才会被拉入 DM（`context.pull.sameAudience` 不会放宽此限制）。recall 搜索对每个频道应用相同的伙伴规则。DM 中提及的成员会显示其回忆（`context.askedAboutEpisodes`）。DM 拉取的内容不会在服务器上标记为已读或已回答。关闭此开关时，无路由、无拉取、无 recall、无被问及成员的回忆。
 - `prompts.private`（如果存在）追加在模式提示（`reply.md`）之后、`forced.md` 之前，填充 `{{name}}` 和 `{{author}}`。
 - `{{trigger}}` 取自 `labels.triggers.private`。
 - `<senses>` 包含 `senses.privateChat`。

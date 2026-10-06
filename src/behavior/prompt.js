@@ -18,7 +18,9 @@
 //       `<people>` does not show, capped by `context.caps.recent`, ranked by who
 //       the turn is about
 //   6. memory about other people present in the transcript
-//   6b. the devices the persona has worn out in its own recent lines (`<worn>`, one piece)
+//   6b. the members the persona feels most strongly about that the request
+//       does not describe (`<attitudes>`, one piece: names and bands)
+//   6c. the devices the persona has worn out in its own recent lines (`<worn>`, one piece)
 //   7. neighbouring channels
 //   8. the server's custom emoji (`<emoji>`)
 //   9. the GIF library (`<gifs>`)
@@ -318,6 +320,47 @@ function moveLines(affinity, labels, { max, timezone, nameOf }) {
  */
 export function renderProfile(profile, labels, opts) {
   return renderProfileShown(profile, labels, opts).text;
+}
+
+/**
+ * The `<attitudes>` block's one item: `labels.attitudes.header`, then one
+ * `labels.attitudes.line` per member (`{name}` = the stored `names[0]`,
+ * `{band}` = `labels.affinity.bands[affinityBand(score)]`, as the attitude
+ * line of a profile shows it) -- the `max` members of `profiles` with the
+ * largest `|affinity.score|`, warm and cool alike, rendered by the signed score
+ * descending (warmest first, coolest last). A profile is skipped when its score
+ * is not a finite number or is 0, its id is in `skipIds` (the interlocutor and
+ * the members `<people>` shows) or was already taken, it has no name, or its
+ * band has no label. Equal `|score|` keeps the input order. No score, no
+ * reason. '' when `max` is not a positive integer, a label is missing or no
+ * member is left, so the block drops out.
+ * @param {object[]} profiles  Public member profiles (store.listUserProfiles).
+ * @param {object} labels
+ * @param {{ max: number, skipIds: Set<string> }} opts
+ * @returns {string}
+ */
+function renderAttitudes(profiles, labels, { max, skipIds }) {
+  const header = labels.attitudes?.header;
+  const line = labels.attitudes?.line;
+  const bands = labels.affinity?.bands;
+  if (!header || !line || !bands || !Number.isInteger(max) || max <= 0) return '';
+  const taken = new Set();
+  const candidates = [];
+  for (const profile of Array.isArray(profiles) ? profiles : []) {
+    const id = memberIdOf(profile?.id);
+    const score = profile?.affinity?.score;
+    const name = profile?.names?.[0];
+    if (id === null || skipIds.has(id) || taken.has(id)) continue;
+    if (!Number.isFinite(score) || score === 0 || typeof name !== 'string' || !name) continue;
+    const band = bands[affinityBand(score)];
+    if (!band) continue;
+    taken.add(id);
+    candidates.push({ score, text: fill(line, { name, band }) });
+  }
+  const top = candidates.sort((a, b) => Math.abs(b.score) - Math.abs(a.score)).slice(0, max);
+  if (top.length === 0) return '';
+  top.sort((a, b) => b.score - a.score);
+  return [header, ...top.map((entry) => entry.text)].join('\n');
 }
 
 /**
@@ -684,6 +727,8 @@ function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task
     // The last hours: one item, the header with the kept lines and moments, oldest first.
     block('recent', (kept.recent ?? []).join('\n')),
     block('people', [...kept.interlocutor, ...kept.people].join('\n\n')),
+    // The members the persona feels most strongly about that `<people>` does not describe.
+    block('attitudes', (kept.attitudes ?? []).join('\n')),
     block('other_channels', kept.neighbors.join('\n\n')),
     // Another channel pulled into this turn, one item per channel.
     block('channel_view', (kept.pulled ?? []).join('\n\n')),
@@ -1002,7 +1047,7 @@ function renderSenses(
   // The search of the server's own message history (`recallAvailable`: a server
   // turn where the runner is available; its own switch, not the web one); an
   // older labels.json without the line shows nothing.
-  if (!privateChat && recallAvailable === true && senses.recall) lines.push(senses.recall);
+  if (recallAvailable === true && senses.recall) lines.push(senses.recall);
   // Drawing (features.imageGeneration, a missing key counts as on) needs the
   // image client (`drawQuota` present): one line, the spent forms first. An
   // older labels.json without senses.draw shows nothing.
@@ -1468,7 +1513,11 @@ function pulledAuthors(pulledFits) {
  * @param {object[]} [input.candidateProfiles]  Every member profile known in the guild
  *   (store.listUserProfiles), scanned to pull a silent member into `<people>` by a
  *   real mention/name/alias in the trigger or the last few messages (see `splitPeople`
- *   above); [] or omitted -> nobody is pulled in.
+ *   above); [] or omitted -> nobody is pulled in. Also the source of `<attitudes>` (see
+ *   `renderAttitudes`): the top `context.attitudes` (6 when unset, 0 = no block) of them by
+ *   `|affinity.score|`, the interlocutor and the members `<people>` keeps left out, in a
+ *   private chat too; budget section `attitudes`, one piece capped by
+ *   `context.caps.attitudes` (400 when unset), fitted right after `<people>`.
  * @param {(id: string) => (string|null)} [input.nameOf]  Resolves a member id to their
  *   current stored name, for turning every `<@id>` token this request renders into
  *   display text -- see docs/prompt-contract.md, "Members are referred to by
@@ -1657,7 +1706,7 @@ export function buildRequest(input) {
   // map back through idByIndex and pulledIds. A routed turn answers a call that lives there.
   const source = privateChat ? null : (input.source ?? null);
   const routed = source?.reason === 'routed';
-  const offered = privateChat ? [] : usablePulled(input.pulled, currentChannelId);
+  const offered = usablePulled(input.pulled, currentChannelId);
   const pulledChannels = labels.pull?.header ? offered : [];
   const chatTrigger = trigger ? (chatItems.find((item) => item.id === trigger.id) ?? null) : null;
   const pulledTriggerId = trigger && !chatTrigger ? trigger.id : null;
@@ -1919,7 +1968,7 @@ export function buildRequest(input) {
   // Each member asked about shows their top `context.askedAboutEpisodes` episodes (0 = off;
   // none in a private chat: another member's moments never reach it; none with an older labels
   // file that cannot render one).
-  const askedAboutEpisodes = privateChat ? 0 : (config.context.askedAboutEpisodes ?? 3);
+  const askedAboutEpisodes = privateChat && config.features?.privateLikeServer === false ? 0 : (config.context.askedAboutEpisodes ?? 3);
   const episodeCount = (profile) => (Array.isArray(profile?.episodes) ? profile.episodes.length : 0);
   const episodeLabelsOn = Boolean(labels.profile?.episodes && labels.profile?.episode && labels.profile?.episodeNoQuote);
   const askedEpisodesOn =
@@ -2097,14 +2146,43 @@ export function buildRequest(input) {
       }),
     })),
   ].filter((entry) => entry.text);
+  const peopleSection = { name: 'people', cap: caps.people, items: peopleOffered.map((entry) => entry.text) };
+  // The members `<people>` keeps: a subsequence of the offered items, in their order.
+  const keptPeopleOf = (keptPeople) => {
+    const shown = [];
+    let next = 0;
+    for (const entry of peopleOffered) {
+      if (next < keptPeople.length && keptPeople[next] === entry.text) {
+        shown.push(entry.profile);
+        next += 1;
+      }
+    }
+    return shown;
+  };
+  // `<attitudes>`: the top `context.attitudes` members by attitude strength (0 = no block), out
+  // of every public profile of the guild, a private chat included. The interlocutor and the
+  // members `<people>` shows carry their full attitude line there and are left out; `<people>`
+  // is fitted ahead of this block, so what it keeps is measured without it.
+  const attitudesMax = config.context.attitudes ?? 6;
+  const attitudesOn =
+    relationships &&
+    Number.isInteger(attitudesMax) &&
+    attitudesMax > 0 &&
+    Boolean(labels.attitudes?.header && labels.attitudes?.line) &&
+    Array.isArray(input.candidateProfiles) &&
+    input.candidateProfiles.length > 0;
+  let attitudesText = '';
+  if (attitudesOn) {
+    const peopleKept = keptPeopleOf(fitSections([...aheadOfPeople, peopleSection], limit, cost).kept.people);
+    const skipIds = new Set([interlocutorId, ...peopleKept.map((profile) => memberIdOf(profile?.id))].filter((id) => id !== null));
+    attitudesText = renderAttitudes(input.candidateProfiles, labels, { max: attitudesMax, skipIds });
+  }
   const budgetFit = fitSections(
     [
       ...aheadOfPeople,
-      {
-        name: 'people',
-        cap: caps.people,
-        items: peopleOffered.map((entry) => entry.text),
-      },
+      peopleSection,
+      // One piece, kept or dropped whole: right below the people it leaves out.
+      { name: 'attitudes', cap: caps.attitudes ?? 400, items: [attitudesText].filter(Boolean) },
       // One small piece, kept or dropped whole: below the chat and the people, above the rest.
       { name: 'worn', items: [renderWorn(input.worn, labels, config)].filter(Boolean) },
       { name: 'neighbors', cap: caps.neighbors, items: neighborItems },
@@ -2172,14 +2250,7 @@ export function buildRequest(input) {
     if (id !== null) peopleShown.push({ id, names });
   };
   if ((kept.interlocutor ?? []).length > 0) showPerson(interlocutor);
-  const keptPeople = kept.people ?? [];
-  let nextPerson = 0;
-  for (const entry of peopleOffered) {
-    if (nextPerson < keptPeople.length && keptPeople[nextPerson] === entry.text) {
-      showPerson(entry.profile);
-      nextPerson += 1;
-    }
-  }
+  for (const profile of keptPeopleOf(kept.people ?? [])) showPerson(profile);
   // The pulled channels whose block survived, with what of them was shown.
   const keptPulled = new Set(kept.pulled);
   const pulledKept = pulledFits

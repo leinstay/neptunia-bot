@@ -94,6 +94,26 @@ function addChannel(
     }
     return new PermissionsBitField(bits);
   };
+  // A member (fakeMember): @everyone's and its roles' base, @everyone's overwrite, its roles'
+  // overwrites together, then its own -- Discord's order.
+  const resolveMember = (member) => {
+    let bits = guild.roles.everyone.permissions.bitfield;
+    for (const roleId of member.roleIds) bits |= guild.roles.cache.get(roleId)?.permissions.bitfield ?? 0n;
+    const base = overwriteCache.get(GUILD_ID);
+    if (base) bits = (bits & ~base.deny.bitfield) | base.allow.bitfield;
+    let deny = 0n;
+    let allow = 0n;
+    for (const roleId of member.roleIds) {
+      const overwrite = overwriteCache.get(roleId);
+      if (overwrite?.type !== OverwriteType.Role) continue;
+      deny |= overwrite.deny.bitfield;
+      allow |= overwrite.allow.bitfield;
+    }
+    bits = (bits & ~deny) | allow;
+    const own = overwriteCache.get(member.id);
+    if (own?.type === OverwriteType.Member) bits = (bits & ~own.deny.bitfield) | own.allow.bitfield;
+    return new PermissionsBitField(bits);
+  };
   const raws = [];
   const fetchCalls = [];
   const channel = {
@@ -106,6 +126,7 @@ function addChannel(
     permissionOverwrites: { cache: overwriteCache },
     permissionsFor: (target) => {
       if (target === guild.members.me) return { has: (flag) => granted.includes(flag) };
+      if (Array.isArray(target?.roleIds)) return resolveMember(target);
       return [...guild.roles.cache.values()].includes(target) ? resolveRole(target) : null;
     },
     get lastMessageId() {
@@ -167,6 +188,16 @@ function rawMessage(channel, { ts, content = 'καλημέρα σε όλους',
 /** The public main channel the persona speaks in. */
 function mainChannel(guild) {
   return addChannel(guild, { id: '750000000000000001', name: 'agora', messages: [{ ts: NOW - MIN }] });
+}
+
+/** A member of `guild` holding `roleIds` besides @everyone: a private chat's partner. */
+function fakeMember(guild, id, roleIds = []) {
+  return { id, guild, roleIds };
+}
+
+/** A private chat (a DM channel: no guild). */
+function privateChat() {
+  return { id: '790000000000000001', guild: null };
 }
 
 /** Message specs every `stepMinutes` from `fromTs` to `toTs` inclusive. */
@@ -473,6 +504,75 @@ test('checkPull: the rails without a request, the channel when they pass', () =>
   );
   assert.deepEqual(checkPull({ guild, channelId: diary.id, destination: null, config: railOff, now: NOW }), { channel: diary, skip: null });
   assert.deepEqual(diary.fetchCalls, []);
+});
+
+test('audienceAllows: a private chat lets in exactly the sources its partner can view, whatever the audience rail', () => {
+  const guild = fakeGuild();
+  const open = addChannel(guild, { id: '760000000000000047' });
+  const closed = addChannel(guild, {
+    id: '760000000000000048',
+    overwrites: [
+      { id: GUILD_ID, type: OverwriteType.Role, deny: VIEW },
+      { id: ROLE.regular, type: OverwriteType.Role, allow: VIEW },
+    ],
+  });
+  const named = addChannel(guild, { id: '760000000000000049', overwrites: [{ id: MEMBER.zoe, type: OverwriteType.Member, deny: VIEW }] });
+  const zoe = fakeMember(guild, MEMBER.zoe, [ROLE.regular]);
+  const iason = fakeMember(guild, MEMBER.iason);
+  for (const rail of [config(), config({ pull: { sameAudience: false } })]) {
+    assert.equal(audienceAllows(privateChat(), open, rail, { partner: iason }), true);
+    assert.equal(audienceAllows(privateChat(), closed, rail, { partner: zoe }), true, 'her role views it');
+    assert.equal(audienceAllows(privateChat(), closed, rail, { partner: iason }), false, 'he holds no role that views it');
+    assert.equal(audienceAllows(privateChat(), named, rail, { partner: zoe }), false, 'denied by name');
+    assert.equal(audienceAllows(privateChat(), named, rail, { partner: iason }), true);
+    assert.equal(audienceAllows(privateChat(), open, rail), false, 'no partner never qualifies');
+  }
+});
+
+test('checkPull: a private chat with its partner passes what the partner can view, refuses the rest as audience', () => {
+  const guild = fakeGuild();
+  const open = addChannel(guild, { id: '760000000000000050', granted: [READ], messages: [{ ts: LAST }] });
+  const closed = addChannel(guild, {
+    id: '760000000000000051',
+    overwrites: [{ id: MEMBER.iason, type: OverwriteType.Member, deny: VIEW }],
+    messages: [{ ts: LAST }],
+  });
+  const iason = fakeMember(guild, MEMBER.iason);
+  const dm = privateChat();
+  assert.deepEqual(checkPull({ guild, channelId: open.id, destination: dm, partner: iason, config: config(), now: NOW }), { channel: open, skip: null });
+  assert.deepEqual(checkPull({ guild, channelId: closed.id, destination: dm, partner: iason, config: config(), now: NOW }), { channel: null, skip: 'audience' });
+  assert.deepEqual(
+    checkPull({ guild, channelId: closed.id, destination: dm, partner: iason, config: config({ pull: { sameAudience: false } }), now: NOW }),
+    { channel: null, skip: 'audience' },
+    'the partner rule holds with the audience rail off',
+  );
+  assert.deepEqual(checkPull({ guild, channelId: open.id, destination: dm, config: config(), now: NOW }), { channel: null, skip: 'private-chat' });
+  assert.deepEqual(
+    checkPull({ guild, channelId: '760000000000000059', destination: dm, partner: iason, config: config(), now: NOW }),
+    { channel: null, skip: 'not-found' },
+  );
+});
+
+test('fetchPull: a private chat with its partner fetches a channel the partner can view, nothing of one they cannot', async () => {
+  const guild = fakeGuild();
+  const open = addChannel(guild, { id: '760000000000000052', messages: burst(NOW - 30 * MIN, NOW - 10 * MIN, 10) });
+  const closed = addChannel(guild, {
+    id: '760000000000000053',
+    overwrites: [{ id: MEMBER.iason, type: OverwriteType.Member, deny: VIEW }],
+    messages: [{ ts: LAST }],
+  });
+  const iason = fakeMember(guild, MEMBER.iason);
+  const { result } = await withCapturedLogs(async () => [
+    await pull(guild, open.id, { destination: privateChat(), partner: iason }),
+    await pull(guild, closed.id, { destination: privateChat(), partner: iason }),
+    await pull(guild, open.id, { destination: privateChat() }),
+  ]);
+  assert.equal(result[0].skip, null);
+  assert.equal(result[0].pulled.channelId, open.id);
+  assert.equal(result[0].pulled.messages.length, 3);
+  assert.deepEqual(result[1], { pulled: null, skip: 'audience' });
+  assert.deepEqual(closed.fetchCalls, []);
+  assert.deepEqual(result[2], { pulled: null, skip: 'private-chat' });
 });
 
 test('checkPull: refuses exactly the channels isReadableChannel refuses', () => {

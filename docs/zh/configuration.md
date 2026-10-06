@@ -29,6 +29,7 @@
 | `webLookup` | `false` | 阅读聊天中发布的链接并在被问到事实性问题时搜索网络。与其他功能不同，缺失的键视为关闭。搜索需要 `.env` 中的 `BRAVE_SEARCH_API_KEY`；没有密钥时只有链接阅读可用。参见[媒体：链接与搜索](media.md#链接) |
 | `imageGeneration` | `false` | 允许角色通过绘画子进程绘制图片。缺失的键视为开启。在 `config.local.json` 中启用；需要 `image.model` 中配置支持图像生成的模型。参见[媒体：绘画](media.md#绘画) |
 | `privateMessages` | `false` | 回复公会成员的私信。需要已存储的公共档案且 `affinity.score >= private.minAffinity`。参见[消息与记忆：私有层](messages-and-memory.md#私有层) |
+| `privateLikeServer` | `true` | 私聊像服务器频道一样运作：路由分类器、频道拉取、服务器搜索（recall）和被问及成员的回忆均在 DM 中运行。仅当伙伴拥有该频道的 View Channel 权限时才拉取。缺失键 = 开。`false` 恢复旧的 DM 行为（无拉取、路由、recall 和回忆） |
 | `channelPull` | `true` | 当最近的消息或触发器包含真实的频道提及时，将该频道拉入回合请求。缺失键 = 开。参见 `context.pull.*` |
 | `elsewhere` | `true` | 响应机器人可读但不可写的频道中的呼叫（@提及、回复、名字）。回复发送到 `memory.mainChannelIds` 中第一个可用的频道。缺失键 = 开 |
 | `portraitRefresh` | `true` | 根据消息计数器定期刷新成员画像。缺失键 = 开 |
@@ -126,13 +127,15 @@
 | `reactionsPerMessage` | `6` | 对话记录中每条消息列出的最大反应数，按频率降序 |
 | `otherProfiles` | `6` | 显示的其他档案最大数量 |
 | `askedAboutProfiles` | `3` | 在近期消息中被提及的成员以完整档案显示，排在其他参与者之前 |
-| `askedAboutEpisodes` | `3` | 被问及的成员显示的回忆数。`0` 隐藏被问及成员的回忆。私聊中始终隐藏 |
+| `askedAboutEpisodes` | `3` | 被问及的成员显示的回忆数。`0` 隐藏被问及成员的回忆。私聊中当 `features.privateLikeServer` 开启时（默认）显示，否则隐藏 |
+| `attitudes` | `6` | `<attitudes>` 块中显示的成员数，按态度评分强度排序，好感与反感混合。`0` 关闭该块 |
 | `tempo.liveMessages10min` | `4` | 10 分钟内的消息数 = “活跃” |
 | `tempo.deadSilenceMinutes` | `45` | 沉默分钟数 = “沉寂” |
 | `caps.interlocutor` | `6000` | Token 上限：呼叫者的档案与回忆 |
 | `caps.aboutChat` | `2500` | Token 上限：服务器习惯/自述事实 |
 | `caps.lore` | `1500` | Token 上限：世界书条目 |
 | `caps.people` | `9000` | Token 上限：其他档案 |
+| `caps.attitudes` | `400` | Token 上限：态度列表 |
 | `caps.neighbors` | `3000` | Token 上限：相邻频道 |
 | `caps.server` | `4000` | Token 上限：频道地图 |
 | `caps.emoji` | `800` | Token 上限：自定义表情 |
@@ -195,6 +198,7 @@
 |---|---|---|
 | `prepareMs` | `6000` | 回合开始到发出对话请求前的毫秒数。LLM 调用前运行的所有任务（历史、说明、多样性过程、路由和搜索分类器）必须在此窗口内完成。`0` 或非数字移除此限制 |
 | `prepareSearchMs` | `12000` | 搜索分类器发起网络或服务器搜索后的延长截止时间。不会短于 `prepareMs`。`0` 或非数字移除此限制 |
+| `prepareMediaMs` | `20000` | 直接呼叫的触发消息（或其回复的消息）包含描述器或视频阶段将处理的图片、GIF 或视频时的延长截止时间。不会短于 `prepareMs`；当搜索延长也适用时，取较大值。`0` 或非数字移除此延长 |
 | `dropAfterMs` | `60000` | 从回合开始计的毫秒数。如果到此时完成的回答仍未到手，回合被丢弃不发布（`turn: dropped`）。`0` 或非数字移除此限制 |
 | `replyHedgeMs` | `20000` | 在回答直接呼叫的回合中，如果回复请求在此毫秒数后仍无结果，发送第二个相同的请求。先完成的获胜，另一个中止。第二次尝试计入 `llm.maxRequestsPerDay`。`dropAfterMs` 限制仍然终止一切。`0` 或非数字 = 仅一次尝试。非呼叫回合（`unpromptedWaits`）不发送第二次尝试 |
 | `typingWhilePreparing` | `false` | 从回答直接呼叫（提及、回复、名字、跟进、私信）的回合开始就显示输入指示器，而非仅在打字阶段显示。必须严格为 `true` 才能启用 |
@@ -218,6 +222,7 @@
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `minChars` | `80` | 询问分拆器前需要的最少字符数（链接和 Discord token 排除在外） |
+| `minPartChars` | `20` | 分类器返回的部分如果短于此值（字符数，排除链接和 Discord token，与 `minChars` 相同），则折叠到下一个部分（最后一个折叠到前一个）。当剩余不足两个部分时视为单个请求。`0` = 不折叠 |
 | `maxTasks` | `4` | 分拆器可返回的最大部分数。小于 2 时分拆器关闭 |
 | `contextMessages` | `6` | 与候选一起渲染给分类器的近期频道消息数 |
 | `maxOutputTokens` | `300` | 分类器的最大输出 token 数 |

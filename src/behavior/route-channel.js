@@ -26,7 +26,11 @@ import {
 /**
  * The route hook for createTurnRunner. Per call, with `hot.config` /
  * `hot.prompts` read at that moment: nothing (`[]`, no log) with
- * `features.channelRoute` off or on a turn routeAllowed refuses; `route:
+ * `features.channelRoute` off or on a turn routeAllowed refuses -- a private
+ * chat asks only on behalf of its partner (`partner`, the discord.js
+ * GuildMember of the served `guild` the turn runner passes with
+ * features.privateLikeServer on), for a `private` turn, and lists the
+ * channels that member can view (checkPull's private-chat rule); `route:
  * skipped` (`reason: 'no-prompt'`) without `prompts['route-channel']`, (`reason:
  * 'no-candidate'`) without a message to judge (routeCandidate); nothing (no
  * call, no log) when no stored channel other than this one (and the
@@ -40,17 +44,19 @@ import {
  * ids and codes only: never a message text, never a channel name.
  * @param {{ hot: { config: object, prompts: object }, store: object, llm: { complete: Function },
  *   now?: () => number }} deps
- * @returns {(args: { guildId: string, channel: object, history: object[], trigger: object|null,
- *   triggerKind?: string|null, selfName: string, config?: object }) => Promise<string[]>}
+ * @returns {(args: { guildId: string, channel: object, guild?: object|null, partner?: object|null,
+ *   history: object[], trigger: object|null, triggerKind?: string|null, selfName: string,
+ *   config?: object }) => Promise<string[]>}  `guild`: the served guild (default: the channel's).
  */
 export function createChannelRouter({ hot, store, llm, now = Date.now }) {
-  return async function routeChannels({ guildId, channel, history, trigger = null, triggerKind = null, selfName }) {
+  return async function routeChannels({ guildId, channel, guild = channel?.guild ?? null, partner = null, history, trigger = null, triggerKind = null, selfName }) {
     const channelId = channel?.id ?? null;
     try {
       const config = hot.config;
       const settings = routeSettings(config);
       if (!settings) return [];
-      if (!routeAllowed({ triggerKind, privateChat: !channel?.guild })) return [];
+      const allowed = channel?.guild ? routeAllowed({ triggerKind }) : Boolean(guild && partner) && triggerKind === 'private';
+      if (!allowed) return [];
       const prompt = hot.prompts?.['route-channel'];
       if (typeof prompt !== 'string' || !prompt.trim()) {
         log.info('route: skipped', { channel: channelId, reason: 'no-prompt' });
@@ -65,7 +71,7 @@ export function createChannelRouter({ hot, store, llm, now = Date.now }) {
       const at = now();
       const check = (id) => {
         try {
-          const judged = checkPull({ guild: channel.guild, channelId: id, destination: channel, config, now: at });
+          const judged = checkPull({ guild, channelId: id, destination: channel, partner, config, now: at });
           return judged.skip === null ? judged.channel : null;
         } catch {
           return null;

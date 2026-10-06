@@ -89,6 +89,7 @@
 | `<self_facts>` | ペルソナが自身について主張した内容 |
 | `<recent>` | サーバーで直近 `memory.recentHours`（デフォルト 72）時間に何が起きたか: アナライザーが書く最近のノート（短いイベント）と、ウィンドウ内のメンバーのエピソード（参照で表示）。ノートはターン自身のチャンネル、またはここにいる全員が読めるチャンネルからのみ表示。プライベートチャットでは全サーバーメンバーが読めるチャンネルからのみ表示され、エピソードなし。このターンが話しかけている人についての項目が優先。`<people>` で既に表示されたエピソードは除外、メンバーあたり最大 2 件。古い順。ヘッダーのみで項目がない場合は何も表示しない。スイッチ `features.recent`（キー欠落 = オン）。上限 `context.caps.recent`（デフォルト 1200） |
 | `<people>` | メンバープロファイル。発話者が先頭で `labels.profile.interlocutorMark` でマーク（`overheard` ターンでは省略: 発話者はペルソナについて話しているのであり、ペルソナに話しかけているのではない）。各メンバーにペルソナの態度を付し、その後に態度を形成した最大 `relationships.shownMoves` 件の変動が続く（絶対変動量の大きい順、ブロック内では古い順、正負両方があれば両方を保持、現在の理由は繰り返さない）。発話者には**エピソード**も含む: ペルソナが二人の間で記憶している出来事（日付と短い引用付き） |
+| `<attitudes>` | ペルソナが最も強く感じているメンバーの上位 `context.attitudes`（デフォルト 6、`0` = オフ）名。態度スコアの大きさで順位付け、好意と反感混在。発話者と `<people>` に既に表示されているメンバーはスキップ。メンバーごとに 1 行（`labels.attitudes.line`）: 名前と態度バンド。ヘッダー: `labels.attitudes.header`。上限 `context.caps.attitudes`（デフォルト 400）。サーバーターンとプライベートチャットの両方に表示 |
 | `<other_channels>` | 隣接チャンネルごとに最大 `context.neighborMessages` 件のメッセージ。`context.neighborMaxAgeMinutes` より古いものは含まない。`features.mediaDescriptions` がオンの場合、隣接チャンネルの行内の画像はキャッシュ済みキャプションを持つ場合にそれを付加。隣接チャンネルに対して新規の説明リクエストは行われない。`<channel_view>` にブロックが表示されているチャンネルは `<other_channels>` から除外。バジェットがプルされたブロックを落とした場合、そのチャンネルは通常の隣接チャンネルとしてここに再表示 |
 | `<channel_view>` | このターンにプルされた別のチャンネル（`features.channelPull`）。プルされたチャンネルごとにヘッダー行（`labels.pull.header`）、該当時の読み取り専用マーク（`labels.server.readOnly`）、ウィンドウがカットされた場合の「古いものは非表示」行、「画像は未確認」カウント、ペルソナへの過去の呼びかけ（応答済み/未応答/スキップマーク付き）、ウィンドウの行。行は `<chat>` と同じトランスクリプト形式だが、チャットの後に番号が続く（チャットは `#1`..`#N`、プルブロックは `#N+1` から）ため、すべての `#n` がブロック間で一意。画像はキャプションまたはブラインドタグのみ、添付画像としては含まない。`labels.pull.header` がない場合ブロックは空 |
 | `<worn>` | ペルソナが最近のメッセージで使い回している表現手法（`features.variety`）: `labels.variety.intro`、続いて手法ごとに `- <shape> ("<example>", ...)`。長いパスのパターン（`wornLong`、`variety-long.md` から）が先、次に短いパス、重複は除去、最大 `variety.maxPatterns` + `variety.longMaxPatterns`。どちらのパスも結果を出さなかった場合またはスイッチがオフの場合は省略 |
@@ -101,7 +102,7 @@
 （カットされない）-> 発話者のプロファイル（エピソード付き）-> lookup（全体として保持または削除。ウェブパート、サーバーパート、またはその両方を含む場合がある）-> about_chat -> self_facts -> lore -> server -> chat（新しい順）->
 pulled（`<channel_view>`、`context.caps.pulled` で制限。読み取り専用チャンネルからの呼びかけに応答するターンでは、プルされたブロックは chat の後ではなく前に配置）->
 recent（`context.caps.recent` で制限）->
-他のプロファイル -> worn（全体として保持または削除）-> other channels -> 絵文字（下からエントリを削除、次にブロック全体; `context.caps.emoji`）-> GIF（同じトリム; `context.caps.gifs`）。
+他のプロファイル -> attitudes（`context.caps.attitudes` で制限）-> worn（全体として保持または削除）-> other channels -> 絵文字（下からエントリを削除、次にブロック全体; `context.caps.emoji`）-> GIF（同じトリム; `context.caps.gifs`）。
 
 トランスクリプト行のメディア（利用可能な最も情報量の多い形式）: このリクエストに添付された画像 →
 `transcript.imageAttached`（画像がテキストの後に並ぶ順にナンバリング）、説明済み →
@@ -198,7 +199,7 @@ senses.voice | links | files
 senses.linksWatch                        replaces links when features.videoDescriptions is on; adds that a linked video may come watched or not watched with the reason
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results and that no search can happen during the reply itself
-senses.recall                            shown right after the search line on a server turn when the server-history search is available (never in a private chat); tells the persona that a search of the server's old messages either ran before the reply or did not, that its part of `<lookup>` is what the history holds (a helper's summary or a verbatim stretch), and that without it nothing was looked up there. An older labels file without the key renders nothing
+senses.recall                            shown right after the search line when the server-history search is available: on every server turn, and in a private chat when `features.privateLikeServer` is on (the default). Tells the persona that a search of the server's old messages either ran before the reply or did not, that its part of `<lookup>` is what the history holds (a helper's summary or a verbatim stretch), and that without it nothing was looked up there. An older labels file without the key renders nothing
 senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona they can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
@@ -277,6 +278,8 @@ recent.header                            REQUIRED {hours}: the block's first lin
 recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
 recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
 recent.episode                           OPTIONAL {date} {name} {what}: a moment the persona remembers with {name} on {date}; no quote, no feeling. Without it the block shows notes only
+attitudes.header                         the block's first line: who these members are and how to use the list
+attitudes.line                           {name} {band}: one member and their attitude band
 task.part                                {index} {total} {part} {others}: this turn answers one part of a split message. {index} is 1-based, {part} is the text of this part, {others} lists the remaining parts and any queued calls as numbered items joined by `; `. Without this key the splitter is off even when the prompt file exists
 task.queued                              {others}: the trigger author has other calls waiting, listed as numbered items joined by `; `. Shown only when there is no `task.part` for this turn. Without this key the waiting calls are not named and the seen-in-history drop rule applies to them
 task.queuedOthers                        {others}: other members have calls waiting in this channel, listed as `<n>. <author>: <text>` items joined by `; `. Without this key those calls are not named
@@ -519,11 +522,11 @@ Mentor サンドボックスは、状況ごとに 1 回の多様性パスを実�
 
 ## タスクスプリッター
 
-直接呼びかけ（メンション、リプライ、名前、フォローアップ、プライベートメッセージ）が十分に長く構造化されている場合（`split.minChars` 文字、リンクと Discord トークンを除外、少なくとも 2 つのセパレーター区間）、ターンの準備と並行して分類器（`prompts/split.md`、`classifier.text`、目的 `split`）に渡されます。分類器は直近 `split.contextMessages` 件のメッセージの短い `<transcript>`（ペルソナ自身の行は `labels.self` でマーク）を読み、新しいメッセージを `<candidate>`（`<著者名>: <テキスト>`）として受け取ります。回答は `one` という語、または 2 行から `split.maxTasks`（デフォルト 4）行で各行 `- ` で始まり著者自身の言葉でパートを示します。空、パースできない、または遅延した回答（ターンの準備が先に完了）は 1 つのリクエストとして扱われ `split: failed` としてログされます。スイッチ `features.splitTasks`（未設定 = オン）。
+直接呼びかけ（メンション、リプライ、名前、フォローアップ、プライベートメッセージ）が十分に長く構造化されている場合（`split.minChars` 文字、リンクと Discord トークンを除外、少なくとも 2 つのセパレーター区間）、ターンの準備と並行して分類器（`prompts/split.md`、`classifier.text`、目的 `split`）に渡されます。分類器は直近 `split.contextMessages` 件のメッセージの短い `<transcript>`（ペルソナ自身の行は `labels.self` でマーク）を読み、新しいメッセージを `<candidate>`（`<著者名>: <テキスト>`）として受け取ります。回答は `one` という語、または 2 行から `split.maxTasks`（デフォルト 4）行で各行 `- ` で始まり著者自身の言葉でパートを示します。パース後、`split.minPartChars`（デフォルト 20）文字より短いパート（リンクと Discord トークンを除外、`minChars` と同様）は次のパートに統合されます（最後のパートは前のパートに統合）。残りが 2 未満になると 1 つのリクエストとして扱われます（`folded`）。空、パースできない、または遅延した回答（ターンの準備が先に完了）は 1 つのリクエストとして扱われ `split: failed` としてログされます。スイッチ `features.splitTasks`（未設定 = オン）。
 
 パートは同じメッセージに対する通常のターンのチェーン（`turn: part`）となります。各パートのヘルパー（検索分類器、リコール、ルートフック、再視聴）はそのパートのテキストを判定し、リクエストにはパートと残りが示されます（`labels.task.part`、`{index}`、`{total}`、`{part}`、`{others}`）。最初のパートはメッセージ全体のターンが取得した履歴を再利用しメッセージにリプライ。後のパートは履歴を新たにフェッチしプレーンで投稿。各パートには独自の期限とドロップバーがあります。失敗または拒否されたパートは次のパートを止めません。無視ロール、プライベートの日次上限、リングのスタンプはメッセージごとに 1 回カウント。一時停止またはウォームアップはチェーンの次のパートの前に終了します（`turn: chain stopped`）。チェーン実行中、未開始のパートはその著者の待機中の項目（ターンランナーの `waitingParts`）です。後のメッセージがそのいずれかに統合（`addToPart`）された場合、そのパートのリクエストに `tasks.added` で届きます。アテンションは最初のターンから最後まで保持され、アイドル通知は最後に 1 回発火します。
 
-`prompts/split.md` がない場合、スプリッターはオフ（`split: skipped`、`no-prompt`）。`labels.task.part` がない場合もオフ: パースされた回答は破棄されます。設定: `split.minChars`（デフォルト 80）、`split.maxTasks`（デフォルト 4）、`split.contextMessages`（デフォルト 6）、`split.maxOutputTokens`（デフォルト 300）。
+`prompts/split.md` がない場合、スプリッターはオフ（`split: skipped`、`no-prompt`）。`labels.task.part` がない場合もオフ: パースされた回答は破棄されます。設定: `split.minChars`（デフォルト 80）、`split.minPartChars`（デフォルト 20）、`split.maxTasks`（デフォルト 4）、`split.contextMessages`（デフォルト 6）、`split.maxOutputTokens`（デフォルト 300）。
 
 ## マージ分類器
 
@@ -600,6 +603,7 @@ DM は以下のすべてが満たされた場合にのみ応答されます（�
 ### DM ターンの内容と省略
 
 - `<server>`（チャンネルマップ）と `<other_channels>` は省略。
+- `features.privateLikeServer` がオン（デフォルト `true`、キー欠落 = オン）の場合、チャンネルルート分類器、チャンネルプル、サーバー検索（recall）が DM で動作する。チャンネルは DM パートナーがそのチャンネルの View Channel 権限を持つ場合のみプルされる（`context.pull.sameAudience` はこれを緩和しない）。recall 検索もチャンネルごとに同じパートナールールを適用する。DM で言及されたメンバーのエピソードが表示される（`context.askedAboutEpisodes`）。DM にプルされたものはサーバー上で既読や回答済みにならない。スイッチがオフの場合、ルート、プル、recall、言及メンバーのエピソードなし。
 - `prompts.private`（存在する場合）がモードプロンプト（`reply.md`）の後、`forced.md` の前に追加。`{{name}}` と `{{author}}` が設定される。
 - `{{trigger}}` は `labels.triggers.private` から取得。
 - `<senses>` に `senses.privateChat` が含まれる。

@@ -9,14 +9,15 @@
 // comparison). This module is the Discord side, fetchPull, which any caller
 // can use for any channel id: the rails a pull must pass (a readable text
 // channel, allowed, not a thread, not the dry-run mirror, visible to everyone
-// who can view the channel the persona speaks in), one page of history, the
+// who can view the channel the persona speaks in -- in a private chat, to the
+// partner), one page of history, the
 // ring's calls marked on their lines, and the captions -- the cache's first,
 // fresh ones only for a turn certain to run, in parallel and never waited
 // for past a timeout. A pull made before the turn is certain (a chooser can
 // still return `not-now`) gets its fresh captions later from captionPulled,
 // without fetching the channel again.
 
-import { SnowflakeUtil } from 'discord.js';
+import { PermissionFlagsBits, SnowflakeUtil } from 'discord.js';
 import { log } from '../log.js';
 import { isTooOld, pullPictures, pullSettings, pullWindow } from '../behavior/pull.js';
 import { audienceCovers, elsewhereSettings, pingStatus, pingsIn } from '../behavior/elsewhere.js';
@@ -67,19 +68,36 @@ function refused(skip) {
 }
 
 /**
- * Whether content of `source` may enter a turn in `destination`: with
- * `context.pull.sameAudience` (read from `config`, the live config; only
- * `false` turns it off) everyone who can view the destination must be able to
- * view the source, checked role by role on both channels' audiences
- * (src/discord/collect.js#audienceOf, src/behavior/elsewhere.js#audienceCovers;
- * no shortcut for a source @everyone can view). A missing destination, a
- * private chat or a thread never qualifies while the rail is on.
+ * Whether `partner` (a discord.js GuildMember) has View Channel on `source`,
+ * a channel of the partner's guild. No partner, a source without a guild or
+ * of another guild -> false.
+ */
+function partnerViews(partner, source) {
+  if (!partner || !source?.guild || typeof source.permissionsFor !== 'function') return false;
+  if (partner.guild?.id && partner.guild.id !== source.guild.id) return false;
+  return source.permissionsFor(partner)?.has(PermissionFlagsBits.ViewChannel) === true;
+}
+
+/**
+ * Whether content of `source` may enter a turn in `destination`. A private
+ * chat (a destination without a guild) has one reader: the source must be a
+ * channel its `partner` (the guild member the persona talks to) has View
+ * Channel on, whatever `context.pull.sameAudience` says; no partner never
+ * qualifies. Elsewhere, with `context.pull.sameAudience` (read from `config`,
+ * the live config; only `false` turns it off) everyone who can view the
+ * destination must be able to view the source, checked role by role on both
+ * channels' audiences (src/discord/collect.js#audienceOf,
+ * src/behavior/elsewhere.js#audienceCovers; no shortcut for a source
+ * @everyone can view). A missing destination or a thread never qualifies
+ * while the rail is on.
  * @param {object|null} destination  The discord.js channel the turn speaks in.
  * @param {object|null} source       The discord.js channel whose content would enter it.
  * @param {object} config            The live config.
+ * @param {{ partner?: object|null }} [options]  A private chat's partner (a discord.js GuildMember).
  * @returns {boolean}
  */
-export function audienceAllows(destination, source, config) {
+export function audienceAllows(destination, source, config, { partner = null } = {}) {
+  if (destination && !destination.guild) return partnerViews(partner, source);
   if (!pullSettings(config).sameAudience) return true;
   return audienceCovers(audienceOf(destination), audienceOf(source));
 }
@@ -105,27 +123,30 @@ function readableRefusal(channel, bot) {
 /**
  * The rails a pull must pass before anything is fetched, in this order, each
  * with its kebab-case skip code: a `destination` that is given is a guild
- * channel, never a private chat (`private-chat`, whatever the audience rail
- * says); the id is a channel of `guild` (`not-found`); the channel is one the
+ * channel, or a private chat with its `partner` (`private-chat` without one,
+ * whatever the audience rail says); the id is a channel of `guild` (`not-found`); the channel is one the
  * persona may read (src/discord/collect.js#isReadableChannel, the rule
  * neighbours obey too), the refusal named `not-text` (not a text channel),
  * `thread`, `dry-run-channel` (`bot.dryRunChannelId`), `denied` (not allowed
  * by `bot.channels`) or else `not-readable` (the bot cannot read its history);
- * the audience rail toward `destination` (`audience`, see audienceAllows);
+ * the audience rail toward `destination` (`audience`, see audienceAllows: in
+ * a private chat, the partner's View Channel on it);
  * and its newest message not older than a positive `context.pull.maxAgeDays`
  * (`too-old`; 0, the default, never refuses). No request is made: a route
  * hook or a mention scan can ask it for every candidate id (`pullTargets`'
  * `isPullable`).
- * @param {{ guild: object, channelId: string, destination?: object|null, config: object, now?: number }} args
+ * @param {{ guild: object, channelId: string, destination?: object|null, partner?: object|null,
+ *   config: object, now?: number }} args  `partner`: a private chat's partner, the discord.js
+ *   GuildMember of `guild` the persona talks to there.
  * @returns {{ channel: object|null, skip: string|null }}  The discord.js channel when it passes, else its code.
  */
-export function checkPull({ guild, channelId, destination = null, config, now = Date.now() } = {}) {
-  if (destination && !destination.guild) return refused('private-chat');
+export function checkPull({ guild, channelId, destination = null, partner = null, config, now = Date.now() } = {}) {
+  if (destination && !destination.guild && !partner) return refused('private-chat');
   const channel = typeof channelId === 'string' && channelId ? (guild?.channels?.cache?.get?.(channelId) ?? null) : null;
   if (!channel) return refused('not-found');
   const unreadable = readableRefusal(channel, config?.bot ?? {});
   if (unreadable) return refused(unreadable);
-  if (!audienceAllows(destination, channel, config)) return refused('audience');
+  if (!audienceAllows(destination, channel, config, { partner })) return refused('audience');
   const last = lastActivity(channel);
   if (last > 0 && isTooOld(last, { maxAgeDays: pullSettings(config).maxAgeDays, now })) return refused('too-old');
   return { channel, skip: null };
@@ -364,6 +385,8 @@ export async function captionPulled(pulled, { describer = null, guildId = null, 
  * @param {string} [args.guildId]        The guild id for the media cache; default `guild.id`.
  * @param {string} args.channelId        The channel to pull.
  * @param {object|null} args.destination The discord.js channel the turn speaks in (the audience rail; the log).
+ * @param {object|null} [args.partner]  When `destination` is a private chat: the partner, a discord.js
+ *   GuildMember of `guild` (the audience rail is their View Channel; none -> `private-chat`).
  * @param {'routed'|'noticed'|'mention'|'route'|'recall'} args.reason
  * @param {string|null} [args.anchorId]  The window ends at this message instead of the newest one. No
  *   production caller yet: the seam a recall (reason `recall`) will use; only tests pass it today.
@@ -387,6 +410,7 @@ export async function fetchPull({
   guildId = guild?.id ?? null,
   channelId,
   destination = null,
+  partner = null,
   reason = null,
   anchorId = null,
   trigger = null,
@@ -406,7 +430,7 @@ export async function fetchPull({
     return { pulled: null, skip };
   };
 
-  const checked = checkPull({ guild, channelId, destination, config, now: nowMs });
+  const checked = checkPull({ guild, channelId, destination, partner, config, now: nowMs });
   if (checked.skip) return skipWith(checked.skip);
   const { channel } = checked;
   const settings = pullSettings(config);
