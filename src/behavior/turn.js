@@ -133,7 +133,9 @@ const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, p
  * `prepareMs`, how long everything before the reply request may take, counted
  * from the turn's start; `prepareSearchMs`, the longer limit once the search
  * classifier asked for a web or server search (never shorter than
- * `prepareMs`); `prepareMediaMs`, the longer limit of a direct call whose own
+ * `prepareMs`), and the longest the turn waits past `prepareMs` for that
+ * classifier's verdict (null: no wait; it stops at once on a verdict asking
+ * for no search); `prepareMediaMs`, the longer limit of a direct call whose own
  * message (or the message it replies to) brought a picture, a GIF or a video
  * the turn describes or watches (never shorter than `prepareMs`; with both,
  * the larger of the two; null = no such extension); `dropAfterMs`, the bar a
@@ -243,9 +245,14 @@ function trackStage(work, { clock, startedAt, onError }) {
  * The deadline of a turn's preparation: `reached` resolves once `limitMs`
  * (counted from `startedAt` on `clock`; null = no deadline, never) has
  * passed. `extend(ms)` moves it to a later limit (null lifts it) while it has
- * not passed; `close()` ends it -- `passed` turns true and the timer is
- * cleared -- once the turn goes on. `leftMs()`: the time left to it now (0
- * once passed), null without a limit. Also the turn's bar (pace.dropAfterMs).
+ * not passed; `hold(work, ms)`, while it has not passed and has a limit, keeps
+ * it from passing until `work` (a promise) settles, at most until `ms` (counted
+ * the same way; null or not later than the limit: no hold; one hold at a
+ * time): a limit that passed meanwhile passes as soon as `work` settles,
+ * unless an `extend` moved it later first. `close()` ends it -- `passed` turns
+ * true and the timer is cleared -- once the turn goes on. `leftMs()`: the time
+ * left to its limit now (0 once that passed, a hold aside), null without a
+ * limit. Also the turn's bar (pace.dropAfterMs).
  * @param {{ clock: () => number, startedAt: number, schedule: (fn: () => void, ms: number) => () => void,
  *   limitMs: number|null }} options
  */
@@ -253,19 +260,33 @@ function createDeadline({ clock, startedAt, schedule, limitMs }) {
   let passed = false;
   let limit = null;
   let cancel = null;
+  // While a hold is on: the latest limit it allows; `due` once the limit passed under it.
+  let holdUntil = null;
+  let due = false;
   let release;
   const reached = new Promise((resolve) => {
     release = resolve;
   });
+  const fire = () => {
+    cancel = null;
+    passed = true;
+    release();
+  };
   const arm = (ms) => {
     cancel?.();
     cancel = null;
     limit = ms;
+    due = false;
     if (ms === null) return;
     cancel = schedule(() => {
       cancel = null;
-      passed = true;
-      release();
+      if (holdUntil !== null && holdUntil > ms) {
+        // Held: wait for the work, at most until the hold's own limit.
+        due = true;
+        cancel = schedule(fire, Math.max(0, holdUntil - (clock() - startedAt)));
+        return;
+      }
+      fire();
     }, Math.max(0, ms - (clock() - startedAt)));
   };
   arm(limitMs);
@@ -281,6 +302,18 @@ function createDeadline({ clock, startedAt, schedule, limitMs }) {
     extend(ms) {
       if (passed || limit === null) return;
       if (ms === null || ms > limit) arm(ms);
+    },
+    hold(work, ms) {
+      if (passed || limit === null || ms === null || ms <= limit || holdUntil !== null) return;
+      holdUntil = ms;
+      const end = () => {
+        holdUntil = null;
+        if (due && !passed) {
+          cancel?.();
+          fire();
+        }
+      };
+      Promise.resolve(work).then(end, end);
     },
     close() {
       passed = true;
@@ -833,7 +866,8 @@ function taskInput({ part, queued, added, labels, channelId }) {
  * variety pass) starts as soon as its inputs exist and runs alongside the
  * rest, under one deadline (paceSettings: `pace.prepareMs` from the turn's
  * start, `pace.prepareSearchMs` once the search classifier asked for a
- * search, `pace.prepareMediaMs` for a direct call that brought media to look
+ * search -- and at most that long while its verdict is still out --,
+ * `pace.prepareMediaMs` for a direct call that brought media to look
  * at; the larger of the two with both). A helper still running then
  * contributes nothing to this turn --
  * its block is absent, as when it fails -- and keeps running for its cache.
@@ -1892,7 +1926,8 @@ export function createTurnRunner({
    * a failed call (`lookup: classifier failed`, `reason: 'empty'`), no
    * search. Its request is a helper's (helperRequestOptions). `onSearch()`
    * is called once the answer asks for a search that runs, before it starts
-   * (the turn's deadline grows to pace.prepareSearchMs).
+   * (the turn's deadline grows to pace.prepareSearchMs; until the answer the
+   * turn holds its deadline on this call, see createDeadline's `hold`).
    */
   async function maybeLookup({ config, guildId, channel, guild = channel.guild, partner = null, selfId, selfName, history, chatHistory, trigger, descriptions, videos, reads, webOn, serverOn, onSearch }) {
     const channelId = channel.id;
@@ -2734,8 +2769,9 @@ export function createTurnRunner({
 
       // Everything below starts as soon as its inputs exist and runs alongside the rest; the turn
       // waits for all of it together, at most until the deadline (paceSettings, counted from the
-      // turn's start; longer once the search classifier asked for a search, or for a direct call
-      // that brought media to look at). A stage still running then contributes nothing -- its block
+      // turn's start; longer once the search classifier asked for a search -- held for its verdict
+      // up to pace.prepareSearchMs while it is out -- or for a direct call that brought media to
+      // look at). A stage still running then contributes nothing -- its block
       // is absent, as when it fails -- and keeps running for its cache; nothing it settles later
       // reaches this turn. A stage whose inputs were not ready by then is never started. An
       // unhurried turn has no deadline: it waits for every stage (a
@@ -2886,7 +2922,8 @@ export function createTurnRunner({
       // A direct call that brought something to look at -- on its own message or the one it
       // replies to, captioned or watched by the stages above -- is about that thing: its deadline
       // grows to pace.prepareMediaMs (null: no extension). A search asked for later may grow it
-      // further; extend keeps the larger limit, and never sets one on a deadline without one.
+      // further; extend keeps the larger limit, and never sets one on a deadline without one. The
+      // hold for the search classifier's verdict (pace.prepareSearchMs) does nothing under a larger limit.
       if (trigger && DIRECT_CALLS.has(triggerKind) && pace.prepareMediaMs !== null && triggerBringsMedia(trigger, captionCandidates, videoCandidates)) {
         deadline.extend(pace.prepareMediaMs);
       }
@@ -2978,6 +3015,10 @@ export function createTurnRunner({
                   return null;
                 }
               });
+              // Until the classifier's verdict the deadline waits for it, at most until
+              // pace.prepareSearchMs: a search it asks for has moved the deadline there by the time
+              // the stage ends; no search lets a limit that passed meanwhile pass at once.
+              deadline.hold(lookupStage.settled, pace.prepareSearchMs);
               return lookupStage.settled;
             })
             .catch(chainFailed('lookup'));
