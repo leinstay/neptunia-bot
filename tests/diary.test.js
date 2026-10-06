@@ -1,6 +1,7 @@
 // Tests for src/behavior/diary.js (the diary scheduler's pure core: the day
 // plan, due slots, kind choice, plan validation, the <diary> / <kinds> /
-// <seeds> renderings, URL stripping, gists) and the store's diary file.
+// <seeds> renderings, URL stripping, gists), the store's diary file and the
+// scheduler's factory (createDiary) over fakes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -19,7 +20,10 @@ import {
   renderSeedsBlock,
   stripUrls,
   gistOf,
+  createDiary,
 } from '../src/behavior/diary.js';
+import { PermissionFlagsBits } from 'discord.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 import { localHour } from '../src/discord/format.js';
 import { MINUTE_MS, HOUR_MS } from '../src/time.js';
 import { labels } from './fixtures/labels.js';
@@ -346,4 +350,262 @@ test('store: a malformed diary file reads as the empty default', () => {
   fs.mkdirSync(path.join(dir, 'guilds', 'g1'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'guilds', 'g1', 'diary.json'), '[1, 2]');
   assert.deepEqual(createStore({ dataDir: dir }).getDiary('g1'), { posts: [], updatedAt: 0 });
+});
+
+// ---------------------------------------------------------------------------
+// createDiary: the scheduler's edge, with a fake store, client and turn runner.
+
+const D_NOW = Date.UTC(2026, 9, 6, 19, 0, 0); // 19:00 UTC, before the evening slot
+const SLOT = Date.UTC(2026, 9, 6, 21, 30, 0); // 18 + 0.5 * 7 h with rng 0.5
+
+/** A diary channel of guild g1; `attach: false` lacks Attach Files, `send: false` Send Messages. */
+function diaryChannelFake({ send = true, attach = true, guildId = 'g1' } = {}) {
+  return {
+    id: 'd1',
+    name: 'journal',
+    viewable: true,
+    guild: { id: guildId, members: { me: { id: 'self' } } },
+    permissionsFor: () => ({
+      has: (flag) => (flag === PermissionFlagsBits.AttachFiles ? attach : flag === PermissionFlagsBits.SendMessages ? send : true),
+    }),
+  };
+}
+
+function diaryHarness({ diary = {}, features = {}, data = {}, posts = [], channel = diaryChannelFake(), outcomes = [], backfill = null, warming = false } = {}) {
+  let clock = D_NOW;
+  const turnCalls = [];
+  const hot = {
+    config: {
+      bot: { timezone: 'UTC' },
+      features: { diary: true, ...features },
+      diary: {
+        channelId: 'd1',
+        windows: [{ from: 18, to: 1, posts: [1, 1] }],
+        quietDayChance: 0,
+        minGapMinutes: 0,
+        maxPerDay: 3,
+        slotGraceMinutes: 30,
+        ...diary,
+      },
+    },
+    prompts: { labels },
+  };
+  const store = {
+    state: { data: { ...data }, markDirty() {} },
+    getDiary: () => ({ posts, updatedAt: 0 }),
+  };
+  const client = {
+    user: { id: 'self' },
+    channels: {
+      cache: new Map(channel ? [[channel.id, channel]] : []),
+      fetch: async () => {
+        throw new Error('unknown channel');
+      },
+    },
+  };
+  const turns = {
+    runTurn: async (params) => {
+      turnCalls.push({ params, done: [...(store.state.data.diary?.g1?.done ?? [])] });
+      return outcomes.shift() ?? { outcome: 'spoke', diary: { kind: 'status', picture: false, search: false, messages: 1 } };
+    },
+  };
+  const diaryFactory = createDiary({
+    hot,
+    store,
+    client,
+    turns,
+    getGuildId: () => 'g1',
+    isWarmingUp: () => warming,
+    backfill,
+    rng: () => 0.5,
+    now: () => clock,
+  });
+  return { hot, store, turnCalls, diary: diaryFactory, setNow: (t) => (clock = t) };
+}
+
+test('tick: no-op without a channel id, with features.diary false, when paused or warming up', async () => {
+  const cases = [
+    ['no-channel', { diary: { channelId: '' } }],
+    ['off', { features: { diary: false } }],
+    ['paused', { data: { paused: true } }],
+    ['warmup', { warming: true }],
+  ];
+  for (const [reason, setup] of cases) {
+    const h = diaryHarness(setup);
+    h.setNow(SLOT + MINUTE_MS);
+    const { logs } = await withCapturedLogs(async () => {
+      await h.diary.tick();
+      await h.diary.tick();
+    });
+    assert.equal(h.turnCalls.length, 0, reason);
+    assert.equal(h.store.state.data.diary, undefined, `${reason}: no plan`);
+    assert.equal(logs.filter((l) => l.msg === 'diary: skip' && l.reason === reason).length, 1, `${reason}: logged once a day`);
+  }
+});
+
+test('tick: plans the day once and stores it in state.data.diary[guildId]', async () => {
+  const h = diaryHarness();
+  await h.diary.tick();
+  const plan = h.store.state.data.diary.g1;
+  assert.deepEqual(plan, { day: '2026-10-06', slots: [SLOT], quiet: false, done: [] });
+  await h.diary.tick();
+  assert.equal(h.store.state.data.diary.g1, plan, 'the same plan, not planned again');
+  h.setNow(D_NOW + 24 * HOUR_MS);
+  await h.diary.tick();
+  assert.equal(h.store.state.data.diary.g1.day, '2026-10-07', 'a new local day replans');
+});
+
+test('tick: the day key is the local date in bot.timezone', async () => {
+  const h = diaryHarness();
+  h.hot.config.bot.timezone = 'Europe/Athens';
+  h.setNow(Date.UTC(2026, 9, 6, 22, 30, 0)); // 01:30 on the 7th in Athens
+  await h.diary.tick();
+  assert.equal(h.store.state.data.diary.g1.day, '2026-10-07');
+});
+
+test('tick: a new local day carries over the open slots of the last plan that spill past midnight', async () => {
+  const late = Date.UTC(2026, 9, 7, 0, 30, 0);
+  const missed = Date.UTC(2026, 9, 6, 21, 0, 0);
+  const fired = Date.UTC(2026, 9, 6, 20, 0, 0);
+  const h = diaryHarness({
+    diary: { windows: [{ from: 12, to: 16, posts: [0, 0] }] },
+    data: { diary: { g1: { day: '2026-10-06', slots: [fired, missed, late], done: [fired], quiet: false } } },
+  });
+  h.setNow(Date.UTC(2026, 9, 7, 0, 5, 0));
+  await h.diary.tick();
+  assert.deepEqual(h.store.state.data.diary.g1.slots, [late], 'the open slot ahead is kept; done and long-missed ones are not');
+  assert.equal(h.store.state.data.diary.g1.day, '2026-10-07');
+  h.setNow(late + MINUTE_MS);
+  await h.diary.tick();
+  assert.equal(h.turnCalls.length, 1, 'the carried slot fires');
+});
+
+test('tick: fires the due slot through runTurn with mode diary and marks it done', async () => {
+  const h = diaryHarness();
+  await h.diary.tick();
+  assert.equal(h.turnCalls.length, 0, 'not due yet');
+  h.setNow(SLOT + 5 * MINUTE_MS);
+  const { logs } = await withCapturedLogs(() => h.diary.tick());
+  assert.equal(h.turnCalls.length, 1);
+  const { params, done } = h.turnCalls[0];
+  assert.equal(params.mode, 'diary');
+  assert.equal(params.channel.id, 'd1');
+  assert.deepEqual(params.diary, { kind: null, forced: false });
+  assert.deepEqual(done, [SLOT], 'marked before the turn ran');
+  assert.ok(logs.some((l) => l.msg === 'diary: due'));
+  const line = logs.find((l) => l.msg === 'diary: post');
+  assert.equal(line.outcome, 'spoke');
+  assert.equal(line.kind, 'status');
+  await h.diary.tick();
+  assert.equal(h.turnCalls.length, 1, 'a done slot never fires again');
+});
+
+test('tick: a busy outcome un-marks the slot so the next tick retries it within the grace', async () => {
+  const h = diaryHarness({ outcomes: [{ outcome: 'busy' }] });
+  h.setNow(SLOT + MINUTE_MS);
+  await h.diary.tick();
+  assert.deepEqual(h.store.state.data.diary.g1.done, []);
+  await h.diary.tick();
+  assert.equal(h.turnCalls.length, 2);
+  assert.deepEqual(h.store.state.data.diary.g1.done, [SLOT]);
+});
+
+test('tick: dropped slots are marked done without firing', async () => {
+  const h = diaryHarness();
+  await h.diary.tick();
+  h.setNow(SLOT + 45 * MINUTE_MS);
+  const { logs } = await withCapturedLogs(() => h.diary.tick());
+  assert.equal(h.turnCalls.length, 0);
+  assert.deepEqual(h.store.state.data.diary.g1.done, [SLOT]);
+  assert.ok(logs.some((l) => l.msg === 'diary: skip' && l.reason === 'grace' && l.count === 1));
+});
+
+test('tick: backfills an empty history before the first post', async () => {
+  const calls = [];
+  let h = null;
+  const backfill = async (args) => {
+    calls.push({ args, turns: h.turnCalls.length });
+    return 4;
+  };
+  h = diaryHarness({ backfill });
+  h.setNow(SLOT + MINUTE_MS);
+  const { logs } = await withCapturedLogs(() => h.diary.tick());
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].turns, 0, 'before the post');
+  assert.equal(calls[0].args.guildId, 'g1');
+  assert.equal(calls[0].args.channel.id, 'd1');
+  assert.equal(calls[0].args.selfId, 'self');
+  assert.equal(calls[0].args.labels, labels);
+  assert.ok(logs.some((l) => l.msg === 'diary: backfill' && l.count === 4));
+  await h.diary.force({});
+  assert.equal(calls.length, 1, 'once per channel and process');
+
+  const kept = [];
+  const full = diaryHarness({ posts: [{ at: 1, kind: 'status', gist: 'x' }], backfill: async (args) => kept.push(args) });
+  full.setNow(SLOT + MINUTE_MS);
+  await full.diary.tick();
+  assert.equal(kept.length, 0, 'a history already there is not backfilled');
+});
+
+test('tick: refuses when the daily post cap is reached', async () => {
+  const h = diaryHarness({ diary: { maxPerDay: 2 }, data: { diaryDay: '2026-10-06', diaryPosts: 2 } });
+  h.setNow(SLOT + MINUTE_MS);
+  const { logs } = await withCapturedLogs(() => h.diary.tick());
+  assert.equal(h.turnCalls.length, 0);
+  assert.ok(logs.some((l) => l.msg === 'diary: skip' && l.reason === 'cap'));
+  assert.deepEqual(h.store.state.data.diary.g1.done, [SLOT], 'the slot is spent');
+});
+
+test('tick: refuses a channel the bot cannot send or attach in', async () => {
+  for (const channel of [diaryChannelFake({ attach: false }), diaryChannelFake({ send: false })]) {
+    const h = diaryHarness({ channel });
+    h.setNow(SLOT + MINUTE_MS);
+    const { logs } = await withCapturedLogs(() => h.diary.tick());
+    assert.equal(h.turnCalls.length, 0);
+    assert.ok(logs.some((l) => l.msg === 'diary: skip' && l.reason === 'not-writable'));
+  }
+});
+
+test('tick: a channel that cannot be found, or of another guild, is no channel', async () => {
+  for (const channel of [null, diaryChannelFake({ guildId: 'g2' })]) {
+    const h = diaryHarness({ channel });
+    h.setNow(SLOT + MINUTE_MS);
+    const { logs } = await withCapturedLogs(() => h.diary.tick());
+    assert.equal(h.turnCalls.length, 0);
+    assert.ok(logs.some((l) => l.msg === 'diary: skip' && l.reason === 'no-channel'));
+  }
+});
+
+test('force: runs now with the kind, ignores the plan and the quiet day, obeys the caps', async () => {
+  const h = diaryHarness({ diary: { quietDayChance: 1 } });
+  const result = await h.diary.force({ kind: 'meme' });
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(h.turnCalls.length, 1);
+  assert.deepEqual(h.turnCalls[0].params.diary, { kind: 'meme', forced: true });
+  assert.equal(h.store.state.data.diary, undefined, 'no plan touched');
+
+  const capped = diaryHarness({ diary: { maxPerDay: 1 }, data: { diaryDay: '2026-10-06', diaryPosts: 1 } });
+  const refused = await capped.diary.force({ kind: 'meme' });
+  assert.deepEqual(refused, { outcome: 'refused', reason: 'cap', limit: { key: 'diary.maxPerDay', used: 1, cap: 1 } });
+  assert.equal(capped.turnCalls.length, 0);
+
+  const paused = diaryHarness({ data: { paused: true } });
+  assert.deepEqual(await paused.diary.force({}), { outcome: 'paused' });
+  const unset = diaryHarness({ diary: { channelId: '' } });
+  assert.deepEqual(await unset.diary.force({}), { outcome: 'not-now', reason: 'no-channel' });
+});
+
+test('stop: no tick after stop', async () => {
+  const h = diaryHarness();
+  h.setNow(SLOT + MINUTE_MS);
+  h.diary.stop();
+  await h.diary.tick();
+  assert.equal(h.turnCalls.length, 0);
+  assert.equal(h.store.state.data.diary, undefined);
+});
+
+test('status: the channel, the day plan, the counts of today and the history size', async () => {
+  const h = diaryHarness({ posts: [{}, {}], data: { diaryDay: '2026-10-06', diaryPosts: 1, diaryPicturesDay: '2026-10-06', diaryPictures: 1 } });
+  await h.diary.tick();
+  assert.deepEqual(h.diary.status(), { channelId: 'd1', day: '2026-10-06', slots: [SLOT], done: [], quiet: false, posts: 1, pictures: 1, history: 2 });
 });

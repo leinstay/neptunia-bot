@@ -21,6 +21,7 @@ import { createChannelRouter } from './behavior/route-channel.js';
 import { createRecall } from './behavior/recall-run.js';
 import { createEmojiIndex } from './discord/emoji.js';
 import { createSpontaneous } from './behavior/spontaneous.js';
+import { createDiary } from './behavior/diary.js';
 import { createMemoryUpdater } from './memory/update.js';
 import { createWarmup } from './memory/warmup.js';
 import { createPortraitScheduler } from './memory/portrait.js';
@@ -180,6 +181,8 @@ const turns = createTurnRunner({
 const warmup = createWarmup({ hot, store, client, llm, calibrator, getSelfName, getGuildId });
 const isWarmingUp = warmup.isWarmingUp;
 const spontaneous = createSpontaneous({ hot, store, client, turns, getGuildId, isWarmingUp });
+// The persona's diary (diary.channelId): its own posts on a day plan, ticked below.
+const diary = createDiary({ hot, store, client, turns, getGuildId, isWarmingUp });
 // The stream analyzer's "the stored portrait misses something" cue -- src/memory/warmup.js's
 // own rails (hours/day/mute) decide whether a refresh actually runs; never awaited here.
 const memory = createMemoryUpdater({
@@ -252,6 +255,8 @@ const admin = createAdmin({
   store,
   client,
   spontaneous,
+  // /nep diary: the day plan, a forced post.
+  diary,
   calibrator,
   getGuildId,
   isWarmingUp,
@@ -345,9 +350,10 @@ client.once(Events.ClientReady, async () => {
   instance.guildId = resolved.guildId;
 
   // The periodic work first, before anything below can throw or wait: the
-  // flush, the spontaneous, memory and portrait ticks, the hourly affinity decay.
+  // flush, the spontaneous, diary, memory and portrait ticks, the hourly affinity decay.
   every(30_000, () => store.flush(), 'store.flush');
   every(30_000, () => spontaneous.tick(), 'spontaneous.tick');
+  every(30_000, () => diary.tick(), 'diary.tick');
   // The tick still runs on schedule even with the switch off, so flipping it
   // back on later needs no restart; it is the wrapper here that no-ops.
   every(60_000, () => (hot.config.features?.memory !== false ? memory.tick() : undefined), 'memory.tick');
@@ -441,6 +447,7 @@ async function shutdown(signal) {
   log.info('index: shutting down', { signal });
   for (const id of timers) clearInterval(id);
   spontaneous.stop();
+  diary.stop();
   onMessage.stop();
   hot.close();
   store.flush();
