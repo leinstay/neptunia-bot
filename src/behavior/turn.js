@@ -120,7 +120,7 @@ export function appendPostLedger(ledger, entry, size) {
 }
 
 /** `pace` when a key is missing: config.json's values. */
-const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, dropAfterMs: 60000, typingWhilePreparing: false, unpromptedWaits: true });
+const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, dropAfterMs: 60000, replyHedgeMs: 20000, typingWhilePreparing: false, unpromptedWaits: true });
 
 /**
  * The pace of a turn's preparation, read from `config` (the live config):
@@ -129,9 +129,11 @@ const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, d
  * classifier asked for a web or server search (never shorter than
  * `prepareMs`); `dropAfterMs`, the bar a turn's answer must be in hand by,
  * counted from the turn's start, past which the turn is dropped unposted;
+ * `replyHedgeMs`, how long the reply request of a turn with a bar is given
+ * before a second, identical one is sent (the first answer wins);
  * each a positive number of milliseconds, or null -- no deadline, wait for
- * everything; no bar -- for 0, a negative value or a non-number. A missing
- * key takes config.json's value. `typingWhilePreparing` (only exactly true
+ * everything; no bar; no second request -- for 0, a negative value or a
+ * non-number. A missing key takes config.json's value. `typingWhilePreparing` (only exactly true
  * turns it on; off as shipped): the typing indicator from the start of a turn
  * answering a direct call until its answer is in hand. Off, the indicator
  * shows only while the finished answer is being typed out, as before.
@@ -141,7 +143,7 @@ const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, d
  * deadline and bar.
  * @param {object} config
  * @returns {{ prepareMs: number|null, prepareSearchMs: number|null, dropAfterMs: number|null,
- *   typingWhilePreparing: boolean, unpromptedWaits: boolean }}
+ *   replyHedgeMs: number|null, typingWhilePreparing: boolean, unpromptedWaits: boolean }}
  */
 export function paceSettings(config) {
   const pace = isPlainObject(config?.pace) ? config.pace : {};
@@ -153,6 +155,7 @@ export function paceSettings(config) {
     prepareMs: limit(pace.prepareMs, PACE_FALLBACK.prepareMs),
     prepareSearchMs: limit(pace.prepareSearchMs, PACE_FALLBACK.prepareSearchMs),
     dropAfterMs: limit(pace.dropAfterMs, PACE_FALLBACK.dropAfterMs),
+    replyHedgeMs: limit(pace.replyHedgeMs, PACE_FALLBACK.replyHedgeMs),
     typingWhilePreparing: pace.typingWhilePreparing === true,
     unpromptedWaits: pace.unpromptedWaits !== false,
   };
@@ -2296,14 +2299,18 @@ export function createTurnRunner({
             ]);
       // The reply request's options (role `voice`, purpose `reply`): with a bar, each attempt's
       // timeout is the smaller of llm.timeoutMs (read now) and the time left, and the bar's
-      // signal aborts it; nothing is asked once no time is left.
+      // signal aborts it; nothing is asked once no time is left. With a bar the request is also
+      // hedged (pace.replyHedgeMs, read now): no answer by then, a second identical request is
+      // sent and the first answer wins, the whole call still cut at the same timeout.
       const replyOptions = () => {
         const left = bar.leftMs();
         if (left === null) return { ...REPLY_REQUEST };
         if (left <= 0) throw TOO_SLOW;
         const configured = hot.config.llm?.timeoutMs;
         const timeoutMs = Number.isFinite(configured) && configured > 0 ? Math.min(configured, left) : left;
-        return { ...REPLY_REQUEST, timeoutMs, signal: barAbort.signal };
+        const hedgeMs = paceSettings(hot.config).replyHedgeMs;
+        const hedge = hedgeMs !== null && hedgeMs < timeoutMs ? { hedge: { afterMs: hedgeMs, timeoutMs } } : {};
+        return { ...REPLY_REQUEST, timeoutMs, signal: barAbort.signal, ...hedge };
       };
       // A drawFailed turn only says the picture failed: no classifier or
       // at-turn variety pass is paid for a second time (once it posts, its

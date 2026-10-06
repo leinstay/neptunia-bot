@@ -2388,6 +2388,108 @@ test('hedge: a set marked long is limited by longTimeoutMs, still hedged at afte
   assert.equal(own.clock.pending(), 0);
 });
 
+// --- an explicit hedge (`options.hedge`): the reply of a turn with a bar ---
+
+/** The hedge a reply request carries in the tests below: attempt 2 at 500 ms, all cut at 5 s. */
+const REPLY_HEDGE = { afterMs: 500, timeoutMs: 5000 };
+
+/**
+ * The real client on a fake clock and a deferred transport, with the prompt cache on for the
+ * voice role; `llm` overrides keys of the llm group. `ask(extra)` sends a reply-shaped request
+ * (REPLY_REQUEST, no helper mark) with `extra` added to its options.
+ */
+function replyLlm({ llm = {}, transport = deferredTransport(), state = fakeState() } = {}) {
+  const clock = fakeClock();
+  const config = cachingConfig({ timeoutMs: REPLY_HEDGE.timeoutMs, ...llm });
+  const client = createLlm({
+    apiKey: 'k',
+    getConfig: () => config,
+    calibrator: fakeCalibrator(),
+    state,
+    fetchImpl: transport.fetchImpl,
+    now: clock.now,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+  const ask = (extra = {}) => client.complete(replyMessages(), { ...REPLY_REQUEST, timeoutMs: REPLY_HEDGE.timeoutMs, ...extra });
+  return { ask, clock, state, calls: transport.calls };
+}
+
+test('hedge: an explicit options.hedge hedges a non-helper request at its afterMs; the first answer wins, both bodies cached alike', async () => {
+  const { ask, clock, calls, state } = replyLlm();
+  const { result, logs } = await withCapturedLogs(async () => {
+    const pending = ask({ hedge: { ...REPLY_HEDGE } });
+    await clock.advance(REPLY_HEDGE.afterMs - 1);
+    assert.equal(calls.length, 1);
+    await clock.advance(1);
+    assert.equal(calls.length, 2, 'the second attempt goes out at afterMs');
+    await clock.advance(200);
+    calls[1].answer(okResponse('second'));
+    return pending;
+  });
+  assert.equal(result.text, 'second');
+  assert.equal(calls[0].signal.aborted, true, 'the slower attempt is aborted');
+  assert.equal(calls[1].signal.aborted, false);
+  assert.equal(calls[1].body, calls[0].body, 'the same request twice');
+  assert.equal(markedParts(JSON.parse(calls[0].body).messages).length, 1, 'the cache marker is on both attempts');
+  assert.deepEqual(Object.keys(JSON.parse(calls[0].body)).sort(), ['max_tokens', 'messages', 'model', 'temperature']);
+  assert.equal(state.data.llmCount, 2, 'both attempts counted');
+  assert.deepEqual(linesOf(logs, 'llm: hedge'), [{ role: 'voice', purpose: 'reply', model: LISTED_MODEL, afterMs: REPLY_HEDGE.afterMs }]);
+  const [usage] = linesOf(logs, 'llm: usage');
+  assert.deepEqual([usage.hedged, usage.attempt, usage.ms], [true, 2, REPLY_HEDGE.afterMs + 200]);
+  assert.equal(clock.pending(), 0);
+});
+
+test('hedge: a non-helper request without a valid explicit hedge is sent once, even on a role llm.hedge lists', async () => {
+  const cases = [
+    { name: 'no hedge', extra: {} },
+    { name: 'afterMs 0', extra: { hedge: { ...REPLY_HEDGE, afterMs: 0 } } },
+    { name: 'afterMs not a number', extra: { hedge: { ...REPLY_HEDGE, afterMs: '500' } } },
+    { name: 'no timeoutMs', extra: { hedge: { afterMs: REPLY_HEDGE.afterMs } } },
+    { name: 'not an object', extra: { hedge: REPLY_HEDGE.afterMs } },
+  ];
+  for (const { name, extra } of cases) {
+    const { ask, clock, calls } = replyLlm({ llm: { hedge: { ...HEDGE, roles: ['voice'], afterMs: 100 } } });
+    const { result, logs } = await withCapturedLogs(async () => {
+      const pending = ask(extra);
+      await clock.advance(REPLY_HEDGE.timeoutMs - 1);
+      assert.equal(calls.length, 1, name);
+      calls[0].answer(okResponse('ok'));
+      return pending;
+    });
+    assert.equal(result.text, 'ok', name);
+    assert.deepEqual(linesOf(logs, 'llm: hedge'), [], name);
+    const [usage] = linesOf(logs, 'llm: usage');
+    assert.equal('hedged' in usage || 'attempt' in usage, false, name);
+  }
+});
+
+test('hedge: an explicit hedge keeps the rails -- the token cap before any attempt, the daily cap on attempt 2, its timeoutMs on the whole call', async () => {
+  const capped = replyLlm({ llm: { maxRequestTokens: 5 } });
+  await assert.rejects(capped.ask({ hedge: { ...REPLY_HEDGE } }), TokenLimitError);
+  assert.equal(capped.calls.length, 0);
+
+  const tight = replyLlm({ llm: { maxRequestsPerDay: 1 } });
+  const { logs } = await withCapturedLogs(async () => {
+    const pending = tight.ask({ hedge: { ...REPLY_HEDGE } });
+    await tight.clock.advance(REPLY_HEDGE.afterMs + 1000);
+    assert.equal(tight.calls.length, 1, 'no room under the daily cap: attempt 2 is never sent');
+    tight.calls[0].answer(okResponse('ok'));
+    assert.equal((await pending).text, 'ok');
+  });
+  assert.equal(tight.state.data.llmCount, 1);
+  assert.deepEqual(linesOf(logs, 'llm: hedge'), []);
+
+  const stalled = replyLlm();
+  const seen = watch(stalled.ask({ hedge: { ...REPLY_HEDGE } }));
+  await stalled.clock.advance(REPLY_HEDGE.timeoutMs - 1);
+  assert.equal(seen.status, 'pending');
+  await stalled.clock.advance(1);
+  assert.equal(seen.value.name, 'TimeoutError');
+  assert.deepEqual(stalled.calls.map((call) => call.signal.aborted), [true, true]);
+  assert.equal(stalled.clock.pending(), 0);
+});
+
 // --- one speaking model: the reply and the memory wording share the role `voice` ---
 
 test('REPLY_REQUEST and MEMORY_VOICE_REQUEST: both go out as role voice, told apart by purpose on the usage line only', async () => {

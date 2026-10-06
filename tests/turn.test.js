@@ -5564,7 +5564,7 @@ async function settleUntil(done = () => false, rounds = 50) {
 }
 
 // The pace every test below sets for itself; a test passing its own `pace` overrides single keys.
-const TEST_PACE = { prepareMs: 1000, prepareSearchMs: 3000, dropAfterMs: 0, typingWhilePreparing: false };
+const TEST_PACE = { prepareMs: 1000, prepareSearchMs: 3000, dropAfterMs: 0, replyHedgeMs: 0, typingWhilePreparing: false };
 
 function paceHot(features = {}, pace = {}) {
   const hot = lookupHot({ mediaDescriptions: true, ...features });
@@ -5621,10 +5621,15 @@ test('paceSettings: 0, a negative value or a non-number turns a limit off; a mis
   }
   assert.ok(missing.dropAfterMs > 0);
   assert.equal(paceSettings({ pace: { dropAfterMs: 0 } }).dropAfterMs, null);
-  assert.deepEqual(paceSettings({ pace: { prepareMs: 2500, prepareSearchMs: 7000, dropAfterMs: 9000, typingWhilePreparing: false, unpromptedWaits: false } }), {
+  assert.ok(missing.replyHedgeMs > 0);
+  for (const off of [0, -5, '500', null, Number.NaN, Infinity]) {
+    assert.equal(paceSettings({ pace: { replyHedgeMs: off } }).replyHedgeMs, null, String(off));
+  }
+  assert.deepEqual(paceSettings({ pace: { prepareMs: 2500, prepareSearchMs: 7000, dropAfterMs: 9000, replyHedgeMs: 4000, typingWhilePreparing: false, unpromptedWaits: false } }), {
     prepareMs: 2500,
     prepareSearchMs: 7000,
     dropAfterMs: 9000,
+    replyHedgeMs: 4000,
     typingWhilePreparing: false,
     unpromptedWaits: false,
   });
@@ -6042,6 +6047,49 @@ test('runTurn: no text-only resend is made once no time is left before pace.drop
   assert.equal(result.outcome, 'error');
   assert.equal(channel.sent.length, 0);
   assert.ok(logs.some((l) => l.msg === 'turn: dropped' && l.reason === 'too-slow'));
+});
+
+// The reply hedge (pace.replyHedgeMs): only the reply request of a turn with a bar carries one.
+
+test('runTurn: a direct call with a bar passes pace.replyHedgeMs to the reply request as its hedge, cut at the same timeout', async () => {
+  const llm = barLlm(async () => ({ text: '<msg>ok</msg>', usage: {}, estimated: 10 }));
+  const hot = paceHot({}, { dropAfterMs: BAR_MS, replyHedgeMs: 500 });
+  hot.config.llm.timeoutMs = 300_000;
+  const scene = paceScene({ hot, llm, clock: () => NOW });
+
+  const { result } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+  assert.equal(result.outcome, 'spoke');
+  const [options] = llm.optionCalls;
+  assert.equal(options.timeoutMs, BAR_MS);
+  assert.deepEqual(options.hedge, { afterMs: 500, timeoutMs: BAR_MS }, 'attempt 2 at 500 ms, both ended at the bar');
+  assert.equal(options.helper, undefined, 'still no helper request');
+});
+
+test('runTurn: pace.replyHedgeMs 0, or not below the time left to the bar, sends the reply request without a hedge', async () => {
+  for (const replyHedgeMs of [0, BAR_MS]) {
+    const llm = barLlm(async () => ({ text: '<msg>ok</msg>', usage: {}, estimated: 10 }));
+    const hot = paceHot({}, { dropAfterMs: BAR_MS, replyHedgeMs });
+    hot.config.llm.timeoutMs = 300_000;
+    const scene = paceScene({ hot, llm, clock: () => NOW });
+
+    const { result } = await withCapturedLogs(() => scene.turns.runTurn(scene.params));
+
+    assert.equal(result.outcome, 'spoke', String(replyHedgeMs));
+    const [options] = llm.optionCalls;
+    assert.equal('hedge' in options, false, String(replyHedgeMs));
+    assert.equal(options.timeoutMs, BAR_MS, String(replyHedgeMs));
+  }
+});
+
+test('runTurn: an initiate turn with pace.unpromptedWaits on has no bar, so its reply request is never hedged', async () => {
+  const llm = barLlm(async () => ({ text: '<msg>ok</msg>', usage: {}, estimated: 10 }));
+  const scene = paceScene({ hot: paceHot({}, { dropAfterMs: BAR_MS, replyHedgeMs: 500, unpromptedWaits: true }), llm, clock: () => NOW });
+
+  const { result } = await withCapturedLogs(() => scene.turns.runTurn({ channel: scene.channel, mode: 'initiate' }));
+
+  assert.equal(result.outcome, 'spoke');
+  assert.deepEqual(llm.optionCalls, [{ role: 'voice', purpose: 'reply' }]);
 });
 
 test('runTurn: pace.dropAfterMs 0 sets no bar -- a slow answer is still posted, the request as before', async () => {
