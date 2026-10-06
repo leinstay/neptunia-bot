@@ -479,6 +479,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `dampingPower` | `1` | 阻尼因子的指数；值越高两端越难达到 |
 | `maxDeltaPerUpdate` | `15` | 每次更新的最大分数变化 |
 | `historySize` | `10` | 每成员保留的态度变化记录数 |
+| `shownMoves` | `4` | 档案中分数后显示的态度变动条数，按绝对变动量从大到小。`0` 隐藏 |
 | `directTriggerCount` | `6` | 强制提前更新的直接互动次数 |
 | `decayPerDay` | `0.04` | 每日向零漂移；每天损失 `decayPerDay * |score| * (|score| / 100) ^ decayPower`。`0` 或缺失 = 关 |
 | `decayPower` | `1` | 衰减曲线的指数；值越高，接近零的分数衰减越慢。非正数 = 1 |

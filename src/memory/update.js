@@ -44,7 +44,7 @@ import { emojiUsageOpts } from './emoji-usage.js';
 import { gifOpts } from './gifs.js';
 import { topByRank } from './ranking.js';
 import { topEpisodes } from './episodes.js';
-import { teacherToken, toTokens, fromTokens } from './mentions.js';
+import { ID_DIGITS, occursAsWholeWord, teacherToken, toTokens, fromTokens, tokenIds } from './mentions.js';
 import { INJOKE_CHARS, MEMORY_LIMIT_DEFAULTS, SELF_CHARS } from './text-limits.js';
 import { clampText } from './clamp.js';
 import { RECENT_DEFAULTS, foldText, liveRecent, recentSettings } from './recent.js';
@@ -1397,6 +1397,59 @@ function selfOpsOptions(cfg, nowMs) {
   };
 }
 
+// The `(id:...)` marker of a member reference `toTokens` left as written (an id it did not know).
+const ID_MARKER_RE = new RegExp(`\\(id:${ID_DIGITS}\\)`);
+
+/**
+ * The lowercased display names a new self claim must not contain: every `names` entry of every
+ * stored profile of the guild (`store.listUserProfiles`, when the store has it), of the batch's
+ * authors (`getUser`, so a store without the listing still checks them) and the nicks the batch's
+ * transcript used (`batchAuthorNames`). Aliases are left out: too many of them are common words.
+ * A profile listing that cannot be read leaves the batch with its authors' names, never fails it.
+ */
+function memberNamesOf(store, guildId, knownUserIds, batchAuthorNames) {
+  const profiles = [];
+  if (typeof store.listUserProfiles === 'function') {
+    try {
+      profiles.push(...(store.listUserProfiles(guildId) ?? []));
+    } catch (err) {
+      log.warn('memory: member names left out', { guildId, reason: 'store-error', error: errorNameOf(err) });
+    }
+  }
+  for (const id of knownUserIds ?? []) profiles.push(store.getUser(guildId, String(id)));
+  const names = new Set();
+  const take = (name) => {
+    if (typeof name === 'string' && name.trim()) names.add(name.trim().toLowerCase());
+  };
+  for (const profile of profiles) for (const name of Array.isArray(profile?.names) ? profile.names : []) take(name);
+  for (const nick of batchAuthorNames instanceof Map ? batchAuthorNames.values() : []) take(nick);
+  return [...names];
+}
+
+/**
+ * A test telling a self claim that is about a member: a `<@id>` token, an `(id:...)` marker, or
+ * a member's display name (`memberNamesOf`) as a whole word, case-insensitive. What the persona
+ * feels about a member lives in that member's attitude and relationship, never among the
+ * persona's standing facts, where every later reply would read it back. The names are read on the
+ * first claim that needs them.
+ * @returns {(text: unknown) => boolean}
+ */
+function memberClaimTest(store, guildId, knownUserIds, batchAuthorNames) {
+  let names = null;
+  return (text) => {
+    if (typeof text !== 'string' || !text) return false;
+    if (tokenIds(text).length > 0 || ID_MARKER_RE.test(text)) return true;
+    names ??= memberNamesOf(store, guildId, knownUserIds, batchAuthorNames);
+    const lower = text.toLowerCase();
+    return names.some((name) => occursAsWholeWord(lower, name));
+  };
+}
+
+/** One log line per update for the self claims about a member `memberClaimTest` dropped; counts only. */
+function logSelfDropped(guildId, count) {
+  if (count > 0) log.info('memory: self claim about a member dropped', { guildId, count });
+}
+
 /** `adjustAffinity` / `adjustPrivateAffinity` options from the `relationships` argument. */
 function affinityOptions(relationships, cfg) {
   return {
@@ -1676,7 +1729,7 @@ function applyRecentField(store, guildId, raw, { recent, tokenize, knownChannelI
  * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, relationships: number, channels: number, episodes: number, lore: number,
  *   learned: number, interestsChanged: number, aliasesChanged: number, aliasOnly: number, aliasesDropped: number,
  *   droppedUsers: number, droppedFields: number, portraitDropped: number, portraitRequests: { userId: string, reason: string }[],
- *   recentAdded: number, recentOverlap: number, recentRemoved: number, recentExpired: number, recentEvicted: number,
+ *   selfDropped: number, recentAdded: number, recentOverlap: number, recentRemoved: number, recentExpired: number, recentEvicted: number,
  *   recentDropped: number, recentInvalid: number, recentNoChannel: number, recentStale: number, recentDuplicate: number,
  *   recentOverCap: number, recentUnshown: number }}
  *   `users`: authors written. `guild`: patterns/starters/injokes changed. `self`: the stored self list changed
@@ -1690,6 +1743,7 @@ function applyRecentField(store, guildId, raw, { recent, tokenize, knownChannelI
  *   a proposal that was dropped, told apart from none. `droppedUsers`: entries for an id that is neither an author
  *   nor a roster member with a stored profile. `droppedFields`: non-empty keys other than `aliases` dropped from
  *   roster members' entries. `portraitDropped`: authors' non-blank `character`/`style` dropped without `portraitFields`.
+ *   `selfDropped`: new self claims about a member dropped (`memberClaimTest`), logged once per update.
  *   `recentAdded` / `recentRemoved` / `recentExpired`: recent lines stored, taken back by id, gone past
  *   `recent.hours`; `recentOverlap`: adds dropped as equal to a long-term entry of this update;
  *   `recentEvicted`, `recentDropped` and its reasons (`recentInvalid`, `recentNoChannel`,
@@ -1722,6 +1776,7 @@ export function applyMemoryUpdate(
     droppedFields: 0,
     portraitDropped: 0,
     portraitRequests: [],
+    selfDropped: 0,
     recentAdded: 0,
     recentOverlap: 0,
     recentRemoved: 0,
@@ -1923,8 +1978,21 @@ export function applyMemoryUpdate(
   }
 
   if (Array.isArray(update.self) && update.self.length > 0) {
+    const storedSelf = store.getGuild(guildId).self;
+    // A NEW claim about a member is dropped (memberClaimTest); one carried from the stored list,
+    // compared as the store compares facts, stays: taking it back is a removal, the model's call.
+    const storedKeys = new Set((Array.isArray(storedSelf) ? storedSelf : []).filter((fact) => typeof fact === 'string').map(normalizeTopic));
+    const aboutMember = memberClaimTest(store, guildId, knownUserIds, batchAuthorNames);
+    const proposed = tokenizeArray(update.self).filter((item) => {
+      if (typeof item !== 'string') return true;
+      const fact = clampText(item, SELF_CHARS, { tolerance: cfg.clampTolerance });
+      if (!fact || storedKeys.has(normalizeTopic(fact)) || !aboutMember(fact)) return true;
+      result.selfDropped += 1;
+      return false;
+    });
+    logSelfDropped(guildId, result.selfDropped);
     // The single-stage list replaces the stored one; a new fact enters a full list (clampStringArray).
-    const self = clampStringArray(tokenizeArray(update.self), SELF_CHARS, cfg.maxSelfFacts, cfg.clampTolerance, store.getGuild(guildId).self);
+    const self = clampStringArray(proposed, SELF_CHARS, cfg.maxSelfFacts, cfg.clampTolerance, storedSelf);
     if (self.length > 0) {
       // Counted only when the stored list moves: a list returned unchanged is no change (and unstamped).
       const before = fieldsSnapshot(store.getGuild(guildId), ['self']);
@@ -2235,16 +2303,22 @@ function queueStageA(store, guildId, split, config, nowMs) {
  * @param {number} nowMs
  * @returns {object}  `applyMemoryUpdate`'s result (its `portraitDropped` also counting the
  *   `character` / `style` / `portrait` keys the split dropped, `self` true when a stored self fact
- *   was removed) plus `queueStageA`'s counts.
+ *   was removed, `selfDropped` the `self.add` claims about a member never queued) plus `queueStageA`'s counts.
  */
 function applyDecision(store, guildId, decision, config, knownUserIds, options, nowMs) {
   const cfg = config.memory ?? {};
   const { tokenize, isKnownId } = makeTokenizers(store, guildId, knownUserIds, options.batchAuthorNames);
-  const split = splitDecision(decision, { config, nowMs, knownUserIds, tokenize, isKnownId, seenAt: options.timing?.seenAt });
+  const decided = splitDecision(decision, { config, nowMs, knownUserIds, tokenize, isKnownId, seenAt: options.timing?.seenAt });
+  // A self claim about a member is never queued (memberClaimTest); `self.remove` is not filtered.
+  const aboutMember = memberClaimTest(store, guildId, knownUserIds, options.batchAuthorNames);
+  const split = { ...decided, items: decided.items.filter((item) => !(item.kind === 'self' && aboutMember(item.brief?.[0]))) };
+  const selfDropped = decided.items.length - split.items.length;
   const briefs = split.items.filter((item) => item.kind === 'learned' || item.kind === 'self').map((item) => item.brief?.[0]);
   const recent = options.recent ? { ...options.recent, taken: [...listTexts(options.recent.taken), ...listTexts(briefs)] } : options.recent;
   const result = applyMemoryUpdate(store, guildId, split.neutral, cfg, knownUserIds, { ...options, recent });
   result.portraitDropped += split.dropped.portrait;
+  result.selfDropped += selfDropped;
+  logSelfDropped(guildId, selfDropped);
   if (split.selfRemove.length > 0) {
     result.self = store.applySelfOps(guildId, { remove: split.selfRemove }, selfOpsOptions(cfg, nowMs)).removed > 0;
   }

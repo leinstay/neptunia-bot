@@ -206,6 +206,8 @@ Things that outlive a conversation: events, recurring characters, feuds, traditi
 
 `add`: neutral standing claims about {{name}}, stated by it or told to it and accepted. Each reads as one plain claim. The voice model will word each claim for the persona. A standing promise is a self fact. A promise for the next hours goes to `recent`.
 
+How {{name}} feels about a member (who it likes, favours, trusts, dislikes, is annoyed by, how it ranks or treats someone, and why) goes to that person's `affinity` reason and `relationship`, whatever the phrasing: "my favourite", "I'm fond of", "I can't stand" are about the person. A self fact names no member.
+
 `remove`: the exact stored text of the item to remove, as shown in `<existing_guild>`.
 
 Up to {{maxSelfFacts}} items total.

@@ -1827,6 +1827,68 @@ test('applyMemoryUpdate: single-stage self facts follow the same rule at memory.
   });
 });
 
+// ---- applyMemoryUpdate: self claims about a member ------------------------------
+
+const SELF_DROP_LOG = 'memory: self claim about a member dropped';
+
+test('applyMemoryUpdate: a single-stage self claim naming a member by token is dropped and counted, once in the log', async () => {
+  await withStoreAsync(async (store) => {
+    store.touchUser('g1', ZOE, 'Zoé', Date.now());
+    // A known reference turns into the token; an unknown id keeps its marker, still a member.
+    const answer = ['μου αρέσει η βροχή', `<@${ZOE}> είναι η αγαπημένη μου`, `η Zoé (id:${ZOE}) δεν βαριέται ποτέ`, 'ο Bran (id:323456789012345678) με κάνει να γελάω'];
+
+    const { result, logs } = await withCapturedLogs(() => applyMemoryUpdate(store, 'g1', { self: answer }, MEMORY_CFG, new Set()));
+
+    assert.deepEqual(store.getGuild('g1').self, ['μου αρέσει η βροχή'], 'the claim without a member lands');
+    assert.equal(result.self, true);
+    assert.equal(result.selfDropped, 3);
+    const dropped = logs.filter((entry) => entry.msg === SELF_DROP_LOG);
+    assert.equal(dropped.length, 1, 'one line per update');
+    assert.equal(dropped[0].guildId, 'g1');
+    assert.equal(dropped[0].count, 3);
+    assert.ok(!JSON.stringify(dropped[0]).includes('αγαπημένη'), 'counts only, no text');
+  });
+});
+
+test('applyMemoryUpdate: a single-stage self claim naming a stored member as a whole word, in any case, is dropped', async () => {
+  await withStoreAsync(async (store) => {
+    // Not an author of the batch: every stored profile's names count, the older ones too.
+    store.touchUser('g1', '1', 'Ελένη', Date.UTC(2026, 0, 1));
+    store.touchUser('g1', '1', 'Λένα', Date.UTC(2026, 0, 2));
+    const answer = ['μου αρέσει η βροχή', 'η ΕΛΈΝΗ είναι η αγαπημένη μου', 'η λΈνα, πάντα χάος'];
+
+    const { result, logs } = await withCapturedLogs(() => applyMemoryUpdate(store, 'g1', { self: answer }, MEMORY_CFG, new Set()));
+
+    assert.deepEqual(store.getGuild('g1').self, ['μου αρέσει η βροχή']);
+    assert.equal(result.selfDropped, 2);
+    assert.equal(logs.filter((entry) => entry.msg === SELF_DROP_LOG).length, 1);
+  });
+});
+
+test('applyMemoryUpdate: a member name inside a longer word is no self claim about them', async () => {
+  await withStoreAsync(async (store) => {
+    store.touchUser('g1', '1', 'Léa', Date.now());
+
+    const { result, logs } = await withCapturedLogs(() => applyMemoryUpdate(store, 'g1', { self: ['μου αρέσει ο Léandre'] }, MEMORY_CFG, new Set()));
+
+    assert.deepEqual(store.getGuild('g1').self, ['μου αρέσει ο Léandre']);
+    assert.equal(result.selfDropped, 0);
+    assert.equal(logs.filter((entry) => entry.msg === SELF_DROP_LOG).length, 0, 'nothing dropped, nothing logged');
+  });
+});
+
+test('applyMemoryUpdate: a stored self fact naming a member is carried, only a new one is dropped', () => {
+  withStore((store) => {
+    store.touchUser('g1', ZOE, 'Zoé', Date.now());
+    const stored = `<@${ZOE}> με έμαθε να παίζω σκάκι`;
+    store.updateGuild('g1', { self: [stored] });
+
+    const result = applyMemoryUpdate(store, 'g1', { self: [stored, 'μου αρέσει η βροχή', 'η Zoé είναι η αγαπημένη μου'] }, MEMORY_CFG, new Set());
+
+    assert.deepEqual(store.getGuild('g1').self, [stored, 'μου αρέσει η βροχή'], 'a list carried forward is no add');
+    assert.equal(result.selfDropped, 1);
+  });
+});
 // ---- applyMemoryUpdate: episodes ----------------------------------------------
 
 const EPISODES_CFG = { enabled: true, maxEpisodes: 20, maxNew: 3, now: Date.UTC(2026, 0, 1) };
@@ -5772,6 +5834,34 @@ test('analyze (two-stage): neutral parts are stored at once and voice items queu
     assert.equal(store.fillEpisodeFeeling(guildId, '1', byKind.feeling.payload, 'χάρηκε'), true);
     assert.equal(store.getUser(guildId, '1').affinity.reason, 'τη βοήθησε');
     assert.equal(store.getUser(guildId, '1').episodes[0].feeling, 'χάρηκε');
+  });
+});
+
+test('analyze (two-stage): a self claim naming a member is never queued, a removal of one still applies', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', STAGE_A_AT - 60_000);
+    store.touchUser(guildId, ZOE, 'Zoé', STAGE_A_AT - DAY_MS);
+    const old = `<@${ZOE}> είναι η αγαπημένη μου`;
+    store.updateGuild(guildId, { self: ['λατρεύει τον καφέ', old] });
+    const llm = recordingLlm({
+      self: { add: ['της αρέσουν τα παζλ', `<@${ZOE}> δεν βαριέται ποτέ`, 'η ARIA είναι η αγαπημένη της'], remove: [old] },
+    });
+    const updater = createMemoryUpdater({ hot: twoStageHot(), store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => STAGE_A_AT });
+
+    const { result: outcome, logs } = await withCapturedLogs(() =>
+      updater.analyze(guildId, [slimMessage({ id: 'm1', channelId: 'c1', authorId: '1', authorName: 'Aria', content: 'γεια', ts: STAGE_A_AT })]),
+    );
+
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.stage, 'two');
+    const selfItems = store.getVoiceQueue(guildId).filter((item) => item.kind === 'self');
+    assert.deepEqual(selfItems.map((item) => item.brief), [['της αρέσουν τα παζλ']]);
+    assert.deepEqual(store.getGuild(guildId).self, ['λατρεύει τον καφέ'], 'the removal is not filtered');
+    assert.equal(outcome.result.self, true);
+    assert.equal(outcome.result.selfDropped, 2);
+    const dropped = logs.filter((entry) => entry.msg === SELF_DROP_LOG);
+    assert.deepEqual(dropped.map(({ guildId: id, count }) => ({ id, count })), [{ id: guildId, count: 2 }]);
   });
 });
 

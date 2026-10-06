@@ -719,6 +719,96 @@ test('renderProfile: a profile with no affinity at all (pre-relationships data) 
   assert.equal(text, '## Carl\ncharacter: calm');
 });
 
+// --- renderProfile: the moves behind the attitude ---------------------------
+
+/** One stored attitude move on 2026-03-`day` at `hour` UTC. */
+function attitudeMove(day, delta, reason, hour = 12) {
+  return { ts: new Date(Date.UTC(2026, 2, day, hour)).toISOString(), delta, appliedDelta: delta, score: 0, reason };
+}
+
+/** Carl with a score of 40, the attitude line's reason `reason` and the given moves. */
+function movedProfile(history, reason = 'latest reason') {
+  return { id: 'p1', names: ['Carl'], character: 'calm', affinity: { score: 40, reason, history } };
+}
+
+/** The move lines of a rendered profile, in their order. */
+function moveLinesOf(text) {
+  return text.split('\n').filter((line) => line.startsWith('move '));
+}
+
+test('renderProfile: the moves render right under the attitude line, oldest first, signed and dated in the time zone', () => {
+  const history = [attitudeMove(5, -2, 'mocked <@223456789012345678>'), attitudeMove(1, 3, 'linked a game to a myth', 22)];
+  const nameOf = (id) => (id === '223456789012345678' ? 'Zoë' : null);
+  const text = renderProfile(movedProfile(history), labels, { relationships: true, shownMoves: 4, timezone: 'Europe/Athens', nameOf });
+  const lines = text.split('\n');
+  assert.equal(lines[1], 'attitude: 40 (fond) — latest reason');
+  // 22:00 UTC on 03-01 is already 03-02 in Athens.
+  assert.equal(lines[2], 'move +3 on 2026-03-02: linked a game to a myth');
+  assert.equal(lines[3], 'move -2 on 2026-03-05: mocked Zoë');
+  assert.equal(lines[4], 'character: calm');
+});
+
+test('renderProfile: shownMoves caps the moves, keeping the strongest', () => {
+  const history = [attitudeMove(1, 1, 'α'), attitudeMove(2, 5, 'β'), attitudeMove(3, 2, 'γ'), attitudeMove(4, 4, 'δ')];
+  const text = renderProfile(movedProfile(history), labels, { relationships: true, shownMoves: 2, timezone: 'UTC' });
+  assert.deepEqual(moveLinesOf(text), ['move +5 on 2026-03-02: β', 'move +4 on 2026-03-04: δ']);
+});
+
+test('renderProfile: the moves keep both signs when there are both and the cap allows', () => {
+  const history = [attitudeMove(1, -1, 'impatient again'), attitudeMove(2, 5, 'α'), attitudeMove(3, 4, 'β'), attitudeMove(4, 3, 'γ')];
+  const text = renderProfile(movedProfile(history), labels, { relationships: true, shownMoves: 2, timezone: 'UTC' });
+  assert.deepEqual(moveLinesOf(text), ['move -1 on 2026-03-01: impatient again', 'move +5 on 2026-03-02: α']);
+});
+
+test('renderProfile: the move whose reason the attitude line shows is not repeated', () => {
+  const history = [attitudeMove(1, 2, 'α'), attitudeMove(2, -6, 'latest reason')];
+  const text = renderProfile(movedProfile(history), labels, { relationships: true, shownMoves: 4, timezone: 'UTC' });
+  assert.deepEqual(moveLinesOf(text), ['move +2 on 2026-03-01: α']);
+  assert.equal(text.split('latest reason').length, 2, 'the current reason appears once, on the attitude line');
+});
+
+test('renderProfile: a move with an empty reason is skipped', () => {
+  const history = [attitudeMove(1, 9, ''), attitudeMove(2, 2, 'α')];
+  const text = renderProfile(movedProfile(history), labels, { relationships: true, shownMoves: 4, timezone: 'UTC' });
+  assert.deepEqual(moveLinesOf(text), ['move +2 on 2026-03-02: α']);
+});
+
+test('renderProfile: shownMoves 0 shows no move, the attitude line stays', () => {
+  const text = renderProfile(movedProfile([attitudeMove(1, 2, 'α')]), labels, { relationships: true, shownMoves: 0, timezone: 'UTC' });
+  assert.deepEqual(moveLinesOf(text), []);
+  assert.ok(text.includes('attitude: 40 (fond) — latest reason'));
+});
+
+test('renderProfile: an older labels file without affinityMove shows no move', () => {
+  const older = { ...labels, profile: { ...labels.profile, affinityMove: undefined } };
+  const text = renderProfile(movedProfile([attitudeMove(1, 2, 'α')]), older, { relationships: true, shownMoves: 4, timezone: 'UTC' });
+  assert.equal(text, '## Carl\nattitude: 40 (fond) — latest reason\ncharacter: calm');
+});
+
+test('renderProfile: relationships off shows no move', () => {
+  const text = renderProfile(movedProfile([attitudeMove(1, 2, 'α')]), labels, { relationships: false, shownMoves: 4, timezone: 'UTC' });
+  assert.deepEqual(moveLinesOf(text), []);
+});
+
+test('renderProfile: a compact profile shows at most the one strongest move, and none with shownMoves 0', () => {
+  const history = [attitudeMove(1, -1, 'β'), attitudeMove(2, 5, 'α'), attitudeMove(3, 2, 'γ')];
+  const compact = renderProfile(movedProfile(history), labels, { compact: true, relationships: true, shownMoves: 4, timezone: 'UTC' });
+  assert.deepEqual(moveLinesOf(compact), ['move +5 on 2026-03-02: α']);
+  const none = renderProfile(movedProfile(history), labels, { compact: true, relationships: true, shownMoves: 0, timezone: 'UTC' });
+  assert.deepEqual(moveLinesOf(none), []);
+});
+
+test('buildRequest: relationships.shownMoves and bot.timezone reach the moves of the interlocutor', () => {
+  const history = [attitudeMove(1, 2, 'α', 22), attitudeMove(2, 3, 'β'), attitudeMove(3, 4, 'γ')];
+  const interlocutor = { ...movedProfile(history), id: 'author-1', names: ['Alice'] };
+  const config = { ...fakeConfig(), relationships: { shownMoves: 2 } };
+  const user = buildRequest(baseInput({ config, interlocutor })).messages[1].content;
+  // Europe/Moscow: 22:00 UTC on 03-01 is 03-02.
+  assert.deepEqual(moveLinesOf(user), ['move +3 on 2026-03-02: β', 'move +4 on 2026-03-03: γ']);
+  const off = buildRequest(baseInput({ config: { ...fakeConfig(), relationships: { shownMoves: 0 } }, interlocutor })).messages[1].content;
+  assert.deepEqual(moveLinesOf(off), []);
+});
+
 // --- renderProfile: episodes --------------------------------------------------
 
 function episodeFixture(overrides = {}) {

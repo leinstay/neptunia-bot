@@ -208,6 +208,8 @@ Standing facts about {{name}}, stated by it or told to it and accepted: its life
 
 Not self-facts: jokes or bits {{name}} performed, one-off quips, comparisons or definitions {{name}} coined, what {{name}} said about other people (those belong to the people's profiles), how {{name}} phrased something, descriptions of their own nature offered as humor. When carrying the list forward, drop these instead of keeping them.
 
+How {{name}} feels about a member (who it likes, favours, trusts, dislikes, is annoyed by, how it ranks or treats someone, and why) goes to that person's `affinity` reason and `relationship`, whatever the phrasing: "my favourite", "I'm fond of", "I can't stand" are about the person. A self fact names no member.
+
 A returned `self` replaces the stored list. Carry forward what holds. Empty array = nothing new. Up to {{maxSelfFacts}} items. Self-facts appear in the persona's context unchanged. Each item reads as one plain claim: no commentary, no significance framing.
 
 ### Recent

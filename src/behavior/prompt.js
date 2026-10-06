@@ -42,7 +42,7 @@ import {
   renderTranscript,
 } from '../discord/format.js';
 import { zonedDay } from '../time.js';
-import { affinityBand, roundScore } from '../memory/affinity.js';
+import { affinityBand, roundScore, strongestMoves } from '../memory/affinity.js';
 import { isConfirmed, isStale } from '../memory/interests.js';
 import { topByRank } from '../memory/ranking.js';
 import { rankEmojiUsage } from '../memory/emoji-usage.js';
@@ -242,11 +242,36 @@ function aliasesText(aliases, labels, maxAliases, aliasHalfLifeDays) {
 }
 
 /**
+ * The moves behind an attitude, one `labels.profile.affinityMove` line each
+ * (`{delta}` the move's `delta` as a signed integer, `{date}` its `YYYY-MM-DD`
+ * in `timezone`, `{reason}` with `<@id>` tokens resolved): up to `max` of
+ * `affinity.history`, chosen by src/memory/affinity.js#strongestMoves (the
+ * strongest, both signs when there are both, never the reason the attitude
+ * line already shows), oldest first. `[]` when the label is missing.
+ */
+function moveLines(affinity, labels, { max, timezone, nameOf }) {
+  const label = labels.profile?.affinityMove;
+  if (!label) return [];
+  return strongestMoves(affinity.history, { max, currentReason: affinity.reason }).map((move) => {
+    const delta = Math.round(Number.isFinite(move.delta) ? move.delta : move.appliedDelta);
+    return fill(label, {
+      delta: delta > 0 ? `+${delta}` : String(delta),
+      date: zonedDay(Date.parse(move.ts), timezone),
+      reason: resolveChatText(move.reason.trim(), nameOf),
+    });
+  });
+}
+
+/**
  * One person's memory as prompt text; '' when nothing has been learned yet.
  * When `relationships` is on and the profile carries a non-neutral (non-zero
  * score or non-empty reason) affinity, an attitude line is inserted right
  * after the heading — even when it ends up being the profile's only content,
  * since the persona's attitude toward someone is useful on its own.
+ * Under it, `opts.shownMoves` (`relationships.shownMoves`) of the stored
+ * moves that made that attitude, one `labels.profile.affinityMove` line each,
+ * oldest first (see `moveLines`); omitted or 0 -> none. `opts.timezone`
+ * (`bot.timezone`) dates them.
  *
  * For the interlocutor (`interlocutor: true`), right after the attitude line
  * (or right after the heading, if there is none), `opts.episodes.enabled`
@@ -273,7 +298,9 @@ function aliasesText(aliases, labels, maxAliases, aliasHalfLifeDays) {
  *
  * `opts.compact` renders the SHORT form used for `<people>` priority
  * (c), the other recent participants: current name, aliases, `character`
- * (as stored), the attitude line, and the top 5 interests (bare topics, no
+ * (as stored), the attitude line with at most ONE move under it (the
+ * strongest, and none when `shownMoves` is 0: a bystander's "why" in one
+ * line), and the top 5 interests (bare topics, no
  * note) -- no former names, no `style`, no `details`, no `relationship`, no
  * message count, no episodes even for the interlocutor. Never passed
  * alongside `interlocutor: true` in practice (the interlocutor is always
@@ -321,6 +348,8 @@ function renderProfileShown(
     staleDays,
     now,
     nameOf,
+    shownMoves,
+    timezone,
   } = {},
 ) {
   if (!profile) return { text: '', episodes: 0 };
@@ -339,6 +368,7 @@ function renderProfileShown(
         reason: resolveChatText(affinity.reason, nameOf),
       }),
     );
+    attitudeLines.push(...moveLines(affinity, labels, { max: compact ? Math.min(shownMoves ?? 0, 1) : shownMoves, timezone, nameOf }));
   }
 
   const restLines = [];
@@ -1585,6 +1615,8 @@ export function buildRequest(input) {
   const nameOf = typeof input.nameOf === 'function' ? input.nameOf : () => null;
   const { timezone } = config.bot;
   const relationships = config.features?.relationships !== false;
+  // How many attitude moves show under the attitude line (renderProfile).
+  const shownMoves = config.relationships?.shownMoves ?? 4;
   const episodesOn = config.features?.episodes !== false;
   const loreOn = config.features?.lore !== false;
   const visionCfg = config.context.vision ?? {};
@@ -1755,6 +1787,8 @@ export function buildRequest(input) {
     staleDays: config.memory?.interestStaleDays,
     now,
     nameOf,
+    shownMoves,
+    timezone,
   });
   const fixedSection = { name: 'fixed', required: true, items: [system, fittedTask, formatNow(now, timezone, labels.locale), sensesText, tempoText] };
   const interlocutorSection = { name: 'interlocutor', cap: caps.interlocutor, items: [interlocutorShown.text].filter(Boolean) };
@@ -1972,6 +2006,8 @@ export function buildRequest(input) {
       staleDays: config.memory?.interestStaleDays,
       now,
       nameOf,
+      shownMoves,
+      timezone,
     });
   const askedAboutBare = askedAbout.map((profile) => renderAsked(profile, undefined).text);
   let askedAboutItems = askedAboutBare;
@@ -2056,6 +2092,8 @@ export function buildRequest(input) {
         staleDays: config.memory?.interestStaleDays,
         now,
         nameOf,
+        shownMoves,
+        timezone,
       }),
     })),
   ].filter((entry) => entry.text);
