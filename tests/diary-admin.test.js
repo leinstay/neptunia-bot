@@ -234,6 +234,19 @@ test('diary post: an unknown kind or one with weight 0 is refused with the list 
   assert.equal(calls.length, 0);
 });
 
+test('diary post: a cap refusal names the limit and the counts', async () => {
+  const outcomes = [
+    { outcome: 'refused', reason: 'cap', limit: { key: 'diary.maxPerDay', used: 3, cap: 3 } },
+    { outcome: 'refused', limit: { key: 'llm.maxRequestsPerDay', used: 500, cap: 500 } },
+    { outcome: 'not-now', reason: 'no-channel' },
+  ];
+  const diary = { force: async () => outcomes.shift() };
+  const { admin } = makeAdmin({ diary });
+  assert.equal(await admin.run('diary.post', { kind: 'thought' }, owner), 'diary post thought: refused (diary.maxPerDay 3/3)');
+  assert.equal(await admin.run('diary.post', {}, owner), 'diary post: refused (llm.maxRequestsPerDay 500/500)');
+  assert.equal(await admin.run('diary.post', {}, owner), 'diary post: not-now (no-channel)');
+});
+
 test('diary post: without a running diary it says so', async () => {
   const { admin } = makeAdmin();
   await assert.rejects(() => admin.run('diary.post', {}, owner), /diary not running/);

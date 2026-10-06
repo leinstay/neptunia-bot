@@ -59,7 +59,7 @@ Every model request in a diary post counts against `llm.maxRequestsPerDay`. With
 | `facts` | 1 | A curious fact, an iceberg entry, a conspiracy theory told as such |
 | `status` | 3 | One short line: mood, a plan, boredom |
 
-`diary.searchKinds` (default `["news", "facts"]`) are the kinds that may trigger a search. `diary.pictureKinds` (default `["selfPicture", "picture", "meme"]`) are the kinds that carry a drawing when the planner falls back to a random kind.
+`diary.searchKinds` (default `["news", "facts"]`) are the kinds that may trigger a search. `diary.pictureKinds` (default `["selfPicture", "picture", "meme"]`) always get a picture when the day's picture caps allow it, whatever the planner answered. Other kinds draw only when the planner asks for one.
 
 `prompts/diary-seeds.md` holds random seeds grouped by `# family` headers (place, setting, detail, activity, subject, twist). Code draws one line per family and composes `diary.seedSets` (2) combinations, handed to the planner in a `<seeds>` block. The combinations are near-infinite; the planner builds something absent from the diary history out of them, or ignores them when a better idea comes from the server's life.
 

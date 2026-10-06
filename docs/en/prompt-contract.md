@@ -926,7 +926,7 @@ with `/nep diary post`. The answer is one JSON object:
 
 **Validation and fallback.** `validatePlan` (in `src/behavior/diary.js`) normalises the answer. When the kind is missing,
 unknown or has weight 0, the whole answer is replaced by a weighted random kind with an empty brief and search
-(`fallback: true`). `brief` is clamped to 300 characters. `picture` is forced false when
+(`fallback: true`). `brief` is clamped to 300 characters. When the kind is in `diary.pictureKinds`, `picture` is forced true if the day's picture caps allow it, whatever the planner answered. For other kinds, `picture` is kept as the planner set it. `picture` is forced false when
 `diary.maxPicturesPerDay` or `image.maxPerDay` is spent.
 
 **Search.** When the plan names a search query and `lookup.search` is available, the query runs through the existing

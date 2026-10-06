@@ -59,7 +59,7 @@
 | `facts` | 1 | 豆知識、氷山エントリ、陰謀論として語られる陰謀論 |
 | `status` | 3 | 一行: 気分、計画、退屈 |
 
-`diary.searchKinds`（デフォルト `["news", "facts"]`）は検索をトリガーできる種類。`diary.pictureKinds`（デフォルト `["selfPicture", "picture", "meme"]`）はプランナーがランダム種類にフォールバックした時に描画する種類。
+`diary.searchKinds`（デフォルト `["news", "facts"]`）は検索をトリガーできる種類。`diary.pictureKinds`（デフォルト `["selfPicture", "picture", "meme"]`）は日次の画像上限が許す限り常に画像付きになる種類。プランナーの回答に関わらず適用される。その他の種類はプランナーが求めた場合のみ描画する。
 
 `prompts/diary-seeds.md` は `# family` ヘッダー（place, setting, detail, activity, subject, twist）でグループ化されたランダムシードを含みます。コードが各ファミリーから 1 行ずつ選び、`diary.seedSets`（2）組み合わせを `<seeds>` ブロックとしてプランナーに渡します。組み合わせはほぼ無限。プランナーはそこから日記の履歴にないものを構築するか、サーバーの生活がより良いアイデアを提供する場合は無視します。
 

@@ -634,7 +634,7 @@ Settings for the diary channel (`features.diary`). The persona posts in one owne
 | `seedSets` | `2` | Random seed combinations drawn from `prompts/diary-seeds.md` and shown to the planner in the `<seeds>` block. `0` omits the block |
 | `kinds` | `{ "selfPicture": 3, "picture": 2, "meme": 1, "thought": 2, "people": 2, "news": 2, "facts": 1, "status": 3 }` | Post kinds with their weights. A kind with weight 0 is never chosen. The planner sees these weights and how many recent posts used each kind. Hot-reloaded, so the owner can steer the mix at any time |
 | `searchKinds` | `["news", "facts"]` | Kinds that may trigger a web search. The planner writes a query only for these kinds |
-| `pictureKinds` | `["selfPicture", "picture", "meme"]` | Kinds that carry a drawing by default when the planner falls back to a random kind |
+| `pictureKinds` | `["selfPicture", "picture", "meme"]` | Kinds that always get a picture when the day's picture caps allow it, whatever the planner answered. Other kinds draw only when the planner asks |
 | `planMaxOutputTokens` | `300` | Max output tokens for the plan request |
 | `planTimeoutMs` | `20000` | Timeout for the plan request (ms) |
 

@@ -181,10 +181,11 @@ export function pickKind(kinds, rng) {
  * The plan request's answer, normalised. `kind` must be a key of `kinds` with
  * a positive weight, else the whole answer is replaced by a weighted random
  * kind (pickKind; null when no kind is weighted) with an empty brief and
- * search (`fallback: true`), drawing when `pictureAllowed` and the kind is in
- * `pictureKinds`. Otherwise `brief` is one line, at most 300 characters;
- * `search` is kept only for a kind in `searchKinds`; `picture` is true only
- * when the answer says `true` and `pictureAllowed`.
+ * search (`fallback: true`). Otherwise `brief` is one line, at most 300
+ * characters; `search` is kept only for a kind in `searchKinds`. With
+ * `pictureAllowed`, a kind in `pictureKinds` always draws (a picture kind
+ * means a picture, whatever the answer said) and any other kind draws only
+ * when the answer says `picture: true`; without it nothing draws.
  * @param {unknown} parsed  The JSON the model answered (untrusted).
  * @param {Record<string, number>} kinds  diary.kinds
  * @param {{ pictureAllowed?: boolean, searchKinds?: string[], pictureKinds?: string[] }} opts
@@ -195,13 +196,13 @@ export function pickKind(kinds, rng) {
 export function validatePlan(parsed, kinds, { pictureAllowed = false, searchKinds, pictureKinds } = {}, rng) {
   const answer = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   const valid = weightedKinds(kinds).some(([key]) => key === answer.kind);
+  const drawable = Array.isArray(pictureKinds) ? pictureKinds : DEFAULT_PICTURE_KINDS;
   if (!valid) {
     const kind = pickKind(kinds, rng);
-    const drawable = Array.isArray(pictureKinds) ? pictureKinds : DEFAULT_PICTURE_KINDS;
     const picture = pictureAllowed === true && kind !== null && drawable.includes(kind);
     return { kind, brief: '', search: '', picture, fallback: true };
   }
-  const picture = answer.picture === true && pictureAllowed === true;
+  const picture = pictureAllowed === true && (drawable.includes(answer.kind) || answer.picture === true);
   const searchable = Array.isArray(searchKinds) ? searchKinds : DEFAULT_SEARCH_KINDS;
   const brief = typeof answer.brief === 'string' ? clampText(oneLine(answer.brief), BRIEF_CHARS, { tolerance: 1 }) : '';
   const search = typeof answer.search === 'string' && searchable.includes(answer.kind) ? oneLine(answer.search) : '';

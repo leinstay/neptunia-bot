@@ -208,10 +208,18 @@ test('validatePlan: a fallback text kind does not draw', () => {
   assert.equal(plan.picture, false);
 });
 
-test('validatePlan: a picture kind answered without a picture is kept as given', () => {
-  const plan = validatePlan({ kind: 'selfPicture', brief: 'b', picture: false }, kinds, { ...opts, pictureKinds: ['selfPicture'] }, () => 0.5);
-  assert.equal(plan.picture, false);
-  assert.equal(plan.fallback, false);
+test('validatePlan: a picture kind always draws when allowed', () => {
+  for (const picture of [false, undefined, 'no']) {
+    const plan = validatePlan({ kind: 'selfPicture', brief: 'b', picture }, kinds, { ...opts, pictureKinds: ['selfPicture'] }, () => 0.5);
+    assert.equal(plan.picture, true);
+    assert.equal(plan.fallback, false);
+  }
+  const capped = validatePlan({ kind: 'selfPicture', brief: 'b', picture: false }, kinds, { ...opts, pictureAllowed: false, pictureKinds: ['selfPicture'] }, () => 0.5);
+  assert.equal(capped.picture, false);
+  const text = validatePlan({ kind: 'thought', brief: 'b', picture: true }, kinds, { ...opts, pictureKinds: ['selfPicture'] }, () => 0.5);
+  assert.equal(text.picture, true);
+  const quiet = validatePlan({ kind: 'thought', brief: 'b', picture: false }, kinds, { ...opts, pictureKinds: ['selfPicture'] }, () => 0.5);
+  assert.equal(quiet.picture, false);
 });
 
 test('validatePlan: search is cleared for a kind outside searchKinds', () => {
