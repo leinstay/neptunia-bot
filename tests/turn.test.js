@@ -7642,3 +7642,135 @@ test('runTurn: the picker runs alongside the first message\'s typing time', asyn
   const together = sendTimes[0] - askedAt;
   assert.ok(together >= 140 && together < 270, `the picker and the typing ran together (${together} ms)`);
 });
+
+// ---------------------------------------------------------------------------
+// Reply parents outside the window: a reply to a message older than the last
+// context.channelMessages lines has its parent fetched by id and prepended.
+
+/** A raw reply to `parentId` (see rawMessage). */
+function rawReplyTo(parentId, fields) {
+  return { ...rawMessage(fields), reference: { messageId: parentId } };
+}
+
+/** fakeTurnChannel whose by-id fetch also serves `stored` (raw messages outside the window); `fetchedIds` records every by-id fetch. */
+function replyParentChannel(historyMessages, stored = []) {
+  const channel = fakeTurnChannel({ historyMessages });
+  const byId = new Map(stored.map((m) => [m.id, m]));
+  const fetchedIds = [];
+  const base = channel.messages.fetch;
+  channel.messages.fetch = async (arg) => {
+    if (typeof arg === 'string') {
+      fetchedIds.push(arg);
+      if (byId.has(arg)) return byId.get(arg);
+    }
+    return base(arg);
+  };
+  channel.fetchedIds = fetchedIds;
+  return channel;
+}
+
+/** The video-stage hot config with the reply-parent settings set by the test. */
+function replyParentHot({ fetchReplyParents = true, replyParentsFor = 3, replyParentsMax = 4 } = {}) {
+  const hot = fakeHot({ mediaDescriptions: true, videoDescriptions: true, vision: false }, {}, VIDEO_TURN_CONFIG);
+  Object.assign(hot.config.context, { fetchReplyParents, replyParentsFor, replyParentsMax });
+  return hot;
+}
+
+const OLD_PARENT_TS = NOW - 2 * 60 * 60 * 1000;
+
+async function runReplyParentTurn({ hot = replyParentHot(), historyMessages, stored, trigger }) {
+  const channel = replyParentChannel(historyMessages, stored);
+  const llm = fakeLlm('<msg>ok</msg>');
+  const describer = fakeVideoDescriber({});
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), describer });
+  const { result, logs } = await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger, triggerKind: 'mention' }));
+  return { result, logs, channel, describer, userMessage: llm.calls[0]?.[1].content };
+}
+
+test('createTurnRunner: a trigger replying outside the window -- its parent is fetched, prepended, rendered as the reply target, and its link reaches the video stage', async () => {
+  const parent = rawMessage({ id: 'p1', authorId: 'u2', authorName: 'Bob', ts: OLD_PARENT_TS, content: 'δείτε https://www.youtube.com/watch?v=abc' });
+  const triggerRaw = rawReplyTo('p1', { id: 'm2', ts: NOW - 1000, content: 'react to the video above' });
+  const { result, channel, describer, userMessage } = await runReplyParentTurn({
+    historyMessages: [rawMessage({ id: 'm1', ts: NOW - 5000, content: 'καλημέρα' }), triggerRaw],
+    stored: [parent],
+    trigger: { ...normalizedTrigger(triggerRaw), replyToId: 'p1' },
+  });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.deepEqual(channel.fetchedIds, ['p1']);
+  assert.ok(userMessage.includes('(replying to #1, Bob: '), 'the reply names the prepended parent as the oldest line');
+  assert.ok(!userMessage.includes(labels.transcript.replyToOld));
+  assert.ok(userMessage.indexOf('δείτε') < userMessage.indexOf('καλημέρα'), 'the parent is the oldest line');
+  const items = describer.videoCalls[0].items;
+  assert.ok(items.some((item) => item.source === 'link' && item.messageId === 'p1' && item.url === 'https://www.youtube.com/watch?v=abc'));
+});
+
+test('createTurnRunner: a reply whose parent is inside the window fetches nothing', async () => {
+  const parent = rawMessage({ id: 'p1', authorId: 'u2', authorName: 'Bob', ts: NOW - 5000, content: 'δείτε' });
+  const triggerRaw = rawReplyTo('p1', { id: 'm2', ts: NOW - 1000 });
+  const { channel, userMessage } = await runReplyParentTurn({
+    historyMessages: [parent, triggerRaw],
+    trigger: { ...normalizedTrigger(triggerRaw), replyToId: 'p1' },
+  });
+
+  assert.deepEqual(channel.fetchedIds, []);
+  assert.ok(userMessage.includes('(replying to #1, Bob: '));
+});
+
+test('createTurnRunner: a chain of two outside the window -- the parent and its own parent are both prepended, oldest first', async () => {
+  const root = rawMessage({ id: 'p1', authorId: 'u3', authorName: 'Chloé', ts: OLD_PARENT_TS, content: 'ρίζα' });
+  const middle = rawReplyTo('p1', { id: 'p2', authorId: 'u2', authorName: 'Bob', ts: OLD_PARENT_TS + 1000, content: 'μέση' });
+  const triggerRaw = rawReplyTo('p2', { id: 'm2', ts: NOW - 1000 });
+  const { channel, userMessage } = await runReplyParentTurn({
+    historyMessages: [triggerRaw],
+    stored: [root, middle],
+    trigger: { ...normalizedTrigger(triggerRaw), replyToId: 'p2' },
+  });
+
+  assert.deepEqual(channel.fetchedIds, ['p2', 'p1']);
+  assert.ok(userMessage.includes('(replying to #1, Chloé: '), 'the middle line replies to the root');
+  assert.ok(userMessage.includes('(replying to #2, Bob: '), 'the trigger replies to the middle line');
+  assert.ok(!userMessage.includes(labels.transcript.replyToOld));
+});
+
+test('createTurnRunner: context.replyParentsMax caps the fetched parents, context.replyParentsFor picks the window lines asked about', async () => {
+  const stored = ['pa', 'pb', 'pc'].map((id, i) => rawMessage({ id, authorId: 'u2', authorName: 'Bob', ts: OLD_PARENT_TS + i }));
+  const historyMessages = [
+    rawReplyTo('pa', { id: 'm1', ts: NOW - 3000 }),
+    rawReplyTo('pb', { id: 'm2', ts: NOW - 2000 }),
+    rawReplyTo('pc', { id: 'm3', ts: NOW - 1000 }),
+  ];
+  const capped = await runReplyParentTurn({ hot: replyParentHot({ replyParentsMax: 2 }), historyMessages, stored, trigger: { ...normalizedTrigger(historyMessages[2]), replyToId: 'pc' } });
+  assert.deepEqual(capped.channel.fetchedIds, ['pc', 'pb']);
+
+  const lastOne = await runReplyParentTurn({ hot: replyParentHot({ replyParentsFor: 1 }), historyMessages, stored, trigger: { ...normalizedTrigger(historyMessages[2]), replyToId: 'pc' } });
+  assert.deepEqual(lastOne.channel.fetchedIds, ['pc']);
+});
+
+test('createTurnRunner: a deleted reply parent is skipped and logged, the turn still speaks', async () => {
+  const triggerRaw = rawReplyTo('gone', { id: 'm2', ts: NOW - 1000 });
+  const { result, logs, channel, userMessage } = await runReplyParentTurn({
+    historyMessages: [triggerRaw],
+    trigger: { ...normalizedTrigger(triggerRaw), replyToId: 'gone' },
+  });
+
+  assert.equal(result.outcome, 'spoke');
+  assert.deepEqual(channel.fetchedIds, ['gone']);
+  const missing = logs.filter((entry) => entry.msg === 'collect: parent missing');
+  assert.deepEqual(missing.map((entry) => [entry.channel, entry.messageId]), [['c1', 'gone']]);
+  assert.ok(userMessage.includes(labels.transcript.replyToOld));
+});
+
+test('createTurnRunner: context.fetchReplyParents off -- no parent is fetched, the reply reads as one to an older message', async () => {
+  const parent = rawMessage({ id: 'p1', authorId: 'u2', authorName: 'Bob', ts: OLD_PARENT_TS });
+  const triggerRaw = rawReplyTo('p1', { id: 'm2', ts: NOW - 1000 });
+  const { channel, userMessage } = await runReplyParentTurn({
+    hot: replyParentHot({ fetchReplyParents: false }),
+    historyMessages: [triggerRaw],
+    stored: [parent],
+    trigger: { ...normalizedTrigger(triggerRaw), replyToId: 'p1' },
+  });
+
+  assert.deepEqual(channel.fetchedIds, []);
+  assert.ok(userMessage.includes(labels.transcript.replyToOld));
+});
