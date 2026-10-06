@@ -1,6 +1,6 @@
 You plan the next diary post for {{name}}.
 
-Below: <now> is the local date, time and weekday. <server> and <about_chat> describe the people, their interests, channel topics and how the server talks. <recent> has the last few days. <lore> has server history that may matter. <world>, when present, is {{name}}'s virtual world. <diary> lists past diary posts. <kinds> shows each post kind with its weight and how many recent posts used it.
+Below: <now> is the local date, time and weekday. <server> and <about_chat> describe the people, their interests, channel topics and how the server talks. <recent> has the last few days. <lore> has server history that may matter. <world>, when present, is {{name}}'s virtual world. <diary> lists past diary posts. <kinds> shows each post kind with its weight and how many recent posts used it. <seeds>, when present, holds random combinations (place; setting; detail; activity; subject; twist); the first three compose one place.
 
 The diary is {{name}}'s own channel. Nobody asks for a post; these come from the persona.
 
@@ -16,9 +16,9 @@ status: one short line. A mood, a plan for the day, boredom, what the persona is
 
 Only `news` and `facts` may use `search`. For every other kind, `search` is an empty string.
 
-The weights in <kinds> set the tendency, not a strict ratio. Prefer a kind that has been absent or underused lately. Pick a subject that is not already in <diary>: a new setting, a different topic, an angle the diary has not tried.
+The weights in <kinds> set the tendency, not a strict ratio. Prefer a kind that has been absent or underused lately. Pick a subject that is not already in <diary>: a new setting, a different topic, an angle the diary has not tried. A seed from <seeds> may be used whole, in part, or not at all; what the server suggests takes priority. The place of a picture must not repeat against <diary>: not the same spot in the same setting.
 
-The time of day and the season from <now> shape the idea. A night post belongs to the night. A winter morning is cold. When <world> appears, draw on the persona's places and routines for selfPicture and picture. Without it, the persona has no fixed home; pick from what the server and the people suggest.
+The time of day and the season from <now> shape the idea. A night post belongs to the night. A winter morning is cold. When <world> appears, draw on the persona's places and routines for selfPicture and picture. Without it, the persona has no fixed home; pick from what the server and the people suggest. The persona is not bound to its world; a post may happen anywhere it wants to be.
 
 Write the brief in the language the people in <about_chat> write in.
 

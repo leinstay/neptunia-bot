@@ -223,7 +223,8 @@
     "kinds": "Post kinds and their recent use:",
     "kindLine": "{key} weight {weight}, used {count} of the last {window}",
     "plan": "Plan for this post:",
-    "found": "What the search found. Retell it in your own words; no links, no quoting."
+    "found": "What the search found. Retell it in your own words; no links, no quoting.",
+    "seeds": "Random seeds (place; setting; detail; activity; subject; twist):"
   },
   "memory": {
     "privateNote": "This batch is a private conversation with one person. Judge only this person — everything learned here is private and must not describe the server or other people. Output users for this person's id only; guild, channels, lore and self are empty.",
