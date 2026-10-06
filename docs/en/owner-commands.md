@@ -35,6 +35,10 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep private show <user>` | Show a member's private memory: relationship, interests, details, episodes, private and effective attitude, today's reply count. No private layer is a plain answer, not an error. Owner-only; cannot be granted |
 | `/nep private forget <user>` | Delete only a member's private memory and their private voice queue items; the public profile is kept. Waits for a running analyzer batch to finish first. Owner-only; cannot be granted |
 | `/nep private purge <user>` | Delete the bot's own messages in the DM chat with a member (scans up to `private.purgeMaxMessages`), then their private memory. The member's own messages stay. Refused while paused. Owner-only; cannot be granted |
+| `/nep diary set <channel>` | Point the diary at this channel. The bot must be able to view, read, send and attach files there. Writes `diary.channelId` to `config.local.json`. When the diary history is empty, fills it from the persona's own past posts in that channel. Replies with the channel, the backfilled count and today's plan |
+| `/nep diary show` | Show the diary channel, today's slots with done marks (in `bot.timezone`), posts and pictures used today, and the history size |
+| `/nep diary off` | Clear `diary.channelId`. The diary history file stays |
+| `/nep diary post [kind]` | Force one diary post now. Optional kind key (e.g. `selfPicture`, `thought`); an unknown kind is refused with the list. Obeys the daily caps. In dry-run the post is mirrored, not sent |
 | `/nep alias add <user> <name>` | Add a chat alias; confirmed at once |
 | `/nep alias remove <user> <name>` | Remove a chat alias |
 | `/nep learned list` | List lessons with ids, who taught each one, sightings |

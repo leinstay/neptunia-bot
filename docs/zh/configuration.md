@@ -42,6 +42,7 @@
 | `recent` | `true` | 在请求中显示一个 `<recent>` 块，呈现服务器最近几天发生的事情。缺失的键视为开启。参见 `memory.recentHours` 和 `context.caps.recent` |
 | `channelRoute` | `true` | 分类器在回合前选出对话中提及的频道，以便将其拉入请求。缺失的键视为开启。参见 `route.*` |
 | `pauseNotice` | `true` | 角色在暂停时被呼叫会发布一条简短通知。缺失的键视为开启。参见 `mention.pauseNoticeMinutes` 和 `labels.limits.paused` |
+| `diary` | `true` | 角色在拥有者选择的频道中按随机时间表自发发帖。缺失的键视为开启。未设置 `diary.channelId` 时不生效。参见[日记](diary.md) |
 | `variety` | `true` | 模型过程识别角色在近期消息中过度使用的表达手法。结果作为 `<worn>` 块包含在回合请求中。缺失的键视为开启 |
 | `varietyPrecompute` | `true` | 角色发布文本后立即启动多样性过程，使下一回合可以直接使用结果。关闭时过程仅在回合时运行，但迟到的结果仍会保存。缺失的键视为开启 |
 | `stickyGuard` | `true` | 每次发帖后查找角色卡住的短语（在 3+ 条近期消息中重复，在旧消息中罕见），作为填充词条目添加，使下一回合的建议列表包含它。无需模型。缺失的键视为开启 |
@@ -610,6 +611,43 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `resolution` | `"1K"` | 输出分辨率（`512`、`1K`、`2K`、`4K`；支持因模型而异）。`gemini-2.5-flash-image` 无分辨率设置 |
+
+## `diary`
+
+日记频道的设置（`features.diary`）。角色在拥有者选择的频道中，按可配置窗口的随机时间自发发帖。每篇帖子由分类器计划，再由主模型配合角色卡和所有记忆块生成。全部热重载。参见[日记](diary.md)。
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `channelId` | `""` | 日记频道。由 `/nep diary set` 写入，每次心跳读取。空表示无日记 |
+| `world` | `false` | 在日记的计划和生成请求中将 `prompts/world.md` 作为 `<world>` 块包含。必须为 `true` 才生效；缺失的键视为关闭。`/nep set diary.world true` 开启。文件描述角色的虚拟世界，仅日记使用，普通回合不用 |
+| `windows` | 见下文 | `bot.timezone` 中的发帖窗口。每个窗口有 `from` 和 `to`（0–24 小时，可跨午夜）和 `posts: [min, max]`（窗口抽取的帖子数）。默认四个窗口见[日记: 窗口](diary.md#窗口) |
+| `quietDayChance` | `0.3` | 一整天没有帖子的概率。创建日计划时抽取一次 |
+| `minGapMinutes` | `90` | 两个计划时间槽之间的最小间隔（分钟）。距离上一个太近的时间槽被丢弃 |
+| `maxPerDay` | `3` | 每天最大帖子数。计划器抽出超过此数的时间槽时，随机丢弃多余的。日次计数也限制 `/nep diary post` |
+| `maxPicturesPerDay` | `2` | 每天日记图片最大数。与 `image.maxPerDay` 共享: 先用完的那个生效。用完后计划的 `picture` 强制为 false，感知提示不可绘画 |
+| `slotGraceMinutes` | `30` | 计划时间槽过后仍可触发的宽限时间（分钟）。机器人关机期间超过此时间的时间槽被丢弃，不会延迟触发 |
+| `maxMessages` | `3` | 每篇日记帖子的最大 `<msg>` 消息数。超出部分被截断 |
+| `historyPosts` | `150` | `diary.json` 中保留并在 `<diary>` 块中展示给计划器和生成器的历史帖子数。超出上限时最旧的被删除 |
+| `gistChars` | `200` | 日记历史中每篇帖子摘要和图片场景的字符数 |
+| `seedSets` | `2` | 从 `prompts/diary-seeds.md` 抽取并在 `<seeds>` 块中展示给计划器的随机种子组合数。`0` 省略该块 |
+| `kinds` | `{ "selfPicture": 3, "picture": 2, "meme": 1, "thought": 2, "news": 2, "facts": 1, "status": 3 }` | 帖子种类与权重。权重为 0 的种类永不被选择。计划器看到权重和最近帖子中每种类型的使用次数。热重载，拥有者可随时调整 |
+| `searchKinds` | `["news", "facts"]` | 可触发网络搜索的种类。计划器仅为这些种类编写搜索查询 |
+| `pictureKinds` | `["selfPicture", "picture", "meme"]` | 计划器回退到随机种类时默认带图的种类 |
+| `planMaxOutputTokens` | `300` | 计划请求的最大输出 token 数 |
+| `planTimeoutMs` | `20000` | 计划请求的超时（毫秒） |
+
+默认的 `windows`:
+
+```json
+[
+  { "from": 7,  "to": 11, "posts": [0, 0] },
+  { "from": 12, "to": 16, "posts": [0, 1] },
+  { "from": 18, "to": 1,  "posts": [0, 2] },
+  { "from": 1,  "to": 5,  "posts": [0, 1] }
+]
+```
+
+早晨（7–11）关闭。白天（12–16）抽取 0 或 1 篇帖子。晚上（18–次日 01）抽取 0、1 或 2 篇。深夜（01–05）抽取 0 或 1 篇。所有时间均为 `bot.timezone`。`to` 不大于 `from` 的窗口跨越午夜: `{ "from": 18, "to": 1 }` 从今天 18:00 到明天 01:00。
 
 ## `variety`
 

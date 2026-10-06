@@ -52,6 +52,9 @@ When `bot.guildId` is empty and the bot is in exactly one server, it locks to th
 
 ## Features and changes
 
+**06.10.2026**  
+Neptunia keeps a diary: one channel where they post on their own, without anyone asking. The posts come at random times across the day, in configurable windows, with quiet days mixed in. Posts vary: a drawing of a scene, a meme, a thought, a retold news item, a curious fact, a one-line mood update. Before each post the persona reviews its own recent history and picks something it has not done yet. Some post kinds trigger a web search so the persona can retell what it found in its own words. The owner points the diary at a channel with `/nep diary set` and tunes the schedule, post kinds and weights through config.
+
 **05.10.2026**  
 Neptunia distinguishes between someone talking to them and people talking about them in the third person. When a conversation mentions another channel, they open that channel and read the latest messages with pictures, even when the channel was named in words without a link. If someone calls them in a channel where they cannot write, they answer in the main channel with a link to that message. On their own they can comment in the main channel on something they read in a channel where they cannot write. They are more likely to respond to a question asked to everyone than to someone specific. They remember what mattered over the last few days: what someone gave them or asked them to do, what they promised, what happened between members. When someone asks about a person, they recall moments connected to that person. They search old server messages the same way they search the web: for questions like "what did we do on New Year's" or "who is ..." they find the right conversation and answer from it.
 
@@ -200,6 +203,10 @@ prompts/
   forced.md                appended on a forced turn (/nep interject, /nep initiate)
   private.md               appended in a DM turn (features.privateMessages)
   memory.md                prompt for the memory analyzer
+  diary.md                 task: write a diary post
+  diary-plan.md            diary planner: pick the kind and subject for the next post
+  world.md                 the persona's virtual world (diary posts only)
+  diary-seeds.md           random seed families for the diary planner
   draw.md                  prompt for the drawing sub-process (image generation)
   appearance.md            the persona's visual look for self-portraits
   describe.md              prompt for the media describer
@@ -236,6 +243,7 @@ docs/
     warmup.md              the warmup: stages, progress, rails, commands
     media.md               pictures, video, links, search, tools, costs
     messages-and-memory.md the pipeline, the analyzer, profiles, episodes, the lorebook
+    diary.md               the diary feature: setup, windows, costs, tuning
   zh/                      Chinese
     README.md
     prompt-contract.md
@@ -244,6 +252,7 @@ docs/
     warmup.md
     media.md
     messages-and-memory.md
+    diary.md
   ja/                      Japanese
     README.md
     prompt-contract.md
@@ -252,6 +261,7 @@ docs/
     warmup.md
     media.md
     messages-and-memory.md
+    diary.md
   ru/                      Russian
     README.md
     prompt-contract.md
@@ -260,6 +270,7 @@ docs/
     warmup.md
     media.md
     messages-and-memory.md
+    diary.md
 src/
   index.js                 entry point, wiring, timers, shutdown
   config.js                .env parser, config loader, deepMerge
@@ -293,6 +304,7 @@ src/
     mention.js             call detection, ignore heuristics
     prompt.js              request builder with token budget
     turn.js                one turn: collect, build, call, act
+    diary.js               diary scheduler, day plan, backfill
     spontaneous.js         chaotic timer, eavesdrop, room questions
     split.js               pure: task splitter pre-filter and answer parse
     pending.js             pending calls, merge answer parse, fold-into
@@ -334,5 +346,6 @@ data/                      persistent state (gitignored, created at runtime)
   guilds/<id>/users/       per-member profiles and relationships
   guilds/<id>/private/     per-member private DM memory
   guilds/<id>/channels/    channel observations from the analyzer
+  guilds/<id>/diary.json   diary post history (one-line gists)
   guilds/<id>/lore.json    lorebook entries
 ```

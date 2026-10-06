@@ -47,7 +47,11 @@ All instructions are English in both layers; a character's speech samples may be
 | `read-link.md` | no | Out-of-character prompt for the link reader (`features.webLookup`, `web.links.enabled`): condense a fetched page into one paragraph. Receives the page title and body. No character card | `{{today}}` `{{maxChars}}` |
 | `search-summary.md` | no | Out-of-character prompt for the search condenser (`features.webLookup`, `web.search.enabled`): condense numbered search results into one note with inline sources. No character card | `{{today}}` `{{query}}` `{{maxChars}}` |
 | `private.md` | no | Appended after the mode prompt (`reply.md`), before `forced.md`, only in a DM (`features.privateMessages`). This is a private conversation: what is said here stays here; the persona keeps their public knowledge. A missing file adds nothing | `{{name}}` `{{author}}` |
-| `draw.md` | yes | Out-of-character prompt of the drawing sub-process (`features.imageGeneration`): produces one picture from a scene description. Receives only the appearance and the request — never the character card | `{{name}}` `{{appearance}}` `{{request}}` |
+| `diary.md` | yes | Task: write a diary post. The persona's own channel, nobody asked. The plan's kind and brief, past posts, the optional world and search result are in the user message blocks. Output: `<msg>` (1 to `diary.maxMessages`), `<draw>`, or `<skip/>`; `<react>` and `<gif>` are dropped. No reply attributes, no links, no addressing a reader | `{{name}}` |
+| `diary-plan.md` | yes | The planner: pick the kind, a brief and whether to search and draw. Runs on `classifier.text`, no character card. Receives `<now>`, `<server>`, `<about_chat>`, `<recent>`, `<lore>`, `<world>`, `<diary>`, `<kinds>`, `<seeds>`. Answers one JSON object | `{{name}}` |
+| `world.md` | no | The persona's virtual world: the places and routines it lives in outside the chat. Rendered as a `<world>` block only in the diary plan and compose requests, and only when `diary.world === true`. Never in an ordinary turn. A missing file or switch adds no block | `{{name}}` |
+| `diary-seeds.md` | no | Random seed families for the diary planner. `# name` headers start a family (place, setting, detail, activity, subject, twist); code draws one line per family and composes `diary.seedSets` combinations as a `<seeds>` block. Omitted when missing or `seedSets` is 0 | none |
+| `draw.md` | yes | Out-of-character prompt of the drawing sub-process (`features.imageGeneration`): produces one picture from a scene description. Receives only the appearance and the request — never the character card | `{{name}}` `{{appearance}}` `{{request}}` `{{when}}` |
 | `appearance.md` | no | The persona's visual look, inserted into `draw.md` when `self="yes"`. One paragraph, no personality, no backstory | `{{name}}` |
 | `mentor-situations.md` | no | Mentor: invent test chat situations for a case (`features.mentor`). Returns JSON only | `{{name}}` `{{count}}` `{{minLines}}` `{{maxLines}}` |
 | `mentor-score.md` | no | Mentor: score the persona's answers to a situation (`features.mentor`). Receives the character card. Returns JSON only | `{{name}}` |
@@ -97,13 +101,21 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 | `<lookup>` | What the persona looked up this turn. A web search (`features.webLookup`) carries `labels.lookup.webHeader`, the condensed answer, `labels.lookup.sources` and, when nothing was found, `labels.lookup.none`. A server search (`features.recall`) carries `labels.lookup.serverHeader`, the summary note and, when the summary names a stretch, the verbatim lines of that stretch. When both ran, `labels.lookup.bothNote` sits between them. A `labels.lookup.stretch` line introduces a verbatim stretch (`{date}` `{channel}`). Appears only when a search classifier fired and at least one search completed |
 | `<chat>` | Up to `context.channelMessages` latest messages of the current channel. When `context.fetchReplyParents` is on, the trigger message and the last `context.replyParentsFor` window lines that are replies to older messages have their parents fetched and placed before the window as ordinary transcript lines; the trigger's parent can also bring its own parent. At most `context.replyParentsMax` parents per turn. A gap marker and date header cover the time jump; the reply line quotes the parent through `transcript.replyTo`; media in a parent is handled like any other line, and a cached description is served for free. A deleted or inaccessible parent is skipped and logged as `collect: parent missing` |
 | `<tempo>` | Counts for 10 min / hour / day, distinct people, silence, a verdict (live / slow / dead) |
-| `<task>` | `reply` / `interject` / `initiate` / `overheard` (when `overheard.md` exists) / `elsewhere` (when `elsewhere.md` exists, for a noticed comment), placeholders filled. After the mode prompt, up to three `task.*` labels are appended when their conditions hold (each separated by a blank line): `task.part` when the turn answers one part of a split message, or `task.queued` when the trigger author has other calls waiting; then `task.queuedOthers` when other members have calls waiting in the channel; then `task.added` when later messages were folded into this call. See `labels.task.*` below |
+| `<world>` | The persona's virtual world (`prompts/world.md` with `{{name}}` filled). Present only in a diary post (`mode === 'diary'`) when `diary.world === true`. Dropped whole under budget pressure. A missing file or switch off adds nothing |
+| `<diary>` | Past diary posts, oldest first, `labels.diary.intro` then one `labels.diary.line` per post. Shown in both the plan and compose requests. Under budget pressure the oldest lines are cut first |
+| `<plan>` | The plan for this diary post: `labels.diary.plan`, then one JSON line `{"kind","brief","picture"}`. Never cut |
+| `<found>` | What the diary's search turned up: `labels.diary.found`, then the search result text. Present only when the plan asked for a search and it returned something. Ranked right after `<lookup>` in the budget |
+| `<kinds>` | Post kinds with weights and usage counts: `labels.diary.kinds`, then one `labels.diary.kindLine` per kind with a positive weight. Never cut |
+| `<seeds>` | Random seed combinations: `labels.diary.seeds`, then one `- a; b; c` line per set. Present only in the plan request. Omitted when the file is missing or `diary.seedSets` is 0. Never cut |
+| `<task>` | `reply` / `interject` / `initiate` / `overheard` (when `overheard.md` exists) / `elsewhere` (when `elsewhere.md` exists, for a noticed comment) / `diary` (when `diary.md` exists, for a diary post), placeholders filled. After the mode prompt, up to three `task.*` labels are appended when their conditions hold (each separated by a blank line): `task.part` when the turn answers one part of a split message, or `task.queued` when the trigger author has other calls waiting; then `task.queuedOthers` when other members have calls waiting in the channel; then `task.added` when later messages were folded into this call. See `labels.task.*` below |
 
 Budget priority (sections are trimmed from the bottom of this list first): system + task + clock + tempo + senses
 (never cut) -> caller's profile with episodes -> lookup (kept or dropped whole; may hold a web part, a server part or both) -> about_chat -> self_facts -> lore -> server -> chat (newest first) ->
 pulled (`<channel_view>`, capped at `context.caps.pulled`; on a turn that answers a call from a read-only channel the pulled block sits before the chat instead of after it) ->
 recent (capped at `context.caps.recent`) ->
-other profiles -> attitudes (capped at `context.caps.attitudes`) -> worn (kept or dropped whole) -> other channels -> emoji (entries from the bottom, then the whole block; `context.caps.emoji`) -> gifs (same trimming; `context.caps.gifs`).
+other profiles -> attitudes (capped at `context.caps.attitudes`) -> worn (kept or dropped whole) ->
+diary mode only: `<found>` (right after `<lookup>`), `<world>` (one piece, right after `<worn>`), `<diary>` (oldest lines cut first), `<plan>` + `<kinds>` + `<seeds>` (never cut) ->
+other channels -> emoji (entries from the bottom, then the whole block; `context.caps.emoji`) -> gifs (same trimming; `context.caps.gifs`).
 
 GIF picker (`features.gifPicker`, default on). After the persona writes a short reply (at most `gifs.pick.maxChars` characters, default 160) and chose no GIF herself, a classifier (`classifier.text`, purpose `gif-pick`, `gifs.pick.maxOutputTokens` 60, prompt `prompts/gif-pick.md`) receives the last `gifs.pick.contextMessages` (default 4) chat lines with the answered message named in the context, the persona's first message and the whole captioned library (every entry with its caption, each carrying the own-mark when recently posted by the persona). The classifier answers one handle or `none`. On a handle the GIF replaces the first outgoing message and replies where it would have; the remaining messages follow in order. When the GIF fails to send, every message goes as written. The classifier runs during the first message's typing simulation; the daily GIF rail `gifs.maxPerDay` applies. Logged as `gifs: picked` (handle true/false, library size) or `gifs: pick failed`.
 
@@ -211,6 +223,7 @@ senses.linksWatch                        replaces links when features.videoDescr
 senses.linksRead                         shown after the links line when features.webLookup is on and web.links.enabled is not false; tells the persona that a link may come with a read excerpt, first-hand
 senses.search                            shown when features.webLookup is on, web.search.enabled is not false AND a Brave Search key is configured; tells the persona that a `<lookup>` block may appear with web results and that no search can happen during the reply itself
 senses.recall                            shown right after the search line when the server-history search is available: on every server turn, and in a private chat when `features.privateLikeServer` is on (the default). Tells the persona that a search of the server's old messages either ran before the reply or did not, that its part of `<lookup>` is what the history holds (a helper's summary or a verbatim stretch), and that without it nothing was looked up there. An older labels file without the key renders nothing
+senses.diary                             {channel}: shown when `diary.channelId` is set and `features.diary` is not false; tells the persona they keep a diary in that channel
 senses.draw                              shown when features.imageGeneration is on and an image client is wired; tells the persona they can draw
 senses.drawSpent                         replaces draw when the daily picture quota is spent
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
@@ -266,6 +279,7 @@ server.category | topic | purpose | topics | tone               {text}
 server.activity                          {activity} = server.activityLive | activitySlow | activityDead
 server.lastMessage                       {when}: humanised age of the channel's newest message
 server.topWriters                        {names}: current names of the members who write there most
+server.diary                             shown on the diary channel in the `<server>` map. The persona's diary
 server.readOnly                          shown on a channel the bot can read and react in but not write in; never shown on the current channel. Appears in the `<server>` map entry and as a line after a pulled channel's header
 senses.channels                          shown on every server turn: which channels this request shows (the chat, `<other_channels>`, `<channel_view>`); never claim to have looked at a channel not shown
 senses.elsewhere                         {destination}: shown when `features.elsewhere` is on and `memory.mainChannelIds` has a usable channel; says a call from a read-only channel is answered in {destination} with a link
@@ -281,7 +295,18 @@ elsewhere.link                           {text} {link}: joins the jump link to t
 triggers.mention | reply | name | followUp | overheard   followUp = an untagged message the address classifier judged to be for the persona; overheard = talk about the persona, not to them. Both post plain, never as a Discord reply. overheard falls back to followUp, then reply
 triggers.private                         the trigger for a private (DM) message
 triggers.drawFailed                      {reason}: the drawing sub-process failed; reason is the human phrase from draw.reasons.*
+draw.when                                {when}: the local date and time shown to the image model so the light and season match. Filled for every picture (diary or not) when the time is known; empty otherwise
 draw.reasons.moderation | daily | userDaily | timeout | error    human phrases for the five failure reasons; daily and userDaily are reserved but no longer reached by triggers.drawFailed — an image cap now posts limits.notice instead of a follow-up turn
+diary.intro                              first line of the `<diary>` block
+diary.line                               {date} {kind} {gist}: one past post
+diary.picture                            {scene}: appended to a diary line when the post had a picture
+diary.pictureUnknown                     placeholder scene when a backfilled post had a picture but the scene was not recorded
+diary.kindUnknown                        placeholder kind for a backfilled post with no recorded kind
+diary.kinds                              first line of the `<kinds>` block
+diary.kindLine                           {key} {weight} {count} {window}: one kind with its weight and use count
+diary.plan                               first line of the `<plan>` block
+diary.found                              first line of the `<found>` block
+diary.seeds                              first line of the `<seeds>` block
 memory.privateNote                       the <private> block content in a private analyzer batch: marks the batch as a private conversation, constrains output to users for the partner's id only
 memory.privateChannel                    heading used in place of a channel name for the <new_messages> section in a private batch
 limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
@@ -818,11 +843,12 @@ text messages, never inlined.
 
 ### Prompt assembly
 
-`buildDrawPrompt` (`src/behavior/prompt.js`) fills `draw.md` with three placeholders:
+`buildDrawPrompt` (`src/behavior/prompt.js`) fills `draw.md` with four placeholders:
 
 - `{{name}}` — the bot's display name.
 - `{{appearance}}` — `appearance.md` with `{{name}}` filled, included only when `self="yes"`. Empty otherwise.
 - `{{request}}` — the scene text from the `<draw>` tag, clamped to `image.maxPromptChars` (default 800).
+- `{{when}}` — the local date and time through `labels.draw.when`, so the image model draws the right light and season. Empty when the time is unknown.
 
 The drawing sub-process never receives the character card, `rules.md` or the system prompt. It follows its own style
 section inside `draw.md`.
@@ -874,6 +900,76 @@ reserved in `labels.json` but no longer reached by `triggers.drawFailed`.
 - Logs carry the model, counts, cost and failure reasons — never the prompt, because it may quote members.
 - In dry-run, the full image prompt (prompt files + the persona's request) is logged and mirrored, but nothing is
   generated.
+
+## Diary
+
+`features.diary` (on by default, but no `diary.channelId` means nothing runs). The persona posts in one owner-chosen
+channel on its own, at times drawn from configurable windows in `bot.timezone`. Each post is two model requests: a
+plan step and a compose step. A third request is added when the plan asks for a web search.
+
+### The two requests
+
+**Plan** (`prompts/diary-plan.md` on `classifier.text`, usage purpose `diary-plan`, `diary.planMaxOutputTokens` 300,
+`diary.planTimeoutMs` 20000). No character card. User message blocks: `<now>`, `<server>`, `<about_chat>`, `<recent>`,
+`<lore>`, `<world>` (under `diary.world`), `<diary>`, `<kinds>`, `<seeds>`. The answer is one JSON object:
+
+```
+{"kind": "<key>", "brief": "<one line>", "search": "<query or empty>", "picture": true|false}
+```
+
+`kind` must be a key of `diary.kinds` with a positive weight. `search` is kept only for a kind in `diary.searchKinds`.
+`picture` is true only when the answer says `true` and the picture caps allow it.
+
+**Validation and fallback.** `validatePlan` (in `src/behavior/diary.js`) normalises the answer. When the kind is missing,
+unknown or has weight 0, the whole answer is replaced by a weighted random kind with an empty brief and search
+(`fallback: true`). `brief` is clamped to 300 characters. `picture` is forced false when
+`diary.maxPicturesPerDay` or `image.maxPerDay` is spent.
+
+**Search.** When the plan names a search query and `lookup.search` is available, the query runs through the existing
+Brave path (cached, `web.maxPerDay`). The result text becomes a `<found>` block in the compose request. A failed or
+capped search turns the post into the same kind without the find.
+
+**Compose** (`prompts/diary.md` as the task, the main model with the character card and all memory blocks,
+`<worn>` included). The compose request receives `<world>` (under `diary.world`), `<diary>`, `<plan>`, and `<found>`
+(when the search produced one). The `<diary>` block is fitted by `fitSections`: the oldest lines are cut first, then
+the whole block. `<plan>` and `<kinds>` are never cut.
+
+### Output rules
+
+Only `<msg>` tags are acted on. Reply attributes are dropped. URLs in the message text are removed mechanically. At most `diary.maxMessages` (3) messages; excess messages are trimmed. `<react>` and `<gif>` are dropped in this mode. `<skip/>` means no post. A post may be a picture alone.
+
+A failed drawing on a diary post is logged; no `drawFailed` follow-up turn fires (nobody asked for the post).
+
+### The drawing prompt and `{{when}}`
+
+Every drawing request (diary or not) now carries a local time: `draw.md`'s `{{when}}` placeholder is filled with
+`labels.draw.when` when the time is known, or left empty. The image model uses it to match the light and the season.
+
+### Recording
+
+After posting, the post is recorded in `diary.json` (`store.appendDiaryPost`, newest `diary.historyPosts` kept): `{ at, kind, gist, picture, messageIds, search }`. `gist` is the post's text collapsed to one line and cut at `diary.gistChars`. `picture` is the scene text (cut the same way) or null. The day's diary post count is bumped; the picture count is bumped only when a picture was posted.
+
+In dry-run the post is logged and mirrored. Nothing is recorded and no daily counter is bumped.
+
+### Data file
+
+`data/guilds/<id>/diary.json`: `{ posts: [...], updatedAt }`. Posts are newest last, capped at `diary.historyPosts` (150). Each post: `{ at, kind, gist, picture, messageIds, search }`. The file is never deleted by code; `/nep diary off` keeps it.
+
+### Backfill
+
+When `diary.json` has no posts, the first tick with a channel and `/nep diary set` both read up to `diary.historyPosts` of the persona's own messages from the channel (REST, oldest first) and store them with `kind: null`, a one-line gist, and `labels.diary.pictureUnknown` as the scene of a message that carried a picture.
+
+### The diary in the server map
+
+The persona's own messages in the diary channel count toward the channel's `days` and `writers` (one exception to the rule that the persona's lines are not counted). `renderChannel` marks the channel with `labels.server.diary`.
+
+### Logs
+
+`diary: plan` (day, slots count, quiet), `diary: planned` (kind, brief, search, picture, fallback, pictureAllowed),
+`diary: due` (slot), `diary: post` (kind, messages, picture, search, outcome, forced),
+`diary: skip` (reason: `no-channel`, `off`, `paused`, `warmup`, `not-writable`, `cap`, `grace`, `busy`),
+`diary: backfill` (count), `diary: plan failed` (reason, status), `diary: search failed` (reason),
+`diary: backfill failed` (error).
 
 ## Private chat
 

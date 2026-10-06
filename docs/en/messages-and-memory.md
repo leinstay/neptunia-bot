@@ -89,6 +89,8 @@ The lorebook stores server-wide knowledge that outlives any conversation: events
 
 The analyzer adds and updates lorebook entries but never touches entries added by the owner through `/nep lore` commands. Lorebook data lives in `data/guilds/<id>/lore.json`.
 
+The diary keeps its own post history in `data/guilds/<id>/diary.json` (one-line gists, newest last, capped at `diary.historyPosts`). See [Diary](diary.md).
+
 The analyzer also records things people taught the persona directly (words and expressions, facts about the server, requests about their behaviour) as server-level learned items that are always present in the prompt.
 
 ## Private layer
