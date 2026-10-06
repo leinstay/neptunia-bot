@@ -5,7 +5,9 @@
 // jump in a few seconds/minutes later, as if it had just noticed it. A line
 // the room classifier of src/discord/events.js found put to everyone present
 // (spontaneous.roomQuestionChance) is scheduled the same way without the
-// roll, the turn about that line (its focus).
+// roll, the turn about that line (its focus). A topic the persona started and
+// posted is followed by a pause (spontaneous.initiateCooldownHours, kept in
+// state.json) in which it starts no other; interjecting is not affected.
 //
 // A channel the persona can read but not write in (a read-only channel) is a
 // candidate too, with the main channel as its destination
@@ -89,23 +91,23 @@ export function msUntilActive(now, timezone, activeHours, rng) {
  * `cfg.initiateChance` for 'initiate'; otherwise a last message of the
  * persona's own means null (it never interjects on itself); otherwise at least
  * `cfg.liveMinMessages` messages from other members (not the persona, not bots)
- * within `cfg.liveWindowMinutes` means 'interject'; otherwise null.
+ * within `cfg.liveWindowMinutes` means 'interject'; otherwise null. With
+ * `initiateAllowed: false` (an initiate cooldown, see initiateCooldownUntil)
+ * the empty or dead channel is null without a roll.
  * @param {object[]} history
  * @param {number} now
  * @param {object} cfg  config.spontaneous
  * @param {() => number} rng
+ * @param {{ initiateAllowed?: boolean }} [options]
  * @returns {'interject'|'initiate'|null}
  */
-export function chooseMode(history, now, cfg, rng) {
-  if (history.length === 0) {
+export function chooseMode(history, now, cfg, rng, { initiateAllowed = true } = {}) {
+  if (initiateChanceDue(history, now, cfg)) {
+    if (!initiateAllowed) return null;
     return rng() < cfg.initiateChance ? 'initiate' : null;
   }
 
   const last = history[history.length - 1];
-  const silenceMs = now - last.ts;
-  if (silenceMs >= cfg.deadAfterMinutes * MINUTE_MS) {
-    return rng() < cfg.initiateChance ? 'initiate' : null;
-  }
 
   if (last.self) return null; // the persona never interjects on its own last line
 
@@ -114,6 +116,56 @@ export function chooseMode(history, now, cfg, rng) {
   if (liveCount >= cfg.liveMinMessages) return 'interject';
 
   return null;
+}
+
+/**
+ * Whether chooseMode would roll `cfg.initiateChance` on `history`: the
+ * channel is empty, or its last message is at least `cfg.deadAfterMinutes` old.
+ * @param {object[]} history
+ * @param {number} now
+ * @param {object} cfg  config.spontaneous
+ * @returns {boolean}
+ */
+function initiateChanceDue(history, now, cfg) {
+  if (history.length === 0) return true;
+  return now - history[history.length - 1].ts >= cfg.deadAfterMinutes * MINUTE_MS;
+}
+
+// Only when spontaneous.initiateCooldownHours is missing (config.json always has it).
+const INITIATE_COOLDOWN_FALLBACK = [6, 12];
+
+/**
+ * The `[min, max]` hours of the pause after an initiate the persona posted
+ * (`spontaneous.initiateCooldownHours`, or [6, 12], config.json's value, when
+ * it is missing), or null when there is none: not an array of two finite
+ * numbers, or a max that is not positive ([0, 0] switches it off).
+ * @param {object} cfg  config.spontaneous
+ * @returns {[number, number]|null}
+ */
+function initiateCooldownRange(cfg) {
+  const range = cfg?.initiateCooldownHours ?? INITIATE_COOLDOWN_FALLBACK;
+  if (!Array.isArray(range) || range.length !== 2 || !range.every(Number.isFinite)) return null;
+  return range[1] > 0 ? range : null;
+}
+
+/**
+ * When the initiate cooldown of `guildId` ends (epoch ms, state.json
+ * `spontaneousInitiateUntil[guildId]`), or null when none holds at `now`: no
+ * stored end, an end already reached, or the cooldown switched off in `cfg`
+ * (read now, so switching it off lifts a running one). While it holds the
+ * persona starts no topic of its own (chooseMode never says 'initiate');
+ * interjecting, a room question, a noticed comment and a forced
+ * `/nep initiate` are not affected.
+ * @param {object} data  store.state.data
+ * @param {string} guildId
+ * @param {number} now
+ * @param {object} cfg  config.spontaneous
+ * @returns {number|null}
+ */
+export function initiateCooldownUntil(data, guildId, now, cfg) {
+  if (!initiateCooldownRange(cfg)) return null;
+  const until = data?.spontaneousInitiateUntil?.[guildId];
+  return Number.isFinite(until) && now < until ? until : null;
 }
 
 /**
@@ -337,8 +389,35 @@ export function createSpontaneous({
     }));
   }
 
-  function makeChooseMode(cfg) {
-    return (history, ts) => chooseMode(history, ts, cfg, rng);
+  /**
+   * The ordinary chooser of `guildId`, the initiate cooldown read when it
+   * runs: a chance to initiate it holds back logs `spontaneous: initiate on cooldown`.
+   */
+  function makeChooseMode(cfg, guildId) {
+    return (history, ts) => {
+      const until = initiateCooldownUntil(store.state.data, guildId, ts, cfg);
+      if (until !== null && initiateChanceDue(history, ts, cfg)) {
+        log.info('spontaneous: initiate on cooldown', { guildId, until });
+      }
+      return chooseMode(history, ts, cfg, rng, { initiateAllowed: until === null });
+    };
+  }
+
+  /**
+   * After a turn the ordinary chooser ran: an initiate the persona posted
+   * (`spoke`, mode 'initiate', not a send that reached nobody; a dry-run
+   * rehearsal counts) starts the cooldown, drawn from
+   * spontaneous.initiateCooldownHours (read now) and kept in state.json
+   * `spontaneousInitiateUntil[guildId]`. Anything else changes nothing.
+   */
+  function noteTurn(guildId, result) {
+    if (result?.outcome !== 'spoke' || result.mode !== 'initiate' || result.delivered === false) return;
+    const range = initiateCooldownRange(hot.config.spontaneous);
+    if (!range) return;
+    const until = now() + Math.max(0, between(range, rng)) * HOUR_MS;
+    (store.state.data.spontaneousInitiateUntil ??= {})[guildId] = until;
+    store.state.markDirty();
+    log.info('spontaneous: initiate cooldown', { guildId, until });
   }
 
   /**
@@ -432,9 +511,10 @@ export function createSpontaneous({
     log.info('spontaneous: firing a turn', { guildId, channel: turnChannel.id, source });
     try {
       const result = await turns.runTurn(
-        noticed ? noticedTurn(channel, turnChannel, cfg, 'tick') : { channel, mode: 'auto', chooseMode: makeChooseMode(cfg) },
+        noticed ? noticedTurn(channel, turnChannel, cfg, 'tick') : { channel, mode: 'auto', chooseMode: makeChooseMode(cfg, guildId) },
       );
       log.info('spontaneous: turn finished', { guildId, channel: turnChannel.id, source, outcome: result.outcome });
+      noteTurn(guildId, result);
       if (result.outcome === 'not-now') {
         schedule[guildId] = now() + between(REWAKE_MINUTES, rng) * MINUTE_MS;
         store.state.markDirty();
@@ -516,10 +596,14 @@ export function createSpontaneous({
       // Up to eavesdropDelayMs later: the same checks again, on the config read now.
       const current = hot.config;
       if (!eavesdropAllowed(current, now())) return;
+      const guildId = channel.guild.id;
       const turn = room
         ? { channel, mode: 'auto', chooseMode: (history) => chooseRoomMode(history, normalized.id), focus: normalized }
-        : { channel, mode: 'auto', chooseMode: makeChooseMode(current.spontaneous) };
-      turns.runTurn(turn).catch((err) => log.error('spontaneous: eavesdrop turn failed', { channel: channel.id, error: err }));
+        : { channel, mode: 'auto', chooseMode: makeChooseMode(current.spontaneous, guildId) };
+      turns
+        .runTurn(turn)
+        .then((result) => noteTurn(guildId, result))
+        .catch((err) => log.error('spontaneous: eavesdrop turn failed', { channel: channel.id, error: err }));
     }, delay);
     timer.unref?.();
     eavesdropTimers.add(timer);

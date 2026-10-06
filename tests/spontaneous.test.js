@@ -12,6 +12,7 @@ import {
   createSpontaneous,
   chooseRoomMode,
   someoneAround,
+  initiateCooldownUntil,
 } from '../src/behavior/spontaneous.js';
 
 function snowflake(ts) {
@@ -1381,4 +1382,180 @@ test('tick: the persona\'s own recent post (turns.lastPostAt) does not keep the 
   const scene = presenceScene({ ages: { c1: 20, c2: 300 }, someoneAroundMinutes: 120, lastPostAt });
   await scene.spontaneous.tick();
   assert.equal(scene.calls.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// initiate cooldown (spontaneous.initiateCooldownHours)
+
+const LIVE_AT = (t) => [
+  msg({ ts: t - 10 * MINUTE, authorId: 'a' }),
+  msg({ ts: t - 8 * MINUTE, authorId: 'b' }),
+  msg({ ts: t - 5 * MINUTE, authorId: 'a' }),
+  msg({ ts: t - 1 * MINUTE, authorId: 'c' }),
+];
+
+/**
+ * A due tick whose turn runs the chooser it was given on `history(t)` (an empty
+ * channel by default, so a won roll initiates) and resolves `result(mode)`.
+ */
+function cooldownScene({
+  range,
+  data = {},
+  history = () => [],
+  result = (mode) => (mode ? { outcome: 'spoke', mode, delivered: true } : { outcome: 'not-now' }),
+  rng = () => 0.5,
+  overrides = {},
+} = {}) {
+  const guild = fakeGuild('g1');
+  const channel = fakeChannel('c1', guild);
+  guild.channels.cache.set(channel.id, channel);
+  const client = { guilds: { cache: new Map([[guild.id, guild]]) } };
+  const clock = { t: Date.UTC(2026, 0, 5, 12, 0, 0) };
+  const store = fakeStore({ spontaneous: { g1: clock.t }, ...data });
+  const chosen = [];
+  const calls = [];
+  const turns = fakeTurns({
+    runTurn: async (args) => {
+      calls.push(args);
+      const mode = args.mode === 'auto' ? args.chooseMode(history(clock.t), clock.t) : args.mode;
+      chosen.push(mode);
+      return result(mode);
+    },
+  });
+  const spontaneousCfg = { initiateChance: 1, ...overrides };
+  if (range !== undefined) spontaneousCfg.initiateCooldownHours = range;
+  const hot = { config: baseConfig(spontaneousCfg) };
+  const spontaneous = createSpontaneous({ hot, store, client, turns, getGuildId: () => 'g1', rng, now: () => clock.t });
+  return { spontaneous, store, chosen, calls, clock, channel, hot };
+}
+
+test('chooseMode: with initiateAllowed false a dead or empty channel never initiates, a live one still interjects', () => {
+  const now = 10_000_000;
+  const dead = [msg({ ts: now - SPONTANEOUS_CFG.deadAfterMinutes * MINUTE - 1 })];
+  const cfg = { ...SPONTANEOUS_CFG, initiateChance: 1 };
+  assert.equal(chooseMode([], now, cfg, () => 0, { initiateAllowed: false }), null);
+  assert.equal(chooseMode(dead, now, cfg, () => 0, { initiateAllowed: false }), null);
+  assert.equal(chooseMode(LIVE_AT(now), now, cfg, () => 0, { initiateAllowed: false }), 'interject');
+  assert.equal(chooseMode(dead, now, cfg, () => 0, { initiateAllowed: true }), 'initiate');
+});
+
+test('initiateCooldownUntil: the stored end while it is ahead and the range is on, else null', () => {
+  const data = { spontaneousInitiateUntil: { g1: 5000 } };
+  const cfg = { initiateCooldownHours: [1, 2] };
+  assert.equal(initiateCooldownUntil(data, 'g1', 4999, cfg), 5000);
+  assert.equal(initiateCooldownUntil(data, 'g1', 5000, cfg), null, 'over at its end');
+  assert.equal(initiateCooldownUntil(data, 'g2', 4999, cfg), null, 'another guild has none');
+  assert.equal(initiateCooldownUntil({}, 'g1', 4999, cfg), null);
+  assert.equal(initiateCooldownUntil(data, 'g1', 4999, { initiateCooldownHours: [0, 0] }), null, 'a range switched off lifts it');
+  assert.equal(initiateCooldownUntil(data, 'g1', 4999, { initiateCooldownHours: 3 }), null, 'a non-array lifts it');
+  assert.equal(initiateCooldownUntil(data, 'g1', 4999, { initiateCooldownHours: [2, -1] }), null, 'a non-positive max lifts it');
+});
+
+test('tick: a spoke initiate starts a cooldown drawn from initiateCooldownHours and persists it in state', async () => {
+  const scene = cooldownScene({ range: [2, 4], rng: () => 0.25 });
+  const dirtyBefore = scene.store.dirtyCalls;
+  const { logs } = await withCapturedLogs(() => scene.spontaneous.tick());
+
+  assert.deepEqual(scene.chosen, ['initiate']);
+  const until = scene.store.state.data.spontaneousInitiateUntil.g1;
+  assert.ok(until >= scene.clock.t + 2 * HOUR && until <= scene.clock.t + 4 * HOUR, `got ${(until - scene.clock.t) / HOUR}h`);
+  assert.equal(until, scene.clock.t + 2.5 * HOUR, 'between([2, 4], 0.25)');
+  assert.ok(scene.store.dirtyCalls > dirtyBefore);
+  const started = logs.filter((entry) => entry.msg === 'spontaneous: initiate cooldown');
+  assert.deepEqual(started.map(({ guildId, until: end }) => ({ guildId, until: end })), [{ guildId: 'g1', until }]);
+});
+
+test('tick: within the cooldown the chooser never initiates (null or interject), and says so once per blocked chance', async () => {
+  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
+  const until = t + HOUR;
+  const dead = cooldownScene({ range: [2, 4], rng: () => 0, data: { spontaneousInitiateUntil: { g1: until } } });
+  const { logs } = await withCapturedLogs(() => dead.spontaneous.tick());
+  assert.deepEqual(dead.chosen, [null], 'a won roll in an empty channel is held back');
+  assert.equal(dead.store.state.data.spontaneousInitiateUntil.g1, until, 'the cooldown is left as it was');
+  const blocked = logs.filter((entry) => entry.msg === 'spontaneous: initiate on cooldown');
+  assert.deepEqual(blocked.map(({ guildId, until: end }) => ({ guildId, until: end })), [{ guildId: 'g1', until }]);
+
+  const live = cooldownScene({ range: [2, 4], rng: () => 0, history: LIVE_AT, data: { spontaneousInitiateUntil: { g1: until } } });
+  const { logs: liveLogs } = await withCapturedLogs(() => live.spontaneous.tick());
+  assert.deepEqual(live.chosen, ['interject'], 'interjecting into a live conversation is not on cooldown');
+  assert.equal(liveLogs.filter((entry) => entry.msg === 'spontaneous: initiate on cooldown').length, 0, 'no initiate chance, nothing blocked');
+});
+
+test('tick: once the cooldown is over an initiate is possible again', async () => {
+  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
+  const scene = cooldownScene({ range: [2, 4], rng: () => 0, data: { spontaneousInitiateUntil: { g1: t } } });
+  await scene.spontaneous.tick();
+  assert.deepEqual(scene.chosen, ['initiate']);
+  assert.equal(scene.store.state.data.spontaneousInitiateUntil.g1, t + 2 * HOUR, 'and a new cooldown starts');
+});
+
+test('tick: a spoke interject, a skipped initiate or an initiate that reached nobody starts no cooldown', async () => {
+  const interject = cooldownScene({ range: [2, 4], history: LIVE_AT });
+  await interject.spontaneous.tick();
+  assert.deepEqual(interject.chosen, ['interject']);
+  assert.equal(interject.store.state.data.spontaneousInitiateUntil?.g1, undefined);
+
+  const skipped = cooldownScene({ range: [2, 4], result: (mode) => ({ outcome: 'skip', mode }) });
+  await skipped.spontaneous.tick();
+  assert.equal(skipped.store.state.data.spontaneousInitiateUntil?.g1, undefined);
+
+  const undelivered = cooldownScene({ range: [2, 4], result: (mode) => ({ outcome: 'spoke', mode, delivered: false }) });
+  await undelivered.spontaneous.tick();
+  assert.equal(undelivered.store.state.data.spontaneousInitiateUntil?.g1, undefined);
+});
+
+test('tick: a rehearsed (dry-run) initiate starts the cooldown like a real one', async () => {
+  const scene = cooldownScene({ range: [2, 4], rng: () => 0, result: (mode) => ({ outcome: 'spoke', mode, dryRun: true }) });
+  await scene.spontaneous.tick();
+  assert.equal(scene.store.state.data.spontaneousInitiateUntil.g1, scene.clock.t + 2 * HOUR);
+});
+
+test('tick: initiateCooldownHours [0, 0], a non-array or a non-positive max means no cooldown', async () => {
+  for (const range of [[0, 0], 'often', [3, 0]]) {
+    const scene = cooldownScene({ range });
+    await scene.spontaneous.tick();
+    assert.deepEqual(scene.chosen, ['initiate'], String(range));
+    assert.equal(scene.store.state.data.spontaneousInitiateUntil?.g1, undefined, String(range));
+  }
+  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
+  const lifted = cooldownScene({ range: [0, 0], rng: () => 0, data: { spontaneousInitiateUntil: { g1: t + HOUR } } });
+  await lifted.spontaneous.tick();
+  assert.deepEqual(lifted.chosen, ['initiate'], 'switched off, a stored cooldown does not hold');
+});
+
+test('force: a forced initiate ignores the cooldown and starts none', async () => {
+  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
+  const until = t + HOUR;
+  const scene = cooldownScene({ range: [2, 4], data: { spontaneousInitiateUntil: { g1: until } } });
+  const result = await scene.spontaneous.force(scene.channel, 'initiate');
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(scene.calls[0].mode, 'initiate');
+  assert.equal(scene.calls[0].forced, true);
+  assert.equal(scene.store.state.data.spontaneousInitiateUntil.g1, until, 'left as it was');
+
+  const fresh = cooldownScene({ range: [2, 4] });
+  await fresh.spontaneous.force(fresh.channel, 'initiate');
+  assert.equal(fresh.store.state.data.spontaneousInitiateUntil?.g1, undefined);
+});
+
+test('onMessage: the eavesdrop chooser keeps the cooldown, an eavesdrop initiate starts one, a room turn never does', async () => {
+  const t = Date.UTC(2026, 0, 5, 12, 0, 0);
+  const eager = { eavesdropChance: 1, eavesdropDelayMs: [0, 0] };
+
+  const held = cooldownScene({ range: [2, 4], rng: () => 0, overrides: eager, data: { spontaneousInitiateUntil: { g1: t + HOUR } } });
+  held.spontaneous.onMessage(held.channel, { self: false, bot: false });
+  await flushTimers();
+  assert.deepEqual(held.chosen, [null]);
+
+  const free = cooldownScene({ range: [2, 4], rng: () => 0, overrides: eager });
+  free.spontaneous.onMessage(free.channel, { self: false, bot: false });
+  await flushTimers();
+  assert.deepEqual(free.chosen, ['initiate']);
+  assert.equal(free.store.state.data.spontaneousInitiateUntil.g1, t + 2 * HOUR);
+
+  const room = cooldownScene({ range: [2, 4], rng: () => 0, overrides: eager, history: () => [{ id: 'm7', self: false }] });
+  room.spontaneous.onMessage(room.channel, { id: 'm7', self: false, bot: false }, { room: true });
+  await flushTimers();
+  assert.deepEqual(room.chosen, ['interject']);
+  assert.equal(room.store.state.data.spontaneousInitiateUntil?.g1, undefined);
 });

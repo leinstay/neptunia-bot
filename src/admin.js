@@ -52,6 +52,7 @@ import { avatarReference } from './discord/fetch-image.js';
 import { classifierTextModel, classifierMediaModel, classifierVideoModel } from './behavior/mention.js';
 import { buildDrawPrompt } from './behavior/prompt.js';
 import { imageFileName } from './behavior/turn.js';
+import { initiateCooldownUntil } from './behavior/spontaneous.js';
 import { renderVarietyReport, varietyStatusLine } from './behavior/variety.js';
 import { effectiveAffinity, privateRepliesToday } from './behavior/private.js';
 import { ImageCapError, ImageGenError, UnsupportedImageModelError, familyOf as imageFamilyOf, IMAGE_ROLE } from './llm/images.js';
@@ -1322,6 +1323,9 @@ export function createAdmin({
       const buffer = store.getBuffer(guildId);
       const next = nextSpontaneousFor(guildId);
       lines.push(`guild: ${label} profiles=${profiles} buffer=${buffer.length} nextSpontaneous=${next ?? '-'}`);
+      // The pause after a topic the persona started (spontaneous.initiateCooldownHours), only while it holds.
+      const initiateUntil = initiateCooldownUntil(data, guildId, Date.now(), cfg?.spontaneous);
+      if (initiateUntil !== null) lines.push(`initiate cooldown until ${new Date(initiateUntil).toISOString()}`);
       // The variety pass: the switch, how many patterns its latest list holds and how old it is.
       lines.push(varietyStatusLine(typeof store.getGuild === 'function' ? store.getGuild(guildId)?.worn : null, cfg, Date.now()));
       // The voice lines exist only while the two-stage analyzer is on (features.memoryTwoStage).

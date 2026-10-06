@@ -2083,6 +2083,20 @@ test('run: status reports dry-run on, logging only, when no mirror channel is co
   assert.equal(body.split('\n')[0], 'dry-run: on → log');
 });
 
+test('run: status shows the initiate cooldown only while it holds', async () => {
+  const rootDir = makeRoot();
+  const { admin, hot, store } = makeAdmin(rootDir);
+  hot.config.spontaneous = { initiateCooldownHours: [2, 4] };
+  const until = Date.now() + 3_600_000;
+  const cooldownLines = (body) => body.split('\n').filter((line) => line.startsWith('initiate cooldown'));
+
+  assert.deepEqual(cooldownLines(await admin.run('status', {}, {})), [], 'none stored');
+  store.state.data.spontaneousInitiateUntil = { g1: until };
+  assert.deepEqual(cooldownLines(await admin.run('status', {}, {})), [`initiate cooldown until ${new Date(until).toISOString()}`]);
+  store.state.data.spontaneousInitiateUntil = { g1: Date.now() - 1000 };
+  assert.deepEqual(cooldownLines(await admin.run('status', {}, {})), [], 'already over');
+});
+
 // ---------------------------------------------------------------------------
 // interject / initiate
 // ---------------------------------------------------------------------------
