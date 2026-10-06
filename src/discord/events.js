@@ -759,8 +759,11 @@ export function createMessageHandler({
    * `followUp` or `overheard` (followUpTriggerKind). Never awaits the turn;
    * returns whether it was started: a turn started
    * elsewhere while the classifier was thinking (turnBlocked, read now)
-   * would answer 'busy', so none is started, logged as `follow-up: dropped`
-   * (and a held message is not dropped as already answered).
+   * would answer 'busy', so none is started (and a held message is not
+   * dropped as already answered). A `followUp` that finds the attention
+   * taken -- here, or as runTurn's 'busy' -- waits in the pending queue
+   * (deferFollowUp); an `overheard` one is dropped (`follow-up: dropped`,
+   * `busy`).
    * @param {{ message: object, normalized: object }} candidate
    * @param {'followUp'|'overheard'} triggerKind
    * @returns {boolean}
@@ -770,7 +773,8 @@ export function createMessageHandler({
     const channelId = channel.id;
     const config = hot.config;
     if (turnBlocked(channelId, config)) {
-      log.info('follow-up: dropped', { channel: channelId, message: normalized.id, reason: 'busy' });
+      if (triggerKind === 'followUp') deferFollowUp(channel, normalized);
+      else log.info('follow-up: dropped', { channel: channelId, message: normalized.id, reason: 'busy' });
       return false;
     }
     // A follow-up is still counted for spam (mention.spamThreshold, future
@@ -782,7 +786,13 @@ export function createMessageHandler({
       .runTurn({ channel, mode: 'reply', trigger: normalized, triggerKind })
       .then((result) => {
         if (result?.outcome === 'busy') {
-          log.info('follow-up: dropped', { channel: channelId, message: normalized.id, reason: 'busy' });
+          if (triggerKind !== 'followUp') {
+            log.info('follow-up: dropped', { channel: channelId, message: normalized.id, reason: 'busy' });
+            return undefined;
+          }
+          deferFollowUp(channel, normalized);
+          if (!turnBlocked(channelId, hot.config)) return drainPending();
+          return undefined;
         }
         return announceRefusal(channel, normalized, result, triggerKind);
       })
@@ -1134,6 +1144,10 @@ export function createMessageHandler({
   // their queued calls -- may be about one of them: the merge classifier
   // (prompts/merge.md, holdCall) folds it into that item instead of queueing
   // it, and the item's turn names it (labels.task.added).
+  // A follow-up the address classifier said `yes` to that found the attention
+  // taken waits here too (deferFollowUp, kind `followUp`, one per channel),
+  // logged as `follow-up: ...`; at pickup its window must still be open and
+  // the persona must not have posted there since (followUpStale).
   // Never persisted.
   let pendingList = [];
   let draining = false; // guards against a re-entrant drainPending() call (see below)
@@ -1174,14 +1188,84 @@ export function createMessageHandler({
    * included), with the counts: how many wait now, and the cap.
    */
   function logEvicted(evicted, maxPending) {
-    log.info('mention: dropped', {
-      channel: evicted.channelId,
-      kind: evicted.kind,
-      reason: 'full',
-      pending: pendingList.length,
-      maxPending,
-      ...routedFields(evicted),
+    logPending(evicted, 'dropped', { reason: 'full', pending: pendingList.length, maxPending });
+  }
+
+  /**
+   * One log line about a pending entry: `follow-up: <event>` for a deferred
+   * follow-up (its message id included, as every follow-up line has it),
+   * `mention: <event>` for any other call; channel, kind, `fields`, and a
+   * routed call's destination.
+   */
+  function logPending(ping, event, fields = {}) {
+    const followUp = ping.kind === 'followUp';
+    log.info(`${followUp ? 'follow-up' : 'mention'}: ${event}`, {
+      channel: ping.channelId,
+      kind: ping.kind,
+      ...(followUp ? { message: ping.trigger.id } : {}),
+      ...fields,
+      ...routedFields(ping),
     });
+  }
+
+  /**
+   * A follow-up `yes` (trigger kind `followUp`) that found the attention
+   * taken (startFollowUpTurn): held in the pending queue like a direct call,
+   * answered by drainPending once the turn frees up, after the window and
+   * "already answered" checks there (followUpStale). Read now: muted
+   * (paused, a warmup run), features.followUp / features.mentions off, or its
+   * own channel busy with mention.pendingSameChannel off -- not held, dropped
+   * with that reason (`busy` for the last two, as before). One per channel:
+   * a newer one takes an older one's place (`follow-up: dropped`, `newer`).
+   * Never folded into another call, nor a fold target (waitingItems).
+   * `follow-up: deferred` names where the running turn is (`runningIn`).
+   */
+  function deferFollowUp(channel, trigger) {
+    const config = hot.config;
+    const channelId = channel.id;
+    const sameChannel = turns.isBusy(channelId);
+    let reason = followUpMuted();
+    if (!reason && (followUpOff(config) || (sameChannel && config.mention.pendingSameChannel === false))) reason = 'busy';
+    if (reason) {
+      log.info('follow-up: dropped', { channel: channelId, message: trigger.id, reason });
+      return;
+    }
+    const older = pendingList.find((p) => p.kind === 'followUp' && p.channelId === channelId);
+    if (older) {
+      pendingList = pendingList.filter((p) => p !== older);
+      log.info('follow-up: dropped', { channel: channelId, message: older.trigger.id, reason: 'newer' });
+    }
+    const maxPending = config.mention.maxPending ?? 6;
+    const ping = { channelId, channel, trigger, kind: 'followUp', arrivedAt: now() };
+    const { list, evicted } = addPending(pendingList, ping, maxPending);
+    pendingList = list;
+    log.info('follow-up: deferred', {
+      channel: channelId,
+      author: trigger.authorId,
+      message: trigger.id,
+      runningIn: sameChannel ? channelId : (turns.busyChannels?.()[0] ?? null),
+      sameChannel,
+      pending: pendingList.length,
+    });
+    if (evicted) logEvicted(evicted, maxPending);
+  }
+
+  /**
+   * Why a deferred follow-up is no longer to be answered at pickup, read now:
+   * `closed` -- the window of its channel is not open any more
+   * (isFollowUpOpen: mention.followUpMinutes and the no-streak, the rule the
+   * classifier used; an expired one is forgotten as the gate does) --, or
+   * `answered` -- the persona posted in that channel after the message
+   * (the window's last answer is later than it). Null: still to answer.
+   * @returns {'closed'|'answered'|null}
+   */
+  function followUpStale(ping, config) {
+    const window = followUpWindows.get(ping.channelId);
+    if (!isFollowUpOpen(window, now(), config.mention)) {
+      if (window) closeFollowUpWindow(ping.channelId);
+      return 'closed';
+    }
+    return window.lastAnswerAt > ping.trigger.ts ? 'answered' : null;
   }
 
   /**
@@ -1298,7 +1382,10 @@ export function createMessageHandler({
     }
     return [
       ...parts.map((part) => ({ kind: 'part', index: part.index, text: itemText(part.text) })),
-      ...authorCalls(pendingList, channelId, authorId).map((p) => ({ kind: 'call', id: p.trigger.id, text: itemText(p.trigger.content) })),
+      // A deferred follow-up is not one: it may still be dropped (window closed, answered).
+      ...authorCalls(pendingList, channelId, authorId)
+        .filter((p) => p.kind !== 'followUp')
+        .map((p) => ({ kind: 'call', id: p.trigger.id, text: itemText(p.trigger.content) })),
     ];
   }
 
@@ -1394,14 +1481,7 @@ export function createMessageHandler({
     const maxPending = mentionCfg.maxPending ?? 6;
     const { list, evicted } = requeuePending(pendingList, ping, maxPending);
     pendingList = list;
-    log.info('mention: deferred again', {
-      channel: ping.channelId,
-      kind: ping.kind,
-      reason: 'busy',
-      pending: pendingList.length,
-      queued: queuedCount(ping.channelId, ping.trigger.authorId),
-      ...routedFields(ping),
-    });
+    logPending(ping, 'deferred again', { reason: 'busy', pending: pendingList.length, queued: queuedCount(ping.channelId, ping.trigger.authorId) });
     if (evicted) logEvicted(evicted, maxPending);
     return turnBlocked(ping.destination?.id ?? ping.channelId, hot.config);
   }
@@ -1461,7 +1541,10 @@ export function createMessageHandler({
    * (`added`) go with it. Each call's turn gets the other calls waiting in its
    * channel (`queued`, queuedFor) and the messages folded into it (`added`).
    * A ping queued in a channel whose own turn was running is picked up the
-   * same way once that turn frees the channel. Guarded against re-entrancy:
+   * same way once that turn frees the channel. A deferred follow-up is never
+   * rolled (counted for spam only) and is dropped when its window closed or
+   * the persona posted in its channel after it (followUpStale), or when
+   * features.followUp is off now. Guarded against re-entrancy:
    * the turn this function itself starts also frees the channel through the very same `onIdle`,
    * which would otherwise start a second overlapping drain. A no-op while
    * `isWarmingUp()` is true -- the queue is left untouched for a later
@@ -1510,24 +1593,24 @@ export function createMessageHandler({
         const mentionCfg = hot.config.mention;
         const routed = routedFields(ping);
         if (isExpired(ping, now(), mentionCfg.pendingMinutes ?? 10)) {
-          log.info('mention: expired', { channel: ping.channelId, kind: ping.kind, ...routed });
+          logPending(ping, 'expired');
           continue;
         }
 
-        log.info('mention: picked up', { channel: ping.channelId, kind: ping.kind, queued: queuedCount(ping.channelId, ping.trigger.authorId), ...routed });
+        logPending(ping, 'picked up', { queued: queuedCount(ping.channelId, ping.trigger.authorId) });
         await sleep(between(mentionCfg.switchDelayMs ?? [2000, 9000], rng));
 
         // Paused meanwhile: nothing may run or mark the store dirty; the
         // queue's other pings are cleared by the pause itself.
         if (store?.state?.data?.paused) {
-          log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: 'paused', ...routed });
+          logPending(ping, 'dropped', { reason: 'paused' });
           break;
         }
         // An ordinary ping is answered where it was written. A routed call's
         // turn posts in a main channel, resolved again below (routeFor): the
         // one it waited with may have changed or lost Send meanwhile.
         if (!ping.destination && !canSend(ping.channel)) {
-          log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: 'cannot-send', ...routed });
+          logPending(ping, 'dropped', { reason: 'cannot-send' });
           continue;
         }
         const held = await heldCallState(ping.channel, ping.trigger.id, Boolean(ping.destination));
@@ -1538,7 +1621,7 @@ export function createMessageHandler({
           continue;
         }
         if (held !== true) {
-          log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: missingReason(held), ...routed });
+          logPending(ping, 'dropped', { reason: missingReason(held) });
           continue;
         }
         // The turn that ran meanwhile fetched its history after this ping
@@ -1546,7 +1629,8 @@ export function createMessageHandler({
         // routed call, and the calls of its source that turn showed, are no
         // longer presented as waiting either).
         if (turns.spokeAfterSeeing?.(ping.channelId, ping.trigger.id)) {
-          log.info('mention: already answered', { channel: ping.channelId, kind: ping.kind, ...routed });
+          if (ping.kind === 'followUp') logPending(ping, 'dropped', { reason: 'answered' });
+          else log.info('mention: already answered', { channel: ping.channelId, kind: ping.kind, ...routed });
           if (ping.destination) skipSeenCalls(ping.channelId, ping.trigger.id);
           continue;
         }
@@ -1589,9 +1673,9 @@ export function createMessageHandler({
 
         // The channel list and the ping's own switch are hot: either may have
         // changed while the ping waited.
-        const switchOff = callSwitchOff(ping.kind, features);
+        const switchOff = ping.kind === 'followUp' ? followUpOff(config) : callSwitchOff(ping.kind, features);
         if (!channelAllowed(ping.channel, config.bot) || switchOff) {
-          log.info('mention: dropped', { channel: ping.channelId, kind: ping.kind, reason: switchOff ? 'off' : 'channel', ...routed });
+          logPending(ping, 'dropped', { reason: switchOff ? 'off' : 'channel' });
           continue;
         }
 
@@ -1607,9 +1691,20 @@ export function createMessageHandler({
           destination = route.destination;
         }
 
+        // A deferred follow-up: its window must still be open and the persona
+        // must not have posted there since. Counted for spam like a live one,
+        // never rolled for the ignore chance (startFollowUpTurn).
+        if (ping.kind === 'followUp') {
+          const stale = followUpStale(ping, config);
+          if (stale) {
+            logPending(ping, 'dropped', { reason: stale });
+            continue;
+          }
+          if (!ping.decided) tagHistory.hit(ping.trigger.authorId, now(), repeatWindowMs(config.mention));
+        }
         // A re-queued ping was already counted and decided `respond` on the
         // pass whose turn found another one running: not counted or rolled again.
-        if (!ping.decided) {
+        else if (!ping.decided) {
           const decision = decideAndLog(ping.channel, ping.trigger, ping.kind, config, { deferred: true, destination });
           if (!decision.respond) {
             // The ignore roll let a routed call pass, and the calls it replaced with it.

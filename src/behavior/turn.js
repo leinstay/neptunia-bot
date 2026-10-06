@@ -3517,6 +3517,8 @@ export function createTurnRunner({
     },
     isBusy: (channelId) => busy.has(channelId),
     isAnyBusy: () => busy.size > 0,
+    /** The ids of the channels a turn is running in now (for log lines: where the attention is). */
+    busyChannels: () => [...busy],
     lastPostAt: (channelId) => lastPostAt.get(channelId) ?? 0,
     notePost: (channelId, ts) => lastPostAt.set(channelId, ts),
     /**
