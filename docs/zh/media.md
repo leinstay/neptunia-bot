@@ -14,6 +14,8 @@
 
 当 `media.gif.watch` 开启时（默认如此，需同时开启视频视觉），GIF 作为短无声片段被观看：动画被转换为不超过 `media.gif.maxSeconds`（默认 8）秒的 mp4，通过 `prompts/describe-gif.md` 发送给 `classifier.video` 模型（文件不存在时回退到 `describe-video.md`）。观看后的说明替代旧的单帧描述。无法观看的 GIF（无动画、每日 `media.gif.maxPerDay` 限额耗尽、转换或请求失败）保留单帧描述。`/nep gifs recache` 删除库外过时的单帧说明，并在后台从最旧的开始重新观看最多 `gifs.recachePerRun`（默认 50）个库条目。
 
+当 `features.gifPicker` 开启时（默认如此，需要 `features.gifs` 开启且库非空），分类器从完整库中挑选 GIF 替代短文本回复。挑选器在角色写了不超过 `gifs.pick.maxChars`（默认 60）个字符的回复且自己没选 GIF 后运行；它接收最近几行聊天、回复及每条库记录的说明。匹配时 GIF 替换文本发送。
+
 设置：直接视觉位于 `context.vision.*`，描述器位于 `media.*`，GIF 库位于 `gifs.*`。每个键请参阅[配置](configuration.md#media)。
 
 ## 视频

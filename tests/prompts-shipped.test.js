@@ -146,6 +146,7 @@ const LOADS = {
   split: ['split'],
   merge: ['merge'],
   patternCheck: ['pattern-check'],
+  gifPick: ['gif-pick'],
   reword: ['reword'],
   turn:[...SYSTEM, 'reply'],
   mentorSituations: ['mentor-situations', 'mentor-signs'],
@@ -1142,6 +1143,34 @@ test('createTurnRunner: the pattern judge fills pattern-check.md and the rewrite
   const rewordText = assertFilled(reword?.messages, { files: LOADS.reword }, 'reword');
   assert.ok(rewordText.includes('franch*'), 'reword: {{words}} carries the resting filler with its *');
   assert.ok(rewordText.includes('opens with a sigh'), 'reword: {{patterns}} carries the matched shape');
+});
+
+// ---- the GIF picker ---------------------------------------------------------------------
+
+test('createTurnRunner: the GIF picker fills gif-pick.md', async () => {
+  const hot = shippedHot({ features: { typingSimulation: false } });
+  const line = rawMessage(GENERAL_INFO, { ts: NOW - MINUTE_MS, author: PEOPLE[ANA], content: 'Zoë, tu viens ce soir ?', mentions: [SELF_ID] });
+  const guild = discordGuild([[GENERAL_INFO, [...generalRaws(), line]]]);
+  const channel = guild.channels.cache.get(GENERAL);
+  const gifs = {
+    nextId: 3,
+    entries: {
+      k1: { id: 'g1', kind: 'link', url: 'https://tenor.com/view/chat-qui-danse-1', itemId: 'gif-item-1', messageId: 'm1', channelId: GENERAL, count: 3, last: NOW - HOUR_MS },
+      k2: { id: 'g2', kind: 'link', url: 'https://tenor.com/view/haussement-2', itemId: 'gif-item-2', messageId: 'm2', channelId: GENERAL, count: 1, last: NOW - DAY_MS, ownLast: NOW - HOUR_MS },
+    },
+  };
+  const mediaCache = { 'gif-item-1': { text: 'un chat qui danse' }, 'gif-item-2': { text: 'un haussement d\'épaules' } };
+  const llm = recordingLlm((messages, options) => (options.purpose === 'gif-pick' ? 'none' : '<msg>oui, bien sûr</msg>'));
+  const store = { ...bareStore(), getMediaCache: () => mediaCache, getGifs: () => gifs, findGif: () => null };
+  const turns = createTurnRunner({ hot, store, llm, calibrator: createCalibrator(), client: discordClient(guild), now: () => NOW, rng: () => 0.5 });
+  const history = normalize([...generalRaws(), line]);
+  await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: history.at(-1), triggerKind: 'mention' }));
+
+  const [pick] = llm.calls.filter((call) => call.options.purpose === 'gif-pick');
+  const text = assertFilled(pick?.messages, { files: LOADS.gifPick, blocks: ['context', 'reply', 'gifs'] }, 'gif-pick');
+  assert.ok(text.includes(SELF_NAME), 'gif-pick: {{name}} is the persona');
+  assert.ok(text.includes(fill(LABELS.gifs.entry, { id: 'g1', text: 'un chat qui danse' })), 'gif-pick: an entry through labels.gifs.entry');
+  assert.ok(text.includes(fill(LABELS.gifs.ownMark, { ago: `1 ${LABELS.units.hour}` })), 'gif-pick: the own mark through labels.gifs.ownMark');
 });
 
 test('createMessageHandler: the merge classifier fills merge.md', async () => {

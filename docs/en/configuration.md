@@ -20,6 +20,7 @@ Every key in `config.json` with its default, grouped by section.
 | `seeReactions` | `true` | Show reactions on messages in the transcript. A missing key counts as on. Distinct from `reactions`, which controls whether the persona PLACES reactions; this one controls whether they SEE them |
 | `customEmoji` | `true` | List the server's custom emoji ranked by usage so the persona can use them by `:name:`. A missing key counts as on |
 | `gifs` | `true` | Build a GIF library from what members share and let the persona post from it by handle. A missing key counts as on |
+| `gifPicker` | `true` | When the persona writes a short reply (at most `gifs.pick.maxChars` characters) and chose no GIF herself, a classifier picks a fitting GIF from the full library. On a match the GIF replaces the text. A missing key counts as on. Needs `features.gifs` on and a non-empty library |
 | `multiMessage` | `true` | Allow 2–3 messages in a row |
 | `vision` | `true` | Process attached images |
 | `mediaDescriptions` | `true` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
@@ -266,6 +267,16 @@ Settings for the GIF library (`features.gifs`). Uses are counted as each message
 | `backfillDescribe` | `20` | Top GIFs by rank that are sent to the describer for a caption right after the backfill; the rest get captions as the chat meets them |
 | `recachePerRun` | `50` | Library GIFs re-described per `/nep gifs recache` run. One-frame captions outside the library are dropped at once; then up to this many library entries are watched in the background, oldest first |
 | `ownMarkHours` | `24` | Hours after the persona posts a GIF during which the entry carries `gifs.ownMark` in the `<gifs>` list. `0` turns the mark off |
+
+### `gifs.pick`
+
+Settings for the GIF picker (`features.gifPicker`). After the persona writes a short reply and chose no GIF herself, a classifier (`classifier.text`, prompt `prompts/gif-pick.md`) receives the last few chat lines, the reply and the whole captioned library (every entry with its caption, each carrying the own-mark when applicable), and answers one handle or `none`. On a handle the GIF is posted instead of the text; otherwise the text goes as written. The classifier runs during the first message's typing simulation; the daily GIF rail `gifs.maxPerDay` applies.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `maxChars` | `60` | Reply length ceiling: the picker runs only when the persona's text is at most this many characters |
+| `contextMessages` | `4` | Recent chat lines sent to the classifier alongside the reply and the library |
+| `maxOutputTokens` | `60` | Max output tokens for the picker classifier |
 
 ## `media`
 
@@ -626,7 +637,7 @@ Settings for the pattern guard (`features.patternGuard`). Before posting, when t
 | Key | Default | Meaning |
 |---|---|---|
 | `minChars` | `15` | Minimum characters in the reply before the check runs |
-| `maxOutputTokens` | `40` | Max output tokens for the pattern check classifier |
+| `maxOutputTokens` | `200` | Max output tokens for the pattern check classifier |
 
 ## `private`
 

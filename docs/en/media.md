@@ -20,6 +20,8 @@ When `features.gifs` is on (the default), a `<gifs>` block lists the GIFs member
 
 When `media.gif.watch` is on (the default, needs video vision on as well), a GIF is watched as a short silent clip: the animation is converted to an mp4 of at most `media.gif.maxSeconds` (default 8) seconds and sent to the `classifier.video` model through `prompts/describe-gif.md` (falling back to `describe-video.md` when absent). The watched caption replaces the old single-frame description. A GIF that cannot be watched (no animation, a spent daily cap `media.gif.maxPerDay`, a failed conversion or request) keeps the one-frame description instead. `/nep gifs recache` drops stale one-frame captions outside the library and re-watches up to `gifs.recachePerRun` (default 50) library entries in the background, oldest first.
 
+When `features.gifPicker` is on (the default, needs `features.gifs` on and a non-empty library), a classifier picks a GIF from the full library to replace a short text reply. The picker runs after the persona writes a reply of at most `gifs.pick.maxChars` (default 60) characters and chose no GIF herself; it sees the last few chat lines, the reply and every library entry with its caption. On a match the GIF is posted instead of the text.
+
 Settings: `context.vision.*` for direct vision, `media.*` for the describer, `gifs.*` for the GIF library. See [Configuration](configuration.md#media) for every key.
 
 ## Video

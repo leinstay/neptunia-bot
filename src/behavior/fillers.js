@@ -401,7 +401,7 @@ export function ownMessageCounter(count, posted) {
 /** The `variety.patternCheck` group when a key is missing or unusable: config.json's values. */
 export const PATTERN_CHECK_DEFAULTS = Object.freeze({
   minChars: 15,
-  maxOutputTokens: 40,
+  maxOutputTokens: 200,
 });
 
 /**
