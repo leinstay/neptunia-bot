@@ -634,7 +634,7 @@ YouTube リンクの再生時間は次の順序で取得されます: まず yt-
 | `seedSets` | `2` | `prompts/diary-seeds.md` から引かれ、プランナーに `<seeds>` ブロックで表示されるランダムシード組み合わせ数。`0` でブロック省略 |
 | `kinds` | `{ "selfPicture": 3, "picture": 2, "meme": 1, "thought": 2, "people": 2, "news": 2, "facts": 1, "status": 3 }` | 投稿種類と重み。重み 0 の種類は選ばれない。プランナーは重みと最近の投稿で各種類が何回使われたかを見る。ホットリロードなのでオーナーはいつでもバランスを変えられる |
 | `searchKinds` | `["news", "facts"]` | ウェブ検索をトリガーできる種類。プランナーはこれらの種類のみクエリを書く |
-| `pictureKinds` | `["selfPicture", "picture", "meme"]` | プランナーがランダム種類にフォールバックした時にデフォルトで描画する種類 |
+| `pictureKinds` | `["selfPicture", "picture", "meme"]` | 日次の画像上限が許す限り、プランナーの回答に関わらず常に画像付きになる種類。その他の種類はプランナーが求めた場合のみ描画 |
 | `planMaxOutputTokens` | `300` | 計画リクエストの最大出力トークン数 |
 | `planTimeoutMs` | `20000` | 計画リクエストのタイムアウト（ms） |
 
