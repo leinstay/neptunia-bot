@@ -12,7 +12,7 @@ The persona posts in one channel on its own, at random times, without anyone ask
 
 `/nep diary off` clears the channel. The history file stays, so re-enabling keeps the persona's memory of what it posted.
 
-`/nep diary post [kind]` forces one post now, outside the plan. It still obeys the daily caps. An optional kind key (e.g. `selfPicture`, `thought`) overrides the planner's choice; an unknown kind is refused with the full list.
+`/nep diary post [kind]` forces one post now, outside the plan. When a turn is running, the command waits up to `diary.forceWaitMs` (120000 ms, two minutes) for it to finish; if the wait runs out it answers `busy`. It still obeys the daily caps. An optional kind key (e.g. `selfPicture`, `thought`) overrides the planner's choice; an unknown kind is refused with the full list.
 
 ## Windows
 

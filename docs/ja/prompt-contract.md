@@ -336,6 +336,7 @@ task.added                               {added}: later messages from the author
 - `<draw self="yes" reply="#87">scene</draw>` 描画サブプロセスへの画像。ターンにつき 1 つ、最初の非空が優先、800 文字でクランプ。`self="yes"` でペルソナの外見が追加。`reply="#87"` は `<msg>` と同じ。`<msg>` や `<react>` と併用可。
 - `<skip/>` 沈黙。
 - `@nick` トランスクリプトと同一の表記が実際のメンションになる。
+- `#チャンネル名` がサーバーチャンネルの場合、`<msg>` テキスト内で本物のチャンネルリンク（`<#id>`）に変換される（`features.channelLinks` オン時、デフォルト true、未設定 = オン）。名前は最長一致。既存のリンクはそのまま。
 
 `features.reactions: false` は `<react>` を無効化、`features.multiMessage: false` は最初の `<msg>` のみを保持。
 `features.imageGeneration: false` またはイメージクライアントなしの場合は `<draw>` を無効化。`drawFailed` ターンでも `<draw>` は無効化されます。プロンプトが知る必要はありません。
