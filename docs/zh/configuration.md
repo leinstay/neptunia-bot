@@ -379,6 +379,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `channels` | `[]` | 允许的频道 |
 | `maxChannelSilenceHours` | `72` | 阻止主动消息的频道沉默时长（小时）；0 = 无限制 |
 | `someoneAroundMinutes` | `120` | 当所有可读频道的最后一条消息都超过此时长（分钟）时，不触发自发回合。角色自身在频道的最后发言不计入；其他机器人的消息计入。`0` = 无门控 |
+| `initiateCooldownHours` | `[6, 12]` | 发起话题后的冷却时间（小时）；冷却期间不再自行发起新话题。插话、全体提问、窃听、注意到的评论和 `/nep initiate` 不受影响。存储在 `state.json` 中，重启后保留；`/nep status` 在冷却期显示结束时间。`[0, 0]` = 无冷却 |
 | `minIntervalMinutes` | `25` | 最短检查间隔（分钟） |
 | `maxIntervalMinutes` | `420` | 最长检查间隔（分钟） |
 | `burstChance` | `0.15` | 连发追加消息的概率 |
