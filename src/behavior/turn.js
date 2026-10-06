@@ -1714,7 +1714,7 @@ export function createTurnRunner({
       log.warn('split: failed', { channel: channelId, reason: railReason(err), status: err?.statusCode ?? null });
       return null;
     }
-    const { parts, reason } = parseSplitAnswer(completion?.text, settings.maxTasks);
+    const { parts, reason } = parseSplitAnswer(completion?.text, settings);
     const late = isLate() ? { late: true } : {};
     if (reason === 'empty' || reason === 'unparsed') {
       log.warn('split: failed', { channel: channelId, reason, status: null, ...late });
