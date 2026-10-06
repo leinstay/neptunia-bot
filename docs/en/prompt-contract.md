@@ -48,7 +48,7 @@ All instructions are English in both layers; a character's speech samples may be
 | `search-summary.md` | no | Out-of-character prompt for the search condenser (`features.webLookup`, `web.search.enabled`): condense numbered search results into one note with inline sources. No character card | `{{today}}` `{{query}}` `{{maxChars}}` |
 | `private.md` | no | Appended after the mode prompt (`reply.md`), before `forced.md`, only in a DM (`features.privateMessages`). This is a private conversation: what is said here stays here; the persona keeps their public knowledge. A missing file adds nothing | `{{name}}` `{{author}}` |
 | `diary.md` | yes | Task: write a diary post. The persona's own channel, nobody asked. The plan's kind and brief, past posts, the optional world and search result are in the user message blocks. Output: `<msg>` (1 to `diary.maxMessages`), `<draw>`, or `<skip/>`; `<react>` and `<gif>` are dropped. No reply attributes, no links, no addressing a reader | `{{name}}` |
-| `diary-plan.md` | yes | The planner: pick the kind, a brief and whether to search and draw. Runs on `classifier.text`, no character card. Receives `<now>`, `<server>`, `<about_chat>`, `<recent>`, `<lore>`, `<world>`, `<diary>`, `<kinds>`, `<seeds>`. Answers one JSON object | `{{name}}` |
+| `diary-plan.md` | yes | The planner: pick the kind, a brief and whether to search and draw. Runs on `classifier.text`, no character card. Receives `<now>`, `<server>`, `<about_chat>`, `<recent>`, `<lore>`, `<world>`, `<diary>`, `<kinds>`, `<seeds>`, and `<topic>` when the owner gave one. Answers one JSON object | `{{name}}` |
 | `world.md` | no | The persona's virtual world: the places and routines it lives in outside the chat. Rendered as a `<world>` block only in the diary plan and compose requests, and only when `diary.world === true`. Never in an ordinary turn. A missing file or switch adds no block | `{{name}}` |
 | `diary-seeds.md` | no | Random seed families for the diary planner. `# name` headers start a family (place, setting, detail, activity, subject, twist); code draws one line per family and composes `diary.seedSets` combinations as a `<seeds>` block. Omitted when missing or `seedSets` is 0 | none |
 | `draw.md` | yes | Out-of-character prompt of the drawing sub-process (`features.imageGeneration`): produces one picture from a scene description. Receives only the appearance and the request — never the character card | `{{name}}` `{{appearance}}` `{{request}}` `{{when}}` |
@@ -103,10 +103,11 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 | `<tempo>` | Counts for 10 min / hour / day, distinct people, silence, a verdict (live / slow / dead) |
 | `<world>` | The persona's virtual world (`prompts/world.md` with `{{name}}` filled). Present only in a diary post (`mode === 'diary'`) when `diary.world === true`. Dropped whole under budget pressure. A missing file or switch off adds nothing |
 | `<diary>` | Past diary posts, oldest first, `labels.diary.intro` then one `labels.diary.line` per post. Shown in both the plan and compose requests. Under budget pressure the oldest lines are cut first |
-| `<plan>` | The plan for this diary post: `labels.diary.plan`, then one JSON line `{"kind","brief","picture"}`. Never cut |
+| `<plan>` | The plan for this diary post: `labels.diary.plan`, then one JSON line `{"kind","brief","picture"}`, plus `"topic"` when the owner gave one with `/nep diary post`. Never cut |
 | `<found>` | What the diary's search turned up: `labels.diary.found`, then the search result text. Present only when the plan asked for a search and it returned something. Ranked right after `<lookup>` in the budget |
 | `<kinds>` | Post kinds with weights and usage counts: `labels.diary.kinds`, then one `labels.diary.kindLine` per kind with a positive weight. Never cut |
 | `<seeds>` | Random seed combinations: `labels.diary.seeds`, then one `- a; b; c` line per set. Present only in the plan request. Omitted when the file is missing or `diary.seedSets` is 0. Never cut |
+| `<topic>` | The owner's topic for a forced post (`/nep diary post [kind] [topic]`): `labels.diary.topic`, then the topic as one line, at most 300 characters. Present only in the plan request, right after `<seeds>`, and only when a topic was given. Never cut |
 | `<task>` | `reply` / `interject` / `initiate` / `overheard` (when `overheard.md` exists) / `elsewhere` (when `elsewhere.md` exists, for a noticed comment) / `diary` (when `diary.md` exists, for a diary post), placeholders filled. After the mode prompt, up to three `task.*` labels are appended when their conditions hold (each separated by a blank line): `task.part` when the turn answers one part of a split message, or `task.queued` when the trigger author has other calls waiting; then `task.queuedOthers` when other members have calls waiting in the channel; then `task.added` when later messages were folded into this call. See `labels.task.*` below |
 
 Budget priority (sections are trimmed from the bottom of this list first): system + task + clock + tempo + senses
@@ -114,7 +115,7 @@ Budget priority (sections are trimmed from the bottom of this list first): syste
 pulled (`<channel_view>`, capped at `context.caps.pulled`; on a turn that answers a call from a read-only channel the pulled block sits before the chat instead of after it) ->
 recent (capped at `context.caps.recent`) ->
 other profiles -> attitudes (capped at `context.caps.attitudes`) -> worn (kept or dropped whole) ->
-diary mode only: `<found>` (right after `<lookup>`), `<world>` (one piece, right after `<worn>`), `<diary>` (oldest lines cut first), `<plan>` + `<kinds>` + `<seeds>` (never cut) ->
+diary mode only: `<found>` (right after `<lookup>`), `<world>` (one piece, right after `<worn>`), `<diary>` (oldest lines cut first), `<plan>` + `<kinds>` + `<seeds>` + `<topic>` (never cut) ->
 other channels -> emoji (entries from the bottom, then the whole block; `context.caps.emoji`) -> gifs (same trimming; `context.caps.gifs`).
 
 GIF picker (`features.gifPicker`, default on). After the persona writes a short reply (at most `gifs.pick.maxChars` characters, default 160) and chose no GIF herself, a classifier (`classifier.text`, purpose `gif-pick`, `gifs.pick.maxOutputTokens` 60, prompt `prompts/gif-pick.md`) receives the last `gifs.pick.contextMessages` (default 4) chat lines with the answered message named in the context, the persona's first message and the whole captioned library (every entry with its caption, each carrying the own-mark when recently posted by the persona). The classifier answers one handle or `none`. On a handle the GIF replaces the first outgoing message and replies where it would have; the remaining messages follow in order. When the GIF fails to send, every message goes as written. The classifier runs during the first message's typing simulation; the daily GIF rail `gifs.maxPerDay` applies. Logged as `gifs: picked` (handle true/false, library size) or `gifs: pick failed`.
@@ -307,6 +308,7 @@ diary.kindLine                           {key} {weight} {count} {window}: one ki
 diary.plan                               first line of the `<plan>` block
 diary.found                              first line of the `<found>` block
 diary.seeds                              first line of the `<seeds>` block
+diary.topic                              first line of the `<topic>` block (the owner's topic for a forced post)
 memory.privateNote                       the <private> block content in a private analyzer batch: marks the batch as a private conversation, constrains output to users for the partner's id only
 memory.privateChannel                    heading used in place of a channel name for the <new_messages> section in a private batch
 limits.notice                            {limit} {used} {cap}: posted as a plain reply when a rail refuses a triggered action; limit is the config key, used/cap are the numbers
@@ -912,7 +914,8 @@ plan step and a compose step. A third request is added when the plan asks for a 
 
 **Plan** (`prompts/diary-plan.md` on `classifier.text`, usage purpose `diary-plan`, `diary.planMaxOutputTokens` 300,
 `diary.planTimeoutMs` 20000). No character card. User message blocks: `<now>`, `<server>`, `<about_chat>`, `<recent>`,
-`<lore>`, `<world>` (under `diary.world`), `<diary>`, `<kinds>`, `<seeds>`. The answer is one JSON object:
+`<lore>`, `<world>` (under `diary.world`), `<diary>`, `<kinds>`, `<seeds>`, and `<topic>` when the owner gave one
+with `/nep diary post`. The answer is one JSON object:
 
 ```
 {"kind": "<key>", "brief": "<one line>", "search": "<query or empty>", "picture": true|false}

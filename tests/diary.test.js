@@ -597,6 +597,18 @@ test('force: runs now with the kind, ignores the plan and the quiet day, obeys t
   assert.deepEqual(await unset.diary.force({}), { outcome: 'not-now', reason: 'no-channel' });
 });
 
+test('force: passes kind and topic to the turn', async () => {
+  const h = diaryHarness();
+  await h.diary.force({ kind: 'meme', topic: '  une  promenade\n au port  ' });
+  assert.deepEqual(h.turnCalls[0].params.diary, { kind: 'meme', topic: 'une promenade au port', forced: true });
+  const long = diaryHarness();
+  await long.diary.force({ topic: 'é'.repeat(400) });
+  assert.ok([...long.turnCalls[0].params.diary.topic].length <= 300, 'the topic is clamped to 300 characters');
+  const blank = diaryHarness();
+  await blank.diary.force({ topic: '   ' });
+  assert.deepEqual(blank.turnCalls[0].params.diary, { kind: null, forced: true }, 'a blank topic is none');
+});
+
 test('stop: no tick after stop', async () => {
   const h = diaryHarness();
   h.setNow(SLOT + MINUTE_MS);

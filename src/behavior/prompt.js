@@ -1839,14 +1839,14 @@ function pulledAuthors(pulledFits) {
  * @param {string|null} [input.diaryChannel]  The bare name of the diary channel (the persona's
  *   own, src/behavior/diary.js) when one is set: `<senses>` gains `senses.diary` with
  *   `{channel}`. Omitted or null -> no line.
- * @param {{ posts?: object[], plan?: { kind: string|null, brief: string, picture: boolean }|null,
+ * @param {{ posts?: object[], plan?: { kind: string|null, brief: string, picture: boolean, topic?: string }|null,
  *   found?: string|null }|null} [input.diary]  A diary post's own input, read only with `mode:
  *   'diary'` (whose task text is `prompts.diary`): `<world>` (prompts/world.md, `{{name}}` filled,
  *   only with `diary.world === true`, see `worldText`; one piece, fitted right after `<worn>`),
  *   `<diary>` (the past posts through src/behavior/diary.js#renderDiaryBlock, the newest
  *   `diary.historyPosts` (150 when unset) oldest first, fitted after `<world>` and losing its
  *   oldest lines first), `<plan>` (`labels.diary.plan`, then the plan as one JSON line with `kind`,
- *   `brief` and `picture`; never cut) and `<found>` (`labels.diary.found`, then what the search
+ *   `brief`, `picture` and, with an owner's topic, `topic`; never cut) and `<found>` (`labels.diary.found`, then what the search
  *   found; one piece, fitted right after `<lookup>`). They render after `<worn>` and before
  *   `<chat>`. `<world>` never renders outside a diary post.
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object,
@@ -2614,13 +2614,16 @@ function diaryHistoryLines(posts, labels, config) {
   return intro && lines[0] === intro ? lines.slice(1) : lines;
 }
 
-/** The `<plan>` block's body: `labels.diary.plan`, then the plan as one JSON line; '' without a plan. */
+/** The `<plan>` block's body: `labels.diary.plan`, then the plan as one JSON line (`topic` only
+ * when the owner gave one); '' without a plan. */
 function planBody(plan, labels) {
   if (!plan || typeof plan !== 'object') return '';
   const kind = typeof plan.kind === 'string' ? plan.kind : '';
   const brief = typeof plan.brief === 'string' ? plan.brief : '';
-  if (!kind && !brief) return '';
-  return [labels.diary?.plan, JSON.stringify({ kind, brief, picture: plan.picture === true })].filter(Boolean).join('\n');
+  const topic = typeof plan.topic === 'string' ? plan.topic : '';
+  if (!kind && !brief && !topic) return '';
+  const line = { kind, brief, picture: plan.picture === true, ...(topic ? { topic } : {}) };
+  return [labels.diary?.plan, JSON.stringify(line)].filter(Boolean).join('\n');
 }
 
 /**
@@ -2635,8 +2638,10 @@ function planBody(plan, labels) {
  * `<diary>` (the past posts, as in the post request), `<kinds>`
  * (src/behavior/diary.js#renderKindsBlock over `kinds`, the use counted among
  * the newest `diary.historyPosts`) and `<seeds>` (`seedsText`, already
- * rendered by src/behavior/diary.js#renderSeedsBlock). Under the request
- * token limit `<now>`, `<kinds>` and `<seeds>` are never cut, then in
+ * rendered by src/behavior/diary.js#renderSeedsBlock), then `<topic>`
+ * (`topicText`, the owner's topic already rendered by
+ * src/behavior/diary.js#renderTopicBlock; absent without one). Under the
+ * request token limit `<now>`, `<kinds>`, `<seeds>` and `<topic>` are never cut, then in
  * priority order: `<diary>` (the oldest lines first), `<world>` (whole),
  * `<about_chat>`, `<server>`, `<recent>`, `<lore>` (each under its
  * `context.caps` entry). Pure.
@@ -2645,11 +2650,11 @@ function planBody(plan, labels) {
  *   currentChannelId?: string|null, recentLines?: object[]|null,
  *   recentAudience?: ((channelId: string|null) => boolean)|null, candidateProfiles?: object[],
  *   nameOf?: ((id: string) => (string|null))|null, posts?: object[], kinds?: Record<string, number>,
- *   seedsText?: string }} input
+ *   seedsText?: string, topicText?: string }} input
  * @returns {{ messages: { role: string, content: string }[], stats: object }}
  */
 export function buildDiaryPlanRequest(input) {
-  const { config, prompts, calibrator, now, selfName, currentChannelId = null, seedsText = '' } = input;
+  const { config, prompts, calibrator, now, selfName, currentChannelId = null, seedsText = '', topicText = '' } = input;
   const labels = requireLabels(prompts);
   const timezone = config.bot?.timezone;
   const nameOf = typeof input.nameOf === 'function' ? input.nameOf : () => null;
@@ -2690,7 +2695,7 @@ export function buildDiaryPlanRequest(input) {
   const channelIds = channels.map((channel) => channel?.id).filter(Boolean);
   const { kept, stats, used } = fitSections(
     [
-      { name: 'fixed', required: true, items: [system, nowText, kindsText, seedsText, diaryIntro].filter(Boolean) },
+      { name: 'fixed', required: true, items: [system, nowText, kindsText, seedsText, topicText, diaryIntro].filter(Boolean) },
       { name: 'diary', keep: 'newest', items: diaryLines },
       { name: 'world', items: [worldText(config, prompts, selfName)].filter(Boolean) },
       { name: 'aboutChat', cap: caps.aboutChat, items: aboutChatItems(input.guildMemory, labels, nameOf, learnedConfig(config)) },
@@ -2734,6 +2739,7 @@ export function buildDiaryPlanRequest(input) {
     block('diary', kept.diary.length > 0 ? [diaryIntro, ...kept.diary].filter(Boolean).join('\n') : ''),
     block('kinds', kindsText),
     block('seeds', seedsText),
+    block('topic', topicText),
   ]
     .filter(Boolean)
     .join('\n\n');
