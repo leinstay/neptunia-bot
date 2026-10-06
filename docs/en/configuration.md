@@ -626,7 +626,7 @@ Settings for the pattern guard (`features.patternGuard`). Before posting, when t
 | Key | Default | Meaning |
 |---|---|---|
 | `minChars` | `15` | Minimum characters in the reply before the check runs |
-| `maxOutputTokens` | `40` | Max output tokens for the pattern check classifier |
+| `maxOutputTokens` | `200` | Max output tokens for the pattern check classifier |
 
 ## `private`
 

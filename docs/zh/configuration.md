@@ -626,7 +626,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `minChars` | `15` | 触发检查的回复最小字符数 |
-| `maxOutputTokens` | `40` | 手法检查分类器的最大输出 token 数 |
+| `maxOutputTokens` | `200` | 手法检查分类器的最大输出 token 数 |
 
 ## `private`
 
