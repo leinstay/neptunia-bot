@@ -78,6 +78,9 @@
   },
   "context": {
     "channelMessages": 100,
+    "fetchReplyParents": true,
+    "replyParentsFor": 3,
+    "replyParentsMax": 4,
     "neighborMessages": 5,
     "neighborMessageChars": 300,
     "neighborMaxAgeMinutes": 60,

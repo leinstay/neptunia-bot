@@ -18,6 +18,7 @@ import {
   canReact,
   canSend,
   fetchHistory,
+  fetchReplyParents,
   fetchNeighbors,
   isWritableChannel,
   PAGE as HISTORY_PAGE,
@@ -596,6 +597,32 @@ function readableLinkCandidates(history, sites) {
     out.push(...collectReadableLinks(history[i], { videoSites: sites ?? [] }));
   }
   return out;
+}
+
+/**
+ * `history` with the messages its replies answer from outside it prepended as its oldest lines
+ * (src/discord/collect.js#fetchReplyParents): the parent of `trigger` when it lives in this
+ * channel, one level of that parent's own parent, and the parents of the last
+ * `context.replyParentsFor` lines, at most `context.replyParentsMax` in all. Off with
+ * `context.fetchReplyParents` false (a missing key counts as on); `history` as it is then.
+ * @param {object} channel
+ * @param {object[]} history
+ * @param {{ trigger: object|null, selfId: string, config: object }} options
+ * @returns {Promise<object[]>}
+ */
+async function withReplyParents(channel, history, { trigger, selfId, config }) {
+  const context = config.context ?? {};
+  if (context.fetchReplyParents === false) return history;
+  const own = trigger && (!trigger.channelId || trigger.channelId === channel.id) ? trigger : null;
+  const parents = await fetchReplyParents(channel, history, {
+    trigger: own,
+    recent: context.replyParentsFor ?? 3,
+    max: context.replyParentsMax ?? 4,
+    selfId,
+    embedTextChars: config.media?.embedTextChars,
+    videoSites: config.media?.video?.sites,
+  });
+  return parents.length > 0 ? [...parents, ...history] : history;
 }
 
 /**
@@ -2725,6 +2752,8 @@ export function createTurnRunner({
         : Promise.resolve(null);
       const historyStartedAt = clock();
       // The first part of a split message reuses the history its message's turn fetched.
+      // Part of the history: the messages replies of the window answer from outside it
+      // (context.fetchReplyParents), prepended as its oldest lines (withReplyParents).
       const rawHistory =
         reuseHistory ??
         (await beforeBar(
@@ -2733,7 +2762,7 @@ export function createTurnRunner({
             selfId,
             embedTextChars: config.media?.embedTextChars,
             videoSites: config.media?.video?.sites,
-          }),
+          }).then((lines) => withReplyParents(channel, lines, { trigger, selfId, config })),
         ));
       const historyMs = clock() - historyStartedAt;
       const partner = await beforeBar(partnerPending);

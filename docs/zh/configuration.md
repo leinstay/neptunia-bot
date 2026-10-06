@@ -121,6 +121,9 @@
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `channelMessages` | `100` | 当前频道消息数 |
+| `fetchReplyParents` | `true` | 当窗口内的回复指向早于窗口的消息时，拉取父消息并放在窗口之前，让模型读到被回复的内容。先检查 discord.js 缓存，缓存命中不产生 API 请求。缺失的键视为开启 |
+| `replyParentsFor` | `3` | 窗口末尾多少条回复早于窗口之消息的行也会拉取其父消息。触发消息始终检查，可拉取父消息和祖父消息 |
+| `replyParentsMax` | `4` | 每轮放在窗口前的父消息行数上限 |
 | `neighborMessages` | `5` | 每个相邻频道的消息数 |
 | `neighborMaxAgeMinutes` | `60` | 相邻频道消息最大时效（分钟） |
 | `neighborMaxChannels` | `8` | 最大相邻频道数 |

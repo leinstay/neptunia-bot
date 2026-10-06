@@ -11,6 +11,7 @@ import {
   withTextPreviews,
   fetchHistory,
   fetchMessage,
+  fetchReplyParents,
   canAttach,
   canSend,
   canRead,
@@ -27,6 +28,7 @@ import { videoUrlCacheKey } from '../src/discord/video-sites.js';
 import { collectPictures, collectVideos } from '../src/discord/media.js';
 import { audienceCovers } from '../src/behavior/elsewhere.js';
 import { emptyGifs, mergeGifs } from '../src/memory/gifs.js';
+import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 function flagsWith(names) {
   const set = new Set(names);
@@ -692,6 +694,113 @@ test('fetchMessage: a failed or empty fetch, or a channel without a message cach
   const uncached = rawMessage({ id: 'm9' });
   const noCache = { messages: { fetch: async () => uncached } };
   assert.equal(await fetchMessage(noCache, 'm9'), uncached);
+});
+
+// --- fetchReplyParents: replies whose parent is outside the window -------------
+
+/** A raw reply to `parentId`. */
+function rawReply(id, ts, parentId, overrides = {}) {
+  return rawMessage({ id, createdTimestamp: ts, reference: parentId ? { messageId: parentId } : null, ...overrides });
+}
+
+/** A channel whose by-id fetch serves `stored` (raw messages) and records every id asked for. */
+function parentChannel(stored) {
+  const byId = new Map(stored.map((m) => [m.id, m]));
+  const fetched = [];
+  return {
+    id: 'c1',
+    fetched,
+    messages: {
+      cache: new Map(),
+      fetch: async (id) => {
+        fetched.push(id);
+        if (!byId.has(id)) throw Object.assign(new Error('Unknown Message'), { code: 10008 });
+        return byId.get(id);
+      },
+    },
+  };
+}
+
+const PARENT_OPTIONS = { recent: 3, max: 4, selfId: 'self', embedTextChars: 200, videoSites: ['youtube.com'] };
+
+test('fetchReplyParents: the trigger replies outside the window -- its parent is fetched and normalized like a history line', async () => {
+  const parent = rawMessage({ id: 'p1', createdTimestamp: 100, cleanContent: 'regarde https://www.youtube.com/watch?v=abc' });
+  const channel = parentChannel([parent]);
+  const history = [normalizeMessage(rawReply('m1', 5000, 'p1'), 'self')];
+  const parents = await fetchReplyParents(channel, history, { ...PARENT_OPTIONS, trigger: history[0] });
+  assert.deepEqual(channel.fetched, ['p1']);
+  assert.deepEqual(parents, [normalizeMessage(parent, 'self', { embedTextChars: 200, videoSites: ['youtube.com'] })]);
+  assert.equal(parents[0].links[0].url, 'https://www.youtube.com/watch?v=abc');
+});
+
+test('fetchReplyParents: a parent inside the window is never fetched', async () => {
+  const channel = parentChannel([]);
+  const history = [normalizeMessage(rawMessage({ id: 'p1' }), 'self'), normalizeMessage(rawReply('m1', 5000, 'p1'), 'self')];
+  const parents = await fetchReplyParents(channel, history, { ...PARENT_OPTIONS, trigger: history[1] });
+  assert.deepEqual(parents, []);
+  assert.deepEqual(channel.fetched, []);
+});
+
+test('fetchReplyParents: a chain of two -- the parent of the fetched parent comes too, one level only, oldest first', async () => {
+  const root = rawMessage({ id: 'p0', createdTimestamp: 50 });
+  const grand = rawReply('p1', 80, 'p0');
+  const parent = rawReply('p2', 100, 'p1');
+  const channel = parentChannel([root, grand, parent]);
+  const history = [normalizeMessage(rawReply('m1', 5000, 'p2'), 'self')];
+  const parents = await fetchReplyParents(channel, history, { ...PARENT_OPTIONS, trigger: history[0] });
+  assert.deepEqual(parents.map((m) => m.id), ['p1', 'p2']);
+  assert.deepEqual(channel.fetched, ['p2', 'p1']);
+});
+
+test('fetchReplyParents: the last `recent` lines of the window get their parents too, older lines do not', async () => {
+  const stored = ['pa', 'pb', 'pc', 'pd'].map((id, i) => rawMessage({ id, createdTimestamp: 10 + i }));
+  const channel = parentChannel(stored);
+  const history = [
+    normalizeMessage(rawReply('m1', 1000, 'pa'), 'self'),
+    normalizeMessage(rawReply('m2', 2000, 'pb'), 'self'),
+    normalizeMessage(rawReply('m3', 3000, 'pc'), 'self'),
+    normalizeMessage(rawReply('m4', 4000, 'pd'), 'self'),
+  ];
+  const parents = await fetchReplyParents(channel, history, { ...PARENT_OPTIONS, recent: 3, trigger: null });
+  assert.deepEqual(channel.fetched, ['pd', 'pc', 'pb']);
+  assert.deepEqual(parents.map((m) => m.id), ['pb', 'pc', 'pd']);
+});
+
+test('fetchReplyParents: at most `max` lines are fetched, the trigger chain first', async () => {
+  const stored = [
+    rawMessage({ id: 'p0', createdTimestamp: 1 }),
+    rawReply('p1', 2, 'p0'),
+    rawMessage({ id: 'pb', createdTimestamp: 3 }),
+    rawMessage({ id: 'pc', createdTimestamp: 4 }),
+  ];
+  const channel = parentChannel(stored);
+  const history = [
+    normalizeMessage(rawReply('m2', 2000, 'pb'), 'self'),
+    normalizeMessage(rawReply('m3', 3000, 'pc'), 'self'),
+    normalizeMessage(rawReply('m4', 4000, 'p1'), 'self'),
+  ];
+  const parents = await fetchReplyParents(channel, history, { ...PARENT_OPTIONS, max: 3, trigger: history[2] });
+  assert.deepEqual(channel.fetched, ['p1', 'p0', 'pc']);
+  assert.deepEqual(parents.map((m) => m.id), ['p0', 'p1', 'pc']);
+});
+
+test('fetchReplyParents: a deleted parent is skipped and logged once with ids only', async () => {
+  const channel = parentChannel([]);
+  const history = [normalizeMessage(rawReply('m1', 1000, 'gone'), 'self'), normalizeMessage(rawReply('m2', 2000, 'gone'), 'self')];
+  const { result, logs } = await withCapturedLogs(() => fetchReplyParents(channel, history, { ...PARENT_OPTIONS, trigger: history[1] }));
+  assert.deepEqual(result, []);
+  assert.deepEqual(channel.fetched, ['gone']);
+  const missing = logs.filter((entry) => entry.msg === 'collect: parent missing');
+  assert.equal(missing.length, 1);
+  assert.equal(missing[0].channel, 'c1');
+  assert.equal(missing[0].messageId, 'gone');
+});
+
+test('fetchReplyParents: max 0 fetches nothing', async () => {
+  const channel = parentChannel([rawMessage({ id: 'p1' })]);
+  const history = [normalizeMessage(rawReply('m1', 1000, 'p1'), 'self')];
+  assert.deepEqual(await fetchReplyParents(channel, history, { ...PARENT_OPTIONS, max: 0, trigger: history[0] }), []);
+  assert.deepEqual(channel.fetched, []);
 });
 
 // --- fetchTextPreview / withTextPreviews ------------------------------------

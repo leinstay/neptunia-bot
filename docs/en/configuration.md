@@ -121,6 +121,9 @@ The three helper model roles, grouped under one key. Each is set independently, 
 | Key | Default | Meaning |
 |---|---|---|
 | `channelMessages` | `100` | Current channel messages |
+| `fetchReplyParents` | `true` | When a reply in the window points to a message older than the window, fetch the parent and place it before the window so the model can read what was replied to. The discord.js cache is checked before any API call. A missing key counts as on |
+| `replyParentsFor` | `3` | How many of the newest window lines that reply to messages older than the window also get their parents fetched. The trigger message is always checked and can bring its parent and grandparent |
+| `replyParentsMax` | `4` | Total parent lines placed before the window per turn |
 | `neighborMessages` | `5` | Messages per neighbour channel |
 | `neighborMaxAgeMinutes` | `60` | Max age for neighbour messages (min) |
 | `neighborMaxChannels` | `8` | Max neighbour channels |

@@ -578,6 +578,48 @@ export async function fetchMessage(channel, id) {
 }
 
 /**
+ * The messages that lines of `history` reply to but that are outside it (a reply to something
+ * older than the window), fetched by id and normalized like any history line, OLDEST first --
+ * the caller prepends them so the transcript can show what a reply answers. Asked in this
+ * order until `max` lines are fetched: the parent of `trigger` (when given; its own line may be
+ * in `history` or not), then that parent's parent when the fetched parent is itself a reply to
+ * a message outside the window (one level, so a short chain reads), then the parents of the
+ * last `recent` lines of `history`, newest first. A parent already in `history` or already
+ * fetched is not asked again. A parent that cannot be fetched (deleted, no access, any error)
+ * is skipped and logged once (`collect: parent missing`, ids only).
+ * @param {import('discord.js').TextBasedChannel} channel
+ * @param {object[]} history  Normalized lines, oldest first.
+ * @param {{ trigger?: { id: string, replyToId?: string|null }|null, recent: number, max: number, selfId: string,
+ *   embedTextChars?: number, videoSites?: string[] }} options
+ * @returns {Promise<object[]>}
+ */
+export async function fetchReplyParents(channel, history, { trigger = null, recent, max, selfId, embedTextChars, videoSites }) {
+  const found = [];
+  if (!(max > 0)) return found;
+  const asked = new Set(history.map((m) => m.id));
+  if (trigger?.id) asked.add(trigger.id);
+  const fetchParent = async (id) => {
+    if (!id || asked.has(id) || found.length >= max) return null;
+    asked.add(id);
+    const raw = await fetchMessage(channel, id);
+    if (!raw) {
+      log.info('collect: parent missing', { channel: channel.id, messageId: id });
+      return null;
+    }
+    const parent = normalizeMessage(raw, selfId, { embedTextChars, videoSites });
+    found.push(parent);
+    return parent;
+  };
+
+  const parent = await fetchParent(trigger?.replyToId ?? null);
+  if (parent) await fetchParent(parent.replyToId);
+  const tail = recent > 0 ? history.slice(-recent).reverse() : [];
+  for (const line of tail) await fetchParent(line.replyToId ?? null);
+
+  return found.sort((a, b) => a.ts - b.ts);
+}
+
+/**
  * Whether `entry` is a post ledger entry fetchMoment can follow: an object
  * whose `newestHistoryId` is a message id.
  */
