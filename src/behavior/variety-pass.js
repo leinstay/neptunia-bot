@@ -29,6 +29,12 @@
 // (src/behavior/variety.js#mergeWorn). It never runs before a reply, never
 // holds a turn and never runs for a private chat. Logs carry counts and
 // codes, never text.
+//
+// Patterns the owner pinned in the long list stay through every long pass
+// (store.js#setWornLong), the pass's own patterns filling the rest of
+// `variety.longMaxPatterns`. Every pattern a stored pass names with a `word`
+// (a word-type habit) feeds the filler list (src/behavior/fillers.js#learnFillers,
+// `fillers: learned`), the short pass's and the long pass's alike.
 
 import { classifierTextModel } from './mention.js';
 import { isLimitNotice } from './limits.js';
@@ -48,6 +54,7 @@ import {
   varietySettings,
 } from './variety.js';
 import { log } from '../log.js';
+import { fillersSettings } from './fillers.js';
 
 // Passes in flight kept joinable per cache slot; an older one past this is
 // forgotten (its request still runs and may still land), never cancelled.
@@ -207,6 +214,22 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
   }
 
   /**
+   * Feed the guild's filler list from a stored pass's patterns: every
+   * pattern with a `word` adds or bumps a filler (store.learnFillers,
+   * `variety.fillers` read now). Logs `fillers: learned` (`guildId`, `added`,
+   * `bumped`) when anything changed. Never throws into the pass.
+   */
+  function learnFillers(guildId, patterns, at) {
+    if (typeof store.learnFillers !== 'function' || !patterns.some((pattern) => typeof pattern?.word === 'string' && pattern.word)) return;
+    try {
+      const { added, bumped } = store.learnFillers(guildId, patterns, at, fillersSettings(hot.config));
+      if (added + bumped > 0) log.info('fillers: learned', { guildId, added, bumped });
+    } catch (err) {
+      log.warn('fillers: learn failed', { guildId, error: err });
+    }
+  }
+
+  /**
    * Keep a valid answer as the slot's latest pass -- unless a pass started
    * later already landed there -- and, outside a private chat, in guild
    * memory with one more history entry. Nothing at all while paused or with
@@ -221,6 +244,7 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
     const at = now();
     store.setWorn(p.guildId, { at, key: p.key, channelId: p.channelId, lines: p.lines.length, patterns });
     store.appendWornHistory(p.guildId, { at, channelId: p.channelId, lines: p.lines.length, patterns }, varietySettings(hot.config).history);
+    learnFillers(p.guildId, patterns, at);
     return { landed: true, stored: true };
   }
 
@@ -455,7 +479,11 @@ export function createVarietyPass({ hot, store, llm, now = Date.now }) {
       }
       const parsed = parseVariety(completion?.text, request.texts, p.config, { maxPatterns });
       const stored = parsed.ok && mayStore();
-      if (stored) store.setWornLong(p.guildId, { at: now(), lines: p.lines.length, patterns: parsed.patterns });
+      if (stored) {
+        const at = now();
+        store.setWornLong(p.guildId, { at, lines: p.lines.length, patterns: parsed.patterns }, maxPatterns);
+        learnFillers(p.guildId, parsed.patterns, at);
+      }
       log[parsed.ok ? 'info' : 'warn']('variety: long', {
         lines: p.lines.length,
         parse: parsed.ok ? 'ok' : 'error',

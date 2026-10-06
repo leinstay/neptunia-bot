@@ -145,6 +145,8 @@ const LOADS = {
   room: ['room'],
   split: ['split'],
   merge: ['merge'],
+  patternCheck: ['pattern-check'],
+  reword: ['reword'],
   turn:[...SYSTEM, 'reply'],
   mentorSituations: ['mentor-situations', 'mentor-signs'],
   mentorVariety: ['variety'],
@@ -1109,6 +1111,37 @@ test('createTurnRunner: the splitter fills split.md; each part, its queued calls
   const text = assertFilled(reply?.messages, { files: LOADS.reply, blocks: ['task'] }, 'queued and added');
   assert.ok(text.includes(fill(LABELS.task.queued, { others: '1. et la photo ?' })));
   assert.ok(text.includes(fill(LABELS.task.added, { added: 'alors ?' })));
+});
+
+// ---- the reply guard: the pattern judge and the one rewrite ------------------------------
+
+test('createTurnRunner: the pattern judge fills pattern-check.md and the rewrite fills reword.md', async () => {
+  const hot = shippedHot({ features: { typingSimulation: false } });
+  const line = rawMessage(GENERAL_INFO, { ts: NOW - MINUTE_MS, author: PEOPLE[ANA], content: 'Zoë, tu viens ce soir ?', mentions: [SELF_ID] });
+  const guild = discordGuild([[GENERAL_INFO, [...generalRaws(), line]]]);
+  const channel = guild.channels.cache.get(GENERAL);
+  const guildMemory = {
+    fillers: [{ text: 'franch', prefix: true, pinned: false, weight: 2, lastSeen: null, lastUsedAt: NOW - MINUTE_MS, lastUsedAtMessage: 40, uses: 2 }],
+    ownMessageCount: 41,
+    wornLong: { at: NOW - MINUTE_MS, lines: 60, patterns: [{ shape: 'ends on a rhetorical question', examples: ['non ?'], count: 3 }] },
+    worn: { at: NOW - MINUTE_MS, key: 'k', channelId: GENERAL, lines: 8, patterns: [{ shape: 'opens with a sigh', examples: ['bof'], count: 2 }] },
+  };
+  const llm = recordingLlm((messages, options) => {
+    if (options.purpose === 'pattern-check') return '2';
+    if (options.purpose === 'reword') return 'oui, je passe vers huit heures';
+    return '<msg>bof, franchement je passe vers huit heures</msg>';
+  });
+  const turns = createTurnRunner({ hot, store: { ...bareStore(), getGuild: () => guildMemory }, llm, calibrator: createCalibrator(), client: discordClient(guild), now: () => NOW, rng: () => 0.5 });
+  const history = normalize([...generalRaws(), line]);
+  await withCapturedLogs(() => turns.runTurn({ channel, mode: 'reply', trigger: history.at(-1), triggerKind: 'mention' }));
+
+  const [check] = llm.calls.filter((call) => call.options.purpose === 'pattern-check');
+  const checkText = assertFilled(check?.messages, { files: LOADS.patternCheck, blocks: ['patterns', 'reply'] }, 'pattern-check');
+  assert.ok(checkText.includes(SELF_NAME), 'pattern-check: {{name}} is the persona');
+  const [reword] = llm.calls.filter((call) => call.options.purpose === 'reword');
+  const rewordText = assertFilled(reword?.messages, { files: LOADS.reword }, 'reword');
+  assert.ok(rewordText.includes('franch*'), 'reword: {{words}} carries the resting filler with its *');
+  assert.ok(rewordText.includes('opens with a sigh'), 'reword: {{patterns}} carries the matched shape');
 });
 
 test('createMessageHandler: the merge classifier fills merge.md', async () => {
