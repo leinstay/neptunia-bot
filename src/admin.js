@@ -2321,7 +2321,11 @@ export function createAdmin({
     const topic = String(args?.topic ?? '').trim();
     const outcome = await diary.force(topic ? { kind, topic } : { kind });
     const text = typeof outcome === 'string' ? outcome : (outcome?.outcome ?? JSON.stringify(outcome) ?? 'ok');
-    const reason = outcome && typeof outcome === 'object' && outcome.reason ? ` (${outcome.reason})` : '';
+    // A refusal by a cap names the setting and the day's counts; any other reason is shown as its code.
+    const limit = outcome && typeof outcome === 'object' ? outcome.limit : null;
+    const reason = limit?.key
+      ? ` (${limit.key} ${limit.used}/${limit.cap})`
+      : outcome && typeof outcome === 'object' && outcome.reason ? ` (${outcome.reason})` : '';
     return `diary post${kind ? ` ${kind}` : ''}: ${text}${reason}`;
   }
 
