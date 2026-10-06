@@ -58,7 +58,8 @@ import { fillerKey, fillersOnCooldown, fillersSettings, parseFiller, rankFillers
 import { effectiveAffinity, privateRepliesToday } from './behavior/private.js';
 import { ImageCapError, ImageGenError, UnsupportedImageModelError, familyOf as imageFamilyOf, IMAGE_ROLE } from './llm/images.js';
 import { matchRoute, resolveProvider, llmCountToday } from './llm/openrouter.js';
-import { PAGE } from './discord/collect.js';
+import { PAGE, canAttach, canRead, canSend } from './discord/collect.js';
+import { backfillDiary } from './behavior/diary.js';
 import { anchorMax, checkCaseText } from './mentor/cases.js';
 import { renderCard, renderFile, renderLastRun } from './mentor/report.js';
 import { log } from './log.js';
@@ -92,6 +93,7 @@ const READ_ONLY_ACCESS_KEYS = new Set([
   'warmup.status',
   'warmup.people',
   'route.list',
+  'diary.show',
   'variety.show',
   'variety.list',
 ]);
@@ -101,7 +103,7 @@ const READ_ONLY_ACCESS_KEYS = new Set([
 const SPENDS_BALANCE_KEYS = new Set(['ping']);
 
 /** How `/nep access grant` names each owner-only group (src/discord/access.js#OWNER_ONLY_GROUPS) when it refuses it. */
-const OWNER_ONLY_NAMES = { private: 'private memory', mentor: 'the mentor', access: 'access management' };
+const OWNER_ONLY_NAMES = { private: 'private memory', mentor: 'the mentor', access: 'access management', diary: 'the diary' };
 
 const FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -895,6 +897,9 @@ const GIFS_RECACHE_SKIPS = {
  *   the owner's feedback. Absent -> every `mentor.*` command reports it is not available.
  * `mentorBudget` — from createMentorBudget() (src/mentor/budget.js), optional: `snapshot()` for the
  *   token line of `/nep mentor status`. Absent -> that line shows `-`.
+ * `diary` — from createDiary() (src/behavior/diary.js), optional: `force({ kind })` (`/nep diary post`)
+ *   and `status()` (`/nep diary show`, the plan in the `set` reply). Absent -> `show` prints the
+ *   channel and the history size only, and `post` reports the diary is not running.
  *
  * `run(commandKey, args, context)` throws a plain `Error` (operator-facing
  * message) on bad input; it never touches discord.js.
@@ -922,6 +927,7 @@ export function createAdmin({
   mentor,
   mentorCases,
   mentorBudget,
+  diary,
 }) {
   /** Owner, or `bot.access` granted the command by exact key, group, or `*` — see
    * src/discord/access.js#isAllowed. `roleIds` -- the caller's Discord role ids -- comes from
@@ -2224,6 +2230,100 @@ export function createAdmin({
   }
 
   // ---------------------------------------------------------------------
+  // diary: the channel where the persona posts on its own (src/behavior/diary.js)
+  // ---------------------------------------------------------------------
+
+  /** The post kinds the diary may use: the keys of `diary.kinds` with a weight above zero, read now. */
+  function diaryKindKeys() {
+    return Object.entries(hot.config.diary?.kinds ?? {})
+      .filter(([, weight]) => Number(weight) > 0)
+      .map(([key]) => key);
+  }
+
+  /** Today's slots as local `HH:MM` times (a done one marked), one line; [] without a plan. */
+  function diaryPlanLines(status) {
+    if (!status || !Array.isArray(status.slots)) return [];
+    const timezone = hot.config.bot?.timezone || 'UTC';
+    const done = new Set(Array.isArray(status.done) ? status.done : []);
+    const slots = status.slots.map((slot) => `${formatClock(slot, timezone)}${done.has(slot) ? ' done' : ''}`);
+    return [`today${status.day ? ` (${status.day})` : ''}: ${slots.length > 0 ? slots.join(', ') : 'no posts planned'}`];
+  }
+
+  /**
+   * `/nep diary set`: the channel must be one the bot can see, read, send and attach files in;
+   * then `diary.channelId` is written to config.local.json, an empty `diary.json` is filled from
+   * the persona's own past posts there (src/behavior/diary.js#backfillDiary), and the reply names
+   * the channel, the backfilled count and today's plan when the diary is running.
+   */
+  async function cmdDiarySet(args, context) {
+    assertNotPaused();
+    const guildId = requireGuildId(context);
+    const channelId = String(args?.channelId ?? '').trim();
+    if (!channelId) throw new Error('a channel is required');
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel) throw new Error(`no channel ${channelId}`);
+    if (!canRead(channel)) throw new Error(`cannot view or read the history of ${channelId}; nothing was changed`);
+    if (!canSend(channel)) throw new Error(`cannot send messages in ${channelId}; nothing was changed`);
+    if (!canAttach(channel)) throw new Error(`cannot attach files in ${channelId}; nothing was changed`);
+
+    const ok = writeLocalPath('diary.channelId', channelId);
+    let backfilled = 0;
+    let note = '';
+    try {
+      backfilled = await backfillDiary({
+        store,
+        channel,
+        guildId,
+        selfId: client.user?.id,
+        config: hot.config,
+        labels: hot.prompts?.labels,
+      });
+    } catch (err) {
+      log.warn('admin: diary backfill failed', { error: err });
+      note = ' (the backfill failed; it is retried before the first post)';
+    }
+    const lines = [`Diary channel set to ${channelId} ${reloadNote(ok)}; backfilled ${backfilled} posts${note}.`];
+    lines.push(...diaryPlanLines(diary?.status?.()));
+    return lines.join('\n');
+  }
+
+  /** `/nep diary show`: the channel, today's slots, posts and pictures used today, the history size. */
+  function cmdDiaryShow(args, context) {
+    freshenIfPaused();
+    const status = diary?.status?.() ?? null;
+    const channelId = hot.config.diary?.channelId || '';
+    const guildId = resolvedGuildId(context);
+    const history = status?.history ?? (guildId ? store.getDiary(guildId).posts.length : '-');
+    const lines = [`diary channel: ${channelId || 'off'}`, ...diaryPlanLines(status)];
+    if (status) {
+      lines.push(`posts today: ${status.posts ?? 0}`, `pictures today: ${status.pictures ?? 0}`);
+    }
+    lines.push(`history: ${history}`);
+    return lines.join('\n');
+  }
+
+  /** `/nep diary off`: clears `diary.channelId`; `diary.json` stays. */
+  function cmdDiaryOff() {
+    const ok = editLocalConfig((local) => unsetPath(local, 'diary.channelId'));
+    return `Diary off ${reloadNote(ok)}; its memory file is kept.`;
+  }
+
+  /** `/nep diary post [kind]`: one forced post now; an unknown kind is refused with the list. */
+  async function cmdDiaryPost(args) {
+    assertNotPaused();
+    if (typeof diary?.force !== 'function') throw new Error('diary not running');
+    const kind = String(args?.kind ?? '').trim() || undefined;
+    const kinds = diaryKindKeys();
+    if (kind !== undefined && !kinds.includes(kind)) {
+      throw new Error(`unknown kind: ${kind} (kinds: ${kinds.join(', ')})`);
+    }
+    const outcome = await diary.force({ kind });
+    const text = typeof outcome === 'string' ? outcome : (outcome?.outcome ?? JSON.stringify(outcome) ?? 'ok');
+    const reason = outcome && typeof outcome === 'object' && outcome.reason ? ` (${outcome.reason})` : '';
+    return `diary post${kind ? ` ${kind}` : ''}: ${text}${reason}`;
+  }
+
+  // ---------------------------------------------------------------------
   // ping: one minimal chat completion per role's model, in parallel,
   // to tell the owner in seconds whether each one is actually reachable.
   // Never touches the daily request cap or token calibration
@@ -3259,6 +3359,10 @@ export function createAdmin({
     'gifs.recache': (args, context) => cmdGifsRecache(args, context),
     'model.show': () => cmdModelShow(),
     'model.set': (args) => cmdModelSet(args),
+    'diary.set': (args, context) => cmdDiarySet(args, context),
+    'diary.show': (args, context) => cmdDiaryShow(args, context),
+    'diary.off': () => cmdDiaryOff(),
+    'diary.post': (args) => cmdDiaryPost(args),
     'route.list': () => cmdRouteList(),
     'route.set': (args) => cmdRouteSet(args),
     'route.remove': (args) => cmdRouteRemove(args),

@@ -16,6 +16,8 @@
 import { fill } from '../discord/format.js';
 import { oneLine, clampText } from '../memory/clamp.js';
 import { MINUTE_MS, zonedDay, zonedEpoch, utcDay } from '../time.js';
+import { fetchHistory } from '../discord/collect.js';
+import { log } from '../log.js';
 
 /** The daily counter of diary posts in state.json (src/time.js dailyCounter / bumpDaily). */
 export const DIARY_DAILY = { dayKey: 'diaryDay', countKey: 'diaryPosts' };
@@ -358,4 +360,41 @@ export function stripUrls(text) {
  */
 export function gistOf(text, chars) {
   return clampText(oneLine(text), chars ?? DEFAULT_GIST_CHARS, { tolerance: 1 });
+}
+
+/**
+ * The diary's memory start: when the guild's `diary.json` has no posts, read up to `diary.historyPosts`
+ * of the persona's own messages from the diary channel (REST, oldest first) and store them with
+ * `kind: null`, a one-line gist, and `labels.diary.pictureUnknown` as the scene of a message that
+ * carried a picture. A history that already has posts is left alone (the posts are never rewritten by
+ * code). This and the factory are the module's Discord-aware edge; everything above stays pure.
+ * @param {{ store: object, channel: object, guildId: string, selfId: string, config: object,
+ *   labels: object, fetchHistoryImpl?: typeof fetchHistory }} deps  `config` is the live merged
+ *   config (`diary`, `media` read now); `labels` the live labels.
+ * @returns {Promise<number>}  The number of posts written (0 when the history was not empty).
+ */
+export async function backfillDiary({ store, channel, guildId, selfId, config, labels, fetchHistoryImpl = fetchHistory }) {
+  if (store.getDiary(guildId).posts.length > 0) return 0;
+  const max = config?.diary?.historyPosts ?? DEFAULT_HISTORY_POSTS;
+  const gistChars = config?.diary?.gistChars ?? DEFAULT_GIST_CHARS;
+  const history = await fetchHistoryImpl(channel, {
+    limit: max,
+    selfId,
+    embedTextChars: config?.media?.embedTextChars,
+    videoSites: config?.media?.video?.sites,
+  });
+  const posts = history
+    .filter((message) => message.self === true)
+    .map((message) => ({
+      at: message.ts,
+      kind: null,
+      gist: gistOf(message.content, gistChars),
+      picture: (message.attachments ?? []).some((a) => a.kind === 'image') ? (labels?.diary?.pictureUnknown ?? '') : null,
+      messageIds: [message.id],
+      search: null,
+    }));
+  if (posts.length === 0) return 0;
+  store.setDiaryPosts(guildId, posts, { max });
+  log.info('diary: backfill', { count: posts.length });
+  return posts.length;
 }

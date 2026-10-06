@@ -2371,6 +2371,8 @@ function applyPrivateDecision(store, guildId, userId, decision, config, options,
  *   callers are expected to have already dropped other bots' messages.
  * @param {object} [memoryCfg]  The live `config.memory`, for the tally's settings
  *   (`channelWritersStored`, `channelWritersHalfLifeDays`); omitted -> the store's fallbacks.
+ *   `diaryChannelId` (the caller adds `diary.channelId`) names the one channel where the persona's
+ *   own messages count as a writer.
  */
 export function touchMemory(store, guildId, normalized, memoryCfg) {
   if (!normalized.self) {
@@ -2378,7 +2380,11 @@ export function touchMemory(store, guildId, normalized, memoryCfg) {
   }
   // The persona's own messages and other bots never count toward a channel's
   // top writers -- see src/memory/store.js#touchChannel.
-  const writerId = !normalized.self && !normalized.bot ? normalized.authorId : null;
+  // The one exception is the configured diary channel (`memoryCfg.diaryChannelId`, from
+  // `diary.channelId`): the persona is its writer, so the map does not show it as dead.
+  const diaryChannelId = memoryCfg?.diaryChannelId || null;
+  const inDiary = diaryChannelId !== null && normalized.channelId === diaryChannelId;
+  const writerId = !normalized.bot && (!normalized.self || inDiary) ? normalized.authorId : null;
   store.touchChannel(
     guildId,
     normalized.channelId,
@@ -2547,7 +2553,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
     // /nep pause: nothing may make the store dirty while paused.
     if (store.state.data.paused) return;
     if (normalized.bot) return;
-    if (!privateUserId) touchMemory(store, guildId, normalized, hot.config.memory);
+    if (!privateUserId) {
+      touchMemory(store, guildId, normalized, { ...hot.config.memory, diaryChannelId: hot.config.diary?.channelId || null });
+    }
     // The GIF library (src/memory/gifs.js) is fed here, not after the batch:
     // it needs the GIF's URL, and no URL survives into the buffer below. A
     // private chat never feeds it; the persona's own GIFs are skipped there.
