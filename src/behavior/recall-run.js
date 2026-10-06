@@ -372,7 +372,7 @@ export function createRecall({ hot, store, llm, describer = null, now = Date.now
     }
 
     // 5. Clusters, 6. a window around each (other bots and the turn's own chat left out).
-    const clusters = clusterHits(kept, { gapMinutes: settings.clusterGapMinutes, maxClusters: settings.maxClusters });
+    const clusters = clusterHits(kept, { gapMinutes: settings.clusterGapMinutes, maxClusters: settings.maxClusters, keepOldest: settings.keepOldest });
     stats.clusters = clusters.length;
     const normalizeOptions = { selfId, embedTextChars: config.media?.embedTextChars, videoSites: config.media?.video?.sites };
     const fetched = await Promise.all(

@@ -44,6 +44,9 @@ test('recallSettings: a missing switch counts as on, false turns it off, unusabl
   assert.equal(s.stretchChars, RECALL_DEFAULTS.stretchChars);
   assert.equal(recallSettings({ recall: { minSummaryMs: -1 } }).minSummaryMs, RECALL_DEFAULTS.minSummaryMs);
   assert.equal(recallSettings({ recall: { minSummaryMs: 0 } }).minSummaryMs, 0, 'the summary asked whatever is left');
+  assert.equal(recallSettings({ recall: { keepOldest: 0 } }).keepOldest, 0, '0 keeps only the newest');
+  assert.equal(recallSettings({ recall: { keepOldest: 2.7 } }).keepOldest, 2);
+  assert.equal(recallSettings({ recall: { keepOldest: -1 } }).keepOldest, RECALL_DEFAULTS.keepOldest);
 });
 
 // ---- the lookup answer -----------------------------------------------------------------------
@@ -176,7 +179,7 @@ test('clusterHits: hits of one channel closer than the gap join; the newest clus
     { id: 'old', channelId: 'c1', ts: t - 40 * HOUR },
     { id: 'a2', channelId: 'c1', ts: t + 20 * MINUTE },
   ];
-  const clusters = clusterHits(hits, { gapMinutes: 30, maxClusters: 3 });
+  const clusters = clusterHits(hits, { gapMinutes: 30, maxClusters: 3, keepOldest: 0 });
   assert.deepEqual(
     clusters.map((c) => [c.channelId, c.ids, c.middleId]),
     [
@@ -187,6 +190,35 @@ test('clusterHits: hits of one channel closer than the gap join; the newest clus
   );
   assert.equal(clusters[1].startTs, t);
   assert.equal(clusters[1].endTs, t + 27 * MINUTE);
+});
+
+/** Seven one-hit clusters, two hours apart, alternating two channels; ids `k0` (oldest) .. `k6` (newest). */
+function sevenClusters() {
+  const t = Date.UTC(2026, 9, 1, 8);
+  return Array.from({ length: 7 }, (_, i) => ({ id: `k${i}`, channelId: i % 2 === 0 ? 'c1' : 'c2', ts: t + i * 2 * HOUR }));
+}
+
+test('clusterHits: keepOldest reserves slots for the oldest clusters, the rest newest first, all newest first', () => {
+  const hits = sevenClusters();
+  const ids = (options) => clusterHits(hits, { gapMinutes: 30, maxClusters: 5, ...options }).map((c) => c.middleId);
+  assert.deepEqual(ids({ keepOldest: 1 }), ['k6', 'k5', 'k4', 'k3', 'k0'], 'the 4 newest and the oldest');
+  assert.deepEqual(ids({ keepOldest: 2 }), ['k6', 'k5', 'k4', 'k1', 'k0'], 'the 3 newest and the 2 oldest');
+  assert.deepEqual(ids({ keepOldest: 0 }), ['k6', 'k5', 'k4', 'k3', 'k2'], 'the old behaviour: the 5 newest');
+  assert.deepEqual(ids({ keepOldest: 9 }), ['k4', 'k3', 'k2', 'k1', 'k0'], 'never more than maxClusters');
+  assert.deepEqual(ids({}), ['k6', 'k5', 'k4', 'k3', 'k0'], 'a missing value falls back to RECALL_DEFAULTS.keepOldest');
+  assert.equal(RECALL_DEFAULTS.keepOldest, 1);
+});
+
+test('clusterHits: with no more clusters than maxClusters, keepOldest changes nothing', () => {
+  const hits = sevenClusters().slice(2);
+  for (const keepOldest of [0, 1, 2]) {
+    assert.deepEqual(
+      clusterHits(hits, { gapMinutes: 30, maxClusters: 5, keepOldest }).map((c) => c.middleId),
+      ['k6', 'k5', 'k4', 'k3', 'k2'],
+      String(keepOldest),
+    );
+  }
+  assert.deepEqual(clusterHits(hits.slice(0, 3), { gapMinutes: 30, maxClusters: 5, keepOldest: 2 }).map((c) => c.middleId), ['k4', 'k3', 'k2']);
 });
 
 /** A normalized message. */

@@ -34,6 +34,7 @@ export const RECALL_DEFAULTS = Object.freeze({
   dateSamples: 4,
   clusterGapMinutes: 30,
   maxClusters: 5,
+  keepOldest: 1,
   windowMessages: 16,
   answerChars: 1200,
   stretchChars: 1500,
@@ -94,13 +95,14 @@ function numberAtLeast(value, fallback, min) {
  * The `recall` settings read from the live config, or null when
  * `features.recall` is false (a missing key counts as on). Each number falls
  * back to RECALL_DEFAULTS when missing or unusable; counts are floored.
- * `maxForms`, `maxPeople`, `maxPerDay`, `stretchChars`, `minSummaryMs` and
- * `memoryItems` may be 0 (no content query, no member lookup, no recall
- * today, no stretch, the summary asked whatever time is left, no stored
- * memory searched); `windowMessages` is at most 100.
+ * `maxForms`, `maxPeople`, `maxPerDay`, `stretchChars`, `minSummaryMs`,
+ * `memoryItems` and `keepOldest` may be 0 (no content query, no member
+ * lookup, no recall today, no stretch, the summary asked whatever time is
+ * left, no stored memory searched, only the newest clusters kept);
+ * `windowMessages` is at most 100.
  * @param {object} config  The live config.
  * @returns {{ maxForms: number, maxPeople: number, dateSamples: number, clusterGapMinutes: number,
- *   maxClusters: number, windowMessages: number, answerChars: number, stretchChars: number, maxPerDay: number,
+ *   maxClusters: number, keepOldest: number, windowMessages: number, answerChars: number, stretchChars: number, maxPerDay: number,
  *   timeoutMs: number, minSummaryMs: number, maxOutputTokens: number, memoryItems: number }|null}
  */
 export function recallSettings(config) {
@@ -113,6 +115,7 @@ export function recallSettings(config) {
     dateSamples: intAtLeast(r.dateSamples, d.dateSamples, 1),
     clusterGapMinutes: numberAtLeast(r.clusterGapMinutes, d.clusterGapMinutes, 0),
     maxClusters: intAtLeast(r.maxClusters, d.maxClusters, 1),
+    keepOldest: intAtLeast(r.keepOldest, d.keepOldest, 0),
     windowMessages: Math.min(MAX_WINDOW_MESSAGES, intAtLeast(r.windowMessages, d.windowMessages, 1)),
     answerChars: intAtLeast(r.answerChars, d.answerChars, 1),
     stretchChars: intAtLeast(r.stretchChars, d.stretchChars, 0),
@@ -364,16 +367,21 @@ export function sampleOffsets(total, samples) {
  * than `gapMinutes` after the previous one joins its cluster. A one-hit
  * cluster counts like any other. Each cluster: `{ channelId, ids (oldest
  * first), startTs, endTs, middleId }`, `middleId` the hit at the middle of
- * its list. The newest `maxClusters` by `endTs` are kept, newest first. Hits
+ * its list. Clusters are ordered newest first by `endTs` (channel id on a
+ * tie). With more than `maxClusters` of them, `keepOldest` slots (at most
+ * `maxClusters`) go to the oldest ones -- where a running thing started --
+ * and the rest to the newest; the kept ones stay newest first, so the oldest
+ * come last. `keepOldest` 0 keeps just the newest `maxClusters`. Hits
  * without an id, a channel or a finite `ts` are ignored; a repeated id counts
  * once.
  * @param {{ id: string, channelId: string, ts: number }[]} hits
- * @param {{ gapMinutes?: number, maxClusters?: number }} [options]
+ * @param {{ gapMinutes?: number, maxClusters?: number, keepOldest?: number }} [options]
  * @returns {{ channelId: string, ids: string[], startTs: number, endTs: number, middleId: string }[]}
  */
-export function clusterHits(hits, { gapMinutes, maxClusters } = {}) {
+export function clusterHits(hits, { gapMinutes, maxClusters, keepOldest } = {}) {
   const gapMs = numberAtLeast(gapMinutes, RECALL_DEFAULTS.clusterGapMinutes, 0) * MINUTE_MS;
   const keep = intAtLeast(maxClusters, RECALL_DEFAULTS.maxClusters, 1);
+  const oldest = Math.min(keep, intAtLeast(keepOldest, RECALL_DEFAULTS.keepOldest, 0));
   const byChannel = new Map();
   const seen = new Set();
   for (const hit of Array.isArray(hits) ? hits : []) {
@@ -396,10 +404,9 @@ export function clusterHits(hits, { gapMinutes, maxClusters } = {}) {
       clusters.push(current);
     }
   }
-  return clusters
-    .sort((x, y) => y.endTs - x.endTs || (x.channelId < y.channelId ? -1 : 1))
-    .slice(0, keep)
-    .map((cluster) => ({ ...cluster, middleId: cluster.ids[Math.floor(cluster.ids.length / 2)] }));
+  clusters.sort((x, y) => y.endTs - x.endTs || (x.channelId < y.channelId ? -1 : 1));
+  const kept = clusters.length <= keep ? clusters : [...clusters.slice(0, keep - oldest), ...clusters.slice(clusters.length - oldest)];
+  return kept.map((cluster) => ({ ...cluster, middleId: cluster.ids[Math.floor(cluster.ids.length / 2)] }));
 }
 
 /**
