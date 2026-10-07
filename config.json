@@ -119,6 +119,7 @@
     "maxPending": 6,
     "pendingSameChannel": true,
     "classifyWhileBusy": true,
+    "pendingOverheard": true,
     "switchDelayMs": [2000, 9000],
     "followUpMinutes": 15,
     "followUpClassifyReplies": true,

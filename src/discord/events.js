@@ -35,7 +35,7 @@ import { helperRequestOptions, railReason } from '../llm/openrouter.js';
 import { clampChars, oneLine } from '../memory/clamp.js';
 import { fill, formatTranscript, renderTranscript } from './format.js';
 import { topByRank } from '../memory/ranking.js';
-import { addPending, authorCalls, foldInto, isExpired, parseMergeAnswer, popOldest, requeuePending } from '../behavior/pending.js';
+import { addPending, authorCalls, foldInto, followUpSlot, isExpired, parseMergeAnswer, popOldest, requeuePending } from '../behavior/pending.js';
 import { between } from '../behavior/random.js';
 import { block, fillPromptTemplate } from '../behavior/prompt.js';
 import { roomQuestionChance } from '../behavior/spontaneous.js';
@@ -800,8 +800,10 @@ export function createMessageHandler({
    * would answer 'busy', so none is started (and a held message is not
    * dropped as already answered). A `followUp` that finds the attention
    * taken -- here, or as runTurn's 'busy' -- waits in the pending queue
-   * (deferFollowUp); an `overheard` one is dropped (`follow-up: dropped`,
-   * `busy`).
+   * (deferFollowUp); so does an `overheard` one while
+   * mention.pendingOverheard is on (missing = on, read at that moment),
+   * keeping its kind; with the switch off it is dropped (`follow-up:
+   * dropped`, `busy`).
    * @param {{ message: object, normalized: object }} candidate
    * @param {'followUp'|'overheard'} triggerKind
    * @returns {boolean}
@@ -811,7 +813,7 @@ export function createMessageHandler({
     const channelId = channel.id;
     const config = hot.config;
     if (turnBlocked(channelId, config)) {
-      if (triggerKind === 'followUp') deferFollowUp(channel, normalized);
+      if (waitsWhenBusy(triggerKind, config)) deferFollowUp(channel, normalized, triggerKind);
       else log.info('follow-up: dropped', { channel: channelId, message: normalized.id, reason: 'busy' });
       return false;
     }
@@ -824,11 +826,11 @@ export function createMessageHandler({
       .runTurn({ channel, mode: 'reply', trigger: normalized, triggerKind })
       .then((result) => {
         if (result?.outcome === 'busy') {
-          if (triggerKind !== 'followUp') {
+          if (!waitsWhenBusy(triggerKind, hot.config)) {
             log.info('follow-up: dropped', { channel: channelId, message: normalized.id, reason: 'busy' });
             return undefined;
           }
-          deferFollowUp(channel, normalized);
+          deferFollowUp(channel, normalized, triggerKind);
           if (!turnBlocked(channelId, hot.config)) return drainPending();
           return undefined;
         }
@@ -836,6 +838,18 @@ export function createMessageHandler({
       })
       .catch((err) => log.error('follow-up: reply turn failed', { channel: channelId, error: err }));
     return true;
+  }
+
+  /**
+   * Whether a follow-up turn of `triggerKind` that found the attention taken
+   * waits in the pending queue: a `followUp` always, an `overheard` while
+   * mention.pendingOverheard is on in `config` (missing = on).
+   * @param {'followUp'|'overheard'} triggerKind
+   * @param {object} config
+   * @returns {boolean}
+   */
+  function waitsWhenBusy(triggerKind, config) {
+    return triggerKind === 'followUp' || config.mention?.pendingOverheard !== false;
   }
 
   // --- Room questions (spontaneous.roomQuestionChance) -----------------------
@@ -1183,9 +1197,12 @@ export function createMessageHandler({
   // (prompts/merge.md, holdCall) folds it into that item instead of queueing
   // it, and the item's turn names it (labels.task.added).
   // A follow-up the address classifier said `yes` to that found the attention
-  // taken waits here too (deferFollowUp, kind `followUp`, one per channel),
-  // logged as `follow-up: ...`; at pickup its window must still be open and
-  // the persona must not have posted there since (followUpStale).
+  // taken waits here too (deferFollowUp, kind `followUp`), and so does an
+  // `overheard` one (kind `overheard`, mention.pendingOverheard): one of them
+  // per channel (followUpSlot), logged as `follow-up: ...`; at pickup its
+  // window must still be open (followUpStale) and, like any call, it is
+  // dropped as answered only when the turn that spoke there had it in its
+  // history (turns.spokeAfterSeeing).
   // Never persisted.
   let pendingList = [];
   let draining = false; // guards against a re-entrant drainPending() call (see below)
@@ -1203,7 +1220,8 @@ export function createMessageHandler({
   /**
    * The `queued` input of a turn answering `trigger` (src/behavior/turn.js): a
    * function giving, when the turn builds its request, the other calls waiting
-   * in `channelId` (never a routed one), arrival order: the trigger author's
+   * in `channelId` (never a routed one, nor a deferred overheard line: talk
+   * about the persona is no call to it), arrival order: the trigger author's
    * own as `{ id, text }`, another member's as `{ id, text, author }` (their
    * display name). Null for a routed call: its turn is about another channel.
    */
@@ -1211,7 +1229,7 @@ export function createMessageHandler({
     if (routed || !trigger?.authorId) return null;
     return () =>
       pendingList
-        .filter((p) => !p.destination && p.channelId === channelId && p.trigger?.id !== trigger.id)
+        .filter((p) => !p.destination && p.kind !== 'overheard' && p.channelId === channelId && p.trigger?.id !== trigger.id)
         .sort((a, b) => a.arrivedAt - b.arrivedAt)
         .map((p) => ({
           id: p.trigger.id,
@@ -1231,12 +1249,13 @@ export function createMessageHandler({
 
   /**
    * One log line about a pending entry: `follow-up: <event>` for a deferred
-   * follow-up (its message id included, as every follow-up line has it),
+   * follow-up or overheard line (its message id included, as every follow-up
+   * line has it),
    * `mention: <event>` for any other call; channel, kind, `fields`, and a
    * routed call's destination.
    */
   function logPending(ping, event, fields = {}) {
-    const followUp = ping.kind === 'followUp';
+    const followUp = isDeferredFollowUp(ping);
     log.info(`${followUp ? 'follow-up' : 'mention'}: ${event}`, {
       channel: ping.channelId,
       kind: ping.kind,
@@ -1249,16 +1268,21 @@ export function createMessageHandler({
   /**
    * A follow-up `yes` (trigger kind `followUp`) that found the attention
    * taken (startFollowUpTurn): held in the pending queue like a direct call,
-   * answered by drainPending once the turn frees up, after the window and
-   * "already answered" checks there (followUpStale). Read now: muted
+   * answered by drainPending once the turn frees up, after the window check
+   * (followUpStale) and the "already answered" one (spokeAfterSeeing) there. Read now: muted
    * (paused, a warmup run), features.followUp / features.mentions off, or its
    * own channel busy with mention.pendingSameChannel off -- not held, dropped
-   * with that reason (`busy` for the last two, as before). One per channel:
-   * a newer one takes an older one's place (`follow-up: dropped`, `newer`).
-   * Never folded into another call, nor a fold target (waitingItems).
-   * `follow-up: deferred` names where the running turn is (`runningIn`).
+   * with that reason (`busy` for the last two, as before). An `overheard`
+   * line (`kind`, startFollowUpTurn) is held the same way. One of them per
+   * channel, by followUpSlot: a newer one takes an older one's place
+   * (`follow-up: dropped`, `newer`), except that an `overheard` line never
+   * takes a waiting `followUp`'s place -- it is dropped itself
+   * (`outranked`). Never folded into another call, nor a fold target
+   * (waitingItems). `follow-up: deferred` names where the running turn is
+   * (`runningIn`), and the kind of an overheard line.
+   * @param {'followUp'|'overheard'} [kind]
    */
-  function deferFollowUp(channel, trigger) {
+  function deferFollowUp(channel, trigger, kind = 'followUp') {
     const config = hot.config;
     const channelId = channel.id;
     const sameChannel = turns.isBusy(channelId);
@@ -1268,13 +1292,14 @@ export function createMessageHandler({
       log.info('follow-up: dropped', { channel: channelId, message: trigger.id, reason });
       return;
     }
-    const older = pendingList.find((p) => p.kind === 'followUp' && p.channelId === channelId);
-    if (older) {
-      pendingList = pendingList.filter((p) => p !== older);
-      log.info('follow-up: dropped', { channel: channelId, message: older.trigger.id, reason: 'newer' });
+    const slot = followUpSlot(pendingList, channelId, kind);
+    if (!slot.admit) {
+      log.info('follow-up: dropped', { channel: channelId, message: trigger.id, reason: 'outranked' });
+      return;
     }
+    if (slot.replaced) dropReplaced(slot.replaced);
     const maxPending = config.mention.maxPending ?? 6;
-    const ping = { channelId, channel, trigger, kind: 'followUp', arrivedAt: now() };
+    const ping = { channelId, channel, trigger, kind, arrivedAt: now() };
     const { list, evicted } = addPending(pendingList, ping, maxPending);
     pendingList = list;
     log.info('follow-up: deferred', {
@@ -1284,18 +1309,32 @@ export function createMessageHandler({
       runningIn: sameChannel ? channelId : (turns.busyChannels?.()[0] ?? null),
       sameChannel,
       pending: pendingList.length,
+      ...(kind === 'overheard' ? { kind } : {}),
     });
     if (evicted) logEvicted(evicted, maxPending);
   }
 
+  /** Remove the deferred follow-up or overheard line a newer entry of its channel replaced (followUpSlot), logged `newer`. */
+  function dropReplaced(older) {
+    pendingList = pendingList.filter((p) => p !== older);
+    log.info('follow-up: dropped', { channel: older.channelId, message: older.trigger.id, reason: 'newer' });
+  }
+
+  /** Whether a pending entry is a deferred follow-up or overheard line (deferFollowUp), not a call. */
+  function isDeferredFollowUp(ping) {
+    return ping.kind === 'followUp' || ping.kind === 'overheard';
+  }
+
   /**
-   * Why a deferred follow-up is no longer to be answered at pickup, read now:
-   * `closed` -- the window of its channel is not open any more
-   * (isFollowUpOpen: mention.followUpMinutes and the no-streak, the rule the
-   * classifier used; an expired one is forgotten as the gate does) --, or
-   * `answered` -- the persona posted in that channel after the message
-   * (the window's last answer is later than it). Null: still to answer.
-   * @returns {'closed'|'answered'|null}
+   * Why a deferred follow-up or overheard line is no longer to be answered
+   * at pickup, read now: `closed` -- the window of its channel is not open
+   * any more (isFollowUpOpen: mention.followUpMinutes and the no-streak, the
+   * rule the classifier used; an expired one is forgotten as the gate does).
+   * Null: still to answer. A post of the persona in that channel after the
+   * line does not make it answered by itself: the turn that posted may have
+   * fetched its history before the line arrived. Whether that turn had the
+   * line in view is the drain's spokeAfterSeeing check, made before this one.
+   * @returns {'closed'|null}
    */
   function followUpStale(ping, config) {
     const window = followUpWindows.get(ping.channelId);
@@ -1303,7 +1342,7 @@ export function createMessageHandler({
       if (window) closeFollowUpWindow(ping.channelId);
       return 'closed';
     }
-    return window.lastAnswerAt > ping.trigger.ts ? 'answered' : null;
+    return null;
   }
 
   /**
@@ -1356,13 +1395,20 @@ export function createMessageHandler({
    * channel or of its author; a routed call carries the calls its settle wait
    * took the place of (src/behavior/pending.js `superseded`). At most
    * mention.maxPending entries; the oldest of any channel is evicted when full
-   * (logEvicted). `sameChannel` is logged for the channel the turn would post
-   * in, `queued` is how many calls the author has waiting in that channel.
+   * (logEvicted). A direct call (not a routed one) takes the place of an
+   * overheard line waiting in its channel (followUpSlot, `follow-up:
+   * dropped`, `newer`): its turn reads that line in the history.
+   * `sameChannel` is logged for the channel the turn would post in,
+   * `queued` is how many calls the author has waiting in that channel.
    * @param {string[]} [superseded]  A routed call only: see answerCall.
    */
   function enqueuePending(channel, trigger, kind, destination = null, superseded = [], arrivedAt = now()) {
     const maxPending = hot.config.mention.maxPending ?? 6;
     const routed = destination ? { destination, ...(superseded.length > 0 ? { superseded: [...superseded] } : {}) } : {};
+    if (!destination) {
+      const { replaced } = followUpSlot(pendingList, channel.id, kind);
+      if (replaced) dropReplaced(replaced);
+    }
     const ping = { channelId: channel.id, channel, trigger, kind, arrivedAt, ...routed };
     const { list, evicted } = addPending(pendingList, ping, maxPending);
     pendingList = list;
@@ -1420,9 +1466,9 @@ export function createMessageHandler({
     }
     return [
       ...parts.map((part) => ({ kind: 'part', index: part.index, text: itemText(part.text) })),
-      // A deferred follow-up is not one: it may still be dropped (window closed, answered).
+      // A deferred follow-up or overheard line is not one: it may still be dropped (window closed, answered).
       ...authorCalls(pendingList, channelId, authorId)
-        .filter((p) => p.kind !== 'followUp')
+        .filter((p) => !isDeferredFollowUp(p))
         .map((p) => ({ kind: 'call', id: p.trigger.id, text: itemText(p.trigger.content) })),
     ];
   }
@@ -1580,8 +1626,8 @@ export function createMessageHandler({
    * channel (`queued`, queuedFor) and the messages folded into it (`added`).
    * A ping queued in a channel whose own turn was running is picked up the
    * same way once that turn frees the channel. A deferred follow-up is never
-   * rolled (counted for spam only) and is dropped when its window closed or
-   * the persona posted in its channel after it (followUpStale), or when
+   * rolled (counted for spam only) and is dropped when its window closed
+   * (followUpStale) or a turn that spoke had it in view, or when
    * features.followUp is off now. Guarded against re-entrancy:
    * the turn this function itself starts also frees the channel through the very same `onIdle`,
    * which would otherwise start a second overlapping drain. A no-op while
@@ -1667,7 +1713,7 @@ export function createMessageHandler({
         // routed call, and the calls of its source that turn showed, are no
         // longer presented as waiting either).
         if (turns.spokeAfterSeeing?.(ping.channelId, ping.trigger.id)) {
-          if (ping.kind === 'followUp') logPending(ping, 'dropped', { reason: 'answered' });
+          if (isDeferredFollowUp(ping)) logPending(ping, 'dropped', { reason: 'answered' });
           else log.info('mention: already answered', { channel: ping.channelId, kind: ping.kind, ...routed });
           if (ping.destination) skipSeenCalls(ping.channelId, ping.trigger.id);
           continue;
@@ -1711,7 +1757,7 @@ export function createMessageHandler({
 
         // The channel list and the ping's own switch are hot: either may have
         // changed while the ping waited.
-        const switchOff = ping.kind === 'followUp' ? followUpOff(config) : callSwitchOff(ping.kind, features);
+        const switchOff = isDeferredFollowUp(ping) ? followUpOff(config) : callSwitchOff(ping.kind, features);
         if (!channelAllowed(ping.channel, config.bot) || switchOff) {
           logPending(ping, 'dropped', { reason: switchOff ? 'off' : 'channel' });
           continue;
@@ -1729,16 +1775,18 @@ export function createMessageHandler({
           destination = route.destination;
         }
 
-        // A deferred follow-up: its window must still be open and the persona
-        // must not have posted there since. Counted for spam like a live one,
-        // never rolled for the ignore chance (startFollowUpTurn).
-        if (ping.kind === 'followUp') {
+        // A deferred follow-up or overheard line: its window must still be
+        // open (a post the line came too late for is no answer: the
+        // spokeAfterSeeing check above decides that). A follow-up
+        // is counted for spam like a live one, an overheard line is not;
+        // neither is rolled for the ignore chance (startFollowUpTurn).
+        if (isDeferredFollowUp(ping)) {
           const stale = followUpStale(ping, config);
           if (stale) {
             logPending(ping, 'dropped', { reason: stale });
             continue;
           }
-          if (!ping.decided) tagHistory.hit(ping.trigger.authorId, now(), repeatWindowMs(config.mention));
+          if (ping.kind === 'followUp' && !ping.decided) tagHistory.hit(ping.trigger.authorId, now(), repeatWindowMs(config.mention));
         }
         // A re-queued ping was already counted and decided `respond` on the
         // pass whose turn found another one running: not counted or rolled again.

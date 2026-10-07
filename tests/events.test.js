@@ -3788,12 +3788,14 @@ test('follow-up: a "yes" during a spontaneous turn in its own channel that ends 
   assert.equal(scene.turns.calls[0].triggerKind, 'followUp');
 });
 
-test('follow-up: a deferred "yes" is dropped as answered when the persona posted in its channel after it', async () => {
-  const scene = await deferredFollowUps();
+test('follow-up: a line that arrived after the running turn fetched its history is drained, not dropped as answered', async () => {
+  const scene = await deferredFollowUps({ busyIn: 'c1' });
+  // The running turn in c1 posts after the line, from a history fetched before it arrived.
   await openFollowUpWindow(scene.handler, { guild: scene.guild, channel: scene.channel, ts: FOLLOW_UP_T0 + 5000 });
+  scene.turns.spokeAfterSeeing = () => false;
   const logs = await endTurnAndDrain(scene);
-  assert.equal(scene.turns.calls.length, 0, 'not answered a second time');
-  assert.deepEqual(followUpDropped(logs), [['m1', 'answered']]);
+  assert.deepEqual(followUpDropped(logs), []);
+  assert.deepEqual(startedTurns(scene.turns), [['m1', 'followUp']]);
 });
 
 test('follow-up: a deferred "yes" is dropped when its window closed while it waited', async () => {
@@ -3823,8 +3825,8 @@ test('follow-up: with features.followUp turned off before the "yes" meets the ru
   assert.equal(scene.turns.calls.length, 0);
 });
 
-test('follow-up: an "overheard" answer that meets the running turn is not deferred, dropped as busy as before', async () => {
-  const scene = await deferredFollowUps({ answers: ['overheard'] });
+test('follow-up: pendingOverheard off drops it as before', async () => {
+  const scene = await deferredFollowUps({ answers: ['overheard'], config: baseConfig({ mention: { pendingOverheard: false } }) });
   assert.equal(scene.logs.some((l) => l.msg === 'follow-up: deferred'), false);
   assert.deepEqual(followUpDropped(scene.logs), [['m1', 'busy']]);
   await endTurnAndDrain(scene);
@@ -3932,9 +3934,12 @@ test('follow-up: an "overheard" answer neither bumps the no-streak nor counts to
   assert.deepEqual(turns.calls.map((c) => c.triggerKind), ['overheard', 'overheard', 'overheard', 'followUp']);
 });
 
-test('follow-up: an "overheard" answer that finds a turn started elsewhere runs no turn and is dropped as busy', async () => {
+test('follow-up: with mention.pendingOverheard off, an "overheard" answer that finds a turn started elsewhere runs no turn and is dropped as busy', async () => {
   let anyBusy = false;
-  const { llm, handler, guild, channel, turns } = await overheardScene({ turns: recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => anyBusy }) });
+  const { llm, handler, guild, channel, turns } = await overheardScene({
+    config: baseConfig({ mention: { pendingOverheard: false } }),
+    turns: recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => anyBusy }),
+  });
 
   const { logs } = await withCapturedLogs(async () => {
     const p = handler(plainFollowUpMessage({ id: 'm1', guild, channel, content: 'she again' }));
@@ -4170,10 +4175,10 @@ for (const [when, reason, makeBlocker] of WAITING_LINE_BLOCKERS) {
   });
 }
 
-test('follow-up: with mention.classifyWhileBusy off, a held message dropped as busy drops the overheard line waiting on it as busy too', async () => {
+test('follow-up: with mention.classifyWhileBusy and mention.pendingOverheard off, a held message dropped as busy drops the overheard line waiting on it as busy too', async () => {
   let anyBusy = false;
   const { llm, turns, logs } = await overheardWithHeld({
-    config: baseConfig({ mention: { classifyWhileBusy: false } }),
+    config: baseConfig({ mention: { classifyWhileBusy: false, pendingOverheard: false } }),
     turns: recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => anyBusy }),
     beforeAnswer: () => (anyBusy = true),
   });
@@ -4183,9 +4188,12 @@ test('follow-up: with mention.classifyWhileBusy off, a held message dropped as b
   assert.deepEqual(followUpDropped(logs), [['m1', 'busy']]);
 });
 
-test('follow-up: an overheard line that waited meets a turn started elsewhere: dropped as busy, no turn', async () => {
+test('follow-up: with mention.pendingOverheard off, an overheard line that waited meets a turn started elsewhere: dropped as busy, no turn', async () => {
   let anyBusy = false;
-  const { llm, turns } = await overheardWithHeld({ turns: recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => anyBusy }) });
+  const { llm, turns } = await overheardWithHeld({
+    config: baseConfig({ mention: { pendingOverheard: false } }),
+    turns: recordingTurns({ outcome: 'spoke' }, { isAnyBusy: () => anyBusy }),
+  });
   assert.equal(llm.calls.length, 2, 'the held message is being classified');
 
   anyBusy = true;
@@ -7126,8 +7134,8 @@ test('follow-up: a "no" on a candidate classified during a busy turn defers noth
   assert.equal(scene.turns.calls.length, 0);
 });
 
-test('follow-up: an "overheard" on a candidate classified during a busy turn is dropped as busy, not deferred', async () => {
-  const scene = await busyFollowUpScene();
+test('follow-up: with mention.pendingOverheard off, an "overheard" on a candidate classified during a busy turn is dropped as busy, not deferred', async () => {
+  const scene = await busyFollowUpScene({ config: baseConfig({ mention: { pendingOverheard: false } }) });
   const logs = await busyCandidate(scene, 'm1', 'overheard');
   assert.equal(scene.llm.calls.length, 1);
   assert.deepEqual(deferredOf(logs), []);
@@ -7202,11 +7210,12 @@ test('follow-up: a burst of three candidates during one busy turn costs one clas
   assert.deepEqual(startedTurns(scene.turns), [['m3', 'followUp']]);
 });
 
-test('follow-up: a "yes" classified during the turn is dropped as answered at pickup when that turn answered its channel', async () => {
+test('follow-up: a line the turn had in its history is dropped as answered', async () => {
   const scene = await busyFollowUpScene({ busyIn: 'c1' });
   await busyCandidate(scene, 'm1', 'yes');
-  // The running turn in c1 posts after the candidate: the window's last answer moves past it.
+  // The running turn in c1 posts after the candidate, with the candidate in its history.
   await openFollowUpWindow(scene.handler, { guild: scene.guild, channel: scene.channel, ts: FOLLOW_UP_T0 + 5000 });
+  scene.turns.spokeAfterSeeing = (channelId, messageId) => channelId === 'c1' && messageId === 'm1';
   const drain = await endTurnAndDrain(scene);
   assert.equal(scene.turns.calls.length, 0, 'not answered a second time');
   assert.deepEqual(followUpDropped(drain), [['m1', 'answered']]);
@@ -7352,4 +7361,182 @@ test('onMessageUpdate: off with features.embedUpdates false', async () => {
   assert.deepEqual(scene.store.getBuffer('g1'), before);
   assert.equal(gifEntries(scene.store).length, 0);
   assert.equal(logs.some((entry) => entry.msg.startsWith('events: embeds')), false);
+});
+
+// ---------------------------------------------------------------------------
+// mention.pendingOverheard: an "overheard" verdict that finds the attention
+// taken waits in the pending queue like a "yes", keeping its kind; one entry
+// per channel, a waiting followUp outranking a later overheard line.
+
+const PENDING_OVERHEARD = { mention: { pendingOverheard: true } };
+
+test('follow-up: an overheard verdict during a running turn is deferred and drained as an overheard turn', async () => {
+  const tagHistory = countingTagHistory();
+  const scene = await deferredFollowUps({ answers: ['overheard'], config: baseConfig(PENDING_OVERHEARD), tagHistory });
+  assert.equal(scene.turns.calls.length, 0, 'no turn while the attention is taken');
+  assert.deepEqual(followUpDropped(scene.logs), [], 'not dropped');
+  const deferred = scene.logs.filter((l) => l.msg === 'follow-up: deferred');
+  assert.deepEqual(
+    deferred.map(({ channel, message, runningIn, sameChannel, kind }) => [channel, message, runningIn, sameChannel, kind]),
+    [['c1', 'm1', 'c9', false, 'overheard']],
+  );
+
+  const logs = await endTurnAndDrain(scene);
+  assert.deepEqual(logs.filter((l) => l.msg === 'follow-up: picked up').map((l) => [l.channel, l.kind, l.message]), [['c1', 'overheard', 'm1']]);
+  assert.equal(logs.some((l) => l.msg === 'mention: decided'), false, 'never rolled for the ignore chance');
+  assert.deepEqual(startedTurns(scene.turns), [['m1', 'overheard']]);
+  assert.equal(scene.turns.calls[0].mode, 'reply');
+  assert.equal(scene.turns.calls[0].channel, scene.channel);
+  assert.equal(tagHistory.hits, 0, 'talk about the persona is never counted for spam');
+});
+
+test('follow-up: an overheard turn whose runTurn answers busy is deferred, then drained with its kind', async () => {
+  const clock = mutableNow(FOLLOW_UP_T0);
+  const llm = fakeFollowUpLlm();
+  const results = [{ outcome: 'busy' }, { outcome: 'spoke' }];
+  const calls = [];
+  const turns = fakeTurns({
+    runTurn: async (args) => {
+      calls.push(args);
+      return results.shift();
+    },
+  });
+  const handler = makeHandler({ config: baseConfig(PENDING_OVERHEARD), turns, llm, now: clock, sleep: async () => {}, rng: () => 0.5, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: FOLLOW_UP_T0 });
+  clock.set(FOLLOW_UP_T0 + 1000);
+  channel.messages.cache.set('m1', {});
+
+  const { logs } = await withCapturedLogs(async () => {
+    const p = handler(plainFollowUpMessage({ id: 'm1', guild, channel, content: 'she again', authorId: 'u1', authorName: 'Élodie', ts: FOLLOW_UP_T0 + 1000 }));
+    await tick();
+    llm.respond('overheard');
+    await p;
+    for (let i = 0; i < 5; i += 1) await settle();
+  });
+
+  assert.deepEqual(followUpDropped(logs), []);
+  assert.deepEqual(logs.filter((l) => l.msg === 'follow-up: deferred').map((l) => [l.message, l.kind]), [['m1', 'overheard']]);
+  assert.deepEqual(calls.map((c) => [c.trigger.id, c.triggerKind]), [['m1', 'overheard'], ['m1', 'overheard']]);
+});
+
+test('follow-up: a pending followUp is not replaced by a later overheard', async () => {
+  const scene = await busyFollowUpScene({ config: baseConfig(PENDING_OVERHEARD) });
+  const first = await busyCandidate(scene, 'm1', 'yes');
+  const second = await busyCandidate(scene, 'm2', 'overheard');
+  assert.deepEqual(deferredOf(first), [['c1', 'm1', 'c9', false]]);
+  assert.deepEqual(deferredOf(second), [], 'the overheard line does not take the slot');
+  assert.deepEqual(followUpDropped(second), [['m2', 'outranked']]);
+
+  const drain = await endTurnAndDrain(scene);
+  assert.deepEqual(followUpDropped(drain), []);
+  assert.deepEqual(startedTurns(scene.turns), [['m1', 'followUp']]);
+});
+
+test('follow-up: a pending overheard is replaced by a later followUp', async () => {
+  const scene = await busyFollowUpScene({ config: baseConfig(PENDING_OVERHEARD) });
+  await busyCandidate(scene, 'm1', 'overheard');
+  const second = await busyCandidate(scene, 'm2', 'yes');
+  assert.deepEqual(followUpDropped(second), [['m1', 'newer']]);
+  assert.deepEqual(deferredOf(second), [['c1', 'm2', 'c9', false]]);
+
+  await endTurnAndDrain(scene);
+  assert.deepEqual(startedTurns(scene.turns), [['m2', 'followUp']]);
+});
+
+test('follow-up: a pending overheard is replaced by a later direct mention in its channel', async () => {
+  const scene = await busyFollowUpScene({ config: baseConfig(PENDING_OVERHEARD) });
+  await busyCandidate(scene, 'm1', 'overheard');
+  scene.channel.messages.cache.set('m2', {});
+  const { logs } = await withCapturedLogs(() =>
+    scene.handler(directPingMessage({ id: 'm2', guild: scene.guild, channel: scene.channel, channelId: 'c1', createdTimestamp: FOLLOW_UP_T0 + 5000 })),
+  );
+  assert.deepEqual(followUpDropped(logs), [['m1', 'newer']]);
+  assert.equal(logs.filter((l) => l.msg === 'mention: deferred').length, 1);
+
+  await endTurnAndDrain(scene);
+  assert.deepEqual(startedTurns(scene.turns), [['m2', 'mention']]);
+});
+
+test('follow-up: a waiting followUp stays beside a later direct mention with pendingOverheard on, as before', async () => {
+  const scene = await busyFollowUpScene({ config: baseConfig(PENDING_OVERHEARD) });
+  await busyCandidate(scene, 'm1', 'yes');
+  scene.channel.messages.cache.set('m2', {});
+  const { logs } = await withCapturedLogs(() =>
+    scene.handler(directPingMessage({ id: 'm2', guild: scene.guild, channel: scene.channel, channelId: 'c1', createdTimestamp: FOLLOW_UP_T0 + 5000 })),
+  );
+  assert.deepEqual(followUpDropped(logs), []);
+  await endTurnAndDrain(scene);
+  assert.deepEqual(startedTurns(scene.turns).map(([id]) => id), ['m1', 'm2']);
+});
+
+test('follow-up: a deferred overheard line is not shown to another turn of its channel as a waiting call', async () => {
+  const scene = await busyFollowUpScene({ config: baseConfig(PENDING_OVERHEARD) });
+  // A direct mention queued first, then the overheard line of the same channel (a later
+  // direct call would take its place, so the mention must come before it).
+  scene.channel.messages.cache.set('m0', {});
+  await withCapturedLogs(() =>
+    scene.handler(directPingMessage({ id: 'm0', guild: scene.guild, channel: scene.channel, channelId: 'c1', createdTimestamp: FOLLOW_UP_T0 + 500 })),
+  );
+  await busyCandidate(scene, 'm1', 'overheard');
+  // What each turn would show as waiting, read when it starts (queued is read lazily).
+  const shown = [];
+  const run = scene.turns.runTurn;
+  scene.turns.runTurn = (args) => (shown.push([args.trigger.id, args.queued?.() ?? null]), run(args));
+  // The fake turn never posts, so the drain answers both; the mention first.
+  await endTurnAndDrain(scene);
+  assert.deepEqual(startedTurns(scene.turns), [['m0', 'mention'], ['m1', 'overheard']]);
+  assert.deepEqual(shown[0], ['m0', []], 'the overheard line is not a call waiting for its turn');
+});
+
+test('follow-up: three messages in a row keep the newest in the slot and the drained turn reads them from history', async () => {
+  const clock = mutableNow(FOLLOW_UP_T0);
+  const llm = fakeFollowUpLlm();
+  const turns = attentionTurns('c9');
+  const handler = makeHandler({ config: baseConfig(PENDING_OVERHEARD), turns, llm, now: clock, sleep: async () => {}, rng: () => 0.5, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const history = [];
+  const channel = fakeChannelWithHistory('c1', guild, history);
+  await openFollowUpWindow(handler, { guild, channel, ts: FOLLOW_UP_T0 });
+  turns.busy = true;
+
+  const allLogs = [];
+  for (const [i, content] of ['she said so', 'ask her', 'Zoé knows'].entries()) {
+    const id = `m${i + 1}`;
+    const ts = FOLLOW_UP_T0 + (i + 1) * 1000;
+    clock.set(ts);
+    const message = plainFollowUpMessage({ id, guild, channel, content, authorId: 'u1', authorName: 'Élodie', ts });
+    history.push(message);
+    channel.messages.cache.set(id, message);
+    const { logs } = await withCapturedLogs(async () => {
+      const p = handler(message);
+      await tick();
+      llm.respond('overheard');
+      await p;
+      await tick();
+    });
+    allLogs.push(...logs);
+  }
+
+  assert.equal(llm.calls.length, 3, 'each line was classified');
+  assert.deepEqual(followUpDropped(allLogs), [['m1', 'newer'], ['m2', 'newer']]);
+  const deferred = allLogs.filter((l) => l.msg === 'follow-up: deferred');
+  assert.deepEqual(deferred.map((l) => l.message), ['m1', 'm2', 'm3']);
+  assert.equal(deferred.at(-1).pending, 1, 'the slot holds one entry');
+
+  turns.busy = false;
+  await withCapturedLogs(() => handler.drainPending());
+  assert.deepEqual(startedTurns(turns), [['m3', 'overheard']], 'the slot held the last one');
+  const fetched = await turns.calls[0].channel.messages.fetch({ limit: 50 });
+  assert.deepEqual([...fetched.keys()], ['m1', 'm2', 'm3'], 'the drained turn reads all three in the history');
+});
+
+test('follow-up: an overheard line that arrived after the running turn fetched its history is drained, not dropped as answered', async () => {
+  const scene = await deferredFollowUps({ busyIn: 'c1', answers: ['overheard'], config: baseConfig({ mention: { pendingOverheard: true } }) });
+  await openFollowUpWindow(scene.handler, { guild: scene.guild, channel: scene.channel, ts: FOLLOW_UP_T0 + 5000 });
+  scene.turns.spokeAfterSeeing = () => false;
+  const logs = await endTurnAndDrain(scene);
+  assert.deepEqual(followUpDropped(logs), []);
+  assert.deepEqual(startedTurns(scene.turns), [['m1', 'overheard']]);
 });
