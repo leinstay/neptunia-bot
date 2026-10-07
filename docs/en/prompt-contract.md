@@ -35,7 +35,7 @@ All instructions are English in both layers; a character's speech samples may be
 | `describe.md` | yes | Out-of-character prompt of the media describer (`features.mediaDescriptions`): one picture in, one plain line out: the action and the point, legible text quoted in its original script. Always English. No commentary, no moralising, no markdown | `{{today}}` `{{maxChars}}` (optional) |
 | `describe-video.md` | yes | Out-of-character prompt of the video describer (`features.videoDescriptions`): one video clip in (with sound), a full ordered account out: who appears, what is said (key phrases quoted), text on screen, what happens visually, music/sound when relevant. Configurable length. Always English; speech, captions and on-screen text quoted in their original language. No character card | `{{today}}` `{{maxChars}}` |
 | `describe-gif.md` | no | Out-of-character prompt for the GIF describer (`media.gif.watch`): a short silent clip in, three labelled lines out: `reaction` (the reply function, a few words or `none`), `action` (what visibly happens, capped at `{{maxChars}}`), `text` (on-screen text verbatim or `none`). Always English. No character card. Falls back to `describe-video.md` when absent | `{{today}}` `{{maxChars}}` `{{seconds}}` |
-| `rewatch.md` | yes | Classifier: does this message need the persona to re-watch a video, retry one that did not load, or look at a picture again (`features.videoRewatch`, `features.imageRelook`). Receives a numbered list of recent media (videos and pictures) with their kind, status and the new message. Output is ONE line: `<number> \| <question>`, `<number> \| retry` or `none` | `{{name}}` |
+| `rewatch.md` | yes | Classifier: does this message need the persona to re-watch a video, retry one that did not load, or look at a picture again (`features.videoRewatch`, `features.imageRelook`). Receives a numbered list of recent media (videos, watched GIFs listed as videos, and pictures) with their kind, status and the new message. Output is ONE line: `<number> \| <question>`, `<number> \| retry` or `none` | `{{name}}` |
 | `rewatch-answer.md` | yes | Out-of-character prompt for the second-look answer: the vision or video model looks at the item again and answers one question in the language of the question. Kind-neutral (serves both videos and pictures). No character card | `{{today}}` `{{question}}` `{{maxChars}}` |
 | `address.md` | yes | Classifier: is this untagged message addressed to the persona, about them, or neither. Output is one word: `yes`, `overheard` or `no` | `{{name}}` |
 | `overheard.md` | no | Task: the message talks about the persona, not to them. Used INSTEAD of the mode prompt when the trigger kind is `overheard` and the file is present and non-blank; missing or blank falls back to the mode prompt (degraded) | `{{name}}` `{{author}}` `{{trigger}}` `{{target}}` |
@@ -146,7 +146,7 @@ Video results are cached per attachment or per link in `data/guilds/<id>/media.j
 - Error miss: `{ miss: true, ts, reason: "error" }`: retried after `media.video.errorRetryMinutes` (default 60) minutes, or at once on a forced retry from the re-watch classifier.
 - Daily limit: not cached; returned as `{ state: "limit", reason: "daily" }` for that turn only.
 
-A re-watch answer is cached under the key `video:<itemId>:q:<hash>` (the first 16 hex digits of SHA-1 of the lower-cased, whitespace-collapsed question): `{ text, ts, answer: true }`. Expires after one hour; code deletes expired entries on read.
+A re-watch answer is cached under the key `video:<itemId>:q:<hash>` (the first 16 hex digits of SHA-1 of the lower-cased, whitespace-collapsed question): `{ answer, question, ts }`. A watched GIF's re-watch answer uses `gif:<itemId>:q:<hash>` the same way (`<itemId>` is the GIF's own id, `<message>#e<n>` for an embed). Expires after one hour; code deletes expired entries on read.
 
 A picture's still-frame entry keeps its own `<itemId>` key as before. Both can coexist for the same item.
 
@@ -190,7 +190,7 @@ transcript.videoDescribed                {name} {duration} {text}: text describe
 transcript.videoWatched                  {name} {duration} {text}: first-hand, the persona saw and heard the clip
 transcript.videoNotWatched               {name} {duration} {reason}: reason is the human phrase from videoReason.*
 transcript.videoNotWatchedFrame          {name} {duration} {reason} {text}: not watched but a still frame was described
-transcript.videoAnswered                {question} {text}: extra tag after a watched video tag; the persona re-watched the clip for this question
+transcript.videoAnswered                {question} {text}: extra tag after a watched video tag or a GIF's tag; the persona re-watched the clip for this question
 transcript.imageAnswered                {question} {text}: extra tag under the picture's line; the persona looked at the picture again for this question
 transcript.videoReason.length | size | daily | error | pending    human phrases for the five reason codes; pending = the clip was still loading when the request went out
 transcript.linkWatched                   {text}: extra tag after a link tag, first-hand video summary
@@ -665,8 +665,8 @@ The window state survives a restart: active windows are saved in `data/state.jso
 
 When the persona is directly addressed (a reply turn, not an overheard or spontaneous turn) and a video or picture sits in the last `media.video.rewatch.recentMessages`
 (default 60) messages of the channel, a classifier decides whether the message asks about one of those items, asserts a concrete detail about a picture, or asks
-to retry a video that did not load. Candidates: watched videos, error-state videos, and described pictures (attached pictures, including the persona's own uploads; pasted image links are excluded). Pictures are offered only when `features.vision` is on. At most `media.video.rewatch.maxCandidates` (default 6) items are
-offered to the classifier, videos first then pictures, newest-message first within each kind. Code sends `rewatch.md` as the system prompt on the
+to retry a video that did not load. Candidates: watched videos, error-state videos, watched GIFs (an attached GIF or a GIF embed whose cached description came from watching its clip, see `describe-gif.md`), and described pictures (attached pictures, including the persona's own uploads; pasted image links are excluded). Pictures are offered only when `features.vision` is on; watched GIFs only while GIFs are watched (`media.gif.watch`, video vision on). At most `media.video.rewatch.maxCandidates` (default 6) items are
+offered to the classifier, videos first, then watched GIFs, then pictures, newest-message first within each group. Code sends `rewatch.md` as the system prompt on the
 `classifier.text` model role (default `anthropic/claude-sonnet-4.6`) with a user message
 containing three blocks: a short `<transcript>` of the last few channel messages with the persona's own lines marked
 with `labels.self` (so the classifier sees what the candidate replies to), then the media list and the candidate:
@@ -686,6 +686,7 @@ with `labels.self` (so the classifier sees what the candidate replies to), then 
 
 Each `<media>` line carries five pipe-separated columns: a sequential number (1 = newest item in its kind group), kind (`video` or `picture`), the item name,
 a status (`watched` or `not loaded` for videos, `described` for pictures), and the first 200 characters of the summary or caption (empty for not-loaded videos).
+A watched GIF is listed as a video: kind `video`, status `watched`, its name (the attached file's name, or the embed's title or site, e.g. `Tenor`) and the beginning of its watched description.
 Names and summaries are whitespace-collapsed to one line. The trigger text is cut at `context.maxMessageChars`.
 Output is ONE line:
 
@@ -697,6 +698,8 @@ On a question hit for a video, the video model watches the clip again with `rewa
 = `rewatch.answerChars`, default 1200) and the answer is appended to the transcript as `transcript.videoAnswered`
 (`{question}`, `{text}`) after the watched tag.
 
+On a question hit for a watched GIF, its clip is fetched again exactly as for the first watch (the first `media.gif.maxSeconds` seconds) and the video model answers with `rewatch-answer.md` the same way; the transcript carries `transcript.videoAnswered` (`{question}`, `{text}`) after the GIF's tag. The answer is cached for one hour apart from the GIF's description. Retry never applies to a GIF.
+
 On a question hit for a picture, the vision model (`classifier.media`, `purpose: relook`, prompt `rewatch-answer.md`, which is kind-neutral) looks at the picture again with that question. The answer is not stored as the caption (cached one hour) and the transcript carries `transcript.imageAnswered` (`{question}`, `{text}`) under the picture's line.
 
 The `<senses>` block includes `senses.videoRewatch` when the feature is on.
@@ -707,8 +710,8 @@ transcript shows the summary as first-hand. A retry counts as a new video attemp
 `media.video.maxPerDay`.
 
 Rails: at most one re-watch or retry per turn; the classifier and the second look each count against
-`llm.maxRequestsPerDay`; the second look also counts against `media.video.maxPerDay`;
-`media.video.rewatch.maxPerDay` (default 20) caps both video re-watches and picture relooks (shared counter). Answers are cached for one hour per
+`llm.maxRequestsPerDay`; a video's second look also counts against `media.video.maxPerDay`, a GIF's against `media.gif.maxPerDay` (never the video counter);
+`media.video.rewatch.maxPerDay` (default 20) caps video re-watches, GIF re-watches and picture relooks (shared counter). Answers are cached for one hour per
 question (see the video cache section above). Switch `features.videoRewatch` (missing = on, needs
 `videoDescriptions` on). Switch `features.imageRelook` (missing = on, needs `vision` on).
 

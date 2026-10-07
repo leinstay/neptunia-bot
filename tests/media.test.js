@@ -1039,9 +1039,28 @@ test('mediaLabelFor: an attached picture with an answer appends imageAnswered af
   });
 });
 
-test('mediaLabelFor: an answer on anything but a picture is ignored', () => {
+test('mediaLabelFor: an answer on a video item is ignored (its answer lives in its state)', () => {
   assert.deepEqual(mediaLabelFor(clip, { answer }), { key: 'video', values: { name: 'clip.mp4', duration: '1:05' } });
-  assert.deepEqual(mediaLabelFor({ kind: 'gif', name: 'a.gif' }, { answer }), { key: 'gif', values: { name: 'a.gif' } });
+});
+
+test('mediaLabelFor: a GIF\'s second look appends videoAnswered after its tag, attached, described or known alike', () => {
+  const answered = { key: 'videoAnswered', values: { question: answer.question, text: answer.text } };
+  assert.deepEqual(mediaLabelFor({ kind: 'gif', name: 'a.gif' }, { answer }), { key: 'gif', values: { name: 'a.gif' }, extra: answered });
+  assert.deepEqual(mediaLabelFor({ kind: 'gif', name: 'a.gif' }, { answer, description: 'un miroir' }), {
+    key: 'gifDescribed',
+    values: { text: 'un miroir' },
+    extra: answered,
+  });
+  assert.deepEqual(mediaLabelFor({ kind: 'gif', name: 'a.gif' }, { answer, description: 'un miroir', gifHandle: 'g3' }), {
+    key: 'gifKnown',
+    values: { id: 'g3', text: 'un miroir' },
+    extra: answered,
+  });
+  assert.deepEqual(mediaLabelFor({ kind: 'gif', name: 'a.gif' }, { answer, attachedIndex: 2 }), {
+    key: 'gif',
+    values: { name: 'a.gif' },
+    extra: [{ key: 'frameAttached', values: { n: 2 } }, answered],
+  });
 });
 
 // --- mediaLabelFor: a link read by the web lookup (linkRead) -----------------------

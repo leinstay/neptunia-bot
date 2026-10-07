@@ -316,8 +316,8 @@ Settings for watching GIFs as short clips (`media.gif.watch`). When enabled, a G
 | Key | Default | Meaning |
 |---|---|---|
 | `watch` | `true` | Watch GIFs as short video clips instead of describing a single frame. Needs `features.mediaDescriptions` and `features.videoDescriptions` on. A missing key counts as on |
-| `maxSeconds` | `8` | Seconds of the animation sent to the video model; the clip is converted with ffmpeg |
-| `maxPerDay` | `200` | Daily GIF watch cap, counted separately from `media.video.maxPerDay`. Once spent, a GIF gets the one-frame description instead |
+| `maxSeconds` | `8` | Seconds of the animation sent to the video model; the clip is converted with ffmpeg. A GIF's second look on a question (`media.video.rewatch`) uses the same cap |
+| `maxPerDay` | `200` | Daily GIF watch cap, counted separately from `media.video.maxPerDay`. Once spent, a GIF gets the one-frame description instead. A GIF's second look on a question takes a slot here too |
 
 ### `media.video`
 
@@ -368,7 +368,7 @@ Settings for the re-watch classifier (`features.videoRewatch`). When the persona
 | `maxCandidates` | `6` | Max videos offered to the classifier from the recent window, newest first |
 | `contextMessages` | `50` | Recent channel messages (excluding the trigger) rendered as a `<transcript>` block for the classifier; `0` omits the block |
 
-At most one re-watch or retry per turn. Answers are cached for one hour per question. The classifier and the second look each count against `llm.maxRequestsPerDay`; the second look also counts against `media.video.maxPerDay`.
+At most one re-watch or retry per turn. Answers are cached for one hour per question. The classifier and the second look each count against `llm.maxRequestsPerDay`; the second look also counts against `media.video.maxPerDay`. Watched GIFs are offered too, listed as videos (only while `media.gif.watch` is on); a GIF's second look fetches its clip again under `media.gif.maxSeconds` and counts against `media.gif.maxPerDay` instead of `media.video.maxPerDay`.
 
 ## `mention`
 

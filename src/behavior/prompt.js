@@ -1728,8 +1728,8 @@ function pulledAuthors(pulledFits) {
  *   `descriptions`. Omitted -> a neighbour picture shows a caption only when `descriptions` has one.
  * @param {Map<string, object>} [input.videos]  Item id -> video state from the video describer
  *   (src/memory/describe.js#describeVideos), passed to formatTranscript.
- * @param {Map<string, { question: string, text: string }>|null} [input.imageAnswers]  Picture id ->
- *   a second look on a question (src/memory/describe.js#relookImage), passed to formatTranscript.
+ * @param {Map<string, { question: string, text: string }>|null} [input.imageAnswers]  Picture or GIF id ->
+ *   a second look on a question (src/memory/describe.js#relookImage / #rewatchGif), passed to formatTranscript.
  * @param {Map<string, string>} [input.reads]  Link id -> the excerpt the web lookup read from that
  *   page (src/web/lookup.js#readLinks), passed to formatTranscript.
  * @param {{ query?: string, text?: string, sources?: object[], cached?: boolean,

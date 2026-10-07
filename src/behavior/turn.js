@@ -559,6 +559,9 @@ const REWATCH_SUMMARY_CHARS = 200;
 // the kind and status columns of a `<media>` line and the answer that asks for a retry.
 const REWATCH_KIND_VIDEO = 'video';
 const REWATCH_KIND_PICTURE = 'picture';
+// A watched GIF: listed to the classifier as a video (REWATCH_KIND_VIDEO); `gif` is the internal
+// candidate kind and the log's code, never written into `<media>`.
+const REWATCH_KIND_GIF = 'gif';
 const REWATCH_STATUS_WATCHED = 'watched';
 const REWATCH_STATUS_NOT_LOADED = 'not loaded';
 const REWATCH_STATUS_DESCRIBED = 'described';
@@ -649,6 +652,20 @@ function relookCandidates(history) {
   const out = [];
   for (let i = history.length - 1; i >= 0; i -= 1) {
     for (const item of collectPictures(history[i])) if (item.kind === 'image') out.push(item);
+  }
+  return out;
+}
+
+/**
+ * The GIFs of `history` a second look on a question may be offered for
+ * (features.videoRewatch): every `gif` item of collectPictures -- an
+ * attached .gif, a tenor/giphy embed -- newest message first. Which of them
+ * were watched is the describer's to say (describer.watchedGifs).
+ */
+function gifRewatchItems(history) {
+  const out = [];
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    for (const item of collectPictures(history[i])) if (item.kind === 'gif') out.push(item);
   }
   return out;
 }
@@ -1810,7 +1827,7 @@ export function createTurnRunner({
    * features.imageRelook for pictures): when the trigger asks about a video
    * watched, or a picture posted, in the last `media.video.rewatch.recentMessages`
    * messages (at most `media.video.rewatch.maxCandidates` of them, the videos
-   * first, then the pictures, each newest first), one cheap classifier call
+   * first, then the watched GIFs, then the pictures, each newest first), one cheap classifier call
    * (prompts.rewatch, on the classifier model: classifierTextModel --
    * `classifier.text`, else the media model; its answer capped at
    * `media.video.rewatch.classifierMaxOutputTokens`) picks the item and
@@ -1819,7 +1836,14 @@ export function createTurnRunner({
    * `answer: { question, text }` -- mutating `videos` in place. For a picture
    * (`pictures`, relookCandidates; listed with the caption `descriptions`
    * holds for it) the describer looks at it again (describer.relookImage) and
-   * the answer goes into `imageAnswers` under the picture's id. Videos that
+   * the answer goes into `imageAnswers` under the picture's id. A watched GIF
+   * (`gifs`, gifRewatchItems narrowed to the watched ones; `gifCaptions` holds
+   * each one's watched caption) is listed as a `video`, status `watched`,
+   * after the videos and before the pictures; the describer watches its clip
+   * again (describer.rewatchGif) and the answer goes into `imageAnswers`
+   * under the GIF's id (rendered as `videoAnswered`, see
+   * src/discord/media.js#mediaLabelFor). A GIF takes a second-look slot and a
+   * GIF watch slot (`videoCapsLeft().gif`), never a video one. Videos that
    * did not load (`error` state) are candidates too whenever the describer
    * can fetch one (describer.describeVideo): the classifier's `<n> | retry`
    * watches one again with `force` and its new state replaces the old one; a
@@ -1831,17 +1855,19 @@ export function createTurnRunner({
    * answers with that ordinal, mapped back here. A `<transcript>` block before
    * `<media>` carries the last `media.video.rewatch.contextMessages` messages before the
    * trigger (0 omits it), with the video states and captions this turn already has. Never throws: any failure leaves
-   * `videos` and `imageAnswers` as they were. The question and the answer are data: never logged;
+   * `videos` and `imageAnswers` as they were. The question and the answer are data: never logged
+   * (`rewatch: classified` names a picked GIF `target: 'gif'` and counts `offered.gifs`);
    * every early stop logs `rewatch: skipped` with its reason. The classifier is
    * not asked when its answer could not run (`reason: 'cap'`): the describer's
    * `videoCapsLeft()` (when it has one; read only) says no video can be
    * looked at or retried today (no video slot left, or no second-look slot
    * left and no failed video can be retried) and no picture can be looked
-   * at (no second-look slot left -- one counter for both kinds) -- with only
+   * at (no second-look slot left -- one counter for every kind) and no GIF
+   * can be re-watched (no second-look or no GIF watch slot left) -- with only
    * the second-look slots spent, only the videos that did not load are
    * offered. The classifier's request is a helper's (helperRequestOptions).
    */
-  async function maybeRewatch({ config, guildId, channelId, selfName, history, trigger, videos, descriptions, candidates, pictures = [], imageAnswers }) {
+  async function maybeRewatch({ config, guildId, channelId, selfName, history, trigger, videos, descriptions, candidates, gifs = [], gifCaptions = new Map(), pictures = [], imageAnswers }) {
     const prompt = hot.prompts?.rewatch;
     if (!prompt) {
       log.info('rewatch: skipped', { channel: channelId, reason: 'no-prompt' });
@@ -1854,7 +1880,10 @@ export function createTurnRunner({
     const slots = typeof describer.videoCapsLeft === 'function' ? describer.videoCapsLeft() : null;
     const questionsOn = !slots || slots.rewatch > 0;
     const videoSlot = !slots || slots.video > 0;
-    if (slots && (!videoSlot || (!questionsOn && !canRetry)) && (pictures.length === 0 || !questionsOn)) {
+    // A GIF's second look takes a GIF watch slot, never a video one (a describer without the count: no limit).
+    const gifSlot = !slots || (slots.gif ?? Infinity) > 0;
+    const gifsOn = questionsOn && gifSlot;
+    if (slots && (!videoSlot || (!questionsOn && !canRetry)) && (pictures.length === 0 || !questionsOn) && (gifs.length === 0 || !gifsOn)) {
       log.info('rewatch: skipped', { channel: channelId, reason: 'cap' });
       return;
     }
@@ -1866,8 +1895,8 @@ export function createTurnRunner({
       log.info('rewatch: skipped', { channel: channelId, reason: 'no-window' });
       return;
     }
-    // `candidates` and `pictures` are each newest first: the videos come first, and the cap
-    // over the merged list keeps the newest of each.
+    // `candidates`, `gifs` and `pictures` are each newest first: the videos come first, then the
+    // GIFs, and the cap over the merged list keeps the newest of each.
     const maxCandidates = Math.max(1, Math.floor(rewatchCfg.maxCandidates ?? 6));
     const recentIds = new Set(history.slice(-recent).map((m) => m.id));
     const seen = new Set();
@@ -1879,6 +1908,12 @@ export function createTurnRunner({
       if (!(state === 'watched' && questionsOn) && !(state === 'error' && canRetry)) continue;
       seen.add(item.itemId);
       listed.push({ item, kind: REWATCH_KIND_VIDEO });
+    }
+    for (const item of gifsOn ? gifs : []) {
+      if (listed.length >= maxCandidates) break;
+      if (seen.has(item.itemId) || !recentIds.has(item.messageId) || !gifCaptions.get(item.itemId)) continue;
+      seen.add(item.itemId);
+      listed.push({ item, kind: REWATCH_KIND_GIF });
     }
     for (const item of questionsOn ? pictures : []) {
       if (listed.length >= maxCandidates) break;
@@ -1896,6 +1931,10 @@ export function createTurnRunner({
         const caption = descriptions?.get(item.itemId);
         const summary = caption ? [...oneLine(caption)].slice(0, REWATCH_SUMMARY_CHARS).join('') : '';
         return `${index + 1} | ${kind} | ${oneLine(item.name)} | ${REWATCH_STATUS_DESCRIBED} | ${summary}`.trimEnd();
+      }
+      if (kind === REWATCH_KIND_GIF) {
+        const summary = [...oneLine(gifCaptions.get(item.itemId))].slice(0, REWATCH_SUMMARY_CHARS).join('');
+        return `${index + 1} | ${REWATCH_KIND_VIDEO} | ${oneLine(item.name)} | ${REWATCH_STATUS_WATCHED} | ${summary}`.trimEnd();
       }
       const video = videos.get(item.itemId);
       const status = video.state === 'watched' ? REWATCH_STATUS_WATCHED : REWATCH_STATUS_NOT_LOADED;
@@ -1934,17 +1973,19 @@ export function createTurnRunner({
     const entry = pick ? listed[pick.n - 1] : null;
     const item = entry?.item ?? null;
     const isPicture = entry?.kind === REWATCH_KIND_PICTURE;
-    const loaded = item && !isPicture ? videos.get(item.itemId).state === 'watched' : false;
-    // A retry is for a video that did not load, a question for a watched one or a picture; anything else is ignored.
-    const usable = Boolean(item) && (isPicture ? !pick.retry : pick.retry !== loaded);
+    const isGif = entry?.kind === REWATCH_KIND_GIF;
+    const loaded = item && !isPicture && !isGif ? videos.get(item.itemId).state === 'watched' : false;
+    // A retry is for a video that did not load, a question for a watched one, a GIF or a picture; anything else is ignored.
+    const usable = Boolean(item) && (isPicture || isGif ? !pick.retry : pick.retry !== loaded);
     const pictureCount = listed.filter((candidate) => candidate.kind === REWATCH_KIND_PICTURE).length;
+    const gifCount = listed.filter((candidate) => candidate.kind === REWATCH_KIND_GIF).length;
     const watchedCount = listed.filter((candidate) => candidate.kind === REWATCH_KIND_VIDEO && videos.get(candidate.item.itemId).state === 'watched').length;
     // Codes and counts only, never the question: an answer outside the format hints at a prompt mismatch.
     const level = reason === 'unknown-id' || reason === 'no-bar' ? 'warn' : 'info';
     log[level]('rewatch: classified', {
       channel: channelId,
       candidates: listed.length,
-      offered: { watched: watchedCount, notLoaded: listed.length - watchedCount - pictureCount, pictures: pictureCount },
+      offered: { watched: watchedCount, notLoaded: listed.length - watchedCount - pictureCount - gifCount, gifs: gifCount, pictures: pictureCount },
       retryAllowed: canRetry,
       parse: reason,
       kind: pick ? (pick.retry ? 'retry' : 'question') : null,
@@ -1955,6 +1996,11 @@ export function createTurnRunner({
 
     if (isPicture) {
       const answer = await describer.relookImage(guildId, item, pick.question);
+      if (answer) imageAnswers.set(item.itemId, answer);
+      return;
+    }
+    if (isGif) {
+      const answer = await describer.rewatchGif(guildId, item, pick.question);
       if (answer) imageAnswers.set(item.itemId, answer);
       return;
     }
@@ -3203,7 +3249,8 @@ export function createTurnRunner({
 
       // A second look when the trigger asks about a watched video or a posted picture: a
       // direct address only (never a spontaneous or an overheard turn, never the drawFailed
-      // turn). Videos under features.videoRewatch (with the video stage), pictures under
+      // turn). Videos under features.videoRewatch (with the video stage), watched GIFs under
+      // features.videoRewatch and video vision, pictures under
       // features.imageRelook and features.vision (a missing key counts as on, each), the
       // persona's own posted drawings included.
       // A routed call asks about its source, whose media no turn looks at: the media
@@ -3212,16 +3259,24 @@ export function createTurnRunner({
       // copy of the states, so a late re-watch never touches what the request was built from.
       const videoRewatchOn = Boolean(videoStage) && features.videoRewatch !== false && typeof describer.rewatchVideo === 'function';
       const imageRelookOn = features.imageRelook !== false && features.vision !== false && typeof describer?.relookImage === 'function';
-      if (asked && !answersDrawFailure && (videoRewatchOn || imageRelookOn)) {
+      // Watched GIFs under features.videoRewatch and video vision (they are watched as clips);
+      // the describer's watchedGifs offers none while GIFs are not watched (media.gif.watch).
+      const gifRewatchOn =
+        isVideoVisionOn(config) && features.videoRewatch !== false && typeof describer?.rewatchGif === 'function' && typeof describer.watchedGifs === 'function';
+      if (asked && !answersDrawFailure && (videoRewatchOn || imageRelookOn || gifRewatchOn)) {
         if (routedPull) {
           log.info('rewatch: skipped', { channel: channel.id, reason: 'routed' });
         } else {
           const pictures = imageRelookOn ? relookCandidates(rawHistory) : [];
+          const gifItems = gifRewatchOn ? gifRewatchItems(rawHistory) : [];
           rewatchChain = Promise.all([videoStage?.settled, previews.settled])
             .then(() => {
               const watched = videoStage?.value?.videos;
               const offersVideos = videoRewatchOn && Boolean(watched);
-              if (deadline.passed || (!offersVideos && !imageRelookOn)) return undefined;
+              // Read from the cache now, after the stages above: a GIF watched meanwhile counts.
+              const gifCaptions = gifItems.length > 0 ? describer.watchedGifs(guildId, gifItems) : new Map();
+              const gifs = gifItems.filter((item) => gifCaptions.has(item.itemId));
+              if (deadline.passed || (!offersVideos && !imageRelookOn && gifs.length === 0)) return undefined;
               rewatchStage = track('rewatch', async () => {
                 const own = new Map(watched ?? []);
                 const imageAnswers = new Map();
@@ -3236,6 +3291,8 @@ export function createTurnRunner({
                     videos: own,
                     descriptions: captionsSoFar(),
                     candidates: offersVideos ? videoCandidates : [],
+                    gifs,
+                    gifCaptions,
                     pictures,
                     imageAnswers,
                   });
