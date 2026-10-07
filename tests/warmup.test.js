@@ -2359,7 +2359,8 @@ test('refreshPortrait: success stamps portraitRefreshedAt and portraitMessageCou
 
 test('refreshPortrait: a failure after sending keeps the slot and stamps portraitAttemptAt', async () => {
   const now = T0 + 30 * 3_600_000;
-  const llm = textLlm([Object.assign(new Error('OpenRouter HTTP 500: upstream'), { statusCode: 500 })]);
+  // 400 is not in src/llm/openrouter.js#RETRY_STATUS: a provider error that says the request itself was wrong.
+  const llm = textLlm([Object.assign(new Error('OpenRouter HTTP 400: bad request'), { statusCode: 400 })]);
   const { warmup, store } = portraitWarmup({ llm, now: () => now });
   seedPortrait(store, 'a');
   const windows = [win('c1', lines('c1', 'a', 5, T0))];
@@ -2372,6 +2373,40 @@ test('refreshPortrait: a failure after sending keeps the slot and stamps portrai
   const again = await warmup.refreshPortrait('g1', 'a', 'a cue', { windows });
   assert.equal(again.reason, 'retry-wait', 'a cue waits memory.portraitRetryHours too');
   assert.equal(llm.calls.length, 1);
+});
+
+test('refreshPortrait: a provider 429 after send gives the day\'s slot back, restores the attempt stamp, and the member stays due', async () => {
+  const now = T0 + 30 * 3_600_000;
+  const earlier = iso(now - 30 * 3_600_000); // past memory.portraitRetryHours
+  const timeout = Object.assign(new Error('request timed out'), { name: 'TimeoutError' });
+  const llm = textLlm([Object.assign(new Error('OpenRouter HTTP 429: rate limited'), { statusCode: 429 }), timeout]);
+  const { warmup, store, hot } = portraitWarmup({ llm, now: () => now });
+  seedPortrait(store, 'a', { messageCount: 420, portraitAttemptAt: earlier });
+  const windows = [win('c1', lines('c1', 'a', 5, T0))];
+  const before = store.state.data.portraitCount ?? 0;
+
+  for (const label of ['429', 'timeout']) {
+    const result = await warmup.refreshPortrait('g1', 'a', '', { windows });
+    assert.deepEqual(result, { ok: false, reason: 'llm-error', slotReturned: true }, label);
+    assert.equal(store.state.data.portraitCount, before, `${label}: the slot is given back`);
+    const profile = store.getUser('g1', 'a');
+    assert.equal(profile.portraitAttemptAt, earlier, `${label}: the earlier attempt stamp, neither fresh nor cleared`);
+    assert.equal(profile.character, 'μιλάει πολύ');
+    assert.equal(portraitDue(profile, now, portraitSettings(hot.config)).due, true, `${label}: the member stays due`);
+  }
+  assert.equal(llm.calls.length, 2);
+});
+
+test('refreshPortrait: an unparsable answer after send keeps the day\'s slot and backs the member off', async () => {
+  const now = T0 + 30 * 3_600_000;
+  const llm = textLlm([{ text: 'όχι json' }]);
+  const { warmup, store } = portraitWarmup({ llm, now: () => now });
+  seedPortrait(store, 'a', { messageCount: 420, portraitAttemptAt: iso(now - 30 * 3_600_000) });
+
+  const result = await warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+  assert.deepEqual(result, { ok: false, reason: 'bad-json' });
+  assert.equal(store.state.data.portraitCount, 1, 'the request was answered: the slot is spent');
+  assert.equal(store.getUser('g1', 'a').portraitAttemptAt, iso(now));
 });
 
 test('refreshPortrait: an empty or cut answer leaves the stored portrait untouched', async () => {

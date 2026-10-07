@@ -95,7 +95,7 @@ import {
 } from './portrait.js';
 import { mergeIntoQueue } from './voice.js';
 import { selectSpreadSample } from './sample.js';
-import { DailyCapError, MEMORY_VOICE_REQUEST, TokenLimitError } from '../llm/openrouter.js';
+import { DailyCapError, MEMORY_VOICE_REQUEST, RETRY_STATUS, TokenLimitError } from '../llm/openrouter.js';
 import { log } from '../log.js';
 import { DAY_MS, HOUR_MS, MINUTE_MS, bumpDaily, dailyCounter, utcDay } from '../time.js';
 
@@ -109,6 +109,14 @@ const PORTRAIT_SHRINK = 0.8;
 
 // A portrait refresh's outcomes that drop an answer on purpose rather than fail (see refreshPortrait).
 const PORTRAIT_STOOD_DOWN = new Set(['paused', 'warming-up', 'gone', 'changed']);
+
+/** Whether a request error is the provider's or the network's passing trouble rather than an
+ * answer: a status the client itself retries (src/llm/openrouter.js#RETRY_STATUS, read from
+ * `statusCode`) or a timed-out / aborted attempt (`TimeoutError`, `AbortError`). */
+function isTransientProviderError(err) {
+  if (RETRY_STATUS.has(err?.statusCode)) return true;
+  return err?.name === 'TimeoutError' || err?.name === 'AbortError';
+}
 
 // The owner-facing message of a portrait refresh with no prompt to send (`no-prompt`).
 const PROFILE_PROMPT_MISSING = 'prompt file missing: prompts/profile.md (or prompts.local/profile.md) is not configured yet';
@@ -1449,7 +1457,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
    * changes nothing): `portraitRefreshedAt` = `readAtMs`, when the history it was drawn from
    * began to be read (the next refresh samples own lines from then on, so a line written after
    * that read is never skipped; now when not given), the member's message count it covers (read
-   * now, see src/memory/portrait.js#portraitDue), and no pending attempt. In the same synchronous
+   * now, see src/memory/portrait.js#portraitDue), no pending attempt, and no longer waiting
+   * (`portraitDueAt`, the scheduler's stamp). In the same synchronous
    * step the member's queued character item goes (`dropQueuedCharacter`): it is older than this
    * decision, which read every line it was drawn from. */
   function stampPortrait(guildId, userId, readAtMs) {
@@ -1457,6 +1466,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       portraitRefreshedAt: new Date(Number.isFinite(readAtMs) ? readAtMs : now()).toISOString(),
       portraitMessageCount: storedCount(store.getUser(guildId, userId)?.messageCount),
       portraitAttemptAt: null,
+      portraitDueAt: null,
     });
     dropQueuedCharacter(guildId, userId);
   }
@@ -2566,6 +2576,13 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
         return unsent('daily-cap', { stamp: false, cap: 'llm' });
       }
       if (err instanceof TokenLimitError) return unsent('token-limit', { stamp: false });
+      if (isTransientProviderError(err)) {
+        // A rate limit, a gateway error or a timeout says nothing about this member and produced
+        // no answer: the day's slot goes back and the member keeps its place (no back-off).
+        giveBackSlot(slot);
+        if (!store.state.data.paused && sameProfile()) stampAttempt(guildId, id, previousAttempt);
+        return portraitNotDone(id, 'llm-error', { sent: true, slotReturned: true, detail: detailOf(err) });
+      }
       return portraitNotDone(id, 'llm-error', { sent: true, detail: detailOf(err) });
     }
 

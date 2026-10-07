@@ -226,6 +226,8 @@
     "portraitRefreshPerDay": 3,
     "portraitRetryHours": 24,
     "portraitCheckMinutes": 60,
+    "portraitMaxAgeDays": 21,
+    "portraitMinMessages": 60,
     "voice": { "maxItems": 24, "maxPerDay": 100, "maxOutputTokens": 3000, "retryMinutes": 15, "maxAttempts": 4, "queueMax": 100, "queueHours": 24, "timeoutMs": 120000 }
   },
   "lore": {

@@ -2314,6 +2314,8 @@ function stampVoicePortraits(store, guildId, items, portraits) {
       portraitRefreshedAt: new Date(item.createdAt).toISOString(),
       portraitMessageCount: storedCount(store.getUser(guildId, item.userId)?.messageCount),
       portraitAttemptAt: null,
+      // The member left the queue with this portrait: the waiting stamp starts over next time.
+      portraitDueAt: null,
     });
     stamped += 1;
   }

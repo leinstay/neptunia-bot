@@ -58,6 +58,17 @@ test('portraitDue: due at 300 own messages since the stamp and 3 days since the 
   assert.deepEqual(verdict, { due: true, reason: 'due', own: 300 });
 });
 
+test('portraitDue: an old portrait with modest new activity is due by age (portraitMaxAgeDays, portraitMinMessages)', () => {
+  const cfg = { ...CFG, maxAgeDays: 21, minMessages: 60 };
+  const p = profile({ id: 'a', messageCount: 380, portraitMessageCount: 300, portraitRefreshedAt: iso(NOW - 25 * DAY) });
+  assert.deepEqual(portraitDue(p, NOW, cfg), { due: true, reason: 'aged', own: 80 });
+  assert.deepEqual(portraitDue({ ...p, portraitRefreshedAt: iso(NOW - 10 * DAY) }, NOW, cfg), { due: false, reason: 'few', own: 80 }, 'not old enough');
+  assert.deepEqual(portraitDue({ ...p, messageCount: 350 }, NOW, cfg), { due: false, reason: 'few', own: 50 }, 'too little new activity');
+  assert.equal(portraitDue({ ...p, portraitAttemptAt: iso(NOW - HOUR) }, NOW, cfg).reason, 'retry-wait', 'the retry wait still applies');
+  assert.equal(portraitDue({ ...p, lastSeen: iso(NOW - 61 * DAY) }, NOW, cfg).reason, 'quiet', 'a quiet member is still never picked');
+  assert.equal(portraitDue(p, NOW, CFG).due, false, 'without the settings the age path is off');
+});
+
 test('portraitDue: 299 messages after 3 days, or 300 messages after 2 days, is not due', () => {
   const fewMessages = portraitDue(profile({ messageCount: 1299, portraitMessageCount: 1000, portraitRefreshedAt: iso(NOW - 3 * DAY) }), NOW, CFG);
   assert.deepEqual(fewMessages, { due: false, reason: 'few', own: 299 });
@@ -173,26 +184,44 @@ test('llmCapReached: a cap that is not a number is left to the LLM client\'s own
 // pickDuePortraits
 // ---------------------------------------------------------------------------
 
-test('pickDuePortraits: most own messages first, then lastSeen; never more than the limit', () => {
+test('pickDuePortraits: with nobody waiting yet, the oldest portrait first (none at all before any), then own messages, then id; never more than the limit', () => {
   const profiles = [
-    profile({ id: 'a', messageCount: 400 }),
-    profile({ id: 'b', messageCount: 900 }),
-    profile({ id: 'c', messageCount: 400, lastSeen: iso(NOW - 10 * 60_000) }),
+    profile({ id: 'a', messageCount: 400, portraitRefreshedAt: iso(NOW - 10 * DAY) }),
+    profile({ id: 'b', messageCount: 900, portraitRefreshedAt: iso(NOW - 5 * DAY) }),
+    profile({ id: 'c', messageCount: 400 }), // never stamped: before every stamped one
     profile({ id: 'd', messageCount: 100 }), // not due
-    profile({ id: 'e', character: '', style: '', messageCount: 35 }), // a first portrait
-    profile({ id: 'f', messageCount: 400 }), // ties with a on own and lastSeen: by id
+    profile({ id: 'e', character: '', style: '', messageCount: 35 }), // a first portrait, never stamped
+    profile({ id: 'f', messageCount: 400, portraitRefreshedAt: iso(NOW - 10 * DAY) }), // ties with a: by id
   ];
 
   assert.deepEqual(pickDuePortraits(profiles, NOW, CFG, 10), [
-    { userId: 'b', own: 900, reason: 'due' },
     { userId: 'c', own: 400, reason: 'due' },
+    { userId: 'e', own: 35, reason: 'first' },
     { userId: 'a', own: 400, reason: 'due' },
     { userId: 'f', own: 400, reason: 'due' },
-    { userId: 'e', own: 35, reason: 'first' },
+    { userId: 'b', own: 900, reason: 'due' },
   ]);
-  assert.deepEqual(pickDuePortraits(profiles, NOW, CFG, 2).map((p) => p.userId), ['b', 'c']);
+  assert.deepEqual(pickDuePortraits(profiles, NOW, CFG, 2).map((p) => p.userId), ['c', 'e']);
   assert.deepEqual(pickDuePortraits(profiles, NOW, CFG, 0), []);
   assert.equal(pickDuePortraits(profiles, NOW, CFG, Infinity).length, 5);
+});
+
+test('pickDuePortraits: the member waiting longest comes first, then the oldest portrait, then own messages', () => {
+  const profiles = [
+    profile({ id: 'a', messageCount: 400, portraitDueAt: iso(NOW - 2 * DAY), portraitRefreshedAt: iso(NOW - 10 * DAY) }),
+    profile({ id: 'b', messageCount: 900, portraitDueAt: iso(NOW - 1 * DAY) }),
+    profile({ id: 'c', messageCount: 400 }), // no dueAt yet: last
+    profile({ id: 'd', messageCount: 400, portraitDueAt: iso(NOW - 2 * DAY), portraitRefreshedAt: iso(NOW - 30 * DAY) }),
+  ];
+  assert.deepEqual(pickDuePortraits(profiles, NOW, CFG, 10).map((p) => p.userId), ['d', 'a', 'b', 'c']);
+});
+
+test('pickDuePortraits: a waiting stamp not later than the last portrait is stale and counts as none', () => {
+  const profiles = [
+    profile({ id: 'a', messageCount: 400, portraitDueAt: iso(NOW - 20 * DAY), portraitRefreshedAt: iso(NOW - 10 * DAY) }),
+    profile({ id: 'b', messageCount: 400, portraitDueAt: iso(NOW - 1 * DAY), portraitRefreshedAt: iso(NOW - 10 * DAY) }),
+  ];
+  assert.deepEqual(pickDuePortraits(profiles, NOW, CFG, 10).map((p) => p.userId), ['b', 'a']);
 });
 
 test('pickDuePortraits: garbage entries and entries without an id are skipped', () => {
@@ -221,6 +250,8 @@ test('portraitSettings: every fallback equals config.json', () => {
     perDay: config.memory.portraitRefreshPerDay,
     retryHours: config.memory.portraitRetryHours,
     checkMinutes: config.memory.portraitCheckMinutes,
+    maxAgeDays: config.memory.portraitMaxAgeDays,
+    minMessages: config.memory.portraitMinMessages,
     firstMessages: config.warmup.minMessages,
     lookbackDays: config.warmup.lookbackDays,
   });
@@ -252,6 +283,13 @@ function fakeStore(profiles, data = {}) {
     },
     getUser(guildId, userId) {
       return guildId === 'g1' ? profiles.find((p) => p?.id === userId) ?? null : null;
+    },
+    userWrites: [],
+    updateUser(guildId, userId, fields) {
+      this.userWrites.push({ guildId, userId, fields });
+      const profile = this.getUser(guildId, userId);
+      if (profile) Object.assign(profile, fields);
+      return profile;
     },
   };
 }
@@ -318,6 +356,30 @@ test('portrait scheduler: tick refreshes at most today\'s free slots, in order, 
   const capped = makeScheduler({ script: (userId) => (userId === 'c' ? { ok: false, reason: 'daily-cap', cap: 'portrait' } : { ok: true }) });
   await capped.scheduler.tick();
   assert.deepEqual(capped.refreshPortrait.calls.map((c) => c.userId), ['b', 'c'], 'the first daily-cap ends the cycle');
+});
+
+test('portrait scheduler: a look stamps portraitDueAt on newly due members and leaves an existing stamp alone', async () => {
+  const earlier = iso(NOW - 2 * DAY);
+  const profiles = [
+    profile({ id: 'a', messageCount: 400 }),
+    profile({ id: 'b', messageCount: 900, portraitDueAt: earlier }),
+    profile({ id: 'c', messageCount: 600, portraitDueAt: iso(NOW - 20 * DAY), portraitRefreshedAt: iso(NOW - 10 * DAY) }), // stale
+    profile({ id: 'd', messageCount: 100 }), // not due
+  ];
+  const { scheduler, store, refreshPortrait, clock } = makeScheduler({ profiles, script: () => ({ ok: false, reason: 'llm-error' }) });
+  await scheduler.tick();
+
+  assert.deepEqual(store.userWrites, [
+    { guildId: 'g1', userId: 'a', fields: { portraitDueAt: iso(NOW) } },
+    { guildId: 'g1', userId: 'c', fields: { portraitDueAt: iso(NOW) } },
+  ]);
+  assert.equal(store.getUser('g1', 'b').portraitDueAt, earlier);
+  assert.equal(store.getUser('g1', 'd').portraitDueAt, undefined);
+  assert.deepEqual(refreshPortrait.calls.map((c) => c.userId), ['b'], 'the member waiting longest goes first; an llm-error ends the cycle');
+
+  clock.now = NOW + 2 * HOUR;
+  await scheduler.tick();
+  assert.equal(store.userWrites.length, 2, 'a later look never moves a stamp');
 });
 
 test('portrait scheduler: in two-stage mode a member whose character text waits for the voice model is not picked and costs no request; in single mode it is', async () => {
