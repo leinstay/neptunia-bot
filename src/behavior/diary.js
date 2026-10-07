@@ -5,7 +5,8 @@
 // cap), which planned slot is due now (a slot missed by more than the grace
 // while the bot was down is dropped, never fired late in a burst), which kind
 // of post a plan names (validated against the weighted `diary.kinds`, with a
-// weighted random fallback), and how the post history, the kinds and the
+// weighted random fallback; while a post may not carry a picture the picture
+// kinds are dropped before the planner sees them), and how the post history, the kinds and the
 // random seeds are rendered for the plan and compose requests. All wording
 // comes from `labels.diary.*`; kind keys are config keys.
 //
@@ -32,7 +33,8 @@ const DEFAULT_FORCE_WAIT_MS = 120000; // diary.forceWaitMs
 const DEFAULT_HISTORY_POSTS = 150; // diary.historyPosts
 const DEFAULT_GIST_CHARS = 200; // diary.gistChars
 const DEFAULT_SEARCH_KINDS = ['news', 'facts']; // diary.searchKinds
-const DEFAULT_PICTURE_KINDS = ['selfPicture', 'picture', 'meme']; // diary.pictureKinds
+/** The kinds that mean a picture when `diary.pictureKinds` is not a list. */
+export const DEFAULT_PICTURE_KINDS = ['selfPicture', 'picture', 'meme']; // diary.pictureKinds
 const DEFAULT_FAMILY = 'seed';
 const URL_RE = /https?:///iu;
 
@@ -175,6 +177,31 @@ export function pickKind(kinds, rng) {
     roll -= weight;
   }
   return entries[entries.length - 1][0];
+}
+
+/**
+ * Whether `kind` is a picture kind: listed in `pictureKinds` (`diary.pictureKinds`),
+ * DEFAULT_PICTURE_KINDS when that is not a list.
+ * @param {string|null} kind
+ * @param {string[]|undefined} pictureKinds
+ * @returns {boolean}
+ */
+export function isPictureKind(kind, pictureKinds) {
+  const drawable = Array.isArray(pictureKinds) ? pictureKinds : DEFAULT_PICTURE_KINDS;
+  return typeof kind === 'string' && drawable.includes(kind);
+}
+
+/**
+ * `kinds` (`diary.kinds`) without its picture kinds (isPictureKind), the other
+ * weights kept; a new object, the input untouched. What the planner and the
+ * random fallback get while a post may not carry a picture.
+ * @param {Record<string, number>|null|undefined} kinds
+ * @param {string[]|undefined} pictureKinds  diary.pictureKinds
+ * @returns {Record<string, number>}
+ */
+export function withoutPictureKinds(kinds, pictureKinds) {
+  if (!kinds || typeof kinds !== 'object' || Array.isArray(kinds)) return {};
+  return Object.fromEntries(Object.entries(kinds).filter(([key]) => !isPictureKind(key, pictureKinds)));
 }
 
 /**

@@ -105,7 +105,7 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 | `<diary>` | Past diary posts, oldest first, `labels.diary.intro` then one `labels.diary.line` per post. Shown in both the plan and compose requests. Under budget pressure the oldest lines are cut first |
 | `<plan>` | The plan for this diary post: `labels.diary.plan`, then one JSON line `{"kind","brief","picture"}`, plus `"topic"` when the owner gave one with `/nep diary post`. Never cut |
 | `<found>` | What the diary's search turned up: `labels.diary.found`, then the search result text. Present only when the plan asked for a search and it returned something. Ranked right after `<lookup>` in the budget |
-| `<kinds>` | Post kinds with weights and usage counts: `labels.diary.kinds`, then one `labels.diary.kindLine` per kind with a positive weight. Never cut |
+| `<kinds>` | Post kinds with weights and usage counts: `labels.diary.kinds`, then one `labels.diary.kindLine` per kind with a positive weight; when the post cannot carry a picture, kinds in `diary.pictureKinds` are omitted. Never cut |
 | `<seeds>` | Random seed combinations: `labels.diary.seeds`, then one `- a; b; c` line per set. Present only in the plan request. Omitted when the file is missing or `diary.seedSets` is 0. Never cut |
 | `<topic>` | The owner's topic for a forced post (`/nep diary post [kind] [topic]`): `labels.diary.topic`, then the topic as one line, at most 300 characters. Present only in the plan request, right after `<seeds>`, and only when a topic was given. Never cut |
 | `<task>` | `reply` / `interject` / `initiate` / `overheard` (when `overheard.md` exists) / `elsewhere` (when `elsewhere.md` exists, for a noticed comment) / `diary` (when `diary.md` exists, for a diary post), placeholders filled. After the mode prompt, up to three `task.*` labels are appended when their conditions hold (each separated by a blank line): `task.part` when the turn answers one part of a split message, or `task.queued` when the trigger author has other calls waiting; then `task.queuedOthers` when other members have calls waiting in the channel; then `task.added` when later messages were folded into this call. See `labels.task.*` below |
@@ -921,13 +921,13 @@ with `/nep diary post`. The answer is one JSON object:
 {"kind": "<key>", "brief": "<one line>", "search": "<query or empty>", "picture": true|false}
 ```
 
-`kind` must be a key of `diary.kinds` with a positive weight. `search` is kept only for a kind in `diary.searchKinds`.
+`kind` must be a key of `diary.kinds` with a positive weight (a picture kind counts only when the post can carry a picture). `search` is kept only for a kind in `diary.searchKinds`.
 `picture` is true only when the answer says `true` and the picture caps allow it.
 
 **Validation and fallback.** `validatePlan` (in `src/behavior/diary.js`) normalises the answer. When the kind is missing,
 unknown or has weight 0, the whole answer is replaced by a weighted random kind with an empty brief and search
 (`fallback: true`). `brief` is clamped to 300 characters. When the kind is in `diary.pictureKinds`, `picture` is forced true if the day's picture caps allow it, whatever the planner answered. For other kinds, `picture` is kept as the planner set it. `picture` is forced false when
-`diary.maxPicturesPerDay` or `image.maxPerDay` is spent.
+`diary.maxPicturesPerDay` or `image.maxPerDay` is spent. When the post cannot carry a picture (those caps spent, drawing off, no image model, or no Attach Files), the picture kinds are dropped before the plan request, so the random fallback cannot pick one. A forced picture kind is refused before any request (`reason: 'pictures'`).
 
 **Search.** When the plan names a search query and `lookup.search` is available, the query runs through the existing
 Brave path (cached, `web.maxPerDay`). The result text becomes a `<found>` block in the compose request. A failed or

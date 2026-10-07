@@ -105,7 +105,7 @@
 | `<diary>` | 过去的日记帖子，从旧到新：`labels.diary.intro`，然后每篇帖子一行 `labels.diary.line`。在计划和生成请求中均展示。预算压力下最旧的行先被截断 |
 | `<plan>` | 本篇日记帖子的计划：`labels.diary.plan`，然后一行 JSON `{"kind","brief","picture"}`，拥有者通过 `/nep diary post` 指定时附带 `"topic"`。不会被截断 |
 | `<found>` | 日记搜索结果：`labels.diary.found`，然后搜索结果文本。仅在计划请求了搜索且有结果时出现。预算中紧随 `<lookup>` 之后 |
-| `<kinds>` | 帖子种类与权重和使用次数：`labels.diary.kinds`，然后每个正权重种类一行 `labels.diary.kindLine`。不会被截断 |
+| `<kinds>` | 帖子种类与权重和使用次数：`labels.diary.kinds`，然后每个正权重种类一行 `labels.diary.kindLine`; 帖子无法包含图片时，`diary.pictureKinds` 中的种类被排除。不会被截断 |
 | `<seeds>` | 随机种子组合：`labels.diary.seeds`，然后每组一行 `- a; b; c`。仅在计划请求中。文件不存在或 `diary.seedSets` = 0 时省略。不会被截断 |
 | `<topic>` | 拥有者的强制帖子主题（`/nep diary post [kind] [topic]`）：`labels.diary.topic`，然后主题一行，最多 300 个字符。仅在计划请求中，紧随 `<seeds>` 之后，仅当指定了主题时出现。不会被截断 |
 | `<task>` | `reply` / `interject` / `initiate` / `overheard`（当 `overheard.md` 存在时）/ `elsewhere`（当 `elsewhere.md` 存在时，用于 noticed 评论）/ `diary`（当 `diary.md` 存在时，用于日记帖子），占位符已填充。模式提示之后，当条件满足时最多追加三个 `task.*` 标签（各以空行分隔）：回合回答分拆消息的一个部分时为 `task.part`，或触发作者有其他呼叫等候时为 `task.queued`；频道中其他成员有呼叫等候时为 `task.queuedOthers`；稍后的消息被折叠进此呼叫时为 `task.added`。参见下方 `labels.task.*` |

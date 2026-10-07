@@ -59,7 +59,7 @@
 | `facts` | 1 | 趣味冷知识、冰山条目、以阴谋论方式讲述的阴谋论 |
 | `status` | 3 | 一行: 心情、计划、无聊 |
 
-`diary.searchKinds`（默认 `["news", "facts"]`）决定哪些种类可以触发搜索。`diary.pictureKinds`（默认 `["selfPicture", "picture", "meme"]`）决定哪些种类在日次图片上限允许时始终带图，无论计划器如何回答。其余种类仅在计划器要求时才绘制。
+`diary.searchKinds`（默认 `["news", "facts"]`）决定哪些种类可以触发搜索。`diary.pictureKinds`（默认 `["selfPicture", "picture", "meme"]`）决定哪些种类在日次图片上限允许时始终带图，无论计划器如何回答。其余种类仅在计划器要求时才绘制。帖子无法包含图片时（日次图片上限已用尽、绘画关闭、无图像模型、或机器人在日记频道缺少 Attach Files 权限），计划器只看到文本种类。通过 `/nep diary post` 强制图片种类会在任何请求前被拒绝: 上限导致时回复中列出上限及其数量，否则显示 `pictures`。
 
 `prompts/diary-seeds.md` 包含按 `# family` 标题（place, setting, detail, activity, subject, twist）分组的随机种子。代码从每个族中抽取一行，组成 `diary.seedSets`（2）个组合，通过 `<seeds>` 块传给计划器。组合数量几乎无限；计划器从中构建日记历史中没有的内容，或在服务器生活提供更好想法时忽略它们。
 

@@ -31,12 +31,14 @@ import {
   DIARY_PICTURES_DAILY,
   diaryTopic,
   gistOf,
+  isPictureKind,
   parseSeedFamilies,
   pickSeeds,
   renderSeedsBlock,
   renderTopicBlock,
   stripUrls,
   validatePlan,
+  withoutPictureKinds,
 } from './diary.js';
 import { channelPullOn, pullSettings, pullTargets } from './pull.js';
 import { audienceCovers, markSeen, messageLink, resolveDestination, stampPings } from './elsewhere.js';
@@ -2268,9 +2270,14 @@ export function createTurnRunner({
    * a `<topic>` block after them; the topic also rides on the plan as its
    * `topic` field (the `<plan>` block of the post). The answer goes through parseJsonObject and src/behavior/diary.js#validatePlan
    * (a weighted random kind when it is missing, broken or names no weighted
-   * kind; `diary.searchKinds`, `diary.pictureKinds`). A forced kind
+   * kind; `diary.searchKinds`, `diary.pictureKinds`). While the post may not
+   * carry a picture, the kinds in `diary.pictureKinds` are dropped before the
+   * plan request and validatePlan (src/behavior/diary.js#withoutPictureKinds),
+   * so neither the planner nor the random fallback picks one, and the
+   * `diary: planned` line carries `picturesOff: true`. A forced kind
    * (`params.kind`) is the only kind offered and replaces the answer's kind,
-   * its brief kept. Then the search the plan asks for (lookup.search, its own
+   * its brief kept (a forced picture kind with pictures off never gets here:
+   * runTurn refuses it first, diaryPictureGate). Then the search the plan asks for (lookup.search, its own
    * switch, cache and daily cap): its text is `found`; a failure or nothing
    * found logs `diary: search failed` and the post goes without it. A request
    * or token cap on the plan request throws (the turn is refused); any other
@@ -2286,16 +2293,14 @@ export function createTurnRunner({
     const posts = Array.isArray(stored?.posts) ? stored.posts : [];
     const forcedKind = typeof params?.kind === 'string' && params.kind ? params.kind : null;
     const topic = diaryTopic(params?.topic);
-    const kinds = forcedKind ? { [forcedKind]: 1 } : (diaryCfg.kinds ?? {});
-
-    const imageQuota = images && typeof images.quota === 'function' ? images.quota({}) : null;
-    const picturesToday = countToday(store.state.data, DIARY_PICTURES_DAILY, now);
-    const pictureAllowed =
-      Boolean(imageQuota) &&
-      config.features?.imageGeneration !== false &&
-      canAttach(channel) &&
-      picturesToday < (diaryCfg.maxPicturesPerDay ?? 2) &&
-      imageQuota.used < imageQuota.cap;
+    const pictureAllowed = diaryPictureGate(config, channel, now).allowed;
+    // Pictures off: only the text kinds are offered (a forced kind is offered alone).
+    const picturesOff = !forcedKind && !pictureAllowed;
+    const kinds = forcedKind
+      ? { [forcedKind]: 1 }
+      : picturesOff
+        ? withoutPictureKinds(diaryCfg.kinds ?? {}, diaryCfg.pictureKinds)
+        : (diaryCfg.kinds ?? {});
 
     let answer = null;
     const planPrompt = prompts?.['diary-plan'];
@@ -2370,8 +2375,29 @@ export function createTurnRunner({
       search: Boolean(plan.search),
       found: found !== null,
       forced: params?.forced === true,
+      ...(picturesOff ? { picturesOff: true } : {}),
     });
     return { posts, plan, found, pictureAllowed };
+  }
+
+  /**
+   * Whether a diary post in `channel` may carry a picture now, and which gate
+   * closed when not, checked in this order: the image client, `features.imageGeneration`
+   * (a missing key counts as on), Attach Files here (`limit: null` for these three), the
+   * day's diary pictures under `diary.maxPicturesPerDay` (2), the image client's own
+   * daily cap (`image.maxPerDay`); a closed cap names its key and counts. Settings come
+   * from `config`, the turn's live config.
+   * @returns {{ allowed: boolean, limit: { key: string, used: number, cap: number }|null }}
+   */
+  function diaryPictureGate(config, channel, now) {
+    const closed = (limit = null) => ({ allowed: false, limit });
+    const imageQuota = images && typeof images.quota === 'function' ? images.quota({}) : null;
+    if (!imageQuota || config.features?.imageGeneration === false || !canAttach(channel)) return closed();
+    const picturesToday = countToday(store.state.data, DIARY_PICTURES_DAILY, now);
+    const diaryCap = config.diary?.maxPicturesPerDay ?? 2;
+    if (picturesToday >= diaryCap) return closed({ key: 'diary.maxPicturesPerDay', used: picturesToday, cap: diaryCap });
+    if (imageQuota.used >= imageQuota.cap) return closed({ key: 'image.maxPerDay', used: imageQuota.used, cap: imageQuota.cap });
+    return { allowed: true, limit: null };
   }
 
   /**
@@ -2648,7 +2674,9 @@ export function createTurnRunner({
    *   author folded into this call (src/discord/events.js): `labels.task.added` names them.
    * @param {{ kind?: string|null, topic?: string|null, forced?: boolean }|null} [params.diary]  With `mode: 'diary'`
    *   (src/behavior/diary.js, in the diary channel, no trigger): the post is planned first
-   *   (prepareDiary: the plan request, then the search it asks for; `kind` forces the kind,
+   *   (prepareDiary: the plan request, then the search it asks for; `kind` forces the kind --
+   *   a picture kind while the post may not carry a picture is refused before any request,
+   *   `{ outcome: 'refused', reason: 'pictures', limit }`, diaryPictureGate --
    *   `topic` is the owner's topic for the planner and the plan, `forced` also appends
    *   prompts.forced to the task), then composed with `prompts.diary` as
    *   the task and the `<world>`, `<diary>`, `<plan>` and `<found>` blocks. Its output keeps only
@@ -2668,12 +2696,13 @@ export function createTurnRunner({
    * persona answered in private, not on the server. The switch off, or no partner: no pull, no
    * route hook, no server search, as before.
    * @returns {Promise<{ outcome: TurnOutcome, mode?: string, dryRun?: boolean, drawFailed?: string,
-   *   delivered?: boolean, limit?: { key: string, used: number, cap: number }|null }>}
+   *   delivered?: boolean, reason?: string, limit?: { key: string, used: number, cap: number }|null }>}
    *   `drawFailed` (the reason) when the persona's picture could not be posted; `delivered` on a
    *   `spoke` turn posted for real: whether anything reached the chat (a reaction put, a message,
    *   the GIF or the picture posted -- by the drawFailed turn too; a send that fails stops the
    *   posting and the turn still ends `spoke` with what reached the chat); `limit` on `outcome:
-   *   'refused'` (a request or token cap), for the caller's limit notice. A `skip`, or a `spoke`
+   *   'refused'` (a request or token cap; a diary picture gate with `reason: 'pictures'`), for
+   *   the caller's limit notice. A `skip`, or a `spoke`
    *   turn posted for real, stamps the calls of the ring it showed (stampShownCalls) -- every
    *   one but a routed turn's own call, which the caller stamps by this outcome.
    */
@@ -2921,6 +2950,12 @@ export function createTurnRunner({
       const selfName = getSelfName(guildId);
       const now = turnStartedAt;
       const startedAt = now;
+      // A forced diary picture kind (/nep diary post <kind>) while the post may not carry a
+      // picture is refused before any request, naming the gate that closed (diaryPictureGate).
+      if (mode === 'diary' && typeof diaryParams?.kind === 'string' && isPictureKind(diaryParams.kind, config.diary?.pictureKinds)) {
+        const gate = diaryPictureGate(config, channel, now);
+        if (!gate.allowed) return { outcome: 'refused', reason: 'pictures', limit: gate.limit };
+      }
       // The turn's pace. A turn nobody waits for (unhurried: a spontaneous or an overheard one,
       // with pace.unpromptedWaits on) has neither the bar nor the preparation's deadline below.
       const pace = paceSettings(config);

@@ -12,6 +12,9 @@ import {
   planDay,
   dueSlot,
   pickKind,
+  withoutPictureKinds,
+  isPictureKind,
+  DEFAULT_PICTURE_KINDS,
   validatePlan,
   renderDiaryBlock,
   renderKindsBlock,
@@ -169,6 +172,31 @@ test('pickKind: null when all weights are zero', () => {
   assert.equal(pickKind({ a: 0, b: 0 }, () => 0.5), null);
   assert.equal(pickKind({}, () => 0.5), null);
   assert.equal(pickKind(null, () => 0.5), null);
+});
+
+test('withoutPictureKinds: drops the picture kinds, keeps the others with their weights', () => {
+  const kinds = { selfPicture: 2, status: 1, meme: 3, news: 0 };
+  assert.deepEqual(withoutPictureKinds(kinds, ['selfPicture', 'meme']), { status: 1, news: 0 });
+  assert.deepEqual(kinds, { selfPicture: 2, status: 1, meme: 3, news: 0 }, 'the input is not changed');
+});
+
+test('withoutPictureKinds: the default picture kinds when diary.pictureKinds is not a list', () => {
+  const kinds = { selfPicture: 1, picture: 1, meme: 1, status: 2 };
+  assert.deepEqual(withoutPictureKinds(kinds, undefined), { status: 2 });
+  assert.deepEqual(DEFAULT_PICTURE_KINDS, ['selfPicture', 'picture', 'meme']);
+  assert.deepEqual(withoutPictureKinds(null, ['meme']), {});
+});
+
+test('withoutPictureKinds: nothing weighted left makes pickKind return null', () => {
+  assert.equal(pickKind(withoutPictureKinds({ selfPicture: 2 }, ['selfPicture']), () => 0.5), null);
+});
+
+test('isPictureKind: listed kinds, the default list when none is given', () => {
+  assert.equal(isPictureKind('meme', ['meme']), true);
+  assert.equal(isPictureKind('status', ['meme']), false);
+  assert.equal(isPictureKind('selfPicture', undefined), true);
+  assert.equal(isPictureKind('selfPicture', []), false);
+  assert.equal(isPictureKind(null, undefined), false);
 });
 
 const kinds = { selfPicture: 3, thought: 2, news: 2, meme: 0 };

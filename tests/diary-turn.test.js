@@ -343,14 +343,77 @@ test('diary turn: picture forced off when diary.maxPicturesPerDay is spent', asy
     { name: 'image cap', store: fakeStore(), images: fakeImages({ used: 10, cap: 10 }) },
   ];
   for (const { name, store, images } of cases) {
-    const llm = fakeLlm({ kind: 'selfPicture', brief: 'a pier', search: '', picture: true }, '<msg>brume</msg><draw self="yes">a pier at night</draw>');
+    const llm = fakeLlm({ kind: 'status', brief: 'a pier', search: '', picture: true }, '<msg>brume</msg><draw self="yes">a pier at night</draw>');
     const result = await runner({ llm, store, images }).runTurn({ channel: diaryChannel(), mode: 'diary', diary: {} });
     const compose = userOf(llm.calls[1]);
-    assert.ok(compose.includes(JSON.stringify({ kind: 'selfPicture', brief: 'a pier', picture: false })), `${name}: the plan says no picture`);
+    assert.ok(compose.includes(JSON.stringify({ kind: 'status', brief: 'a pier', picture: false })), `${name}: the plan says no picture`);
     assert.ok(!compose.includes(labels.senses.draw) && !compose.includes(labels.senses.drawSpent), `${name}: no drawing line in the senses`);
     assert.equal(images.prompts.length, 0, `${name}: nothing drawn`);
     assert.equal(result.diary.picture, false);
   }
+});
+
+/** The `<kinds>` line of `key` with `weight` and no history. */
+const kindLine = (key, weight) => fill(labels.diary.kindLine, { key, weight, count: 0, window: 0 });
+
+test('diary turn: with pictures off only text kinds are offered and the fallback picks one', async () => {
+  const spentDiary = () => fakeStore({ data: { [DIARY_PICTURES_DAILY.dayKey]: utcDay(NOW), [DIARY_PICTURES_DAILY.countKey]: 2 } });
+  const cases = [
+    { name: 'diary cap', store: spentDiary(), images: fakeImages(), channel: diaryChannel() },
+    { name: 'image cap', store: fakeStore(), images: fakeImages({ used: 10, cap: 10 }), channel: diaryChannel() },
+    { name: 'no image client', store: fakeStore(), images: null, channel: diaryChannel() },
+  ];
+  for (const { name, store, images, channel } of cases) {
+    for (const answer of ['not json at all', { kind: 'selfPicture', brief: 'a pier', search: '', picture: true }]) {
+      const llm = fakeLlm(answer, '<msg>brume</msg>');
+      const { logs } = await withCapturedLogs(() => runner({ llm, store, images }).runTurn({ channel, mode: 'diary', diary: {} }));
+      const planUser = userOf(llm.calls[0]);
+      assert.ok(!planUser.includes(kindLine('selfPicture', 2)), `${name}: no picture kind offered`);
+      assert.ok(planUser.includes(kindLine('status', 1)) && planUser.includes(kindLine('news', 1)), `${name}: the text kinds offered`);
+      const planned = logs.find((l) => l.msg === 'diary: planned');
+      assert.ok(['status', 'news'].includes(planned.kind), `${name}: the fallback is a text kind`);
+      assert.equal(planned.fallback, true);
+      assert.equal(planned.picture, false);
+      assert.equal(planned.picturesOff, true, `${name}: the log says why`);
+    }
+    assert.ok(store.appended.every(({ post }) => post.kind !== 'selfPicture'), `${name}: no picture kind recorded`);
+  }
+});
+
+test('diary turn: with pictures allowed the picture kinds are offered as before', async () => {
+  const llm = fakeLlm({ kind: 'status', brief: 'x', search: '', picture: false }, '<msg>brume</msg>');
+  const { logs } = await withCapturedLogs(() => runner({ llm }).runTurn({ channel: diaryChannel(), mode: 'diary', diary: {} }));
+  const planUser = userOf(llm.calls[0]);
+  for (const [key, weight] of [['selfPicture', 2], ['status', 1], ['news', 1]]) assert.ok(planUser.includes(kindLine(key, weight)), key);
+  assert.equal(logs.find((l) => l.msg === 'diary: planned').picturesOff, undefined);
+});
+
+test('diary turn: a forced picture kind with pictures off is refused before any request', async () => {
+  const spentDiary = fakeStore({ data: { [DIARY_PICTURES_DAILY.dayKey]: utcDay(NOW), [DIARY_PICTURES_DAILY.countKey]: 2 } });
+  const cases = [
+    { name: 'diary cap', store: spentDiary, images: fakeImages(), channel: diaryChannel(), limit: { key: 'diary.maxPicturesPerDay', used: 2, cap: 2 } },
+    { name: 'image cap', store: fakeStore(), images: fakeImages({ used: 10, cap: 10 }), channel: diaryChannel(), limit: { key: 'image.maxPerDay', used: 10, cap: 10 } },
+    { name: 'no image client', store: fakeStore(), images: null, channel: diaryChannel(), limit: null },
+    { name: 'no attach files', store: fakeStore(), images: fakeImages(), channel: diaryChannel({ attachFiles: false }), limit: null },
+    { name: 'drawing off', store: fakeStore(), images: fakeImages(), channel: diaryChannel(), limit: null, features: { imageGeneration: false } },
+  ];
+  for (const { name, store, images, channel, limit, features } of cases) {
+    const llm = fakeLlm({ kind: 'selfPicture', brief: 'x', search: '', picture: true }, '<msg>brume</msg>');
+    const hot = fakeHot({ features });
+    const result = await runner({ hot, llm, store, images }).runTurn({ channel, mode: 'diary', diary: { kind: 'selfPicture', forced: true } });
+    assert.deepEqual(result, { outcome: 'refused', reason: 'pictures', limit }, name);
+    assert.equal(llm.calls.length, 0, `${name}: no request`);
+    assert.equal(channel.sent.length, 0);
+    assert.equal(store.appended.length, 0);
+  }
+});
+
+test('diary turn: a forced text kind still posts with pictures off', async () => {
+  const store = fakeStore({ data: { [DIARY_PICTURES_DAILY.dayKey]: utcDay(NOW), [DIARY_PICTURES_DAILY.countKey]: 2 } });
+  const llm = fakeLlm({ kind: 'status', brief: 'x', search: '', picture: false }, '<msg>brume</msg>');
+  const result = await runner({ llm, store }).runTurn({ channel: diaryChannel(), mode: 'diary', diary: { kind: 'status', forced: true } });
+  assert.equal(result.outcome, 'spoke');
+  assert.equal(store.appended[0].post.kind, 'status');
 });
 
 test('diary turn: reactions and gifs are dropped, reply attributes ignored, urls stripped', async () => {
