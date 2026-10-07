@@ -159,6 +159,8 @@ The input shows the top {{maxDetails}}; code keeps more.
 
 **`aliases`** — what others call this member in chat: a stable nickname, shortened or translated name, NOT a Discord display name. One explicit statement that a person is called N is enough: said to {{name}}, said openly in the chat, or an answer to {{name}}'s own question about who someone is. Inferring an alias from usage alone, when nobody stated whom the name means, needs repeated use by others that clearly points at one member. The alias goes under the SUBJECT's id, never the speaker's. When `<known_members>` is present, match a loosely typed, shortened or earlier display name against it to find the id. When two members fit or none clearly does, record nothing; the list may be incomplete. For a member who appears only in `<known_members>`, return `aliases` under their id and nothing else. Write the alias as people type it, in its base form (not an inflected case form). A teasing or insulting name thrown once is not an alias; a name people actually call the member by is. `add` of a known alias is a sighting. `remove` wrong ones.
 
+A joke-request or playful agreement alone does not establish a lasting preference, instruction, habit or alias. Repetition within the same bit is not independent confirmation. Record a joke-name as an alias only when the person adopts it or clear use outside the bit shows it has stuck.
+
 Examples:
 - Alex writes three messages about Elden Ring and mentions a build → add `{ "topic": "Elden Ring", "note": "plays, strength build" }` to Alex.
 - Sam replies "nice" to Alex's message but never brings up the game → do NOT add Elden Ring to Sam.
