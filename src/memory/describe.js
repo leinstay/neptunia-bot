@@ -68,7 +68,14 @@
 // downloaded as for a caption, the question asked through the same prompt on
 // the media model. It takes the same re-watch counter (one counter for both
 // kinds), never a video slot, and its answer is cached apart from the
-// picture's caption, under `image:<itemId>:q:<hash>`.
+// picture's caption, under `image:<itemId>:q:<hash>`. `rewatchGif()` is the
+// same second look at a watched GIF (features.videoRewatch, GIFs watched now):
+// its clip fetched again exactly as the GIF watch fetches it (the first
+// `media.gif.maxSeconds`), the question asked through the same prompt on the
+// video model. It takes a re-watch slot and a GIF watch slot
+// (`media.gif.maxPerDay`), never a video slot; its answer is cached for an
+// hour under `gif:<itemId>:q:<hash>`. `watchedGifs()` tells, from the cache
+// alone, which GIFs were watched (the re-watch classifier's candidates).
 //
 // A GIF is watched, not described from one still frame (`media.gif.watch`,
 // a missing key counts as on, plus video vision on and the describe-gif or
@@ -125,6 +132,8 @@ const PERMANENT_VIDEO_MISSES = new Set(['length', 'size']);
 const VIDEO_DAILY = Object.freeze({ dayKey: 'videoDay', countKey: 'videoCount' });
 /** The state.json fields of the daily second-look counter: a video re-watch and a picture relook alike. */
 const REWATCH_DAILY = Object.freeze({ dayKey: 'rewatchDay', countKey: 'rewatchCount' });
+/** The state.json fields of the daily GIF watch counter: a GIF watch and a GIF's second look alike. */
+const GIF_WATCH_DAILY = Object.freeze({ dayKey: 'gifWatchDay', countKey: 'gifWatchCount' });
 /** What cachedPicture returns for a picture whose recent failure is still remembered. */
 const FRESH_MISS = Symbol('fresh-miss');
 // Only when media.gif.maxSeconds is missing or invalid (config.json always has it).
@@ -227,7 +236,7 @@ function positiveOr(value, fallback) {
 
 /**
  * The cache key of one question's answer: `<prefix>:<itemId>:q:` (`video`
- * for a re-watch, `image` for a picture's second look) and the sha1 prefix
+ * for a re-watch, `image` for a picture's second look, `gif` for a GIF's) and the sha1 prefix
  * of the question lower-cased and whitespace-collapsed (the search cache's
  * normalisation).
  */
@@ -592,17 +601,11 @@ export function createDescriber({
     state.data.gifWatchCount = watchedToday + 1;
     state.markDirty();
 
-    const media = await videoFetcher.fetchGif(source, {
-      maxSeconds,
-      maxBytes: videoCfg.maxBytes,
-      toolTimeoutMs: videoCfg.toolTimeoutMs,
-      ffmpegPath: videoCfg.ffmpegPath,
-      fetchTimeoutMs: hot.config.context?.vision?.fetchTimeoutMs,
-    });
-    if (!media.ok) return report({ state: 'failed', reason: media.reason ?? 'download' });
+    const fetched = await fetchGifClip(source, maxSeconds);
+    if (!fetched.ok) return report({ state: 'failed', reason: fetched.reason });
 
-    const clip = { url: media.dataUrl, seconds: Math.min(media.seconds ?? maxSeconds, maxSeconds), pinned: false };
-    const sizes = { seconds: clip.seconds, bytes: media.bytes ?? null };
+    const { clip } = fetched;
+    const sizes = { seconds: clip.seconds, bytes: fetched.bytes };
     let completion;
     try {
       completion = await llm.complete(
@@ -624,6 +627,27 @@ export function createDescriber({
     putVideoEntry(guildId, item.itemId, { text, reaction, action, screen, ts: now(), watched: true, gif: true });
     report({ state: 'watched' }, sizes);
     return { state: 'watched', text, usage: completion.usage ?? null, estimated: completion.estimated ?? 0 };
+  }
+
+  /**
+   * Download the animation at `source` and convert it to a short mp4
+   * (src/discord/fetch-video.js#fetchGif: the first `maxSeconds`, the video
+   * size and tool settings read now) -- the one fetch of a GIF watch and of
+   * its second look. `{ ok: true, clip: { url, seconds, pinned: false },
+   * bytes }` (`seconds` never above `maxSeconds`) or `{ ok: false, reason }`.
+   */
+  async function fetchGifClip(source, maxSeconds) {
+    const videoCfg = hot.config.media?.video ?? {};
+    const media = await videoFetcher.fetchGif(source, {
+      maxSeconds,
+      maxBytes: videoCfg.maxBytes,
+      toolTimeoutMs: videoCfg.toolTimeoutMs,
+      ffmpegPath: videoCfg.ffmpegPath,
+      fetchTimeoutMs: hot.config.context?.vision?.fetchTimeoutMs,
+    });
+    if (!media.ok) return { ok: false, reason: media.reason ?? 'download' };
+    const clip = { url: media.dataUrl, seconds: Math.min(media.seconds ?? maxSeconds, maxSeconds), pinned: false };
+    return { ok: true, clip, bytes: media.bytes ?? null };
   }
 
   /**
@@ -849,18 +873,24 @@ export function createDescriber({
    * over or written here): `video` under `media.video.maxPerDay` (a watch, a
    * retry and a re-watch each take one) and `rewatch` under
    * `media.video.rewatch.maxPerDay` (a re-watch also needs a `video` slot; a
-   * picture's second look, relookImage, takes a `rewatch` slot only).
+   * picture's second look, relookImage, takes a `rewatch` slot only), plus
+   * `gif` under `media.gif.maxPerDay` (gifWatchCap; a GIF's second look,
+   * rewatchGif, takes a `rewatch` and a `gif` slot, never a video one).
    * A cap that is not a number leaves its rail unlimited (Infinity), as the
    * watch itself reads it. For a turn that skips a classifier whose action
    * could not run.
-   * @returns {{ video: number, rewatch: number }}
+   * @returns {{ video: number, rewatch: number, gif: number }}
    */
   function videoCapsLeft() {
     const videoCfg = hot.config.media?.video ?? {};
     const nowMs = now();
     const left = (cap, keys) =>
       typeof cap === 'number' && !Number.isNaN(cap) ? Math.max(0, cap - readDailyCount(state.data, keys, nowMs)) : Infinity;
-    return { video: left(videoCfg.maxPerDay, VIDEO_DAILY), rewatch: left(videoCfg.rewatch?.maxPerDay, REWATCH_DAILY) };
+    return {
+      video: left(videoCfg.maxPerDay, VIDEO_DAILY),
+      rewatch: left(videoCfg.rewatch?.maxPerDay, REWATCH_DAILY),
+      gif: left(gifWatchCap(hot.config), GIF_WATCH_DAILY),
+    };
   }
 
   /**
@@ -1373,6 +1403,139 @@ export function createDescriber({
     return { question: asked, text };
   }
 
+  /**
+   * The GIFs of `items` the media cache holds as watched (`watched: true`
+   * under the GIF's own item id, see watchGifNow), with an animation that
+   * can be fetched again (gifAnimationSource): `itemId` -> the watched
+   * caption, in the order of `items`. Never a download, a request or a daily
+   * count. Empty while GIFs are not watched (gifWatchBlocker: the switches,
+   * `media.gif.watch`, video vision, the prompt) -- there is nothing to
+   * re-watch then. The re-watch classifier's GIF candidates.
+   * @param {string} guildId
+   * @param {object[]} items  collectPictures items; only `gif` ones count.
+   * @returns {Map<string, string>}
+   */
+  function watchedGifs(guildId, items) {
+    const watched = new Map();
+    if (gifWatchBlocker() !== null) return watched;
+    const cache = store.getMediaCache(guildId);
+    for (const item of items ?? []) {
+      if (item?.kind !== 'gif' || !item.itemId || watched.has(item.itemId) || !gifAnimationSource(item)) continue;
+      const entry = cache[item.itemId];
+      if (!entry || entry.miss || entry.watched !== true || typeof entry.text !== 'string' || !entry.text) continue;
+      watched.set(item.itemId, entry.text);
+    }
+    return watched;
+  }
+
+  /**
+   * The second look at a watched GIF on a question: its clip fetched again
+   * the way the GIF watch fetches it (fetchGifClip, the first
+   * `media.gif.maxSeconds` -- the same cap as the first watch) and the video
+   * model asked `question` through the `rewatch-answer` prompt
+   * (`{{question}}`, `{{maxChars}}` = `media.video.rewatch.answerChars`,
+   * output capped at `media.video.rewatch.maxOutputTokens`), under the video
+   * request rails. Needs GIFs watched now (gifWatchBlocker),
+   * `features.videoRewatch` not false, the prompt, a `gif` item with an
+   * animation and a non-empty question. Two daily counters must have room:
+   * the second-look one (`media.video.rewatch.maxPerDay`, shared with
+   * rewatchVideo and relookImage) and the GIF watch one
+   * (`media.gif.maxPerDay`) -- never a video slot; both are reserved before
+   * the fetch and kept on failure. An answer is cached for an hour under
+   * `gif:<itemId>:q:<hash>` (the GIF's own item id, `<message>#e<n>` for an
+   * embed); a failure never. With `llm.maxRequestsPerDay` spent nothing is
+   * fetched and no slot is taken. One `describe: rewatch` line with
+   * `kind: 'gif'`; the question and the answer are data: never logged.
+   * @param {string} guildId
+   * @param {object} item  One collectPictures item of kind `gif`.
+   * @param {string} question
+   * @returns {Promise<{ question: string, text: string }|null>}
+   */
+  async function rewatchGif(guildId, item, question) {
+    if (gifWatchBlocker() !== null || hot.config.features?.videoRewatch === false) return null;
+    const promptText = hot.prompts?.['rewatch-answer'];
+    const asked = String(question ?? '').trim();
+    const source = gifAnimationSource(item);
+    if (!promptText || !item?.itemId || !source || !asked) return null;
+
+    const mediaCfg = hot.config.media ?? {};
+    const videoCfg = mediaCfg.video ?? {};
+    const rewatchCfg = videoCfg.rewatch ?? {};
+    const answerChars = positiveOr(rewatchCfg.answerChars, REWATCH_ANSWER_CHARS_FALLBACK);
+    const maxSeconds = positiveOr(mediaCfg.gif?.maxSeconds, GIF_MAX_SECONDS_FALLBACK);
+    const report = (outcome, extra = {}) => {
+      log.info('describe: rewatch', {
+        kind: 'gif',
+        source: item.source ?? null,
+        state: outcome,
+        reason: extra.reason ?? null,
+        cached: extra.cached ?? false,
+        seconds: extra.seconds ?? null,
+        location: safeLocation(source),
+      });
+    };
+
+    const cache = store.getMediaCache(guildId);
+    const key = questionKey(item.itemId, asked, 'gif');
+    const hit = cache[key];
+    if (hit && typeof hit.answer === 'string') {
+      if (now() - hit.ts < REWATCH_TTL_MS) {
+        touchKey(cache, key, hit);
+        store.markMediaCacheDirty(guildId);
+        report('answered', { cached: true });
+        return { question: hit.question ?? asked, text: hit.answer };
+      }
+      delete cache[key];
+      store.markMediaCacheDirty(guildId);
+    }
+
+    // The request would be refused: no fetch, no slot.
+    if (capSpent()) {
+      report('limit', { reason: 'daily-cap' });
+      return null;
+    }
+    // Both rails, both reserved synchronously before any await (like a watch).
+    const lookedToday = countToday(REWATCH_DAILY.dayKey, REWATCH_DAILY.countKey);
+    const gifsToday = countToday(GIF_WATCH_DAILY.dayKey, GIF_WATCH_DAILY.countKey);
+    if (lookedToday >= (rewatchCfg.maxPerDay ?? Infinity) || gifsToday >= gifWatchCap(hot.config)) {
+      report('limit', { reason: 'daily' });
+      return null;
+    }
+    state.data.rewatchCount = lookedToday + 1;
+    state.data.gifWatchCount = gifsToday + 1;
+    state.markDirty();
+
+    const fetched = await fetchGifClip(source, maxSeconds);
+    if (!fetched.ok) {
+      report('error', { reason: fetched.reason });
+      return null;
+    }
+    const { clip } = fetched;
+
+    let completion;
+    try {
+      completion = await llm.complete(
+        [
+          { role: 'system', content: fillPromptTemplate(promptText, { question: asked, maxChars: answerChars, today: todayDate() }) },
+          { role: 'user', content: [videoPart(videoCfg, clip)] },
+        ],
+        videoRequestOptions(videoCfg, clip, { maxOutputTokens: rewatchCfg.maxOutputTokens }),
+      );
+    } catch (err) {
+      report('error', { reason: requestFailureReason(err), seconds: clip.seconds });
+      return null;
+    }
+
+    const text = cleanVideoText(completion.text, answerChars);
+    if (!text) {
+      report('error', { reason: 'empty', seconds: clip.seconds });
+      return null;
+    }
+    putVideoEntry(guildId, key, { answer: text, question: asked, ts: now() });
+    report('answered', { seconds: clip.seconds });
+    return { question: asked, text };
+  }
+
   // Which link of the YouTube duration chain works on this host (src/memory/youtube-check.js):
   // the same fetcher and key as a real link, no LLM call, nothing cached.
   const checkYoutube = createYoutubeCheck({ hot, videoFetcher, youtubeApiKey });
@@ -1386,6 +1549,8 @@ export function createDescriber({
     cachedVideos,
     rewatchVideo,
     relookImage,
+    rewatchGif,
+    watchedGifs,
     videoCapsLeft,
     watchGif,
     gifWatchBlocker,

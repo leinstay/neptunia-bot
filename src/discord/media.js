@@ -433,6 +433,16 @@ function imageAnsweredExtra(answer) {
   return { key: 'imageAnswered', values: { question: answer.question ?? '', text: answer.text ?? '' } };
 }
 
+/**
+ * The `videoAnswered` extra of a GIF that got a second look on a question
+ * (`answer = { question, text }`, src/memory/describe.js#rewatchGif: its clip
+ * watched again, as a video's), else null.
+ */
+function gifAnsweredExtra(answer) {
+  if (!answer) return null;
+  return { key: 'videoAnswered', values: { question: answer.question ?? '', text: answer.text ?? '' } };
+}
+
 /** `base` with `extra` (an extraOf result) added when there is one. */
 function withExtra(base, extra) {
   return extra ? { ...base, extra } : base;
@@ -495,8 +505,10 @@ function extraOf(...extras) {
  *
  * `context.answer` is a picture's second look on a question (`{ question,
  * text }`, src/memory/describe.js#relookImage): an `image` item, attached or
- * not, appends `imageAnswered` after its own tag. Every other kind ignores it
- * (a video's answer lives in its state, `context.video.answer`).
+ * not, appends `imageAnswered` after its own tag. A `gif` item takes a GIF's
+ * second look the same way (src/memory/describe.js#rewatchGif) and appends
+ * `videoAnswered` instead: its clip was watched again, as a video's. Every
+ * other kind ignores it (a video's answer lives in its state, `context.video.answer`).
  * @param {object} item
  * @param {{ attachedIndex?: number|null, description?: string|null, unknownDuration?: string,
  *   video?: { state: 'watched'|'limit'|'error'|'pending', text?: string, reason?: string,
@@ -512,7 +524,7 @@ export function mediaLabelFor(
   // A `link`'s attached thumbnail is handled in its own case below.
   if (attachedIndex != null && PICTURE_ATTACHMENT_KINDS.has(item.kind)) {
     if (item.kind === 'video' || item.kind === 'gif') {
-      const base = mediaLabelFor(item, { description, unknownDuration, video, gifHandle });
+      const base = mediaLabelFor(item, { description, unknownDuration, video, gifHandle, answer: item.kind === 'gif' ? answer : null });
       return { ...base, extra: extraOf({ key: 'frameAttached', values: { n: attachedIndex } }, base.extra) };
     }
     const attached = description
@@ -528,12 +540,16 @@ export function mediaLabelFor(
     }
     case 'gif': {
       const name = item.name || item.title || item.site || '';
+      const answered = extraOf(gifAnsweredExtra(answer));
       if (gifHandle) {
-        return description
-          ? { key: 'gifKnown', values: { id: gifHandle, text: description } }
-          : { key: 'gifKnownNoText', values: { id: gifHandle, name } };
+        return withExtra(
+          description
+            ? { key: 'gifKnown', values: { id: gifHandle, text: description } }
+            : { key: 'gifKnownNoText', values: { id: gifHandle, name } },
+          answered,
+        );
       }
-      return description ? { key: 'gifDescribed', values: { text: description } } : { key: 'gif', values: { name } };
+      return withExtra(description ? { key: 'gifDescribed', values: { text: description } } : { key: 'gif', values: { name } }, answered);
     }
     case 'video': {
       const name = item.name ?? '';

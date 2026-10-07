@@ -1932,6 +1932,127 @@ test('createTurnRunner: relook -- maxCandidates caps the merged list: the videos
   assert.equal(describer.relookCalls[0].item.itemId, 'p2');
 });
 
+// The second look at a watched GIF (features.videoRewatch): listed as a video.
+
+/** A raw message carrying one tenor gifv embed (item id `<id>#e0`, named after its site). */
+function gifEmbedRaw(id, ts) {
+  return linkRaw(
+    id,
+    ts,
+    [
+      {
+        type: 'gifv',
+        url: 'https://tenor.com/view/miroir-1',
+        provider: { name: 'Tenor' },
+        thumbnail: { url: 'https://media.tenor.com/x/still.png' },
+        video: { url: 'https://media.tenor.com/x/loop.mp4' },
+      },
+    ],
+    '',
+  );
+}
+
+/**
+ * fakeRelookDescriber plus watchedGifs (the ids of `watched` with their caption; none with
+ * media.gif.watch false, as the real describer's) and rewatchGif, answering with `answer`.
+ */
+function fakeGifRewatchDescriber(hot, { states = {}, watched = {}, answer = 'une autre femme dans le miroir' } = {}) {
+  const base = fakeRelookDescriber(states, {});
+  const gifRewatchCalls = [];
+  return {
+    ...base,
+    watchedGifs: (guildId, items) =>
+      hot.config.media?.gif?.watch === false
+        ? new Map()
+        : new Map(items.filter((item) => item.kind === 'gif' && watched[item.itemId]).map((item) => [item.itemId, watched[item.itemId]])),
+    gifRewatchCalls,
+    rewatchGif: async (guildId, item, question) => {
+      gifRewatchCalls.push({ guildId, item, question });
+      return answer ? { question, text: answer } : null;
+    },
+  };
+}
+
+function gifRewatchScene(history = [gifEmbedRaw('m1', NOW - 5000)]) {
+  const trigger = rawMessage({ id: 'mt', ts: NOW - 1000, authorName: 'Zoë', content: 'à la fin le miroir montre une autre personne' });
+  return { trigger, channel: fakeTurnChannel({ historyMessages: [...history, trigger] }) };
+}
+
+async function runGifRewatch({ hot = rewatchHot(), llm = rewatchLlm('1 | qui est dans le miroir à la fin ?'), describer, scene = gifRewatchScene() } = {}) {
+  const d = describer ?? fakeGifRewatchDescriber(hot, { watched: { 'm1#e0': 'une femme se regarde dans un miroir' } });
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm, calibrator: identityCalibrator(), client: fakeClient(), describer: d, imageFetcher: fakeImageFetcher() });
+  await turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: normalizedTrigger(scene.trigger), triggerKind: 'mention' });
+  return { describer: d, llm };
+}
+
+test('createTurnRunner: rewatch -- a watched GIF is offered as a watched video and a pick re-watches it; the answer reaches the request', async () => {
+  const { result, logs } = await withCapturedLogs(() => runGifRewatch());
+  const { describer, llm } = result;
+
+  assert.equal(llm.classifierCalls.length, 1);
+  assert.deepEqual(mediaLines(llm), ['1 | video | Tenor | watched | une femme se regarde dans un miroir']);
+  assert.equal(describer.gifRewatchCalls.length, 1);
+  assert.equal(describer.gifRewatchCalls[0].guildId, 'g1');
+  assert.equal(describer.gifRewatchCalls[0].item.itemId, 'm1#e0');
+  assert.equal(describer.gifRewatchCalls[0].question, 'qui est dans le miroir à la fin ?');
+  assert.equal(describer.rewatchCalls.length, 0);
+  assert.equal(describer.relookCalls.length, 0);
+  const line = logs.find((entry) => entry.msg === 'rewatch: classified');
+  assert.deepEqual(line.offered, { watched: 0, notLoaded: 0, gifs: 1, pictures: 0 });
+  assert.equal(line.target, 'gif');
+  assert.equal(line.picked, true);
+  assert.ok(!JSON.stringify(logs).includes('miroir'), 'never the question or the caption');
+  const tag = fill(labels.transcript.videoAnswered, { question: 'qui est dans le miroir à la fin ?', text: 'une autre femme dans le miroir' });
+  assert.ok(llm.turnCalls[0].messages[1].content.includes(tag), 'the answer sits in the transcript as a video answer');
+});
+
+test('createTurnRunner: rewatch -- a GIF that was not watched, GIF watching off or videoRewatch off offers no GIF', async () => {
+  const notWatched = rewatchHot();
+  const off = rewatchHot();
+  off.config.media.gif = { watch: false };
+  const cases = [
+    [notWatched, (hot) => fakeGifRewatchDescriber(hot, { watched: {} })],
+    [off, (hot) => fakeGifRewatchDescriber(hot, { watched: { 'm1#e0': 'une femme' } })],
+    [rewatchHot({ videoRewatch: false }), (hot) => fakeGifRewatchDescriber(hot, { watched: { 'm1#e0': 'une femme' } })],
+  ];
+  for (const [hot, make] of cases) {
+    const describer = make(hot);
+    const { result, logs } = await withCapturedLogs(() => runGifRewatch({ hot, describer }));
+    assert.equal(result.llm.classifierCalls.length, 0);
+    assert.equal(describer.gifRewatchCalls.length, 0);
+    assert.ok(!logs.some((entry) => entry.msg === 'rewatch: classified'));
+  }
+});
+
+test('createTurnRunner: rewatch -- a retry on a GIF does nothing; a spent GIF watch counter keeps the GIF off the list', async () => {
+  const retry = await withCapturedLogs(() => runGifRewatch({ llm: rewatchLlm('1 | retry') }));
+  assert.equal(retry.result.describer.gifRewatchCalls.length, 0);
+  assert.equal(retry.logs.find((entry) => entry.msg === 'rewatch: classified').picked, false);
+
+  const hot = rewatchHot();
+  const describer = fakeGifRewatchDescriber(hot, { watched: { 'm1#e0': 'une femme' } });
+  describer.videoCapsLeft = () => ({ video: 5, rewatch: 5, gif: 0 });
+  delete describer.describeVideo;
+  const capped = await withCapturedLogs(() => runGifRewatch({ hot, describer }));
+  assert.equal(capped.result.llm.classifierCalls.length, 0);
+  assert.equal(describer.gifRewatchCalls.length, 0);
+});
+
+test('createTurnRunner: rewatch -- a watched video and a watched GIF: the video first, a pick of the video re-watches only the video', async () => {
+  const hot = rewatchHot();
+  const describer = fakeGifRewatchDescriber(hot, {
+    states: { va: { state: 'watched', text: 'ένα αυτοκίνητο περνά' } },
+    watched: { 'm2#e0': 'une femme se regarde dans un miroir' },
+  });
+  const scene = gifRewatchScene([videoAttachmentRaw('m1', NOW - 9000, 'va', 'clip.mp4'), gifEmbedRaw('m2', NOW - 5000)]);
+  const { llm } = await runGifRewatch({ hot, describer, scene, llm: rewatchLlm('1 | τι χρώμα;') });
+  assert.deepEqual(mediaLines(llm), ['1 | video | clip.mp4 | watched | ένα αυτοκίνητο περνά', '2 | video | Tenor | watched | une femme se regarde dans un miroir']);
+  assert.equal(describer.rewatchCalls.length, 1);
+  assert.equal(describer.rewatchCalls[0].item.itemId, 'va');
+  assert.equal(describer.gifRewatchCalls.length, 0);
+  assert.ok(llm.turnCalls[0].messages[1].content.includes(fill(labels.transcript.videoAnswered, { question: 'τι χρώμα;', text: 'κόκκινο' })));
+});
+
 // ---------------------------------------------------------------------------
 // The web lookup: read links and the search on a question.
 

@@ -1176,19 +1176,23 @@ test('rewatchVideo: with the daily request cap spent nothing is fetched and neit
   assert.equal(state.data.videoCount, undefined);
 });
 
-test('videoCapsLeft: the video and re-watch slots left today, read only, the whole caps back after 00:00 UTC', async () => {
+test('videoCapsLeft: the video, re-watch and GIF watch slots left today, read only, the whole caps back after 00:00 UTC', async () => {
   const now = clock(Date.parse('2026-09-23T23:59:00Z'));
-  const state = fakeState({ videoDay: '2026-09-23', videoCount: 3, rewatchDay: '2026-09-23', rewatchCount: 2 });
-  const { describer } = videoDescriber({ hot: rewatchHot({ video: { maxPerDay: 5 }, rewatch: { maxPerDay: 4 } }), state, now });
+  const state = fakeState({ videoDay: '2026-09-23', videoCount: 3, rewatchDay: '2026-09-23', rewatchCount: 2, gifWatchDay: '2026-09-23', gifWatchCount: 1 });
+  const hot = rewatchHot({ video: { maxPerDay: 5 }, rewatch: { maxPerDay: 4 } });
+  hot.config.media.gif = { maxPerDay: 7 };
+  const { describer } = videoDescriber({ hot, state, now });
   const before = structuredClone(state.data);
-  assert.deepEqual(describer.videoCapsLeft(), { video: 2, rewatch: 2 });
+  assert.deepEqual(describer.videoCapsLeft(), { video: 2, rewatch: 2, gif: 6 });
   now.advance(2 * 60_000);
-  assert.deepEqual(describer.videoCapsLeft(), { video: 5, rewatch: 4 });
+  assert.deepEqual(describer.videoCapsLeft(), { video: 5, rewatch: 4, gif: 7 });
   assert.deepEqual(state.data, before, 'never rolled over or written');
   assert.equal(state.dirtyCount, 0);
 
-  const unlimited = videoDescriber({ hot: rewatchHot({ video: { maxPerDay: null }, rewatch: { maxPerDay: null } }) });
-  assert.deepEqual(unlimited.describer.videoCapsLeft(), { video: Infinity, rewatch: Infinity });
+  const unlimitedHot = rewatchHot({ video: { maxPerDay: null }, rewatch: { maxPerDay: null } });
+  unlimitedHot.config.media.gif = { maxPerDay: 3 };
+  const unlimited = videoDescriber({ hot: unlimitedHot });
+  assert.deepEqual(unlimited.describer.videoCapsLeft(), { video: Infinity, rewatch: Infinity, gif: 3 });
 });
 
 test('videoStateFromCache: watched, a permanent limit, or null -- a length miss that fits the cap now is no limit', () => {
@@ -2732,4 +2736,103 @@ test('watchGif: an old-format watched entry (no reaction field) is watched again
   assert.deepEqual(await run.describer.watchGif('g1', gifEmbedItem()), { state: 'watched', text: 'a caracal stares ahead' });
   const entry = run.store.getMediaCache('g1')['m1#e0'];
   assert.deepEqual([entry.reaction, entry.action, entry.screen, entry.watched], ['waiting', 'a caracal stares ahead', '', true]);
+});
+
+// --- rewatchGif / watchedGifs: the second look at a watched GIF -----------------
+
+/** gifHot with the re-watch prompt and settings. */
+function gifRewatchHot({ features = {}, gif = {}, rewatch = {} } = {}) {
+  return gifHot({ features, gif, video: { rewatch: { ...REWATCH_CFG, ...rewatch } }, prompts: { 'rewatch-answer': REWATCH_PROMPT } });
+}
+
+const WATCHED_GIF_ENTRY = { text: 'a woman looks into a mirror', reaction: '', action: 'a woman looks into a mirror', screen: '', ts: 1, watched: true, gif: true };
+
+test('watchedGifs: only watched GIF entries with an animation, from the cache alone; none while GIFs are not watched', async () => {
+  const run = gifDescriber({ hot: gifRewatchHot() });
+  const cache = run.store.getMediaCache('g1');
+  cache['m1#e0'] = { ...WATCHED_GIF_ENTRY };
+  cache['m2#e0'] = { text: 'one frame', ts: 1, gif: true };
+  cache['m3#e0'] = { ...WATCHED_GIF_ENTRY };
+  const items = [gifEmbedItem('m1#e0'), gifEmbedItem('m2#e0', { messageId: 'm2' }), gifEmbedItem('m3#e0', { messageId: 'm3', animationUrl: undefined }), pictureItem('p1')];
+  assert.deepEqual([...run.describer.watchedGifs('g1', items)], [['m1#e0', 'a woman looks into a mirror']]);
+  assert.equal(run.videoFetcher.calls.length, 0);
+  assert.equal(run.llm.calls.length, 0);
+
+  const off = gifDescriber({ hot: gifRewatchHot({ gif: { watch: false } }) });
+  off.store.getMediaCache('g1')['m1#e0'] = { ...WATCHED_GIF_ENTRY };
+  assert.equal(off.describer.watchedGifs('g1', items).size, 0);
+});
+
+test('rewatchGif: one GIF clip fetch and one video request with the question; the answer cached under gif:<itemId>:q:', async () => {
+  const state = fakeState();
+  const run = gifDescriber({ hot: gifRewatchHot({ gif: { maxSeconds: 6 } }), llm: fakeLlm({ text: '  une autre personne   dans le miroir ' }), state });
+
+  const result = await run.describer.rewatchGif('g1', gifEmbedItem(), 'Qui est dans le miroir ?');
+
+  assert.deepEqual(result, { question: 'Qui est dans le miroir ?', text: 'une autre personne dans le miroir' });
+  assert.deepEqual(run.videoFetcher.calls.map((c) => [c.fn, c.url, c.options.maxSeconds]), [['fetchGif', TENOR_MP4, 6]]);
+  assert.equal(run.llm.calls.length, 1);
+  const [system, user] = run.llm.calls[0].messages;
+  assert.equal(system.content, 'Question: Qui est dans le miroir ?. At most 1200 characters.');
+  assert.deepEqual(user.content, [{ type: 'video_url', video_url: { url: GIF_CLIP_URL } }]);
+  const options = run.llm.calls[0].options;
+  assert.equal(options.role, 'classifier.video');
+  assert.equal(options.maxOutputTokens, 600);
+  assert.equal(options.videoSeconds, 6);
+  assert.equal(state.data.rewatchCount, 1);
+  assert.equal(state.data.gifWatchCount, 1, 'a GIF watch slot, like the first watch');
+  assert.equal(state.data.videoCount, undefined, 'never a video slot');
+  const digest = createHash('sha1').update('qui est dans le miroir ?').digest('hex').slice(0, 16);
+  assert.equal(run.store.getMediaCache('g1')[`gif:m1#e0:q:${digest}`].answer, 'une autre personne dans le miroir');
+
+  const again = await run.describer.rewatchGif('g1', gifEmbedItem(), 'qui est dans le miroir ?');
+  assert.equal(again.text, 'une autre personne dans le miroir');
+  assert.equal(run.llm.calls.length, 1, 'the same question within an hour is free');
+});
+
+test('rewatchGif: a full re-watch or GIF counter refuses without a fetch; a failed fetch keeps both slots and caches nothing', async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  for (const data of [{ rewatchDay: today, rewatchCount: 2 }, { gifWatchDay: today, gifWatchCount: 3 }]) {
+    const run = gifDescriber({ hot: gifRewatchHot({ gif: { maxPerDay: 3 }, rewatch: { maxPerDay: 2 } }), state: fakeState({ ...data }) });
+    assert.equal(await run.describer.rewatchGif('g1', gifEmbedItem(), 'q ?'), null);
+    assert.equal(run.videoFetcher.calls.length, 0, JSON.stringify(data));
+  }
+  const state = fakeState();
+  const failing = gifDescriber({ hot: gifRewatchHot(), videoFetcher: gifFetcher({ ok: false, reason: 'convert' }), state });
+  assert.equal(await failing.describer.rewatchGif('g1', gifEmbedItem(), 'q ?'), null);
+  assert.equal(failing.llm.calls.length, 0);
+  assert.deepEqual([state.data.rewatchCount, state.data.gifWatchCount], [1, 1]);
+  assert.ok(!Object.keys(failing.store.getMediaCache('g1')).some((key) => key.startsWith('gif:')));
+});
+
+test('rewatchGif: GIFs not watched, videoRewatch off, no prompt, no animation or an empty question -> null, no fetch', async () => {
+  const noPrompt = gifRewatchHot();
+  delete noPrompt.prompts['rewatch-answer'];
+  const cases = [
+    [gifRewatchHot({ gif: { watch: false } }), gifEmbedItem(), 'q ?'],
+    [gifRewatchHot({ features: { videoRewatch: false } }), gifEmbedItem(), 'q ?'],
+    [gifRewatchHot({ features: { videoDescriptions: false } }), gifEmbedItem(), 'q ?'],
+    [noPrompt, gifEmbedItem(), 'q ?'],
+    [gifRewatchHot(), gifEmbedItem('m1#e0', { animationUrl: undefined }), 'q ?'],
+    [gifRewatchHot(), gifEmbedItem(), '   '],
+  ];
+  for (const [hot, item, question] of cases) {
+    const run = gifDescriber({ hot });
+    assert.equal(await run.describer.rewatchGif('g1', item, question), null);
+    assert.equal(run.videoFetcher.calls.length, 0);
+    assert.equal(run.llm.calls.length, 0);
+  }
+});
+
+test('rewatchGif: logs one describe: rewatch line with kind gif -- never the question, the answer or a signed URL', async () => {
+  const run = gifDescriber({ hot: gifRewatchHot(), llm: fakeLlm({ text: 'a secret answer' }) });
+  const { logs } = await withCapturedLogs(() => run.describer.rewatchGif('g1', gifAttachmentItem(), 'a secret question'));
+  const lines = logs.filter((entry) => entry.msg === 'describe: rewatch');
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].kind, 'gif');
+  assert.equal(lines[0].state, 'answered');
+  const all = JSON.stringify(logs);
+  assert.ok(!all.includes('a secret answer'));
+  assert.ok(!all.includes('a secret question'));
+  assert.ok(!all.includes('ex=secret'));
 });

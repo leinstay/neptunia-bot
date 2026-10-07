@@ -36,6 +36,7 @@ Every key in `config.json` with its default, grouped by section.
 | `channelPull` | `true` | Pull another channel into a turn's request when the recent messages or the trigger contain a real channel mention. A missing key counts as on. See `context.pull.*` |
 | `elsewhere` | `true` | Answer a call (@mention, reply, name) from a channel where the bot can read but not send. The answer goes to the first usable channel in `memory.mainChannelIds`. A missing key counts as on |
 | `portraitRefresh` | `true` | Refresh a member's portrait by message counters on a periodic schedule. A missing key counts as on |
+| `notesRefresh` | `true` | Periodically re-examine channel and server notes from a spread sample of recent messages. A missing key counts as on. See `memory.notesRefreshDays*` and [Warmup: Keeping the notes current](warmup.md#keeping-the-notes-current) |
 | `memoryTwoStage` | `false` | Split the memory analyzer into two stages: a neutral GPT model decides what changed (stage A), then the voice model words the persona's texts (stage B). Must be exactly `true` to enable; a missing key counts as off. See `memory.voice.*` |
 | `mentor` | `false` | Manual testing sub-process with its own model. Must be exactly `true` to enable; a missing key counts as off. See [Mentor](#mentor) |
 | `promptCache` | `false` | Mark the system message for the provider's prompt cache. A cached read costs a fraction of normal input; some providers do not count cached reads against token quotas. Must be exactly `true` to enable; a missing key counts as off. See `llm.cache.*` |
@@ -316,8 +317,8 @@ Settings for watching GIFs as short clips (`media.gif.watch`). When enabled, a G
 | Key | Default | Meaning |
 |---|---|---|
 | `watch` | `true` | Watch GIFs as short video clips instead of describing a single frame. Needs `features.mediaDescriptions` and `features.videoDescriptions` on. A missing key counts as on |
-| `maxSeconds` | `8` | Seconds of the animation sent to the video model; the clip is converted with ffmpeg |
-| `maxPerDay` | `200` | Daily GIF watch cap, counted separately from `media.video.maxPerDay`. Once spent, a GIF gets the one-frame description instead |
+| `maxSeconds` | `8` | Seconds of the animation sent to the video model; the clip is converted with ffmpeg. A GIF's second look on a question (`media.video.rewatch`) uses the same cap |
+| `maxPerDay` | `200` | Daily GIF watch cap, counted separately from `media.video.maxPerDay`. Once spent, a GIF gets the one-frame description instead. A GIF's second look on a question takes a slot here too |
 
 ### `media.video`
 
@@ -368,7 +369,7 @@ Settings for the re-watch classifier (`features.videoRewatch`). When the persona
 | `maxCandidates` | `6` | Max videos offered to the classifier from the recent window, newest first |
 | `contextMessages` | `50` | Recent channel messages (excluding the trigger) rendered as a `<transcript>` block for the classifier; `0` omits the block |
 
-At most one re-watch or retry per turn. Answers are cached for one hour per question. The classifier and the second look each count against `llm.maxRequestsPerDay`; the second look also counts against `media.video.maxPerDay`.
+At most one re-watch or retry per turn. Answers are cached for one hour per question. The classifier and the second look each count against `llm.maxRequestsPerDay`; the second look also counts against `media.video.maxPerDay`. Watched GIFs are offered too, listed as videos (only while `media.gif.watch` is on); a GIF's second look fetches its clip again under `media.gif.maxSeconds` and counts against `media.gif.maxPerDay` instead of `media.video.maxPerDay`.
 
 ## `mention`
 
@@ -454,8 +455,21 @@ Follow-up windows are persisted in `data/state.json` under `followUpWindows` and
 | `maxNewRecent` | `3` | Lines the analyzer may add per batch |
 | `recentChars` | `160` | Max characters per recent line |
 | `recentShown` | `12` | Live recent lines the analyzer is shown in `<existing_recent>` so it does not repeat them |
-| `notesStaleDays` | `7` | Days after which a channel's or the server's notes are flagged for a re-check by the analyzer. `0` turns the flag off |
-| `notesMinLines` | `20` | Batch lines a channel needs in this batch for its staleness flag to be sent |
+| `notesStaleDays` | `7` | Days since the last valid review or text change before a channel's or the server's notes are flagged for a stale-note review in the next qualifying batch. The flag is sent only when enough messages have accumulated since then (`notesMinMessages` for a channel, `notesGuildMinMessages` for the server) and the batch carries at least `notesBatchLines` lines from that channel. `0` turns the flag off |
+| `notesBatchLines` | `8` | Messages from a channel in the current batch for its stale flag to be considered. The batch provides local evidence; the accumulated count (`notesMinMessages`) tracks whether enough activity happened since the last review |
+| `notesMinMessages` | `30` | Messages tallied in a channel since the later of its last text change and last valid review before that channel's notes become eligible for a stale-note flag |
+| `notesGuildMinMessages` | `100` | Messages tallied across all stored channels since the later of the server notes' last text change and last valid review before the server notes become eligible for a stale flag |
+| `notesRetryHours` | `24` | Hours before the same channel or server is flagged again after a flag was sent. Covers both the stream analyzer flag and the sample refresh attempt |
+| `notesRefreshDaysMain` | `7` | Days since the last text change or sample review before a channel in `mainChannelIds` is due for a sample refresh (`features.notesRefresh`) |
+| `notesRefreshDays` | `21` | Same as `notesRefreshDaysMain`, for channels not in `mainChannelIds` |
+| `notesServerRefreshDays` | `7` | Days since the last text change or sample review before the server notes are due for a sample refresh. The server goes after the channels in a cycle and is outside the daily cap |
+| `notesRefreshPerDay` | `4` | Successful channel note refreshes per UTC day. A failed request does not take a slot. The day counter lives in `state.json` as `notesRefreshDay` / `notesRefreshCount` |
+| `notesCheckMinutes` | `60` | How often the notes refresh scheduler checks for overdue channels and the server. Last check time is stored in `state.json` as `notesRefreshLookAt` |
+| `notesSampleDays` | `30` | Days of channel history read for a sample refresh |
+| `notesSampleMessages` | `160` | Target number of messages in the spread sample. Messages are spread over the days (newest day first, one message per day per round) to avoid sampling only the latest conversation |
+| `notesSampleMaxAuthorShare` | `0.35` | One author may hold at most this share of the sample; excess messages from a dominant author are replaced with other authors' lines |
+| `portraitMaxAgeDays` | `21` | A portrait older than this (with at least `portraitMinMessages` own messages since) is due for a refresh even if it has not reached `portraitRefreshMessages` |
+| `portraitMinMessages` | `60` | Own messages since the last portrait for the age-based due path (`portraitMaxAgeDays`) |
 | `privateMaxAgeMinutes` | `360` | Minutes before a quiet private buffer is analyzed even though it has not reached `minBatchMessages` |
 | `channelWritersStored` | `20` | Top writers kept per channel, ranked by a decayed tally |
 | `channelWritersHalfLifeDays` | `30` | Half-life of the per-channel writer tally (days); a writer who stopped writing sinks below active ones |

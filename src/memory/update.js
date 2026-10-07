@@ -36,6 +36,7 @@ import { log } from '../log.js';
 import { DAY_MS, HOUR_MS, MINUTE_MS, bumpDaily, dailyCounter } from '../time.js';
 import { emptyAffinity, roundScore, affinityBand, applyDelta, relationshipStaleOf } from './affinity.js';
 import { emptyChannel } from './store.js';
+import { messagesSince } from './channels.js';
 import { keywordMatches } from './lore.js';
 import { normalizeInterests, normalizeTopic } from './interests.js';
 import { normalizeDetails } from './details.js';
@@ -73,6 +74,8 @@ import { stampMs, storedCount } from './portrait.js';
 const BACKOFF_MS = 15 * 60_000;
 const MIN_LIVE_BATCH = 20; // the live analyzer never shrinks below this many messages
 const CHANNEL_FIELDS = ['purpose', 'topics', 'tone']; // the analyzer's own fields of a channel entry
+// The statuses a `note_reviews` item may carry (docs/en/prompt-contract.md, analyzer JSON).
+const NOTE_REVIEW_STATUSES = new Set(['updated', 'confirmed', 'insufficient_evidence']);
 
 /**
  * The temperature of every analyzer-role request: the stream analyzer here, and the warmup's
@@ -320,18 +323,25 @@ export function notesStale({ updatedAt, checkedAt } = {}, nowMs, staleDays) {
 }
 
 /**
- * The notes staleness settings, read at each request: `staleDays` = `memory.notesStaleDays` (a
- * number of at least 0, else config.json's 7; 0 sends no marker) and `minLines` =
- * `memory.notesMinLines` (a number of at least 0, else config.json's 20): the batch lines a
- * channel, or the whole batch for the server notes, needs before its notes are flagged.
+ * The notes staleness settings, read at each request, each a number of at least 0, else
+ * config.json's value: `staleDays` = `memory.notesStaleDays` (7; 0 sends no marker);
+ * `batchLines` = `memory.notesBatchLines` (8): the batch lines a channel, or the whole batch for
+ * the server notes, needs before its notes are flagged; `minMessages` = `memory.notesMinMessages`
+ * (30) and `guildMinMessages` = `memory.notesGuildMinMessages` (100): the messages a channel, or
+ * every stored channel together, accumulated since the notes last changed or were last checked
+ * (src/memory/channels.js#messagesSince); `retryHours` = `memory.notesRetryHours` (24): how long
+ * a flag that earned no check stamp waits before it goes out again.
  * @param {object} [config]  The live config.
- * @returns {{ staleDays: number, minLines: number }}
+ * @returns {{ staleDays: number, batchLines: number, minMessages: number, guildMinMessages: number, retryHours: number }}
  */
 function notesSettings(config) {
   const atLeastZero = (value, fallback) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback);
   return {
     staleDays: atLeastZero(config?.memory?.notesStaleDays, 7),
-    minLines: atLeastZero(config?.memory?.notesMinLines, 20),
+    batchLines: atLeastZero(config?.memory?.notesBatchLines, 8),
+    minMessages: atLeastZero(config?.memory?.notesMinMessages, 30),
+    guildMinMessages: atLeastZero(config?.memory?.notesGuildMinMessages, 100),
+    retryHours: atLeastZero(config?.memory?.notesRetryHours, 24),
   };
 }
 
@@ -756,14 +766,22 @@ function recentNoteItems(lines, { config, now, timezone, locale, nameOf }) {
  * @param {number} [input.now]  The clock (epoch ms) the recent window and the notes' staleness are
  *   measured from; omitted -> the batch's newest message.
  *
+ * @param {object[]} [input.guildChannels]  Every stored channel entry of the guild
+ *   (store.listChannels): their `days` tallies are the server's activity for the server notes'
+ *   marker. Omitted -> the entries of `channels`.
+ *
  * Stale notes (guild batches only): a channel entry of `<existing_channels>` whose channel has at
- * least `memory.notesMinLines` lines among the lines the request shows, main or not, carries `"stale": { "days": n }`
- * when its notes are stale (`notesStale`: its `updatedAt`, which only a real change of
- * purpose/topics/tone stamps, and its `notesCheckedAt`); `<existing_guild>` carries the same once
- * the request shows at least `memory.notesMinLines` lines and the server notes are stale (its
- * `notesUpdatedAt` and `notesCheckedAt`). `n` = whole days since the text last changed, null when
- * never. `memory.notesStaleDays` 0 sends no marker. A JSON field only: the wording that asks for a
- * re-check is the prompt's.
+ * least `memory.notesBatchLines` lines among the lines the request shows, main or not, carries
+ * `"stale": { "days": n }` when its channel accumulated at least `memory.notesMinMessages`
+ * messages (its `days` tally, src/memory/channels.js#messagesSince) since the later of its
+ * `updatedAt` and `notesCheckedAt`, its notes are stale (`notesStale`: its `updatedAt`, which
+ * only a real change of purpose/topics/tone stamps, and its `notesCheckedAt`) and no flag went out
+ * within `memory.notesRetryHours` (`notesFlaggedAt`); `<existing_guild>` carries the same once the
+ * request shows at least `memory.notesBatchLines` lines, every channel of `guildChannels` together
+ * accumulated `memory.notesGuildMinMessages` since the later of `notesUpdatedAt` and
+ * `notesCheckedAt`, the server notes are stale and their `notesFlaggedAt` waited as long. `n` =
+ * whole days since the text last changed, null when never. `memory.notesStaleDays` 0 sends no
+ * marker. A JSON field only: the wording that asks for a re-check is the prompt's.
  * @returns {{ messages: object[], consumed: number, shown: number, deferred: number, rosterIds: string[],
  *   rosterCandidates: number, rosterTokens: number, profilesWhole: number, profilesCompact: number,
  *   profilesTokens: number, staleRelationships: number, recentShown: number,
@@ -773,7 +791,7 @@ function recentNoteItems(lines, { config, now, timezone, locale, nameOf }) {
  *   other `deferred` are left for the next batch, never consumed unseen (`shown + deferred` is the
  *   batch). A batch with lines of which none fits throws SectionsTooLargeError (`token-limit`).
  *   `staleNotes`: the targets sent with a stale marker (channel ids in the order sent, and whether
- *   the server notes were), for `store.markNotesChecked` once the batch is applied.
+ *   the server notes were), for `store.markNotesFlagged` and `reconcileNoteReviews` once the batch is applied.
  *   `rosterIds`: the members the request's `<known_members>` actually carries, in the order
  *   sent -- the only non-authors an answer may give an alias (applyMemoryUpdate's `aliasOnlyIds`).
  *   `rosterCandidates`: the roster entries offered to the budget (after `memory.aliasRosterSize`),
@@ -786,7 +804,7 @@ function recentNoteItems(lines, { config, now, timezone, locale, nameOf }) {
  *   `recentShown`: the recent lines `<recent_notes>` actually carries; `recentIds`: their ids, in
  *   the order sent -- the only lines an answer may remove (applyMemoryUpdate's `recent.shownIds`).
  */
-export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, videos, reads, nameOf, privateChat, rosterProfiles, recentLines, now, stage = 'single' }) {
+export function buildMemoryRequest({ prompts, config, calibrator, profiles, guildMemory, channels, messages, selfName, loreEntries, descriptions, videos, reads, nameOf, privateChat, rosterProfiles, recentLines, now, guildChannels, stage = 'single' }) {
   const { timezone } = config.bot;
   const labels = requireLabels(prompts);
   if (privateChat && (!labels.memory?.privateNote || !labels.memory?.privateChannel)) {
@@ -883,6 +901,17 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     if (mainChannels.has(String(id))) fields.main = true;
     return { id, channel, fields };
   });
+  // Messages accumulated since the later of a note's two stamps (null = never stamped: the whole
+  // tally), and whether a flag that earned no check stamp waited `memory.notesRetryHours`.
+  const accumulatedSince = (entries, updatedAt, checkedAt) => {
+    const since = Math.max(notesStampMs(updatedAt) ?? -Infinity, notesStampMs(checkedAt) ?? -Infinity);
+    return entries.reduce((sum, entry) => sum + messagesSince(entry, Number.isFinite(since) ? since : null, clock).count, 0);
+  };
+  const waited = (flaggedAt) => {
+    const ms = notesStampMs(flaggedAt);
+    return ms === null || clock - ms >= notes.retryHours * HOUR_MS;
+  };
+  const serverChannels = (Array.isArray(guildChannels) ? guildChannels : Object.values(channels ?? {})).filter(isPlainObject);
   const notesBlocks = (lines) => {
     const staleNotes = { channels: [], guild: false };
     const linesIn = new Map();
@@ -890,7 +919,12 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
       for (const m of lines) linesIn.set(String(m.channelId), (linesIn.get(String(m.channelId)) ?? 0) + 1);
     }
     const guildView = { ...guildFields };
-    if (!privateChat && lines.length >= notes.minLines) {
+    if (
+      !privateChat &&
+      lines.length >= notes.batchLines &&
+      waited(guildMemory?.notesFlaggedAt) &&
+      accumulatedSince(serverChannels, guildMemory?.notesUpdatedAt, guildMemory?.notesCheckedAt) >= notes.guildMinMessages
+    ) {
       const stale = notesStale({ updatedAt: guildMemory?.notesUpdatedAt, checkedAt: guildMemory?.notesCheckedAt }, clock, notes.staleDays);
       if (stale) {
         guildView.stale = stale;
@@ -900,7 +934,12 @@ export function buildMemoryRequest({ prompts, config, calibrator, profiles, guil
     const existingChannels = {};
     for (const { id, channel, fields } of channelFields) {
       const view = { ...fields };
-      if (!privateChat && (linesIn.get(String(id)) ?? 0) >= notes.minLines) {
+      if (
+        !privateChat &&
+        (linesIn.get(String(id)) ?? 0) >= notes.batchLines &&
+        waited(channel?.notesFlaggedAt) &&
+        accumulatedSince([channel], channel?.updatedAt, channel?.notesCheckedAt) >= notes.minMessages
+      ) {
         const stale = notesStale({ updatedAt: channel?.updatedAt, checkedAt: channel?.notesCheckedAt }, clock, notes.staleDays);
         if (stale) {
           view.stale = stale;
@@ -1657,6 +1696,36 @@ function applyRecentField(store, guildId, raw, { recent, tokenize, knownChannelI
 }
 
 /**
+ * Which flagged notes earned their `notesCheckedAt` stamp this batch. `confirmed` counts;
+ * `updated` counts only when the target's text really changed (else `identical`); a flagged
+ * target with no review is `missing`; a review for an unflagged target is `unflagged`. Pure.
+ * @param {{ flagged?: { channels?: string[], guild?: boolean }, reviews?: object, changedChannels?: string[], guildChanged?: boolean }} input
+ *   `flagged`: buildMemoryRequest's `staleNotes`; `reviews`: applyMemoryUpdate's `noteReviews`;
+ *   `changedChannels` / `guildChanged`: what really changed in this batch.
+ * @returns {{ stamp: { channels: string[], guild: boolean }, counts: { updated: number, confirmed: number,
+ *   insufficient: number, missing: number, identical: number, unflagged: number } }}
+ */
+export function reconcileNoteReviews({ flagged, reviews, changedChannels, guildChanged }) {
+  const counts = { updated: 0, confirmed: 0, insufficient: 0, missing: 0, identical: 0, unflagged: 0 };
+  const stamp = { channels: [], guild: false };
+  const changed = new Set(changedChannels ?? []);
+  const judge = (target, didChange) => {
+    const status = reviews?.[target];
+    if (status === undefined) { counts.missing += 1; return false; }
+    if (status === 'confirmed') { counts.confirmed += 1; return true; }
+    if (status === 'insufficient_evidence') { counts.insufficient += 1; return false; }
+    if (didChange) { counts.updated += 1; return true; }
+    counts.identical += 1;
+    return false;
+  };
+  for (const id of flagged?.channels ?? []) if (judge(id, changed.has(id))) stamp.channels.push(id);
+  if (flagged?.guild) stamp.guild = judge('guild', guildChanged === true);
+  const flaggedSet = new Set([...(flagged?.channels ?? []), ...(flagged?.guild ? ['guild'] : [])]);
+  for (const target of Object.keys(reviews ?? {})) if (!flaggedSet.has(target)) counts.unflagged += 1;
+  return { stamp, counts };
+}
+
+/**
  * Validate and store the model's memory-update JSON. Never throws on garbage
  * input, never drops a field that was not part of the update. A user id is
  * taken in full only when it is in `knownUserIds` (the batch's authors); one
@@ -1731,7 +1800,10 @@ function applyRecentField(store, guildId, raw, { recent, tokenize, knownChannelI
  *   droppedUsers: number, droppedFields: number, portraitDropped: number, portraitRequests: { userId: string, reason: string }[],
  *   selfDropped: number, recentAdded: number, recentOverlap: number, recentRemoved: number, recentExpired: number, recentEvicted: number,
  *   recentDropped: number, recentInvalid: number, recentNoChannel: number, recentStale: number, recentDuplicate: number,
- *   recentOverCap: number, recentUnshown: number }}
+ *   recentOverCap: number, recentUnshown: number, noteReviews: { [target: string]: string }, changedChannels: string[], guildChanged: boolean }}
+ *   `noteReviews`: the answer's `note_reviews`, keyed `guild` or a channel id, only the three valid
+ *   statuses, the first item for a target wins (see `reconcileNoteReviews`). `changedChannels`: the
+ *   ids whose stored channel text changed; `guildChanged`: the same as `guild`.
  *   `users`: authors written. `guild`: patterns/starters/injokes changed. `self`: the stored self list changed
  *   (a list returned unchanged is false). Past `cfg.maxInjokes` / `cfg.maxSelfFacts` the items new against the
  *   stored list are kept first (`clampStringArray`). `channels`/`lore`: entries whose stored values changed
@@ -1777,6 +1849,9 @@ export function applyMemoryUpdate(
     portraitDropped: 0,
     portraitRequests: [],
     selfDropped: 0,
+    noteReviews: {},
+    changedChannels: [],
+    guildChanged: false,
     recentAdded: 0,
     recentOverlap: 0,
     recentRemoved: 0,
@@ -1931,12 +2006,16 @@ export function applyMemoryUpdate(
 
       const fields = {};
       for (const key of CHANNEL_FIELDS) {
-        if (typeof raw[key] === 'string') fields[key] = clampText(tokenize(raw[key]), cfg.fieldChars, { tolerance: cfg.clampTolerance });
+        // A blank field says nothing: it never blanks the stored text.
+        if (typeof raw[key] === 'string' && raw[key].trim() !== '') fields[key] = clampText(tokenize(raw[key]), cfg.fieldChars, { tolerance: cfg.clampTolerance });
       }
 
       // Counted only when the stored text moves: an identical re-send is no change (and unstamped).
       const before = fieldsSnapshot(store.getChannel(guildId, channelId) ?? emptyChannel(String(channelId)), CHANNEL_FIELDS);
-      if (fieldsSnapshot(store.updateChannel(guildId, channelId, fields), CHANNEL_FIELDS) !== before) result.channels += 1;
+      if (fieldsSnapshot(store.updateChannel(guildId, channelId, fields), CHANNEL_FIELDS) !== before) {
+        result.channels += 1;
+        result.changedChannels.push(String(channelId));
+      }
     }
   }
 
@@ -1959,6 +2038,17 @@ export function applyMemoryUpdate(
     const keys = Object.keys(guildFields);
     const before = fieldsSnapshot(store.getGuild(guildId), keys);
     result.guild = fieldsSnapshot(store.updateGuild(guildId, guildFields), keys) !== before;
+  }
+  result.guildChanged = result.guild;
+
+  // The stale-note reviews: kept raw for reconcileNoteReviews (run() decides what earns a stamp).
+  if (Array.isArray(update.note_reviews)) {
+    for (const item of update.note_reviews) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const target = item.target === 'guild' ? 'guild' : typeof item.target === 'string' && item.target !== '' ? item.target : null;
+      if (target === null || !NOTE_REVIEW_STATUSES.has(item.status) || Object.hasOwn(result.noteReviews, target)) continue;
+      result.noteReviews[target] = item.status;
+    }
   }
 
   // Things people taught the persona: incremental ops, same mechanics as a
@@ -2224,6 +2314,8 @@ function stampVoicePortraits(store, guildId, items, portraits) {
       portraitRefreshedAt: new Date(item.createdAt).toISOString(),
       portraitMessageCount: storedCount(store.getUser(guildId, item.userId)?.messageCount),
       portraitAttemptAt: null,
+      // The member left the queue with this portrait: the waiting stamp starts over next time.
+      portraitDueAt: null,
     });
     stamped += 1;
   }
@@ -2303,7 +2395,9 @@ function queueStageA(store, guildId, split, config, nowMs) {
  * @param {number} nowMs
  * @returns {object}  `applyMemoryUpdate`'s result (its `portraitDropped` also counting the
  *   `character` / `style` / `portrait` keys the split dropped, `self` true when a stored self fact
- *   was removed, `selfDropped` the `self.add` claims about a member never queued) plus `queueStageA`'s counts.
+ *   was removed, `selfDropped` the `self.add` claims about a member never queued) plus `queueStageA`'s counts,
+ *   and `guildBriefQueued`: a `patterns` / `starters` brief went to the voice queue (the server notes'
+ *   text changes later, in the voice run, so a stale-note review counts it as a change -- run()).
  */
 function applyDecision(store, guildId, decision, config, knownUserIds, options, nowMs) {
   const cfg = config.memory ?? {};
@@ -2322,7 +2416,9 @@ function applyDecision(store, guildId, decision, config, knownUserIds, options, 
   if (split.selfRemove.length > 0) {
     result.self = store.applySelfOps(guildId, { remove: split.selfRemove }, selfOpsOptions(cfg, nowMs)).removed > 0;
   }
-  return { ...result, ...queueStageA(store, guildId, split, config, nowMs) };
+  const queued = queueStageA(store, guildId, split, config, nowMs);
+  const guildBriefQueued = queued.voiceQueued > 0 && split.items.some((item) => item.kind === 'patterns' || item.kind === 'starters');
+  return { ...result, ...queued, guildBriefQueued };
 }
 
 /**
@@ -2692,7 +2788,19 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         // The live recent lines the analyzer is shown, read only while the layer is on; a fake
         // store without the recent store (tests) shows none.
         const recentLines = recentSettings(hot.config) && typeof store.getRecent === 'function' ? store.getRecent(guildId).lines : [];
-        return { profiles: context.profiles, channels: context.channels, rosterProfiles, recentLines, now: now() };
+        // Every stored channel, for the server notes' accumulated activity; a fake store without
+        // the list (tests) counts the batch's channels.
+        // A channel that cannot be read costs the server notes their marker, never the batch.
+        let guildChannels;
+        if (typeof store.listChannels === 'function') {
+          try {
+            guildChannels = store.listChannels(guildId);
+          } catch (err) {
+            guildChannels = [];
+            log.warn('memory: guild channels left out', { guildId, reason: 'store-error', error: errorNameOf(err) });
+          }
+        }
+        return { profiles: context.profiles, channels: context.channels, guildChannels, rosterProfiles, recentLines, now: now() };
       },
       (update, { relationships, episodes, lore, recent }, { rosterIds, recentIds, stage, nowMs, consumed }) => {
         const cfg = hot.config.memory;
@@ -3092,8 +3200,9 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * Run a memory update for one guild if its buffer is due and it is not busy/backed off. Only
    * the lines the request showed are consumed (`outcome.consumed`, the batch's oldest); the
    * deferred rest stays in the buffer and leads the next batch. The server and channel notes the
-   * request flagged stale are stamped re-checked (`store.markNotesChecked`, at `now()`), so a
-   * note answered with the same text is not flagged again for `memory.notesStaleDays`. A
+   * request flagged stale are stamped flagged (`store.markNotesFlagged`, at `now()`); only those
+   * the answer's `note_reviews` really reviewed (`reconcileNoteReviews`) are stamped re-checked
+   * (`store.markNotesChecked`), the rest wait `memory.notesRetryHours` before the next flag. A
    * stage A batch that was stored is followed by one voice run for the guild (`runVoice`), still
    * under the guild's own `running` key, so the tick never starts a second one beside it.
    */
@@ -3113,13 +3222,27 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
         store.shiftBuffer(guildId, consumed);
         const { channels: flaggedChannels, guild: flaggedGuild } = outcome.staleNotes;
         const notesFlagged = flaggedChannels.length + (flaggedGuild ? 1 : 0);
-        // A store without the stamp (an older store module) leaves the markers to come again.
-        if (notesFlagged > 0 && typeof store.markNotesChecked === 'function') {
-          store.markNotesChecked(guildId, { channels: flaggedChannels, guild: flaggedGuild }, now());
+        // Counts only: a portrait cue's text is the analyzer's prose about a member; the review
+        // map and the change list feed the reconciliation below, not the log line.
+        const { portraitRequests, noteReviews, changedChannels, guildChanged, guildBriefQueued, ...counts } = outcome.result;
+        let noteCounts = null;
+        if (notesFlagged > 0) {
+          // A store without a stamp (an older store module) leaves the markers to come again.
+          if (typeof store.markNotesFlagged === 'function') store.markNotesFlagged(guildId, { channels: flaggedChannels, guild: flaggedGuild }, now());
+          // In stage A the server notes' patterns / starters are briefs worded later by the voice
+          // run: a brief queued in this batch is the change an `updated` review promised.
+          const reconciled = reconcileNoteReviews({
+            flagged: outcome.staleNotes,
+            reviews: noteReviews,
+            changedChannels,
+            guildChanged: guildChanged === true || guildBriefQueued === true,
+          });
+          noteCounts = reconciled.counts;
+          if ((reconciled.stamp.channels.length > 0 || reconciled.stamp.guild) && typeof store.markNotesChecked === 'function') {
+            store.markNotesChecked(guildId, reconciled.stamp, now());
+          }
         }
         store.flush();
-        // Counts only: a portrait cue's text is the analyzer's prose about a member.
-        const { portraitRequests, ...counts } = outcome.result;
         log.info('memory: update applied', {
           guildId,
           consumed: consumed.length,
@@ -3136,8 +3259,19 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           // Relationship markers sent; `relationships` (in counts) = texts actually rewritten.
           staleRelationships: outcome.staleRelationships,
           // Notes markers sent (channels plus the server notes); `channels` / `guild` (in counts)
-          // say whether a text really changed.
+          // say whether a text really changed. With markers sent, how the answer reviewed them:
+          // a stamp went to the updated (really changed) and confirmed ones only.
           notesFlagged,
+          ...(noteCounts
+            ? {
+                notesUpdated: noteCounts.updated,
+                notesConfirmed: noteCounts.confirmed,
+                notesInsufficient: noteCounts.insufficient,
+                notesMissing: noteCounts.missing,
+                notesIdentical: noteCounts.identical,
+                notesUnflagged: noteCounts.unflagged,
+              }
+            : {}),
           // Recent lines the request carried; the answer's `recentAdded`, `recentOverlap`,
           // `recentRemoved`, what the code dropped (`recentDropped` and its reasons) and the
           // batch's `recentExpired` / `recentEvicted` come with the counts (applyRecentField).

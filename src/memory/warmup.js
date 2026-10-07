@@ -29,7 +29,10 @@
 // unless the owner forces it), with the stored portrait as the `<draft>`;
 // it is started by src/memory/portrait.js's scheduler (by counters), by the
 // stream analyzer's cue (src/memory/update.js's `onPortraitRequest`) and by
-// `/nep memory refresh`, all under one daily cap.
+// `/nep memory refresh`, all under one daily cap. `refreshChannelNotes()` /
+// `refreshServerNotes()` re-ask `channel.md` / `server.md` on a sample spread
+// over recent days, the stored notes shown as claims (`<existing_notes>`);
+// they are started by src/memory/notes-refresh.js's scheduler.
 //
 // Two-stage mode (`features.memoryTwoStage`, DECISIONS-R4): no text in the
 // persona's voice is asked of `memory.model` (`warmupRoute`). The portrait
@@ -91,7 +94,8 @@ import {
   waitingPortraits,
 } from './portrait.js';
 import { mergeIntoQueue } from './voice.js';
-import { DailyCapError, MEMORY_VOICE_REQUEST, TokenLimitError } from '../llm/openrouter.js';
+import { selectSpreadSample } from './sample.js';
+import { DailyCapError, MEMORY_VOICE_REQUEST, RETRY_STATUS, TokenLimitError } from '../llm/openrouter.js';
 import { log } from '../log.js';
 import { DAY_MS, HOUR_MS, MINUTE_MS, bumpDaily, dailyCounter, utcDay } from '../time.js';
 
@@ -105,6 +109,14 @@ const PORTRAIT_SHRINK = 0.8;
 
 // A portrait refresh's outcomes that drop an answer on purpose rather than fail (see refreshPortrait).
 const PORTRAIT_STOOD_DOWN = new Set(['paused', 'warming-up', 'gone', 'changed']);
+
+/** Whether a request error is the provider's or the network's passing trouble rather than an
+ * answer: a status the client itself retries (src/llm/openrouter.js#RETRY_STATUS, read from
+ * `statusCode`) or a timed-out / aborted attempt (`TimeoutError`, `AbortError`). */
+function isTransientProviderError(err) {
+  if (RETRY_STATUS.has(err?.statusCode)) return true;
+  return err?.name === 'TimeoutError' || err?.name === 'AbortError';
+}
 
 // The owner-facing message of a portrait refresh with no prompt to send (`no-prompt`).
 const PROFILE_PROMPT_MISSING = 'prompt file missing: prompts/profile.md (or prompts.local/profile.md) is not configured yet';
@@ -148,6 +160,45 @@ function nonEmptyFields(fields) {
   return Object.fromEntries(
     Object.entries(fields).filter(([, value]) => (typeof value === 'string' ? value.trim() !== '' : Array.isArray(value) && value.length > 0)),
   );
+}
+
+/** The sample refresh settings of the channel and server notes, read from the live config at the
+ * moment of use; every fallback equals config.json. */
+function notesSampleSettings(config) {
+  const memoryCfg = config?.memory ?? {};
+  return {
+    days: memoryCfg.notesSampleDays ?? 30,
+    max: memoryCfg.notesSampleMessages ?? 160,
+    maxAuthorShare: memoryCfg.notesSampleMaxAuthorShare ?? 0.35,
+    minMessages: memoryCfg.notesMinMessages ?? 30,
+  };
+}
+
+/** Whole days from an ISO stamp to `nowMs` (`writtenDaysAgo` of `<existing_notes>`), null when
+ * the stamp does not read as a time. */
+function daysSince(stamp, nowMs) {
+  const ms = typeof stamp === 'string' ? Date.parse(stamp) : NaN;
+  return Number.isFinite(ms) ? Math.max(0, Math.floor((nowMs - ms) / DAY_MS)) : null;
+}
+
+/** The counts a notes refresh reports about its sample: lines, distinct authors, distinct UTC days. */
+function sampleCounts(sample) {
+  return {
+    sample: sample.length,
+    authors: new Set(sample.map((m) => String(m.authorId))).size,
+    days: new Set(sample.filter((m) => Number.isFinite(m.ts)).map((m) => utcDay(m.ts))).size,
+  };
+}
+
+// A notes refresh's failures that stamp `notesAttemptAt`, so the scheduler backs off the target.
+const NOTES_ATTEMPT_REASONS = new Set(['too-few', 'conflict', 'bad-json', 'llm-error']);
+
+/** A notes refresh's reason and detail for a failed processChannel / processServer outcome: a
+ * request that does not fit even with the fewest lines (`over-cap`) is a `token-limit`, with the
+ * original reason as `detail`; every other reason is the refresh's own, its `detail` kept. */
+function notesRefreshReason(outcome) {
+  if (outcome.reason === 'over-cap') return { reason: 'token-limit', detail: 'over-cap' };
+  return { reason: outcome.reason, detail: outcome.detail };
 }
 
 /** formatTranscript's 'memory'-mode options for a warmup request (channel, person, server,
@@ -532,9 +583,12 @@ export function channelTemplateValues(config) {
  * @param {object[]} input.messages  Already selected (see selectChannelMessages), chronological.
  * @param {boolean} input.isMain
  * @param {string} [input.selfName]
+ * @param {{ purpose: string, topics: string, tone: string, writtenDaysAgo: number|null }} [input.existing]
+ *   The stored notes a sample refresh shows as claims: an `<existing_notes>` block after
+ *   `<channel>`, before `<messages>`. Absent on a warmup pass.
  * @returns {{ messages: {role: string, content: string}[], stats: { kept: number, dropped: number, estimatedTokens: number } }}
  */
-export function buildChannelRequest({ prompts, config, calibrator, channel, messages: channelMessages, isMain, selfName = '' }) {
+export function buildChannelRequest({ prompts, config, calibrator, channel, messages: channelMessages, isMain, selfName = '', existing = null }) {
   const labels = requireLabels(prompts);
   const system = fillPromptTemplate(prompts?.channel, channelTemplateValues(config));
   const channelLine = [
@@ -546,6 +600,7 @@ export function buildChannelRequest({ prompts, config, calibrator, channel, mess
     .filter(Boolean)
     .join(', ');
   const channelBlock = block('channel', channelLine);
+  const existingBlock = existing ? block('existing_notes', JSON.stringify(existing)) : '';
 
   const formatOptions = memoryFormatOptions(config, selfName, labels);
   const items = formatTranscript(channelMessages, formatOptions);
@@ -553,11 +608,11 @@ export function buildChannelRequest({ prompts, config, calibrator, channel, mess
 
   const cost = sectionCost(calibrator);
   const limit = requestTokenLimit(config);
-  const keptTexts = fitNewest([system, channelBlock], transcriptTexts, limit, cost);
+  const keptTexts = fitNewest([system, channelBlock, existingBlock], transcriptTexts, limit, cost);
   const keptItems = items.slice(items.length - keptTexts.length);
 
   const messagesBlock = block('messages', renderTranscript(keptItems, formatOptions.timezone, labels));
-  const user = [channelBlock, messagesBlock].filter(Boolean).join('\n\n');
+  const user = [channelBlock, existingBlock, messagesBlock].filter(Boolean).join('\n\n');
   const messages = [
     { role: 'system', content: system },
     { role: 'user', content: user },
@@ -977,6 +1032,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
   const readAtOf = new WeakMap();
   let running = false; // a full run() or one-off runXxx() in flight -- see isWarmingUp()
   let refreshing = 0; // portrait refreshes in flight: waitIdle() waits for them, isWarmingUp() does not
+  let notesRefreshing = false; // a notes refresh in flight (one at a time); isWarmingUp() does not see it
   const refreshingUsers = new Set(); // members whose portrait refresh is in flight (one at a time each)
   let idleWaiters = []; // resolvers for waitIdle(), notified once nothing above is in flight
   let consecutiveFailures = 0; // resets on any successful request; 3 in a row aborts the run (resumable)
@@ -1173,6 +1229,22 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
   function portraitRequestOptions({ voice = false } = {}) {
     const { maxRequestTokens: _warmupCap, ...options } = analyzerRequestOptions({ voice });
     return options;
+  }
+
+  /** One notes refresh request (see refreshChannelNotes): live behaviour, so it is sent like a
+   * portrait refresh's -- the 50k rail and `llm.maxRequestsPerDay` apply, the warmup's budget,
+   * progress and failure counter are never touched. Never throws: `daily-cap` (DailyCapError),
+   * `token-limit` (TokenLimitError), `llm-error` with `detail` for anything else.
+   * @returns {Promise<{ ok: true, completion: object } | { ok: false, reason: string, detail?: string }>}
+   */
+  async function sendNotesRequest(messages, { voice = false } = {}) {
+    try {
+      return { ok: true, completion: await llm.complete(messages, portraitRequestOptions({ voice })) };
+    } catch (err) {
+      if (err instanceof DailyCapError) return { ok: false, reason: 'daily-cap' };
+      if (err instanceof TokenLimitError) return { ok: false, reason: 'token-limit' };
+      return { ok: false, reason: 'llm-error', detail: detailOf(err) };
+    }
   }
 
   /**
@@ -1385,7 +1457,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
    * changes nothing): `portraitRefreshedAt` = `readAtMs`, when the history it was drawn from
    * began to be read (the next refresh samples own lines from then on, so a line written after
    * that read is never skipped; now when not given), the member's message count it covers (read
-   * now, see src/memory/portrait.js#portraitDue), and no pending attempt. In the same synchronous
+   * now, see src/memory/portrait.js#portraitDue), no pending attempt, and no longer waiting
+   * (`portraitDueAt`, the scheduler's stamp). In the same synchronous
    * step the member's queued character item goes (`dropQueuedCharacter`): it is older than this
    * decision, which read every line it was drawn from. */
   function stampPortrait(guildId, userId, readAtMs) {
@@ -1393,6 +1466,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       portraitRefreshedAt: new Date(Number.isFinite(readAtMs) ? readAtMs : now()).toISOString(),
       portraitMessageCount: storedCount(store.getUser(guildId, userId)?.messageCount),
       portraitAttemptAt: null,
+      portraitDueAt: null,
     });
     dropQueuedCharacter(guildId, userId);
   }
@@ -1430,9 +1504,14 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
    * bad answer is `bad-json`, retried by the next run.
    * `progress` (`{ index, total }`, both 1-based/count, optional) is this channel's position among
    * the run's eligible channels -- purely for `activity.detail`, a one-off `/nep warmup channels
-   * channel:` call omits it. */
-  async function processChannel(guildId, window, cfg, mainChannelIds, progress) {
-    touchActivity('channel', { id: window.id, name: window.name, index: progress?.index ?? null, total: progress?.total ?? null });
+   * channel:` call omits it.
+   * `refresh` (`{ sample, existing, version }`, a sample refresh, see refreshChannelNotes): the
+   * request reads `sample` as it is (no deeper fetch) with the stored notes `existing` as
+   * `<existing_notes>`; the answer is dropped as `conflict` when the channel's `updatedAt` is no
+   * longer `version`, and otherwise written like a pass's, but without the channel facts or the
+   * warmup progress: `{ ok: true, changed }`, the review stamped either way. */
+  async function processChannel(guildId, window, cfg, mainChannelIds, progress, { refresh } = {}) {
+    if (!refresh) touchActivity('channel', { id: window.id, name: window.name, index: progress?.index ?? null, total: progress?.total ?? null });
     if (!hot.prompts?.channel) {
       return { ok: false, stop: true, reason: 'no-prompt', message: 'prompt file missing: prompts/channel.md (or prompts.local/channel.md) is not configured yet' };
     }
@@ -1442,7 +1521,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     // history at all is described from its name, category and topic alone.
     let source = window.messages;
     const wanted = cfg.messagesPerChannel ?? 200;
-    if (source.length < wanted && window.channel) {
+    if (!refresh && source.length < wanted && window.channel) {
       try {
         source = await fetchHistoryWindow(window.channel, { limit: wanted, minTs: 0, selfId: client.user?.id, embedTextChars: hot.config.media?.embedTextChars, videoSites: hot.config.media?.video?.sites });
         log.info('warmup: quiet channel fetched deeper', { channelId: window.id, messages: source.length });
@@ -1450,12 +1529,13 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
         log.warn('warmup: deeper fetch failed, describing from the window', { channelId: window.id, error: err });
       }
     }
-    const selected = selectChannelMessages(source, cfg.messagesPerChannel);
+    const selected = refresh ? refresh.sample : selectChannelMessages(source, cfg.messagesPerChannel);
     const selfName = getSelfName(guildId);
 
     let built;
     try {
-      built = buildChannelRequest({ prompts: hot.prompts, config: requestConfig(), calibrator, channel: window, messages: selected, isMain, selfName });
+      // A refresh is fitted under the live per-request rail it is sent under (sendNotesRequest).
+      built = buildChannelRequest({ prompts: hot.prompts, config: refresh ? hot.config : requestConfig(), calibrator, channel: window, messages: selected, isMain, selfName, existing: refresh?.existing ?? null });
     } catch (err) {
       if (err instanceof SectionsTooLargeError) {
         log.warn('warmup: channel request does not fit even the minimum, skipping this round', { channelId: window.id });
@@ -1464,7 +1544,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       throw err;
     }
 
-    const result = await callWithRails(built.messages);
+    const result = refresh ? await sendNotesRequest(built.messages) : await callWithRails(built.messages);
     if (!result.ok) return result;
 
     let parsed;
@@ -1477,6 +1557,23 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
 
     const clamped = clampChannelResult(parsed, hot.config);
     const fields = nonEmptyFields(clamped);
+    if (refresh) {
+      // Right before the write, with no await left: a pause, a forget or a newer note wins.
+      if (store.state.data.paused) return { ok: false, reason: 'paused' };
+      const current = store.getChannel(guildId, window.id);
+      if (!current) return { ok: false, reason: 'gone' };
+      if ((current.updatedAt ?? null) !== refresh.version) return { ok: false, reason: 'conflict' };
+      const snapshot = () => {
+        const stored = store.getChannel(guildId, window.id);
+        return JSON.stringify([stored?.purpose ?? '', stored?.topics ?? '', stored?.tone ?? '']);
+      };
+      const before = snapshot();
+      if (Object.keys(fields).length > 0) store.updateChannel(guildId, window.id, fields);
+      const changed = snapshot() !== before;
+      store.markNotesSampled(guildId, window.id, now(), { outcome: 'reviewed' });
+      store.flush();
+      return { ok: true, changed, channel: { id: window.id, name: window.name }, result: clamped };
+    }
     if (Object.keys(fields).length > 0) store.updateChannel(guildId, window.id, fields);
     // A channel note without its counters/top writers looks dead and
     // anonymous until live traffic slowly fills them in (see the module
@@ -1601,9 +1698,14 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
   /** The server-wide `server.md` request: `<channels>` = stored channel notes, `<members>` = one
    * line per profiled member, `<messages>` = newest `serverSampleMessages` of the main channels (or
    * the single busiest channel when none is marked main) → `store.updateGuild`/`store.setLore`.
-   * Outcomes as for `processChannel`: a bad answer is `bad-json`, retried by the next run. */
-  async function processServer(guildId, windows, cfg, mainChannelIds, people) {
-    touchActivity('server');
+   * Outcomes as for `processChannel`: a bad answer is `bad-json`, retried by the next run.
+   * `refresh` (`{ sample, existing, version }`, a sample refresh, see refreshServerNotes):
+   * `<messages>` is `sample` as it is, the stored notes `existing` go in an `<existing_notes>`
+   * block before it; the answer is dropped as `conflict` when the guild's `notesUpdatedAt` is no
+   * longer `version`, otherwise only `patterns`/`starters`/`injokes` are written (lore has its own
+   * path), the warmup progress untouched: `{ ok: true, changed }`, the review stamped either way. */
+  async function processServer(guildId, windows, cfg, mainChannelIds, people, { refresh } = {}) {
+    if (!refresh) touchActivity('server');
     if (!hot.prompts?.server) {
       return { ok: false, stop: true, reason: 'no-prompt', message: 'prompt file missing: prompts/server.md (or prompts.local/server.md) is not configured yet' };
     }
@@ -1641,18 +1743,19 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     const mainWindows = windows.filter((window) => mainChannelIds.has(String(window.id)));
     const sourceWindows = mainWindows.length > 0 ? mainWindows : [...windows].sort((a, b) => b.messages.length - a.messages.length).slice(0, 1);
     const pooled = sourceWindows.flatMap((window) => window.messages).sort((a, b) => a.ts - b.ts);
-    const newest = selectChannelMessages(pooled, cfg.serverSampleMessages);
+    const newest = refresh ? refresh.sample : selectChannelMessages(pooled, cfg.serverSampleMessages);
     const items = formatTranscript(newest, formatOptions);
     const messagesBlock = block('messages', renderTranscript(items, timezone, labels));
+    const existingBlock = refresh?.existing ? block('existing_notes', JSON.stringify(refresh.existing)) : '';
 
-    const user = [characterBlock, channelsBlock, membersBlock, messagesBlock].filter(Boolean).join('\n\n');
+    const user = [characterBlock, channelsBlock, membersBlock, existingBlock, messagesBlock].filter(Boolean).join('\n\n');
     const messages = [
       { role: 'system', content: system },
       { role: 'user', content: user },
     ];
 
     // A server answer words the patterns and starters notes: the persona's voice.
-    const result = await callWithRails(messages, { voice: true });
+    const result = refresh ? await sendNotesRequest(messages, { voice: true }) : await callWithRails(messages, { voice: true });
     if (!result.ok) return result;
 
     let parsed;
@@ -1666,6 +1769,21 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     const nameOf = buildNameIndex(windows);
     const clamped = clampServerResult(parsed, hot.config, nameOf);
     const guildFields = nonEmptyFields({ patterns: clamped.patterns, starters: clamped.starters, injokes: clamped.injokes });
+    if (refresh) {
+      // Right before the write, with no await left: a pause or newer notes win.
+      if (store.state.data.paused) return { ok: false, reason: 'paused' };
+      if ((store.getGuild(guildId).notesUpdatedAt ?? null) !== refresh.version) return { ok: false, reason: 'conflict' };
+      const snapshot = () => {
+        const stored = store.getGuild(guildId);
+        return JSON.stringify([stored.patterns ?? '', stored.starters ?? '', stored.injokes ?? []]);
+      };
+      const before = snapshot();
+      if (Object.keys(guildFields).length > 0) store.updateGuild(guildId, guildFields);
+      const changed = snapshot() !== before;
+      store.markNotesSampled(guildId, 'guild', now(), { outcome: 'reviewed' });
+      store.flush();
+      return { ok: true, changed };
+    }
     if (Object.keys(guildFields).length > 0) store.updateGuild(guildId, guildFields);
     if (clamped.lore.length > 0) {
       store.setLore(guildId, clamped.lore, {
@@ -1881,6 +1999,169 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     })();
 
     return { ok: true, count: targets.length };
+  }
+
+  // -------------------------------------------------------------------
+  // Notes refresh: one channel's or the server's notes re-described from a spread sample
+  // -------------------------------------------------------------------
+
+  /** A refresh's own history read: the last `days` of `channel` (at most
+   * `warmup.fetchLimitPerChannel`), without the persona's and other bots' lines. */
+  async function fetchNotesHistory(channel, days) {
+    const messages = await fetchHistoryWindow(channel, {
+      limit: hot.config.warmup?.fetchLimitPerChannel ?? 15000,
+      minTs: now() - days * DAY_MS,
+      selfId: client.user?.id,
+      embedTextChars: hot.config.media?.embedTextChars,
+      videoSites: hot.config.media?.video?.sites,
+    });
+    return messages.filter((m) => !m.self && !m.bot);
+  }
+
+  /**
+   * The shared frame of refreshChannelNotes / refreshServerNotes: the guards (a warmup run in
+   * flight or another refresh, paused, no prompt, the guild or the target gone, the LLM's daily
+   * cap), one refresh at a time (`notesRefreshing`, never `running`: a refresh does not mute the
+   * persona, `isWarmingUp()` stays false), the attempt stamp on a failure the target is to back
+   * off from (NOTES_ATTEMPT_REASONS) and the one log line. `work` reads, samples and asks; it
+   * resolves to processChannel's / processServer's outcome plus the sample's counts. A refresh is
+   * not a warmup phase: the activity snapshot is left alone.
+   */
+  async function refreshNotes({ guildId, target, channelId, promptKey, resolveTarget, work }) {
+    const logFields = target === 'channel' ? { target, channelId } : { target };
+    const stampTarget = target === 'channel' ? channelId : 'guild';
+    const fail = (reason, detail) => {
+      if (NOTES_ATTEMPT_REASONS.has(reason)) store.markNotesSampled(guildId, stampTarget, now(), { outcome: 'attempt' });
+      log.info('warmup: notes refresh failed', { ...logFields, reason });
+      return detail === undefined ? { ok: false, reason } : { ok: false, reason, detail };
+    };
+    if (running || notesRefreshing) return fail('running');
+    if (store.state.data.paused) return fail('paused');
+    if (!hot.prompts?.[promptKey]) return fail('no-prompt');
+    const guild = resolvedGuild(guildId);
+    const resolved = guild ? resolveTarget(guild) : null;
+    if (!resolved) return fail('gone');
+    if (llmCapReached(store.state.data, hot.config, now())) return fail('daily-cap');
+
+    notesRefreshing = true;
+    try {
+      const outcome = await work(resolved, notesSampleSettings(hot.config));
+      if (!outcome.ok) {
+        const { reason, detail } = notesRefreshReason(outcome);
+        return fail(reason, detail);
+      }
+      const counts = sampleCounts(outcome.sample);
+      log.info('warmup: notes refreshed', { ...logFields, changed: outcome.changed, ...counts });
+      return { ok: true, changed: outcome.changed, ...counts };
+    } finally {
+      notesRefreshing = false;
+    }
+  }
+
+  /**
+   * Re-describe one channel's notes (`purpose`/`topics`/`tone`) from a sample spread over the last
+   * `memory.notesSampleDays` (src/memory/sample.js#selectSpreadSample: `memory.notesSampleMessages`
+   * lines at most, one author at most `memory.notesSampleMaxAuthorShare` of them), the stored notes
+   * shown as claims in `<existing_notes>` (`writtenDaysAgo`: whole days since their text last
+   * changed). Fewer than `memory.notesMinMessages` lines is `too-few`. The answer is written only
+   * when the channel's notes did not change while the request was in flight (`conflict`
+   * otherwise); `changed` says whether the text moved. Never sets the channel facts nor marks
+   * warmup progress. Stamps: `notesSampleReviewedAt` on a clean answer (changed or not),
+   * `notesAttemptAt` on `too-few`, `conflict`, `bad-json`, `llm-error`. The request goes through the
+   * live rails (sendNotesRequest: the 50k request cap, `llm.maxRequestsPerDay`), never the
+   * warmup's budget. Started by src/memory/notes-refresh.js's scheduler.
+   * @param {string} guildId
+   * @param {string} channelId
+   * @returns {Promise<{ ok: true, changed: boolean, sample: number, authors: number, days: number } |
+   *   { ok: false, reason: 'running'|'paused'|'gone'|'too-few'|'conflict'|'bad-json'|'llm-error'|'token-limit'|'daily-cap'|'no-prompt', detail?: string }>}
+   *   `detail`: the provider error of an `llm-error`, or `over-cap` for a `token-limit` found while fitting.
+   */
+  function refreshChannelNotes(guildId, channelId) {
+    const id = String(channelId);
+    return refreshNotes({
+      guildId,
+      target: 'channel',
+      channelId: id,
+      promptKey: 'channel',
+      resolveTarget: (guild) => {
+        if (!store.getChannel(guildId, id)) return null;
+        return readableChannels(guild, hot.config.bot).find((channel) => String(channel.id) === id) ?? null;
+      },
+      work: async (channel, settings) => {
+        const messages = await fetchNotesHistory(channel, settings.days);
+        if (store.state.data.paused) return { ok: false, reason: 'paused' };
+        const sample = selectSpreadSample(messages, { max: settings.max, maxAuthorShare: settings.maxAuthorShare, nowMs: now() });
+        if (sample.length < settings.minMessages) return { ok: false, reason: 'too-few' };
+        const record = store.getChannel(guildId, id);
+        if (!record) return { ok: false, reason: 'gone' };
+        const existing = { purpose: record.purpose ?? '', topics: record.topics ?? '', tone: record.tone ?? '', writtenDaysAgo: daysSince(record.updatedAt, now()) };
+        const window = { id, name: channel.name, category: channel.parent?.name ?? null, topic: channel.topic ?? null, messages, channel };
+        const mainChannelIds = mainChannelSet(hot.config.memory?.mainChannelIds);
+        const outcome = await processChannel(guildId, window, hot.config.warmup ?? {}, mainChannelIds, undefined, {
+          refresh: { sample, existing, version: record.updatedAt ?? null },
+        });
+        return { ...outcome, sample };
+      },
+    });
+  }
+
+  /**
+   * Re-describe the server notes (`patterns`/`starters`/`injokes`) the way refreshChannelNotes
+   * does a channel's: the sample is spread over the main channels' pooled history
+   * (`memory.mainChannelIds`; with none, the readable channel with the most stored messages),
+   * `<channels>` and `<members>` as on a warmup pass, the stored notes in `<existing_notes>`
+   * (member tokens as the analyzer reads them), the version is the guild's `notesUpdatedAt`. Lore
+   * in the answer is ignored (it has its own path). Stamps go on the guild. Same outcomes.
+   * @param {string} guildId
+   * @returns {Promise<{ ok: true, changed: boolean, sample: number, authors: number, days: number } |
+   *   { ok: false, reason: string, detail?: string }>}
+   */
+  function refreshServerNotes(guildId) {
+    return refreshNotes({
+      guildId,
+      target: 'server',
+      promptKey: 'server',
+      resolveTarget: (guild) => guild,
+      work: async (guild, settings) => {
+        const readable = readableChannels(guild, hot.config.bot);
+        const mainChannelIds = mainChannelSet(hot.config.memory?.mainChannelIds);
+        let sources = readable.filter((channel) => mainChannelIds.has(String(channel.id)));
+        if (sources.length === 0) {
+          const stored = (channel) => store.getChannel(guildId, channel.id)?.messageCount ?? 0;
+          sources = [...readable].sort((a, b) => stored(b) - stored(a)).slice(0, 1);
+        }
+        const fetched = new Map();
+        for (const channel of sources) fetched.set(String(channel.id), await fetchNotesHistory(channel, settings.days));
+        if (store.state.data.paused) return { ok: false, reason: 'paused' };
+        const pooled = [...fetched.values()].flat().sort((a, b) => a.ts - b.ts);
+        const sample = selectSpreadSample(pooled, { max: settings.max, maxAuthorShare: settings.maxAuthorShare, nowMs: now() });
+        if (sample.length < settings.minMessages) return { ok: false, reason: 'too-few' };
+
+        const windows = readable.map((channel) => ({
+          id: String(channel.id),
+          name: channel.name,
+          category: channel.parent?.name ?? null,
+          topic: channel.topic ?? null,
+          messages: fetched.get(String(channel.id)) ?? [],
+          channel,
+        }));
+        const record = store.getGuild(guildId);
+        const nameOf = buildNameIndex(windows);
+        const notesNameOf = (memberId) => nameOf(memberId) ?? store.getUser(guildId, memberId)?.names?.[0] ?? null;
+        const resolve = (text) => fromTokens(typeof text === 'string' ? text : '', notesNameOf, 'analyzer');
+        const existing = {
+          patterns: resolve(record.patterns),
+          starters: resolve(record.starters),
+          injokes: (Array.isArray(record.injokes) ? record.injokes : []).map(resolve),
+          writtenDaysAgo: daysSince(record.notesUpdatedAt, now()),
+        };
+        const warmupCfg = hot.config.warmup ?? {};
+        const outcome = await processServer(guildId, windows, warmupCfg, mainChannelIds, pickPeople(windows, warmupCfg), {
+          refresh: { sample, existing, version: record.notesUpdatedAt ?? null },
+        });
+        return { ...outcome, sample };
+      },
+    });
   }
 
   /**
@@ -2295,6 +2576,13 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
         return unsent('daily-cap', { stamp: false, cap: 'llm' });
       }
       if (err instanceof TokenLimitError) return unsent('token-limit', { stamp: false });
+      if (isTransientProviderError(err)) {
+        // A rate limit, a gateway error or a timeout says nothing about this member and produced
+        // no answer: the day's slot goes back and the member keeps its place (no back-off).
+        giveBackSlot(slot);
+        if (!store.state.data.paused && sameProfile()) stampAttempt(guildId, id, previousAttempt);
+        return portraitNotDone(id, 'llm-error', { sent: true, slotReturned: true, detail: detailOf(err) });
+      }
       return portraitNotDone(id, 'llm-error', { sent: true, detail: detailOf(err) });
     }
 
@@ -2381,6 +2669,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     status,
     reset,
     refreshPortrait,
+    refreshChannelNotes,
+    refreshServerNotes,
     isWarmingUp,
     waitIdle,
   };

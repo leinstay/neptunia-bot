@@ -36,6 +36,7 @@
 | `channelPull` | `true` | 当最近的消息或触发器包含真实的频道提及时，将该频道拉入回合请求。缺失键 = 开。参见 `context.pull.*` |
 | `elsewhere` | `true` | 响应机器人可读但不可写的频道中的呼叫（@提及、回复、名字）。回复发送到 `memory.mainChannelIds` 中第一个可用的频道。缺失键 = 开 |
 | `portraitRefresh` | `true` | 根据消息计数器定期刷新成员画像。缺失键 = 开 |
+| `notesRefresh` | `true` | 定期从近期消息的分散样本中重新检查频道和服务器笔记。缺失键 = 开。参见 `memory.notesRefreshDays*` 和[预热：保持笔记更新](warmup.md#保持笔记更新) |
 | `memoryTwoStage` | `false` | 将记忆分析器拆分为两个阶段：中性 GPT 模型判定变更（阶段 A），然后语音模型撰写角色文本（阶段 B）。必须严格为 `true` 才能启用；缺失键 = 关。参见 `memory.voice.*` |
 | `mentor` | `false` | 手动测试子进程，使用独立模型。必须严格为 `true` 才能启用；缺失的键视为关闭。参见 [Mentor](#mentor) |
 | `promptCache` | `false` | 为系统消息添加提供商的提示缓存标记。缓存读取仅为正常输入成本的一小部分；某些提供商不将缓存读取计入 token 配额。必须严格为 `true` 才能启用；缺失的键视为关闭。参见 `llm.cache.*` |
@@ -454,8 +455,21 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `maxNewRecent` | `3` | 分析器每批次可添加的行数 |
 | `recentChars` | `160` | 每条近期记事的最大字符数 |
 | `recentShown` | `12` | 在 `<existing_recent>` 中向分析器展示的实时近期行数，避免重复 |
-| `notesStaleDays` | `7` | 频道或服务器笔记多少天未变化后被标记为待分析器重新检查。`0` 关闭标记 |
-| `notesMinLines` | `20` | 频道在本批次中需要多少行消息才会发送过时标记 |
+| `notesStaleDays` | `7` | 自上次有效检查或文本变更以来经过此天数后，频道或服务器笔记在下一个合格批次中被标记为待复审。标记仅在此后累积了足够的消息（频道为 `notesMinMessages`，服务器为 `notesGuildMinMessages`）且批次中包含该频道至少 `notesBatchLines` 行时才发送。`0` 关闭标记 |
+| `notesBatchLines` | `8` | 当前批次中来自某频道的消息数，达到此值时才考虑该频道的过时标记。批次提供本地证据；累积计数（`notesMinMessages`）追踪自上次检查以来是否有足够活动 |
+| `notesMinMessages` | `30` | 自频道笔记的上次文本变更和上次有效检查中较晚者算起，频道需要累积的消息数，之后才有资格被标记为过时 |
+| `notesGuildMinMessages` | `100` | 自服务器笔记的上次文本变更和上次有效检查中较晚者算起，所有已存储频道的累积消息数总和需要达到此值，之后服务器笔记才有资格被标记 |
+| `notesRetryHours` | `24` | 标记发送后，同一频道或服务器再次被标记前需等待的小时数。同时适用于流分析器标记和采样刷新尝试 |
+| `notesRefreshDaysMain` | `7` | `mainChannelIds` 中的频道自上次文本变更或采样复审以来经过此天数后，进入采样刷新等待队列（`features.notesRefresh`） |
+| `notesRefreshDays` | `21` | 同 `notesRefreshDaysMain`，用于不在 `mainChannelIds` 中的频道 |
+| `notesServerRefreshDays` | `7` | 服务器笔记自上次文本变更或采样复审以来经过此天数后进入采样刷新。服务器在循环中排在频道之后，不计入频道的每日限额 |
+| `notesRefreshPerDay` | `4` | 每 UTC 天成功刷新的频道笔记数。失败的请求不占用名额。日计数器存储在 `state.json` 中（`notesRefreshDay` / `notesRefreshCount`） |
+| `notesCheckMinutes` | `60` | 笔记刷新调度器检查逾期频道和服务器的频率。上次检查时间存储在 `state.json` 中（`notesRefreshLookAt`） |
+| `notesSampleDays` | `30` | 采样刷新时读取的频道历史天数 |
+| `notesSampleMessages` | `160` | 分散样本的目标消息数。消息按天分散（最新一天优先，每轮每天一条），避免仅采样最近的对话 |
+| `notesSampleMaxAuthorShare` | `0.35` | 单个作者在样本中最多占此比例；主导作者的多余消息用其他作者的行替换 |
+| `portraitMaxAgeDays` | `21` | 画像超过此天数（且此后至少有 `portraitMinMessages` 条自身消息）时，即使未达到 `portraitRefreshMessages` 也会进入刷新队列 |
+| `portraitMinMessages` | `60` | 年龄路径（`portraitMaxAgeDays`）触发刷新所需的自上次画像以来的自身消息数 |
 | `privateMaxAgeMinutes` | `360` | 安静的私聊缓冲区在未达到 `minBatchMessages` 时多少分钟后仍进行分析 |
 | `channelWritersStored` | `20` | 每个频道保留的最活跃作者数，按衰减计数排名 |
 | `channelWritersHalfLifeDays` | `30` | 每频道作者计数的半衰期（天）；停止发言的作者排名会低于活跃的 |

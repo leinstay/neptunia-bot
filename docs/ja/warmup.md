@@ -73,4 +73,34 @@
 
 完全にやり直すには、まず `/nep memory wipe` を使用します。メンバープロファイル（態度とエピソードを含む）、サーバーの傾向、チャンネルマップ、ロアブックエントリ、ウォームアップの進捗がすべてクリアされます。
 
+## ノートの鮮度維持
+
+チャンネルとサーバーのノートはウォームアップ時に書かれ、その後ストリームアナライザーがバッチに十分な証拠があるときに更新します。しかし時間が経つと、短いバッチでは、人々の話し方やチャンネルの話題の緩やかな変化を捉えられなくなります。ノートリフレッシュ（`features.notesRefresh`）は、最近のメッセージの完全なサンプルからノートを定期的に再チェックすることでこれを補います。ウォームアップ時にチャンネルを記述したのと同じ方法です。
+
+### 何が起きるか
+
+スケジューラーが `memory.notesCheckMinutes`（デフォルト 60）分ごとに、どのチャンネルとサーバーノートが期限を過ぎているかチェックします。チャンネルが対象になる条件: ノートのテキストが既にある（ウォームアップが記述していないチャンネルはウォームアップに委ねられる）。最後のテキスト変更またはサンプルレビューから十分な日数が経過（`memory.notesRefreshDaysMain`、`memory.mainChannelIds` 内のチャンネルはデフォルト 7、それ以外は `memory.notesRefreshDays`、デフォルト 21）。その時点以降 `memory.notesMinMessages`（デフォルト 30）以上のメッセージが蓄積。`warmup.lookbackDays`（デフォルト 60）日以内にメッセージがあること。`memory.notesRetryHours`（デフォルト 24）以内に失敗した試行がないこと。
+
+対象チャンネルに対し、エンジンは `memory.notesSampleDays`（デフォルト 30）日分の履歴を読み、ペルソナや他のボットの行を除き、`memory.notesSampleMessages`（デフォルト 160）件のメッセージを日ごとに分散してピックします。分散により最新の会話だけを偏ってサンプリングすることを避けます。1 人の著者はサンプルの `memory.notesSampleMaxAuthorShare`（デフォルト 0.35）を超えることはできません。有効なメッセージが `notesMinMessages` 未満の場合、チャンネルはスキップされます（`too-few`）。
+
+リクエストはウォームアップと同じ `channel.md`（サーバーの場合は `server.md`）を使い、1 つ追加があります: `<existing_notes>` ブロックに保存済みノートの JSON と `writtenDaysAgo`（最後の変更からの日数、不明時は null）が含まれます。プロンプトはモデルにこれらをサンプルに対して評価すべき主張として扱い、証拠としては扱わないよう指示します。回答は保存済みの purpose、topics、tone を置き換えます（サーバーの場合は patterns、starters、injokes）。履歴の読み取りと回答の間にチャンネルのテキストが変更された場合（別のバッチが更新した場合）、回答は破棄されます（`conflict`）。いずれの場合も、有効な回答は `notesSampleReviewedAt` をスタンプします。テキストの `updatedAt` は実際に変更があった場合のみ移動します。
+
+サーバーは同じルールに従います: `memory.notesServerRefreshDays`（デフォルト 7）、全チャンネル合計で `memory.notesGuildMinMessages`（デフォルト 100）メッセージ。サーバーはサイクル内でチャンネルの後に処理され、日次上限の対象外です。
+
+### 頻度とコスト
+
+UTC 日あたり `memory.notesRefreshPerDay`（デフォルト 4）件までの成功したチャンネルリフレッシュ。失敗したリクエストはスロットを消費しません。日次カウンターは `state.json` に `notesRefreshDay` / `notesRefreshCount` として保存されます。サーバーリフレッシュはチャンネル上限にカウントされません。
+
+各リフレッシュリクエストは `llm.maxRequestsPerDay` と 50k トークン上限にカウントされますが、ウォームアップの `warmup.maxTokens` にはカウントされません。リフレッシュ中もペルソナはミュートされません。ウォームアップパスの実行中はリフレッシュが拒否されます。
+
+### ログ行
+
+`warmup: notes refreshed`（`{ target: "channel" | "server", channelId, changed, sample, authors, days }`）。
+
+`warmup: notes refresh failed`（`{ target, channelId, reason }`）。理由: `running`（ウォームアップパス実行中）、`paused`、`gone`（チャンネルが存在しない）、`too-few`（有効なメッセージが少なすぎる）、`conflict`（履歴読み取りと回答の間にテキストが変更）、`bad-json`、`llm-error`、`token-limit`、`daily-cap`、`no-prompt`。
+
+`notes refresh: look`（`{ due, started, refreshed, changed, skipped }`、および `buckets { neverReviewed, fresh, due, few, quiet, retryWait }` を全チャンネルでカウント）。
+
+見た目を新しくするためだけに書き直されることはありません。主張がまだ有効かどうかサンプルで判断できない場合、保存済みテキストはそのまま残ります。
+
 ウォームアップの設定キーの全一覧は[設定: `warmup`](configuration.md#warmup)を参照してください。
