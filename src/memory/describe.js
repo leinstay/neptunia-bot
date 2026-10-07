@@ -97,7 +97,7 @@
 // owner's recache, src/memory/gif-recache.js) replaces it.
 
 import { isPlainObject } from '../config.js';
-import { mediaProxyUrl } from '../discord/media.js';
+import { fitBox, mediaProxyUrl } from '../discord/media.js';
 import { createImageFetcher } from '../discord/fetch-image.js';
 import { createVideoFetcher } from '../discord/fetch-video.js';
 import { isDirectUrlSite, publicVideoUrl, safeLocation, youtubeVideoId } from '../discord/video-sites.js';
@@ -247,15 +247,18 @@ function questionKey(itemId, question, prefix = 'video') {
 /**
  * The URL a picture is downloaded from for the vision model: a sticker or
  * emoji URL as it is (already sized by its own builder; the proxy must never
- * touch either), every other kind through the media proxy at
- * `media.imageSize` -- a video poster as webp, a gif as one still png frame
- * (as webp the proxy serves the whole animation, often above
- * `context.vision.maxBytes`), anything else as webp. A no-op for a
- * non-Discord host such as a YouTube thumbnail's i.ytimg.com.
+ * touch either), every other kind through the media proxy -- a video
+ * poster as webp, a gif as one still png frame (as webp the proxy serves the
+ * whole animation, often above `context.vision.maxBytes`), anything else as
+ * webp. A gif or a picture of known size has its longer side scaled to at
+ * most `media.imageSize`, the aspect kept (fitBox: the proxy crops any box
+ * of another aspect); of unknown size it gets no size at all and the
+ * original is served, `context.vision.maxBytes` still capping the download.
+ * A no-op for a non-Discord host such as a YouTube thumbnail's i.ytimg.com.
  */
 function pictureImageUrl(item, mediaCfg) {
   if (item.kind === 'sticker' || item.kind === 'emoji') return item.url;
-  const sized = { width: mediaCfg.imageSize, height: mediaCfg.imageSize };
+  const sized = fitBox(item.width, item.height, mediaCfg.imageSize) ?? {};
   if (item.kind === 'video') return mediaProxyUrl(item.url, { format: 'webp' });
   if (item.kind === 'gif') return mediaProxyUrl(item.url, { ...sized, format: 'png', animated: false });
   return mediaProxyUrl(item.url, { ...sized, format: 'webp' });
@@ -1197,9 +1200,11 @@ export function createDescriber({
   /**
    * The second look on a question: fetch `item` again exactly like a watch
    * (fetchVideoMedia -- same probe chain, direct-URL rules, caps and pinned
-   * provider) and ask the video model `question` through the
-   * `rewatch-answer` prompt (`{{question}}`, `{{maxChars}}` =
-   * `media.video.rewatch.answerChars`). Needs video vision on,
+   * provider) and ask the video model `question`: the `rewatch-answer`
+   * prompt is the system message (`{{maxChars}}` =
+   * `media.video.rewatch.answerChars`; a `{{question}}` still in it is filled
+   * too, never left literal) and the question goes as a text part of the user
+   * message next to the video. Needs video vision on,
    * `features.videoRewatch` not false, the prompt, a video candidate and a
    * non-empty question. Both daily counters must have room
    * (`media.video.rewatch.maxPerDay` and `media.video.maxPerDay`); both
@@ -1273,7 +1278,7 @@ export function createDescriber({
       completion = await llm.complete(
         [
           { role: 'system', content: fillPromptTemplate(promptText, { question: asked, maxChars: answerChars, today: todayDate() }) },
-          { role: 'user', content: [videoPart(videoCfg, media)] },
+          { role: 'user', content: [{ type: 'text', text: asked }, videoPart(videoCfg, media)] },
         ],
         videoRequestOptions(videoCfg, media, { maxOutputTokens: rewatchCfg.maxOutputTokens }),
       );
@@ -1297,9 +1302,11 @@ export function createDescriber({
    * features.vision, a missing key counts as on): download `item` the way a
    * caption does (pictureImageUrl, `context.vision.maxBytes`) and ask the
    * media model (`classifier.media`, a helper request, `purpose: 'relook'`,
-   * output capped at `media.video.rewatch.maxOutputTokens`) `question`
-   * through the `rewatch-answer` prompt (`{{question}}`, `{{maxChars}}` =
-   * `media.video.rewatch.answerChars`). Only an `image` item with a URL and a
+   * output capped at `media.video.rewatch.maxOutputTokens`) `question`: the
+   * `rewatch-answer` prompt is the system message (`{{maxChars}}` =
+   * `media.video.rewatch.answerChars`; a `{{question}}` still in it is filled
+   * too, never left literal) and the question goes as a text part of the user
+   * message next to the picture. Only an `image` item with a URL and a
    * non-empty question. It shares the one second-look counter with
    * rewatchVideo (`media.video.rewatch.maxPerDay`, `state.data.rewatchDay` /
    * `rewatchCount`), reserved before the download and kept on failure; it
@@ -1374,7 +1381,7 @@ export function createDescriber({
       completion = await llm.complete(
         [
           { role: 'system', content: fillPromptTemplate(promptText, { question: asked, maxChars: answerChars, today: todayDate() }) },
-          { role: 'user', content: [{ type: 'image_url', image_url: { url: downloaded.dataUrl } }] },
+          { role: 'user', content: [{ type: 'text', text: asked }, { type: 'image_url', image_url: { url: downloaded.dataUrl } }] },
         ],
         {
           model: classifierMediaModel(hot.config),

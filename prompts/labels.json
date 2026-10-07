@@ -60,7 +60,7 @@
     "reactionMine": "{emoji} x{count} (you)"
   },
   "senses": {
-    "imageSee": "Pictures marked as attached you see yourself; they may also carry a helper's note on what is easy to miss (who is there, what the joke is), but the helper can be wrong.",
+    "imageSee": "Pictures marked as attached you see yourself; they may carry a helper's note, which is a fallible reading whose confident wording is not evidence. Check identities and claims against what you see, and when a region is too small or unclear to make out, do not adopt a name or story from the note or the chat as fact. The helper may have seen more detail, so a vague view is inconclusive.",
     "imageDescribed": "Other pictures come with a short description from a helper; you did not see them yourself.",
     "imageBlind": "Pictures not marked as attached appear as a label — you cannot see what is on them.",
     "gifDescribed": "GIFs come with a one-line description of a single frame from a helper. They have no sound. Without a description, do not infer what the GIF shows.",

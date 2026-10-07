@@ -23,6 +23,7 @@ import {
   siteOf,
   clipWithEllipsis,
   isGifHostUrl,
+  fitBox,
 } from '../src/discord/media.js';
 
 // --- siteOf --------------------------------------------------------------------
@@ -661,6 +662,25 @@ test('collectVideos: no sites (missing or empty) -> attachments only', () => {
   assert.deepEqual(collectVideos(videoMessage(), { videoSites: [] }).map((item) => item.itemId), ['a2']);
 });
 
+// --- fitBox ------------------------------------------------------------------
+
+test('fitBox: the longer side is scaled to at most max, the aspect kept, integers', () => {
+  assert.deepEqual(fitBox(988, 1306, 512), { width: 387, height: 512 });
+  assert.deepEqual(fitBox(1306, 988, 512), { width: 512, height: 387 });
+});
+
+test('fitBox: a picture already within max is never upscaled', () => {
+  assert.deepEqual(fitBox(167, 264, 512), { width: 167, height: 264 });
+});
+
+test('fitBox: a missing, zero or non-numeric dimension gives null', () => {
+  assert.equal(fitBox(null, 1306, 512), null);
+  assert.equal(fitBox(988, undefined, 512), null);
+  assert.equal(fitBox(0, 1306, 512), null);
+  assert.equal(fitBox(988, 0, 512), null);
+  assert.equal(fitBox('988', 1306, 512), null);
+});
+
 // --- collectPictures / isDescribable -------------------------------------------
 
 function message(id, overrides = {}) {
@@ -1191,6 +1211,8 @@ test('collectPictures: forwarded snapshots follow the message\'s own pictures, i
     kind: 'link',
     url: 'https://i.ytimg.com/vi/abc/hq.jpg',
     name: 'Forwarded video',
+    width: null,
+    height: null,
   });
 });
 

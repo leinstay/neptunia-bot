@@ -62,8 +62,34 @@ test('normalizeMessage: classifies attachments through media.js, keeping url/siz
     ]),
   });
   const m = normalizeMessage(raw, 'self');
-  assert.deepEqual(m.attachments[0], { id: 'a1', kind: 'image', name: 'pic.png', url: 'https://cdn/pic.png', size: 123, durationSec: null });
+  assert.deepEqual(m.attachments[0], {
+    id: 'a1',
+    kind: 'image',
+    name: 'pic.png',
+    url: 'https://cdn/pic.png',
+    size: 123,
+    durationSec: null,
+    width: null,
+    height: null,
+  });
   assert.equal(m.attachments[1].kind, 'video');
+});
+
+test('normalizeMessage: an attachment carries its pixel size from discord.js, null when Discord gives none', () => {
+  const raw = rawMessage({
+    attachments: new Map([
+      ['a1', { id: 'a1', contentType: 'image/png', name: 'pic.png', url: 'https://cdn/pic.png', size: 1, width: 988, height: 1306 }],
+      ['a2', { id: 'a2', contentType: 'text/plain', name: 'a.txt', url: 'https://cdn/a.txt', size: 1, width: null, height: null }],
+    ]),
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.attachments[0].width, 988);
+  assert.equal(m.attachments[0].height, 1306);
+  assert.equal(m.attachments[1].width, null);
+  assert.equal(m.attachments[1].height, null);
+  const [picture] = collectPictures(m);
+  assert.equal(picture.width, 988);
+  assert.equal(picture.height, 1306);
 });
 
 test('normalizeMessage: the voice-message flag reclassifies an audio attachment as voice, without it the attachment stays audio', () => {
@@ -359,6 +385,33 @@ test('normalizeMessage: an embed thumbnail prefers proxyURL over url when discor
   });
   const m = normalizeMessage(raw, 'self');
   assert.equal(m.links[0].thumbnailUrl, 'https://media.discordapp.net/external/abc/hq.jpg');
+});
+
+test('normalizeMessage: a link thumbnail carries its pixel size from the embed thumbnail, through to its picture item', () => {
+  const raw = rawMessage({
+    embeds: [
+      {
+        url: 'https://www.youtube.com/watch?v=xyz',
+        provider: { name: 'YouTube' },
+        title: 'Cool video',
+        thumbnail: { url: 'https://i.ytimg.com/vi/xyz/hq.jpg', width: 1280, height: 720 },
+      },
+      { url: 'https://example.org/page', title: 'No size', thumbnail: { url: 'https://example.org/t.jpg' } },
+    ],
+  });
+  const m = normalizeMessage(raw, 'self');
+  assert.equal(m.links[0].thumbnailWidth, 1280);
+  assert.equal(m.links[0].thumbnailHeight, 720);
+  assert.equal(m.links[1].thumbnailWidth, null);
+  assert.equal(m.links[1].thumbnailHeight, null);
+  const pictures = collectPictures(m);
+  assert.deepEqual(
+    pictures.map((p) => [p.width, p.height]),
+    [
+      [1280, 720],
+      [null, null],
+    ],
+  );
 });
 
 // --- normalizeMessage: video-site URLs typed in the text ----------------------

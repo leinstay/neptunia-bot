@@ -17,6 +17,7 @@ import {
   discordCdnVideo,
   DISCORD_CDN_SITES,
   siteOf,
+  positiveDimension,
 } from './media.js';
 import { extractVideoUrls, videoSiteFor, videoUrlCacheKey } from './video-sites.js';
 import { CUSTOM_EMOJI_MARKUP } from './emoji.js';
@@ -127,6 +128,8 @@ function normalizeAttachments(attachments, isVoice) {
     url: attachment.url,
     size: attachment.size ?? null,
     durationSec: attachment.duration ?? null,
+    width: positiveDimension(attachment.width),
+    height: positiveDimension(attachment.height),
   }));
 }
 

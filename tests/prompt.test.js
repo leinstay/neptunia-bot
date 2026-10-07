@@ -481,7 +481,23 @@ test('buildRequest: textFallback is null when nothing is attached (no pictures s
   assert.equal(request.textFallback, null);
 });
 
-test('buildRequest: the media proxy resizes a Discord CDN picture to context.vision.imageSize', () => {
+test('buildRequest: the media proxy fits a Discord CDN picture of known size into context.vision.imageSize, aspect kept', () => {
+  const trigger = makeMessage(1, NOW - MIN, {
+    attachments: [{ id: 'i1', kind: 'image', url: 'https://cdn.discordapp.com/attachments/1/2/pic.png', width: 988, height: 1306 }],
+  });
+  const config = fakeConfig({
+    features: { vision: true },
+    context: { vision: { maxImages: 4, tokensPerImage: 400, imageSize: 256, recentImages: 0, recentImageMinutes: 0 } },
+  });
+  const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', config }));
+  const imagePart = request.messages[1].content.find((part) => part.type === 'image_url');
+  const url = new URL(imagePart.image_url.url);
+  assert.equal(url.searchParams.get('width'), '194');
+  assert.equal(url.searchParams.get('height'), '256');
+  assert.equal(url.searchParams.get('format'), 'webp');
+});
+
+test('buildRequest: a Discord CDN picture of unknown size goes through the proxy with no width or height', () => {
   const trigger = makeMessage(1, NOW - MIN, {
     attachments: [{ id: 'i1', kind: 'image', url: 'https://cdn.discordapp.com/attachments/1/2/pic.png' }],
   });
@@ -491,9 +507,7 @@ test('buildRequest: the media proxy resizes a Discord CDN picture to context.vis
   });
   const request = buildRequest(baseInput({ history: [trigger], trigger, triggerKind: 'mention', config }));
   const imagePart = request.messages[1].content.find((part) => part.type === 'image_url');
-  const url = new URL(imagePart.image_url.url);
-  assert.equal(url.searchParams.get('width'), '256');
-  assert.equal(url.searchParams.get('format'), 'webp');
+  assert.equal(imagePart.image_url.url, 'https://media.discordapp.net/attachments/1/2/pic.png?format=webp');
 });
 
 // --- vision: the trigger's own sticker --------------------------------------

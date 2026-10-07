@@ -156,7 +156,7 @@ The three helper model roles, grouped under one key. Each is set independently, 
 | `channelActivity.deadAfterDays` | `7` | Days without messages = "dead" channel |
 | `vision.maxImages` | `4` | Max images per request |
 | `vision.tokensPerImage` | `400` | Token budget per image |
-| `vision.imageSize` | `512` | Downscale target in px, via Discord's media proxy |
+| `vision.imageSize` | `512` | Via Discord's media proxy, a picture's longer side is scaled down to at most this many px with its aspect kept; a picture of unknown size is sent at its original size |
 | `vision.recentImages` | `3` | Recent channel images to include |
 | `vision.recentImageMinutes` | `30` | Max age for recent images (min) |
 | `vision.maxBytes` | `1500000` | Max image file size (bytes); larger pictures are skipped |
@@ -303,7 +303,7 @@ Settings for the media describer (`features.mediaDescriptions`). The describer m
 |---|---|---|
 | `maxOutputTokens` | `120` | Max output tokens per description; raise for a reasoning model whose thinking counts against this cap |
 | `descriptionChars` | `200` | Max characters for a picture description; the first line is kept and cut on a word boundary. Fills `{{maxChars}}` in `describe.md` when the placeholder is present |
-| `imageSize` | `512` | Downscale target in px |
+| `imageSize` | `512` | Via Discord's media proxy, a picture's longer side is scaled down to at most this many px with its aspect kept; a picture of unknown size is sent at its original size |
 | `maxPerTurn` | `6` | Max descriptions generated per turn |
 | `prefillPerMessage` | `2` | Pictures, stickers and custom emoji of one observed message sent to the describer as they arrive; `0` turns the picture prefill off |
 | `cacheEntries` | `5000` | Description cache size, keyed by attachment |

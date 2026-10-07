@@ -228,8 +228,10 @@ function embedTypeOf(embed) {
  * third-party thumbnail hosts. A gif embed that carries its animation (see
  * gifAnimationUrl: the `gifv` video, or a `.gif` link) adds `animationUrl`,
  * the file the GIF watch downloads; no other item ever has the key.
+ * `thumbnailWidth` / `thumbnailHeight` are the thumbnail's pixel size when
+ * Discord reports it (else null), for fitBox.
  * @param {{ url?: string|null, title?: string|null, description?: string|null,
- *   thumbnail?: { url?: string|null, proxyURL?: string|null }|null,
+ *   thumbnail?: { url?: string|null, proxyURL?: string|null, width?: number|null, height?: number|null }|null,
  *   video?: { url?: string|null, proxyURL?: string|null }|null,
  *   provider?: { name?: string|null }|null }} embed
  * @param {{ embedTextChars?: number, videoSites?: string[] }} [options]
@@ -248,6 +250,8 @@ export function classifyEmbed(embed, { embedTextChars = 200, videoSites = [] } =
     title: clipWithEllipsis(String(embed?.title ?? '').trim(), embedTextChars),
     text: clipWithEllipsis(String(embed?.description ?? '').trim(), embedTextChars),
     thumbnailUrl: embed?.thumbnail?.proxyURL ?? embed?.thumbnail?.url ?? null,
+    thumbnailWidth: positiveDimension(embed?.thumbnail?.width),
+    thumbnailHeight: positiveDimension(embed?.thumbnail?.height),
     kind: isGif ? 'gif' : 'link',
     url,
     ...(animationUrl ? { animationUrl } : {}),
@@ -282,6 +286,34 @@ export function formatDurationShort(seconds) {
   return `${minutes}:${String(secs).padStart(2, '0')}`;
 }
 
+/** A pixel dimension as a positive finite number, else null. */
+export function positiveDimension(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * The media-proxy `width`/`height` pair for a picture of known size: the
+ * proxy FILLS the box it is given and centre-crops to it, and ignores a lone
+ * `width` or `height`, so the only way to resize without cropping is a box of
+ * the picture's own aspect. Scales so that the longer side is at most `max`
+ * (rounded to integers, each side at least 1), never upscales (a picture
+ * already within `max` keeps its size). Null when either dimension is
+ * unknown or not positive, or `max` is not positive: the caller then sends
+ * no size at all and the original is served. Pure.
+ * @param {number|null|undefined} width
+ * @param {number|null|undefined} height
+ * @param {number} max
+ * @returns {{ width: number, height: number }|null}
+ */
+export function fitBox(width, height, max) {
+  const w = positiveDimension(width);
+  const h = positiveDimension(height);
+  const limit = positiveDimension(max);
+  if (w === null || h === null || limit === null) return null;
+  const scale = Math.min(1, limit / Math.max(w, h));
+  return { width: Math.max(1, Math.round(w * scale)), height: Math.max(1, Math.round(h * scale)) };
+}
+
 /**
  * Rewrite a Discord attachment URL through the media proxy so it is served at
  * a given size/format. Measured against real Discord payloads:
@@ -300,7 +332,10 @@ export function formatDurationShort(seconds) {
  * image, not a video needing frame extraction). `animated` (when
  * given) sets the proxy's `animated` param: `false` asks for one still frame
  * of an animated GIF instead of an animated webp that can exceed the vision
- * download limit. Best-effort: an unparsable URL is returned as-is.
+ * download limit. The proxy fills a `width` x `height` box and centre-crops
+ * to it (a lone `width` or `height` is ignored), so callers pass either a
+ * pair of the picture's own aspect (fitBox) or no size at all.
+ * Best-effort: an unparsable URL is returned as-is.
  * @param {string} url
  * @param {{ width?: number, height?: number, format?: string, animated?: boolean }} [options]
  */
@@ -614,6 +649,8 @@ function partPictures(part, messageId) {
       url: attachment.url,
       name: attachment.name,
       durationSec: attachment.durationSec,
+      width: attachment.width ?? null,
+      height: attachment.height ?? null,
     });
   }
   (part.links ?? []).forEach((link) => {
@@ -625,6 +662,8 @@ function partPictures(part, messageId) {
       kind: link.kind,
       url: link.thumbnailUrl,
       name: link.title || link.site,
+      width: link.thumbnailWidth ?? null,
+      height: link.thumbnailHeight ?? null,
       // A gif embed's animation (see classifyEmbed), for the GIF watch.
       ...(link.kind === 'gif' && link.animationUrl ? { animationUrl: link.animationUrl } : {}),
     });
