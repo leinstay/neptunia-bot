@@ -146,7 +146,7 @@ Video results are cached per attachment or per link in `data/guilds/<id>/media.j
 - Error miss: `{ miss: true, ts, reason: "error" }`: retried after `media.video.errorRetryMinutes` (default 60) minutes, or at once on a forced retry from the re-watch classifier.
 - Daily limit: not cached; returned as `{ state: "limit", reason: "daily" }` for that turn only.
 
-A re-watch answer is cached under the key `video:<itemId>:q:<hash>` (the first 16 hex digits of SHA-1 of the lower-cased, whitespace-collapsed question): `{ text, ts, answer: true }`. A watched GIF's re-watch answer uses `gif:<itemId>:q:<hash>` the same way (`<itemId>` is the GIF's own id, `<message>#e<n>` for an embed). Expires after one hour; code deletes expired entries on read.
+A re-watch answer is cached under the key `video:<itemId>:q:<hash>` (the first 16 hex digits of SHA-1 of the lower-cased, whitespace-collapsed question): `{ answer, question, ts }`. A watched GIF's re-watch answer uses `gif:<itemId>:q:<hash>` the same way (`<itemId>` is the GIF's own id, `<message>#e<n>` for an embed). Expires after one hour; code deletes expired entries on read.
 
 A picture's still-frame entry keeps its own `<itemId>` key as before. Both can coexist for the same item.
 
