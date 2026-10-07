@@ -21,6 +21,7 @@ Every key in `config.json` with its default, grouped by section.
 | `customEmoji` | `true` | List the server's custom emoji ranked by usage so the persona can use them by `:name:`. A missing key counts as on |
 | `gifs` | `true` | Build a GIF library from what members share and let the persona post from it by handle. A missing key counts as on |
 | `gifPicker` | `true` | When the persona's first message is at most `gifs.pick.maxChars` characters and she chose no GIF herself, a classifier picks a fitting GIF from the full library. On a match the GIF replaces that first message; the remaining messages follow as written. A missing key counts as on. Needs `features.gifs` on and a non-empty library |
+| `embedUpdates` | `true` | When Discord attaches a link's embed after the message itself (Tenor GIFs arrive this way), fold it into the memory buffer so the GIF library and the analyzer see the GIF. A missing key counts as on |
 | `multiMessage` | `true` | Allow 2–3 messages in a row |
 | `vision` | `true` | Process attached images |
 | `mediaDescriptions` | `true` | One-line descriptions for pictures, GIFs, video frames and link thumbnails |
