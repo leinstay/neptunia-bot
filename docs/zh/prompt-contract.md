@@ -30,8 +30,8 @@
 | `memory-voice.md` | 否 | 两阶段分析器的阶段 B：角色用自己的声音撰写排队的条目。返回 JSON。`features.memoryTwoStage` 开启时必需 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
 | `portrait.md` | 否 | 两阶段画像刷新的阶段 A。详情见后续文档迭代 | `{{name}}` `{{fieldChars}}` |
 | `profile.md` | 是 | 预热 / 画像刷新：从消息样本生成一个成员的档案 | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
-| `channel.md` | 是 | 预热：从消息样本生成频道笔记 | `{{fieldChars}}` |
-| `server.md` | 是 | 预热：从频道笔记和成员摘要生成服务器级笔记 | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
+| `channel.md` | 是 | 预热和笔记刷新：从消息样本生成频道笔记。刷新时，可选的 `<existing_notes>` 块包含已存储笔记作为待评估的主张（而非证据） | `{{fieldChars}}` |
+| `server.md` | 是 | 预热和笔记刷新：从频道笔记和成员摘要生成服务器级笔记。刷新时，可选的 `<existing_notes>` 块包含已存储笔记作为待评估的主张 | `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | 是 | 角色外提示，用于媒体描述器（`features.mediaDescriptions`）：输入一张图片，输出一行描述：图中内容、可辨认的文字，使用聊天所用的语言。无评论，无 markdown | 无 |
 | `describe-video.md` | 是 | 角色外提示，用于视频描述器（`features.videoDescriptions`）：输入一个视频片段（含声音），输出可配置长度的完整有序描述：谁出现了、说了什么（关键短语引用）、屏幕上的文字、视觉上发生了什么、音乐/音效。不接收角色卡 | `{{maxChars}}` |
 | `describe-gif.md` | 否 | 角色外提示，用于 GIF 描述器（`media.gif.watch`）：输入一段短无声片段，输出三行标注结果：`reaction`（回复功能，数词或 `none`）、`action`（可见动作，受 `{{maxChars}}` 限制）、`text`（屏幕文字原样引用或 `none`）。始终英语。不接收角色卡。不存在时代码回退到 `describe-video.md` | `{{today}}` `{{maxChars}}` `{{seconds}}` |
@@ -342,8 +342,8 @@ task.added                               {added}: later messages from the author
 提示中的数值限制是占位符，在运行时从 `config.memory.*` 和 `relationships.maxDeltaPerUpdate` 填充。
 
 输入：`<character>` · `<existing_profiles>`（按用户 id 的 JSON；每个档案为完整或简要形式。完整形式包含文本字段、态度和兴趣、细节、别名、回忆的排名前列：兴趣上限 `memory.maxInterests`，细节上限 `memory.maxDetails`，别名上限 `memory.maxAliases`，回忆上限 `memory.analyzerEpisodes`（默认 8）。简要形式仅包含 `names`、`affinity` 和 `"compact": true`。当批次过大时，消息最多的作者保留完整形式，其余为简要形式。日志字段 `profilesWhole`、`profilesCompact`、`profilesTokens`，记录在 `memory: update applied` 上）· `<existing_lore>` ·
-`<existing_guild>`（JSON：规律、开场白、内部梗、学到的条目）· `<existing_channels>`（按频道 id 的 JSON：`name`、Discord `category`、`topic`、已存储的
-`purpose`、`topics`、`tone`）· `<known_members>`（仅服务器批次，私聊批次不含；可能部分或完全缺失：本批次中未写入的已存储成员，各带其显示名和别名，使分析器能为其中一人记录别名；最多 `memory.aliasRosterSize` 条，按最近可见排列，`0` = 关闭；在预算中排在对话记录之前，非必需因此不会导致请求失败）· `<new_messages>` 按 `## #channel-name (id:123)` 分组，行格式为
+`<existing_guild>`（JSON：规律、开场白、内部梗、学到的条目；当服务器笔记待审时可包含 `"stale": { "days": n }`）· `<existing_channels>`（按频道 id 的 JSON：`name`、Discord `category`、`topic`、已存储的
+`purpose`、`topics`、`tone`；条目当笔记待审时可包含 `"stale": { "days": n }`）· `<known_members>`（仅服务器批次，私聊批次不含；可能部分或完全缺失：本批次中未写入的已存储成员，各带其显示名和别名，使分析器能为其中一人记录别名；最多 `memory.aliasRosterSize` 条，按最近可见排列，`0` = 关闭；在预算中排在对话记录之前，非必需因此不会导致请求失败）· `<new_messages>` 按 `## #channel-name (id:123)` 分组，行格式为
 `[14:32] nick (id:123): text`，对角色说话的行以 `→ ` 开头，角色自身的行使用 `labels.self`。
 
 用户消息中的区块顺序（预算从底部开始裁剪）：每个作者的简要档案、名册（`<known_members>`）、对话记录（`<new_messages>`）、完整档案（仅为有显示行的作者提供，行最多的优先）、近期记事（`<recent_notes>`）。服务器、频道和世界书块在简要档案之前。无法容纳完整形式的档案以简要形式发送；请求永远不会因为档案而失败。
@@ -367,7 +367,8 @@ task.added                               {added}: later messages from the author
              "learned": { "add": [{ "text": "", "from": "<@id>" }], "seen": [3], "remove": [3] } },
   "channels": { "<channelId>": { "purpose": "", "topics": "", "tone": "" } },
   "lore": [ { "title": "", "keys": [""], "text": "" } ],
-  "self": [""]
+  "self": [""],
+  "note_reviews": [{ "target": "", "status": "" }]
 }
 ```
 
@@ -458,7 +459,8 @@ task.added                               {added}: later messages from the author
 - 刻意未设：关于反讽或讽刺的任何规则。所有类型的不确定性都通过 `"sure": false` 表达。
 - 分析器的提示保持简短；每增加一条规则都需要通过收紧现有文本来支付。
 - 仅包含有新内容的用户和频道。返回的频道 / `guild` / `self` 是完整的合并值，替换已存储的值；空的
-  `guild` / `self` = 无新内容。
+  `guild` / `self` = 无新内容。频道字段（purpose、topics 或 tone）的空字符串被忽略，已存储文本保持不变。
+- **过时笔记复审。** 携带 `"stale": { "days": n }` 的频道或公会条目需要在顶层 `note_reviews` 数组中恰好有一个条目：`{ "target": "<channelId>" | "guild", "status": "updated" | "confirmed" | "insufficient_evidence" }`。`updated` 表示批次证实了内容变更，通过正常的 `channels` 或 `guild` 输出返回。`confirmed` 表示分析器基于本批次的相关证据检查了已存储笔记，未发现需要变更之处（批次级复审，非全周期的认证）。`insufficient_evidence` 表示批次中的相关材料太少，无法判断。代码仅在 `confirmed` 和已存储文本确实发生变化的 `updated` 上盖 `notesCheckedAt` 戳（两阶段模式中，`patterns`/`starters` 排队的语音摘要视为变更）。`insufficient_evidence`、缺失的条目和文本相同的 `updated` 不盖戳；目标在 `memory.notesRetryHours` 之后再次被标记。每次标记都会盖 `notesFlaggedAt` 戳。
 - `affinity` 是一个变化量：整数 `delta`（通常 ±1…5，重大事件时最多 ±`relationships.maxDeltaPerUpdate`），
   单行 `reason` 指明观察到的事件。代码将其限制在 ±`relationships.maxDeltaPerUpdate` 范围内，累积到
   −100…100，保留简短历史。模型永远不设置绝对分数。设置 `relationships.decayPerDay` 后，分数每天向零漂移：
@@ -478,7 +480,7 @@ task.added                               {added}: later messages from the author
 - 字符串字段 ≤ `memory.fieldChars`；细节 ≤ `memory.maxDetails`，内部梗 ≤ `memory.maxInjokes`，自述 ≤
   `memory.maxSelfFacts`。笔记使用聊天所用的语言。仅记录观察到的事实；不记录敏感信息（地址、电话、证件、
   健康、财务、真实全名）。
-- **`memory: update applied` 上的计数器**（每批次后记录）：`roster`（`<known_members>` 中发送的成员数）、`rosterCandidates`（提供给预算的名册条目数）、`rosterTokens`（发送的名册占用的估计 token 数）、`aliasesChanged`（作者和名册中存储别名列表实际发生变化的成员数）、`aliasOnly`（其中的名册成员数）、`droppedUsers`（既非作者也非有存储档案的名册成员的 id 条目数）、`droppedFields`（从名册成员条目中丢弃的非 `aliases` 键数）。
+- **`memory: update applied` 上的计数器**（每批次后记录）：`roster`（`<known_members>` 中发送的成员数）、`rosterCandidates`（提供给预算的名册条目数）、`rosterTokens`（发送的名册占用的估计 token 数）、`aliasesChanged`（作者和名册中存储别名列表实际发生变化的成员数）、`aliasOnly`（其中的名册成员数）、`droppedUsers`（既非作者也非有存储档案的名册成员的 id 条目数）、`droppedFields`（从名册成员条目中丢弃的非 `aliases` 键数）、`portraitDropped`（丢弃的作者非空 `character`/`style` 数）、`notesFlagged`（本批次中携带过时标记的频道或公会条目数）。当发送了标记时，还包括：`notesUpdated`、`notesConfirmed`、`notesInsufficient`（三种复审状态）、`notesMissing`（模型未返回的已标记目标）、`notesIdentical`（文本与存储一致的 `updated`）、`notesUnflagged`（为未标记目标返回的复审）。
 
 ## 频道地图
 
@@ -518,6 +520,8 @@ task.added                               {added}: later messages from the author
 `users.<id>.portrait: "一行：画像遗漏了什么"`。然后代码为该成员排队进行刷新：以已存储的性格 + 风格作为
 `<draft>`，分析器的那行作为 `<hint>`，使用该成员最新的消息调用 `profile.md`，回答中的 `character` 和
 `style` 替换已存储的版本（该回答中的兴趣、细节、回忆和别名被忽略；它们通过流操作持续流入）。
+
+成员通过两条路径之一进入画像刷新队列。计数器路径：自上次画像以来至少 `memory.portraitRefreshMessages`（默认 300）条自身消息，且 `memory.portraitRefreshDays`（默认 3）天已过。年龄路径：画像距今至少 `memory.portraitMaxAgeDays`（默认 21）天，且至少 `memory.portraitMinMessages`（默认 60）条自身消息已累积。队列顺序：等待最久的成员优先（`portraitDueAt`，成员首次符合条件时盖戳，画像完成后清除），其次是画像最旧的，再次是自上次画像以来自身消息最多的。请求发送后遇到 provider 错误（HTTP 408/429/5xx 或超时）会归还当日名额并恢复之前的尝试戳，成员仍留在队列中；调度器结束该 tick 的循环。
 
 态度和 `relationship` 不参与预热；它们仅从实时对话中增长。
 

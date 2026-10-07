@@ -73,4 +73,34 @@ All warmup commands live under `/nep warmup`. See [Commands](owner-commands.md) 
 
 For a truly fresh start, use `/nep memory wipe` first: it clears member profiles with their attitudes and episodes, server habits, the channel map, lore entries and warmup progress.
 
+## Keeping the notes current
+
+Channel and server notes are written during the warmup, then updated by the stream analyzer when a batch carries enough evidence. Over time, though, short batches miss gradual shifts in how people talk or what a channel is about. The notes refresh (`features.notesRefresh`) catches this by periodically re-examining notes from a full sample of recent messages, the same way the warmup described the channel in the first place.
+
+### What happens
+
+A scheduler checks every `memory.notesCheckMinutes` (default 60) minutes which channels and server notes are overdue. A channel is due when: it already has notes text (a channel the warmup never described is left to the warmup); enough days have passed since its last text change or last sample review (`memory.notesRefreshDaysMain`, default 7 for channels in `memory.mainChannelIds`, or `memory.notesRefreshDays`, default 21 for the rest); at least `memory.notesMinMessages` (default 30) messages have been tallied since then; the channel had a message within `warmup.lookbackDays` (default 60) days; and no failed attempt within `memory.notesRetryHours` (default 24).
+
+For a due channel, the engine reads `memory.notesSampleDays` (default 30) days of history, drops the persona's and other bots' lines, and picks `memory.notesSampleMessages` (default 160) messages spread over the days. The spread avoids overrepresenting the latest conversation: the engine takes one message per day per round, newest day first, and one author may hold at most `memory.notesSampleMaxAuthorShare` (default 0.35) of the sample. If fewer than `notesMinMessages` usable messages remain, the channel is skipped (`too-few`).
+
+The request uses the same `channel.md` (or `server.md` for the server) that the warmup uses, with one addition: an `<existing_notes>` block showing the stored notes as JSON plus `writtenDaysAgo` (whole days since they last changed, null when unknown). The prompt tells the model to treat these as claims to evaluate against the sample, not as evidence. The answer replaces the stored purpose, topics and tone (or patterns, starters and in-jokes for the server). If the channel's text changed between the history read and the answer (another batch updated it), the answer is dropped (`conflict`). Either way, a valid answer stamps `notesSampleReviewedAt`. The stored text's `updatedAt` moves only when the text actually changed.
+
+The server follows the same rule: `memory.notesServerRefreshDays` (default 7) since the last change or review, at least `memory.notesGuildMinMessages` (default 100) messages summed over all channels. The server goes after the channels in a cycle and is outside the daily cap.
+
+### How often, what it costs
+
+Up to `memory.notesRefreshPerDay` (default 4) successful channel refreshes per UTC day. A failed request does not take a slot. The day counter lives in `state.json` as `notesRefreshDay` / `notesRefreshCount`. Server refreshes are not counted toward the channel cap.
+
+Each refresh request counts against `llm.maxRequestsPerDay` and the 50k token cap, but not against the warmup's `warmup.maxTokens`. The persona is not muted during a refresh. A refresh is refused while a warmup pass runs.
+
+### Log lines
+
+`warmup: notes refreshed` with `{ target: "channel" | "server", channelId, changed, sample, authors, days }`.
+
+`warmup: notes refresh failed` with `{ target, channelId, reason }`. Reasons: `running` (a warmup pass is in flight), `paused`, `gone` (the channel no longer exists), `too-few` (too few usable messages), `conflict` (the stored text changed between the history read and the answer), `bad-json`, `llm-error`, `token-limit`, `daily-cap`, `no-prompt`.
+
+`notes refresh: look` with `{ due, started, refreshed, changed, skipped }` and `buckets { neverReviewed, fresh, due, few, quiet, retryWait }` counted over all channels.
+
+Nothing is rewritten to look fresh. When the sample cannot tell whether a claim still holds, the stored text stays as it is.
+
 For the full list of warmup configuration keys see [Configuration: warmup](configuration.md#warmup).

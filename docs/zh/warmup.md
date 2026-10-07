@@ -73,4 +73,34 @@
 
 如需完全重新开始，先使用 `/nep memory wipe`：它会清除成员档案及其态度和回忆、服务器习惯、频道地图、世界书条目和预热进度。
 
+## 保持笔记更新
+
+频道和服务器笔记在预热期间写入，之后由流分析器在批次包含足够证据时更新。但随着时间推移，短批次难以捕捉人们聊天方式或频道主题的渐进变化。笔记刷新（`features.notesRefresh`）通过定期从近期消息的完整样本中重新检查笔记来弥补这一不足，方法与预热最初描述频道时相同。
+
+### 发生了什么
+
+调度器每 `memory.notesCheckMinutes`（默认 60）分钟检查一次哪些频道和服务器笔记已逾期。频道被视为逾期的条件：已有笔记文本（预热未描述的频道留给预热处理）；自上次文本变更或采样复审以来已过足够天数（`memory.notesRefreshDaysMain`，`memory.mainChannelIds` 中的频道默认 7，其余 `memory.notesRefreshDays`，默认 21）；此后累积了至少 `memory.notesMinMessages`（默认 30）条消息；该频道在 `warmup.lookbackDays`（默认 60）天内有消息；且 `memory.notesRetryHours`（默认 24）内没有失败的尝试。
+
+对于逾期频道，引擎读取 `memory.notesSampleDays`（默认 30）天的历史，去除角色和其他机器人的行，选取 `memory.notesSampleMessages`（默认 160）条消息分散在各天中。分散避免了仅采样最近对话的偏差：引擎每轮每天取一条消息，最新一天优先，单个作者最多占样本的 `memory.notesSampleMaxAuthorShare`（默认 0.35）。如果可用消息少于 `notesMinMessages`，频道被跳过（`too-few`）。
+
+请求使用与预热相同的 `channel.md`（服务器用 `server.md`），额外附加一个 `<existing_notes>` 块，以 JSON 形式展示已存储笔记及 `writtenDaysAgo`（距上次变更的整天数，未知时为 null）。提示指示模型将它们视为待评估的主张，而非证据。回答替换已存储的 purpose、topics、tone（服务器则为 patterns、starters、injokes）。如果在读取历史到收到回答之间频道文本发生了变化（另一个批次更新了它），回答被丢弃（`conflict`）。无论哪种情况，有效回答都会盖 `notesSampleReviewedAt` 戳。文本的 `updatedAt` 仅在实际发生变化时才移动。
+
+服务器遵循相同规则：`memory.notesServerRefreshDays`（默认 7），全频道合计至少 `memory.notesGuildMinMessages`（默认 100）条消息。服务器在循环中排在频道之后，不计入频道的每日限额。
+
+### 频率和成本
+
+每 UTC 天最多 `memory.notesRefreshPerDay`（默认 4）次成功的频道刷新。失败的请求不占用名额。日计数器存储在 `state.json` 中（`notesRefreshDay` / `notesRefreshCount`）。服务器刷新不计入频道限额。
+
+每次刷新请求计入 `llm.maxRequestsPerDay` 和 50k token 上限，但不计入预热的 `warmup.maxTokens`。刷新期间角色不会被静默。预热运行中拒绝刷新。
+
+### 日志行
+
+`warmup: notes refreshed`，携带 `{ target: "channel" | "server", channelId, changed, sample, authors, days }`。
+
+`warmup: notes refresh failed`，携带 `{ target, channelId, reason }`。原因：`running`（预热运行中）、`paused`、`gone`（频道已不存在）、`too-few`（可用消息太少）、`conflict`（读取历史和回答之间文本已变更）、`bad-json`、`llm-error`、`token-limit`、`daily-cap`、`no-prompt`。
+
+`notes refresh: look`，携带 `{ due, started, refreshed, changed, skipped }` 和 `buckets { neverReviewed, fresh, due, few, quiet, retryWait }`（全频道计数）。
+
+没有任何东西仅为看起来更新而被重写。当样本无法判断某个表述是否仍然成立时，已存储文本保持原样。
+
 预热配置键的完整列表见[配置：`warmup`](configuration.md#warmup)。

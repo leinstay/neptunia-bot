@@ -44,7 +44,7 @@ voice 请求之前运行的所有任务（历史、说明、多样性过程、�
 
 当 `features.channelRoute` 开启时（默认如此），分类器（`prompts/route-channel.md`）从最多 `route.maxChannels`（默认 40）个候选频道中选出对话中提及的频道，以便将其作为 `<channel_view>` 块拉入请求。这与显式频道提及（`features.channelPull`）并行：路由分类器解析间接引用（"那个频道"、"某某的频道"），而真实的 `<#id>` 提及始终直接拉取。
 
-模型可以看到服务器的频道地图（用途、话题、氛围、活跃度），当前频道会被标记。每个频道条目还包含代码维护的数据：消息数量、首条和末条消息、近 30 天的活跃度和最活跃的作者（`memory.channelWritersStored`，按 `memory.channelWritersHalfLifeDays` 衰减）。预热从频道历史中填充这些数据，实时流量保持其更新。当频道笔记在 `memory.notesStaleDays`（默认 7）天内未变更且批次中有至少 `memory.notesMinLines`（默认 20）行来自该频道时，分析器会被要求重新检查。
+模型可以看到服务器的频道地图（用途、话题、氛围、活跃度），当前频道会被标记。每个频道条目还包含代码维护的数据：消息数量、首条和末条消息、近 30 天的活跃度和最活跃的作者（`memory.channelWritersStored`，按 `memory.channelWritersHalfLifeDays` 衰减）。预热从频道历史中填充这些数据，实时流量保持其更新。当频道笔记距今至少 `memory.notesStaleDays`（默认 7）天，批次中有至少 `memory.notesBatchLines`（默认 8）行来自该频道，自笔记上次变更或检查以来累积了至少 `memory.notesMinMessages`（默认 30）条消息，且距上次标记已过 `memory.notesRetryHours`（默认 24）小时时，分析器收到过时标记并通过 `note_reviews`（`updated`、`confirmed` 或 `insufficient_evidence`）回答。仅确认的复审或实际的文本变更才算作检查；证据不足或缺失的回答不会重置计时器。
 
 模型使用 `<think>`（隐藏的思考过程）、`<msg>`（1 到 3 条聊天消息；`reply="#87"` 回复对话记录中的某一行）、`<react>`（一个 emoji 反应）或 `<skip/>`（保持沉默）来回应。解析后，按人类速度模拟输入，输出中的 `@nick` 会转换为真实的提及。每条消息截断至 Discord 的 2000 字符限制。发送失败的消息会被记录（`turn: send failed`）并终止该回合的发布。
 
