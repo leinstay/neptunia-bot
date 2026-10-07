@@ -247,6 +247,17 @@ test('diary post: a cap refusal names the limit and the counts', async () => {
   assert.equal(await admin.run('diary.post', {}, owner), 'diary post: not-now (no-channel)');
 });
 
+test('diary post: a pictures refusal names the closed cap, else the reason', async () => {
+  const outcomes = [
+    { outcome: 'refused', reason: 'pictures', limit: { key: 'diary.maxPicturesPerDay', used: 2, cap: 2 } },
+    { outcome: 'refused', reason: 'pictures', limit: null },
+  ];
+  const diary = { force: async () => outcomes.shift() };
+  const { admin } = makeAdmin({ diary });
+  assert.equal(await admin.run('diary.post', { kind: 'thought' }, owner), 'diary post thought: refused (diary.maxPicturesPerDay 2/2)');
+  assert.equal(await admin.run('diary.post', { kind: 'thought' }, owner), 'diary post thought: refused (pictures)');
+});
+
 test('diary post: without a running diary it says so', async () => {
   const { admin } = makeAdmin();
   await assert.rejects(() => admin.run('diary.post', {}, owner), /diary not running/);
