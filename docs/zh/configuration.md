@@ -21,6 +21,7 @@
 | `customEmoji` | `true` | 列出服务器自定义表情（按使用率排名），使角色可以通过 `:name:` 使用它们。缺失的键视为开启 |
 | `gifs` | `true` | 从成员分享的内容构建 GIF 库，让角色通过 handle 发送。缺失的键视为开启 |
 | `gifPicker` | `true` | 当角色的第一条消息不超过 `gifs.pick.maxChars` 个字符且自己没选 GIF 时，分类器从完整库中挑选合适的 GIF。匹配时 GIF 替换第一条消息；其余消息照常发布。缺失的键视为开启。需要 `features.gifs` 开启且库非空 |
+| `embedUpdates` | `true` | 当 Discord 在消息本体之后才附加链接的嵌入内容时（Tenor 的 GIF 就是这样到达的），将其纳入记忆缓冲区，使 GIF 库和分析器能看到该 GIF。缺失的键视为开启 |
 | `multiMessage` | `true` | 允许连续发 2–3 条消息 |
 | `vision` | `true` | 处理附加图片 |
 | `mediaDescriptions` | `true` | 为图片、GIF、视频帧和链接缩略图生成单行描述 |

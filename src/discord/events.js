@@ -46,6 +46,8 @@ import { isLimitNotice, pauseNotice, pauseNoticeMinutes, postLimitNotice, postPa
 import { isVideoVisionOn } from '../memory/youtube-check.js';
 import { log } from '../log.js';
 import { MINUTE_MS, utcDay } from '../time.js';
+import { slimMessage } from '../memory/update.js';
+import { gifOpts } from '../memory/gifs.js';
 
 /** @typedef {import('../behavior/turn.js').TurnOutcome} TurnOutcome */
 /** @typedef {import('../behavior/turn.js').TriggerKind} TriggerKind */
@@ -110,6 +112,32 @@ function missingReason(missing) {
 }
 
 /**
+ * The media of `normalized` the buffered copy did not carry yet (`known`: the item ids of every
+ * attachment and link of the buffered message and its forwarded snapshots): what an embed
+ * Discord attached after the message arrived brought. Stickers and custom emoji always come
+ * with the message itself, so none is late. Pure; never mutates `normalized`.
+ * @param {object} normalized  A normalized message (src/discord/collect.js#normalizeMessage).
+ * @param {Set<string>} known
+ * @returns {object} `normalized` with only the late attachments and links in each part.
+ */
+function lateMedia(normalized, known) {
+  const fresh = (items) => (items ?? []).filter((item) => item?.id != null && !known.has(String(item.id)));
+  const part = (p) => ({ ...p, attachments: fresh(p.attachments), links: fresh(p.links), stickers: [], emojis: [] });
+  return { ...part(normalized), forwarded: (normalized.forwarded ?? []).map(part) };
+}
+
+/** The attachment and link item ids of a buffered (slim) message and its forwarded snapshots. */
+function bufferedMediaIds(buffered) {
+  const ids = new Set();
+  for (const p of [buffered, ...(Array.isArray(buffered.forwarded) ? buffered.forwarded : [])]) {
+    for (const item of [...(p?.attachments ?? []), ...(p?.links ?? [])]) {
+      if (item?.id != null) ids.add(String(item.id));
+    }
+  }
+  return ids;
+}
+
+/**
  * @param {object} deps
  * @param {import('../hot.js').createHot extends (...args: any) => infer R ? R : never} deps.hot
  * @param {ReturnType<import('../memory/store.js').createStore>} deps.store
@@ -160,7 +188,9 @@ function missingReason(missing) {
  *   `.clearPending()` method (`/nep pause`, wired from src/admin.js via src/index.js) that
  *   drops every queued ping and every settle wait without answering any of them. And a `.stop()`
  *   method (shutdown, src/index.js) that clears every settle wait, so none starts a turn while the
- *   client goes down.
+ *   client goes down. And an `.onMessageUpdate(oldMessage, newMessage)` method (src/index.js wires
+ *   it to `messageUpdate`) that folds an embed Discord attached after the message arrived into
+ *   its buffered copy -- see onMessageUpdate below.
  */
 export function createMessageHandler({
   hot,
@@ -2324,7 +2354,65 @@ export function createMessageHandler({
     }
   }
 
+  /**
+   * A message changed after it arrived (`messageUpdate`). Discord attaches some embeds late -- a
+   * Tenor link's `gifv` embed comes in an update, not with `messageCreate` -- so the buffered
+   * copy would keep a bare link and its GIF would never reach the library. When the message is
+   * still in the memory buffer, its copy is rebuilt from the updated message (src/memory/
+   * update.js#slimMessage, keeping its `direct` mark); the attachments and links it did not
+   * carry yet are counted into the GIF library (features.gifs) and handed to the media prefill
+   * under the same switches as on arrival (warmMediaCache). Nothing else: no trigger, no turn,
+   * no eavesdrop, no counters, no channel map, no affinity. A message no longer buffered (the
+   * analyzer took it) is an accepted miss, logged with counts only. Off with
+   * features.embedUpdates (a missing key counts as on), with features.memory off and while
+   * paused. Only the served guild, an allowed channel outside threads and the dry-run mirror,
+   * and a human author's message with embeds. Config read now. Never throws.
+   * @param {import('discord.js').Message|import('discord.js').PartialMessage} _oldMessage
+   * @param {import('discord.js').Message|import('discord.js').PartialMessage} newMessage
+   * @returns {Promise<void>}
+   */
+  async function onMessageUpdate(_oldMessage, newMessage) {
+    try {
+      const config = hot.config;
+      const features = config.features ?? {};
+      if (features.embedUpdates === false || features.memory === false) return;
+      if (store?.state?.data?.paused) return;
+      let message = newMessage;
+      const guildId = message?.guild?.id ?? message?.guildId ?? null;
+      if (!guildId || guildId !== getGuildId()) return;
+      if (message.partial) message = await message.fetch();
+      if (message.system || message.webhookId) return;
+      const selfId = client.user.id;
+      if (!message.author || message.author.bot || message.author.id === selfId) return;
+      if (message.channel?.isThread?.()) return;
+      if (!channelAllowed(message.channel, config.bot)) return;
+      const dryRunChannelId = config.bot.dryRunChannelId;
+      if (dryRunChannelId && message.channel.id === dryRunChannelId) return;
+      const embeds = message.embeds?.length ?? 0;
+      if (embeds === 0) return;
+
+      const normalized = normalizeMessage(message, selfId, {
+        embedTextChars: config.media?.embedTextChars,
+        videoSites: config.media?.video?.sites,
+      });
+      const fields = { channelId: normalized.channelId, messageId: normalized.id, embeds };
+      const buffered = store.getBuffer(guildId).find((m) => m?.id != null && String(m.id) === String(normalized.id));
+      if (!buffered) {
+        log.info('events: embeds late', fields);
+        return;
+      }
+      const late = lateMedia(normalized, bufferedMediaIds(buffered));
+      store.updateBuffered(guildId, slimMessage(normalized, buffered.direct === true));
+      const gifs = features.gifs !== false ? store.recordGifs(guildId, [late], gifOpts(config)) : 0;
+      warmMediaCache(guildId, late);
+      log.info('events: embeds folded', { ...fields, gifs });
+    } catch (err) {
+      log.error('events: update handler failed', { error: err });
+    }
+  }
+
   onMessage.drainPending = drainPending;
+  onMessage.onMessageUpdate = onMessageUpdate;
   /**
    * Drop every pending direct ping and every settle wait without answering any
    * of them (`/nep pause`): no timer fires afterwards. Each wait is logged as

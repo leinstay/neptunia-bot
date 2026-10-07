@@ -15,6 +15,7 @@
     "reactions": true,
     "customEmoji": true,
     "gifs": true,
+    "embedUpdates": true,
     "seeReactions": true,
     "multiMessage": true,
     "vision": true,

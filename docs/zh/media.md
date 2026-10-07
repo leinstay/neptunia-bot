@@ -14,6 +14,8 @@
 
 贴纸和自定义表情经常重复出现，因此按 id 缓存，首次描述后几乎没有开销。启用 `features.vision` 时，呼叫消息的贴纸会作为图片附加。Discord 内置的动态贴纸是 Lottie 动画而非图片，因此只能显示名称。
 
+当 Discord 在消息本体之后才附加嵌入内容时（Tenor 的 GIF 就是这样到达的），机器人会将其纳入缓冲区，使 GIF 库和分析器也能看到（`features.embedUpdates`，默认开启）。
+
 当 `media.gif.watch` 开启时（默认如此，需同时开启视频视觉），GIF 作为短无声片段被观看：动画被转换为不超过 `media.gif.maxSeconds`（默认 8）秒的 mp4，通过 `prompts/describe-gif.md` 发送给 `classifier.video` 模型（文件不存在时回退到 `describe-video.md`）。观看后的说明替代旧的单帧描述。无法观看的 GIF（无动画、每日 `media.gif.maxPerDay` 限额耗尽、转换或请求失败）保留单帧描述。`/nep gifs recache` 删除库外过时的单帧说明，并在后台从最旧的开始重新观看最多 `gifs.recachePerRun`（默认 50）个库条目。
 
 当 `features.gifPicker` 开启时（默认如此，需要 `features.gifs` 开启且库非空），分类器从完整库中挑选 GIF 替代短的第一条消息。挑选器在角色的第一条发出消息不超过 `gifs.pick.maxChars`（默认 160）个字符且自己没选 GIF 时运行；它接收最近几行聊天、该第一条消息及每条库记录的说明。匹配时 GIF 替换第一条消息并以其原本的回复方式发送；其余消息按原顺序跟随。GIF 发送失败时，所有消息照常发布。
