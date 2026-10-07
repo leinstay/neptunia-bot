@@ -3672,3 +3672,190 @@ test('refreshPortrait: the mode, its prompt and the request\'s route are read af
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// Notes refresh: refreshChannelNotes / refreshServerNotes
+// ---------------------------------------------------------------------------
+
+const NOTES_DAY = 86_400_000;
+
+/** fakeHot with the notes refresh settings this test sets itself. */
+function notesHot(memory = {}) {
+  const hot = fakeHot();
+  Object.assign(hot.config.memory, { notesSampleDays: 30, notesSampleMessages: 60, notesSampleMaxAuthorShare: 0.35, notesMinMessages: 30, ...memory });
+  return hot;
+}
+
+/** `days` days of `perDay` raw messages before T0 (one every ten minutes from 11:50 back), every
+ * tenth by the persona's own id (`selfUser`, fakeClient's), the rest by five members in turn. */
+function spreadHistory(days, perDay, { mark = '', offset = 0 } = {}) {
+  const history = [];
+  for (let d = days - 1; d >= 0; d -= 1) {
+    for (let i = perDay - 1; i >= 0; i -= 1) {
+      const ts = T0 - d * NOTES_DAY - (i + 1) * 10 * 60_000 - offset;
+      const own = i % 10 === 0;
+      const authorId = own ? 'selfUser' : ['a', 'b', 'c', 'd', 'e'][i % 5];
+      history.push(rawMessage(ts, { authorId, content: own ? `persona-line ${d}-${i}` : `${mark}member line ${d}-${i}` }));
+    }
+  }
+  return history;
+}
+
+const existingNotesOf = (call) => {
+  const match = /<existing_notes>\n([\s\S]*?)\n<\/existing_notes>/.exec(call.messages[1].content);
+  return match ? JSON.parse(match[1]) : null;
+};
+
+test('refreshChannelNotes: fills <existing_notes>, samples across days without the persona, writes only on a change, stamps the review either way', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.updateChannel('g1', 'c1', { purpose: 'alpha', topics: 'beta', tone: 'gamma' });
+  store.getChannel('g1', 'c1').updatedAt = iso(T0 - 20 * NOTES_DAY);
+  const channel = fakeChannel('c1', spreadHistory(12, 30), { name: 'general' });
+  const hot = notesHot();
+  const llm = scriptedLlm([
+    { purpose: 'alpha', topics: 'beta', tone: 'gamma' },
+    { purpose: 'alpha', topics: 'beta and delta', tone: 'gamma' },
+  ]);
+  const warmup = createWarmup({ hot, store, client: fakeClient(fakeGuild('g1', [channel])), llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => T0 });
+
+  const { result: first, logs } = await withCapturedLogs(() => warmup.refreshChannelNotes('g1', 'c1'));
+  assert.equal(first.ok, true);
+  assert.equal(first.changed, false);
+  assert.ok(first.sample <= hot.config.memory.notesSampleMessages, 'the sample stays within memory.notesSampleMessages');
+  assert.ok(first.sample >= hot.config.memory.notesMinMessages);
+  assert.ok(first.days >= 10, 'the sample spreads over the days of the window');
+  assert.equal(first.authors, 5, 'the persona is never one of the authors');
+  let stored = store.getChannel('g1', 'c1');
+  assert.equal(stored.updatedAt, iso(T0 - 20 * NOTES_DAY), 'an identical answer does not move updatedAt');
+  assert.equal(stored.notesSampleReviewedAt, iso(T0));
+  assert.equal(stored.notesAttemptAt, null);
+
+  const [call] = llm.calls;
+  const content = call.messages[1].content;
+  assert.deepEqual(existingNotesOf(call), { purpose: 'alpha', topics: 'beta', tone: 'gamma', writtenDaysAgo: 20 });
+  assert.ok(content.indexOf('<channel>') < content.indexOf('<existing_notes>'), '<existing_notes> after <channel>');
+  assert.ok(content.indexOf('<existing_notes>') < content.indexOf('<messages>'), '<existing_notes> before <messages>');
+  assert.ok(!content.includes('persona-line'), 'no line by the persona reaches the sample');
+  assert.deepEqual(store.state.data.warmup?.done?.channels ?? [], [], 'a refresh never marks warmup progress');
+  assert.equal(store.state.data.warmup?.tokensUsed ?? 0, 0, 'a refresh never spends the warmup budget');
+  assert.notEqual(call.opts.countAgainstDailyCap, false, 'a refresh counts against llm.maxRequestsPerDay');
+
+  const refreshed = logs.find((entry) => entry.msg === 'warmup: notes refreshed');
+  assert.deepEqual(
+    { target: refreshed.target, channelId: refreshed.channelId, changed: refreshed.changed, sample: refreshed.sample, authors: refreshed.authors, days: refreshed.days },
+    { target: 'channel', channelId: 'c1', changed: false, sample: first.sample, authors: 5, days: first.days },
+  );
+  assert.ok(!JSON.stringify(logs).includes('member line'), 'logs carry counts, never text');
+
+  const second = await withCapturedLogs(() => warmup.refreshChannelNotes('g1', 'c1')).then(({ result }) => result);
+  assert.equal(second.ok, true);
+  assert.equal(second.changed, true);
+  stored = store.getChannel('g1', 'c1');
+  assert.equal(stored.topics, 'beta and delta');
+  assert.notEqual(stored.updatedAt, iso(T0 - 20 * NOTES_DAY), 'a changed note moves updatedAt');
+  assert.equal(stored.notesSampleReviewedAt, iso(T0));
+});
+
+test('refreshChannelNotes: a channel changed since the history read is a conflict -- nothing written, attempt stamped', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.updateChannel('g1', 'c1', { purpose: 'alpha', topics: 'beta', tone: 'gamma' });
+  store.getChannel('g1', 'c1').updatedAt = iso(T0 - 20 * NOTES_DAY);
+  const channel = fakeChannel('c1', spreadHistory(12, 30), { name: 'general' });
+  const llm = scriptedLlm([
+    () => {
+      // The stream analyzer rewrites the note while the refresh's request is in flight.
+      store.updateChannel('g1', 'c1', { purpose: 'delta' });
+      return { purpose: 'epsilon', topics: 'zeta', tone: 'eta' };
+    },
+  ]);
+  const warmup = createWarmup({ hot: notesHot(), store, client: fakeClient(fakeGuild('g1', [channel])), llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => T0 });
+
+  const { result, logs } = await withCapturedLogs(() => warmup.refreshChannelNotes('g1', 'c1'));
+  assert.deepEqual([result.ok, result.reason], [false, 'conflict']);
+  const stored = store.getChannel('g1', 'c1');
+  assert.deepEqual([stored.purpose, stored.topics, stored.tone], ['delta', 'beta', 'gamma'], 'the answer is dropped whole');
+  assert.equal(stored.notesAttemptAt, iso(T0));
+  assert.equal(stored.notesSampleReviewedAt, null);
+  const failed = logs.find((entry) => entry.msg === 'warmup: notes refresh failed');
+  assert.deepEqual([failed.target, failed.channelId, failed.reason], ['channel', 'c1', 'conflict']);
+});
+
+test('refreshChannelNotes: too few messages in the window is too-few and stamps the attempt; running / paused refuse without a request', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.updateChannel('g1', 'c1', { purpose: 'alpha', topics: 'beta', tone: 'gamma' });
+  // 10 member lines inside the window; the persona's own lines and the older ones do not count.
+  const history = [
+    ...Array.from({ length: 40 }, (_, i) => rawMessage(T0 - 59 * NOTES_DAY + i * 60_000, { authorId: 'b' })),
+    ...Array.from({ length: 10 }, (_, i) => rawMessage(T0 - NOTES_DAY + i * 60_000, { authorId: 'a' })),
+    ...Array.from({ length: 30 }, (_, i) => rawMessage(T0 - NOTES_DAY + (20 + i) * 60_000, { authorId: 'selfUser' })),
+  ];
+  const channel = fakeChannel('c1', history, { name: 'general' });
+  const llm = abortAwareLlm();
+  const warmup = createWarmup({ hot: notesHot(), store, client: fakeClient(fakeGuild('g1', [channel])), llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => T0 });
+
+  const held = holdFetch(channel);
+  const pendingFew = withCapturedLogs(() => warmup.refreshChannelNotes('g1', 'c1'));
+  await waitFor(() => held.started, 500);
+  assert.equal(warmup.isWarmingUp(), false, 'a refresh in flight never mutes the persona');
+  const { result: second } = await withCapturedLogs(() => warmup.refreshChannelNotes('g1', 'c1'));
+  assert.deepEqual([second.ok, second.reason], [false, 'running'], 'one refresh at a time');
+  held.open();
+  const { result: few } = await pendingFew;
+  assert.deepEqual([few.ok, few.reason], [false, 'too-few']);
+  assert.equal(llm.calls.length, 0);
+  assert.equal(store.getChannel('g1', 'c1').notesAttemptAt, iso(T0));
+  assert.equal(store.getChannel('g1', 'c1').notesSampleReviewedAt, null);
+
+  store.state.data.paused = true;
+  const { result: paused } = await withCapturedLogs(() => warmup.refreshChannelNotes('g1', 'c1'));
+  assert.deepEqual([paused.ok, paused.reason], [false, 'paused']);
+  store.state.data.paused = false;
+
+  // A warmup run whose channel request hangs in flight: the refresh is refused meanwhile.
+  const pending = withCapturedLogs(() => warmup.run('g1'));
+  await waitFor(() => llm.calls.length === 1, 500);
+  const { result: busy } = await withCapturedLogs(() => warmup.refreshChannelNotes('g1', 'c1'));
+  assert.deepEqual([busy.ok, busy.reason], [false, 'running']);
+  assert.equal(llm.calls.length, 1, 'neither refusal sent a request');
+  warmup.stop();
+  await pending;
+});
+
+test('refreshServerNotes: <existing_notes> carries patterns/starters/injokes, lore from the answer is ignored, the guild stamp moves', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.updateGuild('g1', { patterns: 'old patterns', starters: 'old starters', injokes: ['old joke'] });
+  store.getGuild('g1').notesUpdatedAt = iso(T0 - 5 * NOTES_DAY);
+  const main = fakeChannel('c1', spreadHistory(12, 30), { name: 'general' });
+  const side = fakeChannel('c2', spreadHistory(3, 30, { mark: 'side-', offset: 5 * 60_000 }), { name: 'side' });
+  const hot = notesHot();
+  hot.config.memory.mainChannelIds = ['c1'];
+  const llm = scriptedLlm([
+    { patterns: 'new patterns', starters: 'old starters', injokes: ['old joke'], lore: [{ title: 'The Outage', keys: ['outage'], text: 'the server went down once' }] },
+  ]);
+  const warmup = createWarmup({ hot, store, client: fakeClient(fakeGuild('g1', [main, side])), llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => T0 });
+
+  const { result, logs } = await withCapturedLogs(() => warmup.refreshServerNotes('g1'));
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, true);
+  assert.ok(result.sample <= hot.config.memory.notesSampleMessages);
+  assert.ok(result.days >= 10);
+  assert.equal(result.authors, 5);
+
+  const [call] = llm.calls;
+  assert.deepEqual(existingNotesOf(call), { patterns: 'old patterns', starters: 'old starters', injokes: ['old joke'], writtenDaysAgo: 5 });
+  const content = call.messages[1].content;
+  assert.ok(content.indexOf('<existing_notes>') < content.indexOf('<messages>'));
+  assert.ok(!content.includes('side-member line'), 'only the main channels are sampled');
+  assert.ok(!content.includes('persona-line'), 'no line by the persona reaches the sample');
+
+  const guild = store.getGuild('g1');
+  assert.equal(guild.patterns, 'new patterns');
+  assert.equal(guild.starters, 'old starters');
+  assert.deepEqual(guild.injokes, ['old joke']);
+  assert.equal(guild.notesSampleReviewedAt, iso(T0));
+  assert.equal(guild.notesAttemptAt, null);
+  assert.equal(store.getLore('g1').length, 0, 'lore from a refresh answer is never written');
+  assert.equal(store.state.data.warmup?.done?.server ?? false, false, 'a refresh never marks warmup progress');
+  const refreshed = logs.find((entry) => entry.msg === 'warmup: notes refreshed');
+  assert.deepEqual([refreshed.target, refreshed.changed, refreshed.channelId], ['server', true, undefined]);
+});
