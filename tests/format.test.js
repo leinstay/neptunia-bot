@@ -1060,6 +1060,19 @@ test('formatTranscript: labels without imageAnswered render an answered picture 
   assert.deepEqual(withAnswer, plain);
 });
 
+test('formatTranscript: a GIF with an answer renders videoAnswered after its tag; gone with videoAnswered blanked, whatever imageAnswered says', () => {
+  const gifMsg = () => msg('a', T0, { content: '', attachments: [{ id: 'g1', kind: 'gif', name: 'miroir.gif' }] });
+  const descriptions = new Map([['g1', 'une femme devant un miroir']]);
+  const imageAnswers = new Map([['g1', answered]]);
+  const items = videoTranscript([gifMsg()], { descriptions, imageAnswers });
+  const tag = `${fill(labels.transcript.gifDescribed, { text: 'une femme devant un miroir' })} ${fill(labels.transcript.videoAnswered, answered)}`;
+  assert.ok(items[0].text.endsWith(tag), items[0].text);
+
+  const noVideoAnswers = { ...labels, transcript: { ...labels.transcript, videoAnswered: undefined } };
+  const plain = videoTranscript([gifMsg()], { labels: noVideoAnswers, descriptions });
+  assert.deepEqual(videoTranscript([gifMsg()], { labels: noVideoAnswers, descriptions, imageAnswers }), plain);
+});
+
 // --- formatTranscript: a link page read by the web lookup (reads -> linkRead)
 
 test('formatTranscript: reads appends linkRead after the link tag and its other extras', () => {

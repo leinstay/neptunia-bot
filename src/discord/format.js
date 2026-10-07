@@ -148,6 +148,8 @@ export function formatDuration(ms, units) {
  * `context.imageAnswers` is an optional `Map` of picture ids to a second look
  * on a question (`{ question, text }`, src/memory/describe.js#relookImage);
  * it needs `transcript.imageAnswered`, blanked the same way to switch it off.
+ * A GIF's id may carry one too (src/memory/describe.js#rewatchGif): it
+ * renders `transcript.videoAnswered` and needs that key instead.
  * `context.gifHandles` is an optional `Map` from src/memory/gifs.js#gifHandleMap:
  * a GIF (attachment or embed) the library knows renders `transcript.gifKnown` /
  * `gifKnownNoText` with its handle; with the key in question blanked it
@@ -162,7 +164,11 @@ function mediaTags(message, labels, context = {}) {
   // A read page's excerpt (linkRead): blanking the key switches it off too.
   const readsOn = Boolean(labels.transcript.linkRead);
   // A picture's second look on a question (imageAnswered): blanking the key switches it off.
-  const answerOf = (id) => (labels.transcript.imageAnswered ? (context.imageAnswers?.get(id) ?? null) : null);
+  // A GIF's (rewatchGif) renders as a video's (videoAnswered) and goes off with that key.
+  const answerOf = (item) => {
+    const on = item.kind === 'gif' ? answersOn : Boolean(labels.transcript.imageAnswered);
+    return on ? (context.imageAnswers?.get(item.id) ?? null) : null;
+  };
   const videoOf = (id) => {
     const video = videosOn ? (context.videos?.get(id) ?? null) : null;
     if (!video?.answer || answersOn) return video;
@@ -204,7 +210,7 @@ function mediaTags(message, labels, context = {}) {
     const description = context.descriptions?.get(attachment.id) ?? null;
     const video = videoOf(attachment.id);
     const gifHandle = handleOf(attachment, 'attachment');
-    const answer = answerOf(attachment.id);
+    const answer = answerOf(attachment);
     const label = withGifFallback(mediaLabelFor(attachment, { attachedIndex, description, unknownDuration, video, gifHandle, answer }));
     pushLabel(
       label.key === 'imageAttachedDescribed' && !attachedCaptionOn ? { ...label, key: 'imageAttached', values: { n: label.values.n } } : label,
@@ -221,7 +227,7 @@ function mediaTags(message, labels, context = {}) {
     const description = canDescribe ? (context.descriptions?.get(link.id) ?? null) : null;
     const read = readsOn ? (context.reads?.get(link.id) ?? null) : null;
     const gifHandle = handleOf(link, 'link');
-    const answer = answerOf(link.id);
+    const answer = answerOf(link);
     pushLabel(withGifFallback(mediaLabelFor(link, { attachedIndex, description, unknownDuration, video: videoOf(link.id), read, gifHandle, answer })));
   }
   for (const sticker of message.stickers ?? []) {
