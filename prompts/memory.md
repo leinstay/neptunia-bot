@@ -12,9 +12,9 @@ The lists of interests, details, episodes and aliases shown are the ranked top o
 
 `<existing_lore>` — stored lorebook entries: every title with its keys, full text when the batch touches them. Owner entries are marked and never changed.
 
-`<existing_guild>` — server-level notes as JSON: conversation patterns, starters, in-jokes, and learned items (`{ id, text, from, seen, last }` — `from` is `name (id:123)` for the member who taught it, or empty).
+`<existing_guild>` — server-level notes as JSON: conversation patterns, starters, in-jokes, and learned items (`{ id, text, from, seen, last }` — `from` is `name (id:123)` for the member who taught it, or empty). When the entry carries `"stale": { "days": n }`, the stored notes need a review; `days` is how long since they last changed, or `null` when unknown.
 
-`<existing_channels>` — stored channel notes as JSON, keyed by channel ID. Each has `name`, Discord `category` and `topic`, and your notes: `purpose`, `topics`, `tone`. A channel may carry `"main": true` — where people talk to each other. When no channel is marked, every channel counts as main.
+`<existing_channels>` — stored channel notes as JSON, keyed by channel ID. Each has `name`, Discord `category` and `topic`, and your notes: `purpose`, `topics`, `tone`. A channel may carry `"main": true` — where people talk to each other. When no channel is marked, every channel counts as main. An entry may carry `"stale": { "days": n }`, meaning its notes need a review; `days` is how long since they last changed, or `null` when unknown.
 
 `<known_members>` (not always present) — JSON keyed by user id: server members who did NOT write in this batch. `names`: stored display names, newest first. `aliases`: names already recorded for this member (key omitted when empty). Most recently seen members first; the list may be incomplete.
 
@@ -80,7 +80,8 @@ A note that breaks off mid-word was cut by an older version; return it whole whe
   "recent": {
     "add": [{ "text": "", "time": "HH:MM", "channel": "<channelId>", "weight": 2 }],
     "remove": [3]
-  }
+  },
+  "note_reviews": [{ "target": "", "status": "" }]
 }
 ```
 
@@ -178,7 +179,7 @@ Fields: `date` from the transcript, YYYY-MM-DD. `what` — one line. `quote` —
 
 ### Guild
 
-Server-wide observations. What one person does in their own channel is not a pattern, starter or in-joke; an in-joke is something several people use. Return only when changed — patterns, starters and in-jokes replace storage, carry forward what holds; empty = nothing new. `learned` uses incremental ops (below). In-jokes: ≤ {{maxInjokes}} items.
+Server-wide observations. What one person does in their own channel is not a pattern, starter or in-joke; an in-joke is something several people use. Return only when changed — patterns, starters and in-jokes replace storage, carry forward what holds; empty = nothing new. `learned` uses incremental ops (below). In-jokes: ≤ {{maxInjokes}} items. When the guild entry carries `stale`, return a `note_reviews` item (see `### Stale-note review`).
 
 ### Learned
 
@@ -196,7 +197,23 @@ Not lessons: what people say to each other (not addressed to {{name}}), general 
 
 ### Channels
 
-Only channels with something new. A returned channel replaces storage — carry forward what holds. `purpose` — what the channel is for. `topics` — what people write about. `tone` — how they talk. Activity level is code's call, not yours.
+Only channels with something new. A returned channel replaces storage — carry forward what holds. `purpose` — what the channel is for. `topics` — what people write about. `tone` — how they talk. Activity level is code's call, not yours. When a channel entry carries `stale`, return a `note_reviews` item (see `### Stale-note review`).
+
+### Stale-note review
+
+A channel or guild entry carrying `stale` needs exactly one item in `note_reviews` in this answer. `stale.days` says a review is due. Old notes can still be accurate.
+
+For each flagged entry, return one item with the target and one of these statuses:
+
+- `updated`: the batch justifies a content change. Return the revised notes through the normal `channels` or `guild` output.
+- `confirmed`: you examined the stored notes against relevant evidence in this batch and no change is justified. This acknowledges a review of this batch, not a certificate for the whole period.
+- `insufficient_evidence`: this batch has too little relevant material to judge. Notes stay unchanged.
+
+To return `confirmed`, you need relevant evidence for at least one substantive part of the notes. A batch whose messages happen not to contradict the notes is `insufficient_evidence`, not `confirmed`.
+
+Stored notes are claims to evaluate, not evidence. An isolated exchange is not a recurring pattern. Do not invent change, do not paraphrase for freshness, do not drop a long-term claim because this batch lacks it.
+
+The CHANGES-only rule covers note content. Return review items even when the rest of the answer is empty. Never omit a flagged entry.
 
 ### Lore
 
