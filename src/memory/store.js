@@ -2143,6 +2143,25 @@ export function createStore({ dataDir }) {
     },
 
     /**
+     * Replace the buffered entry with the same `id` by `message` (an embed Discord attached
+     * after the message arrived, see src/discord/events.js#onMessageUpdate), in place: the
+     * buffer keeps its order and length. Marks the file dirty only when an entry was replaced.
+     * @param {string} guildId
+     * @param {object} message  A slim buffered message (src/memory/update.js#slimMessage).
+     * @returns {boolean} Whether the message was still buffered (false: already analyzed or
+     *   never buffered, nothing changes).
+     */
+    updateBuffered(guildId, message) {
+      if (message?.id == null) return false;
+      const item = entry(bufferFile(guildId), () => []);
+      const index = item.value.findIndex((buffered) => buffered?.id != null && String(buffered.id) === String(message.id));
+      if (index < 0) return false;
+      item.value[index] = message;
+      item.dirty = true;
+      return true;
+    },
+
+    /**
      * Drop the buffered messages a memory update consumed, by identity (see `dropConsumed`):
      * messages that arrived while the update was in flight stay, even when the capped buffer
      * already trimmed some of the consumed ones off its front.

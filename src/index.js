@@ -431,6 +431,8 @@ hot.on('change', ({ what }) => {
 });
 
 client.on('messageCreate', onMessage);
+// Discord attaches some embeds (a Tenor GIF's) after the message arrived: fold them into memory.
+client.on('messageUpdate', onMessage.onMessageUpdate);
 // A new or edited channel of the served guild may name a member the cache has not seen.
 const warmOnChannel = (channel) => {
   if (instance.guildId && channel?.guild?.id === instance.guildId) audienceWarmer.warm({ quiet: true });

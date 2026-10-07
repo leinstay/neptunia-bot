@@ -2414,6 +2414,41 @@ function slimMedia(part) {
 }
 
 /**
+ * One normalized message as the memory buffer keeps it: ids, author, content, `ts`, the
+ * reply target and its media without any URL (slimMedia), the forwarded snapshots stripped
+ * the same way, and `direct`. The one shape `observe()` pushes and the late-embed fold
+ * (src/discord/events.js#onMessageUpdate) writes back over a buffered entry.
+ * @param {object} normalized  A normalized message (src/discord/collect.js#normalizeMessage).
+ * @param {boolean} [direct]   Whether the message was addressed to the persona.
+ * @returns {object}
+ */
+export function slimMessage(normalized, direct = false) {
+  const forwarded = (normalized.forwarded ?? []).map((snapshot) => ({
+    content: snapshot.content ?? '',
+    ...slimMedia(snapshot),
+  }));
+  return {
+    id: normalized.id,
+    channelId: normalized.channelId,
+    channelName: normalized.channelName,
+    authorId: normalized.authorId,
+    authorName: normalized.authorName,
+    self: normalized.self,
+    bot: normalized.bot,
+    content: normalized.content,
+    ts: normalized.ts,
+    replyToId: normalized.replyToId,
+    ...slimMedia(normalized),
+    // A forwarded message's snapshots (src/discord/collect.js
+    // #normalizeSnapshot), stripped the same way, so the analyzer's
+    // transcript renders a forward like the live one. Absent for a message
+    // with no forward: the buffer entry stays as it was.
+    ...(forwarded.length > 0 ? { forwardedFrom: normalized.forwardedFrom ?? null, forwarded } : {}),
+    direct: Boolean(direct),
+  };
+}
+
+/**
  * The stored profiles/channels an analyzer batch needs, plus the distinct
  * non-self author ids and channel ids of `messages` (the `knownUserIds` /
  * `knownChannelIds` of `applyMemoryUpdate`). The lookups are passed in, so
@@ -2564,29 +2599,7 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       if (gifs > 0) log.info('memory: gifs recorded', { guildId, gifs });
     }
 
-    const forwarded = (normalized.forwarded ?? []).map((snapshot) => ({
-      content: snapshot.content ?? '',
-      ...slimMedia(snapshot),
-    }));
-    const slim = {
-      id: normalized.id,
-      channelId: normalized.channelId,
-      channelName: normalized.channelName,
-      authorId: normalized.authorId,
-      authorName: normalized.authorName,
-      self: normalized.self,
-      bot: normalized.bot,
-      content: normalized.content,
-      ts: normalized.ts,
-      replyToId: normalized.replyToId,
-      ...slimMedia(normalized),
-      // A forwarded message's snapshots (src/discord/collect.js
-      // #normalizeSnapshot), stripped the same way, so the analyzer's
-      // transcript renders a forward like the live one. Absent for a message
-      // with no forward: the buffer entry stays as it was.
-      ...(forwarded.length > 0 ? { forwardedFrom: normalized.forwardedFrom ?? null, forwarded } : {}),
-      direct: Boolean(direct),
-    };
+    const slim = slimMessage(normalized, direct);
     const cfg = hot.config.memory;
     // The cap drops the oldest buffered messages before any analyzer saw them (the analyzer
     // is failing or backed off): say so, with the count only. A private line never names the member.
