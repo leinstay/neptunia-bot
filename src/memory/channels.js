@@ -104,3 +104,28 @@ export function renderChannel(channel, labels, { current = false, activity, now:
 
   return lines.join('\n');
 }
+
+/**
+ * Messages a channel saw since `sinceMs` (UTC-day resolution, from the stored `days` tally).
+ * `coveredFromMs` is the oldest day the tally holds, so a caller knows when the count cannot
+ * reach back to `sinceMs`. Pure; a missing or malformed tally counts as empty.
+ * @param {object} channel  A stored channel (`days: { 'YYYY-MM-DD': count }`).
+ * @param {number|null} sinceMs  Count from this day on; null = every day.
+ * @param {number} nowMs
+ * @returns {{ count: number, coveredFromMs: number|null }}
+ */
+export function messagesSince(channel, sinceMs, nowMs) {
+  const days = channel && typeof channel.days === 'object' && channel.days !== null ? channel.days : {};
+  const from = sinceMs === null || sinceMs === undefined ? null : utcDay(sinceMs);
+  const to = utcDay(nowMs);
+  let count = 0;
+  let oldest = null;
+  for (const [day, n] of Object.entries(days)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(n)) continue;
+    const ms = Date.parse(day + 'T00:00:00Z');
+    if (!Number.isFinite(ms)) continue;
+    if (oldest === null || ms < oldest) oldest = ms;
+    if ((from === null || day >= from) && day <= to) count += n;
+  }
+  return { count, coveredFromMs: oldest };
+}
