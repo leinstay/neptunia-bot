@@ -58,7 +58,7 @@ import { sortEpisodesForDisplay, topEpisodes } from '../memory/episodes.js';
 import { RECENT_EPISODES_PER_MEMBER, episodeKey, memberIdOf, recentSettings, recentView } from '../memory/recent.js';
 import { matchLore } from '../memory/lore.js';
 import { channelActivity, renderChannel } from '../memory/channels.js';
-import { selectPictures, mediaProxyUrl } from '../discord/media.js';
+import { selectPictures, mediaProxyUrl, fitBox } from '../discord/media.js';
 import { ID_DIGITS, fromTokens, isWordChar, occursAsWholeWord } from '../memory/mentions.js';
 import { mergeProfiles } from './private.js';
 import { renderWorn } from './variety.js';
@@ -2554,11 +2554,14 @@ export function buildRequest(input) {
 
   // A sticker's URL is already fully sized (see src/discord/media.js
   // stickerUrl: `size=`, not width/height/format) -- the media proxy must
-  // never touch it again.
+  // never touch it again. Any other picture of known size gets its longer
+  // side scaled to at most `context.vision.imageSize`, the aspect kept
+  // (fitBox: the proxy crops any box of another aspect); of unknown size no
+  // size at all, the original served under `context.vision.maxBytes`.
   const pictureUrl = (picture) =>
     picture.kind === 'sticker'
       ? picture.url
-      : mediaProxyUrl(picture.url, { width: visionCfg.imageSize, height: visionCfg.imageSize, format: 'webp' });
+      : mediaProxyUrl(picture.url, { ...(fitBox(picture.width, picture.height, visionCfg.imageSize) ?? {}), format: 'webp' });
 
   const content = pictures.length
     ? [

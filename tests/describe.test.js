@@ -376,7 +376,7 @@ test('describe: video items request a webp poster frame via the media proxy, wit
   assert.equal(llm.calls[0].messages[1].content[0].image_url.url, SUCCESSFUL_DOWNLOAD.dataUrl);
 });
 
-test('describe: a gif item requests a single still png frame at media.imageSize, never an animated webp', async () => {
+test('describe: a gif item of known size requests a single still png frame fitted to media.imageSize, never an animated webp', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const hot = fakeHot({ config: { features: { mediaDescriptions: true }, media: { imageSize: 256 } } });
@@ -384,10 +384,13 @@ test('describe: a gif item requests a single still png frame at media.imageSize,
   const imageFetcher = fakeImageFetcher();
   const describer = createDescriber({ hot, store, llm, imageFetcher });
 
-  await describer.describe('g1', pictureItem('gif1', { kind: 'gif', url: 'https://cdn.discordapp.com/attachments/1/2/anim.gif?ex=1' }));
+  await describer.describe(
+    'g1',
+    pictureItem('gif1', { kind: 'gif', url: 'https://cdn.discordapp.com/attachments/1/2/anim.gif?ex=1', width: 498, height: 280 }),
+  );
   assert.equal(
     imageFetcher.calls[0].url,
-    'https://media.discordapp.net/attachments/1/2/anim.gif?ex=1&width=256&height=256&format=png&animated=false',
+    'https://media.discordapp.net/attachments/1/2/anim.gif?ex=1&width=256&height=144&format=png&animated=false',
   );
 });
 
@@ -400,11 +403,11 @@ test('describe: a tenor gif embed on images-ext keeps its host and asks for a st
   const describer = createDescriber({ hot, store, llm, imageFetcher });
 
   const url = 'https://images-ext-1.discordapp.net/external/abc/https/media.tenor.com/x/anim.gif?ex=1';
-  await describer.describe('g1', pictureItem('link:t1', { kind: 'gif', url }));
-  assert.equal(imageFetcher.calls[0].url, `${url}&width=512&height=512&format=png&animated=false`);
+  await describer.describe('g1', pictureItem('link:t1', { kind: 'gif', url, width: 220, height: 124 }));
+  assert.equal(imageFetcher.calls[0].url, `${url}&width=220&height=124&format=png&animated=false`);
 });
 
-test('describe: an image item keeps the resized webp proxy URL with no animated param', async () => {
+test('describe: an image item of known size gets the aspect-kept webp proxy URL with no animated param', async () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   const hot = fakeHot({ config: { features: { mediaDescriptions: true }, media: { imageSize: 256 } } });
@@ -412,8 +415,19 @@ test('describe: an image item keeps the resized webp proxy URL with no animated 
   const imageFetcher = fakeImageFetcher();
   const describer = createDescriber({ hot, store, llm, imageFetcher });
 
-  await describer.describe('g1', pictureItem('a1'));
-  assert.equal(imageFetcher.calls[0].url, 'https://media.discordapp.net/x/pic.png?width=256&height=256&format=webp');
+  await describer.describe('g1', pictureItem('a1', { width: 988, height: 1306 }));
+  assert.equal(imageFetcher.calls[0].url, 'https://media.discordapp.net/x/pic.png?width=194&height=256&format=webp');
+});
+
+test('describe: a picture or gif of unknown size goes through the proxy with no width or height at all', async () => {
+  const hot = fakeHot({ config: { features: { mediaDescriptions: true }, media: { imageSize: 256 } } });
+  const imageFetcher = fakeImageFetcher();
+  const describer = createDescriber({ hot, store: createStore({ dataDir: tmpDataDir() }), llm: fakeLlm({ text: 'a cat' }), imageFetcher });
+
+  await describer.describe('g1', pictureItem('a1', { width: 988 }));
+  await describer.describe('g1', pictureItem('gif1', { kind: 'gif', url: 'https://cdn.discordapp.com/x/anim.gif' }));
+  assert.equal(imageFetcher.calls[0].url, 'https://media.discordapp.net/x/pic.png?format=webp');
+  assert.equal(imageFetcher.calls[1].url, 'https://media.discordapp.net/x/anim.gif?format=png&animated=false');
 });
 
 // --- stickers, custom emoji, link thumbnails -------------------------
@@ -1973,7 +1987,10 @@ test('rewatchVideo: one fetch and one video request with the question and answer
   assert.equal(llm.calls.length, 1);
   const [system, user] = llm.calls[0].messages;
   assert.equal(system.content, 'Question: De quelle couleur est la voiture ?. At most 1200 characters.');
-  assert.deepEqual(user.content, [{ type: 'video_url', video_url: { url: CLIP_DATA_URL } }]);
+  assert.deepEqual(user.content, [
+    { type: 'text', text: 'De quelle couleur est la voiture ?' },
+    { type: 'video_url', video_url: { url: CLIP_DATA_URL } },
+  ]);
   const options = llm.calls[0].options;
   assert.equal(options.model, 'x/video-model', 'the second look uses the video model (classifier.video)');
   assert.equal(options.maxOutputTokens, 600);
@@ -2107,7 +2124,10 @@ test('relookImage: one download and one vision request with the question; the an
   assert.equal(llm.calls.length, 1);
   const [system, user] = llm.calls[0].messages;
   assert.equal(system.content, 'Question: Y a-t-il un chargeur dans la pupille ?. At most 1200 characters.');
-  assert.deepEqual(user.content, [{ type: 'image_url', image_url: { url: SUCCESSFUL_DOWNLOAD.dataUrl } }]);
+  assert.deepEqual(user.content, [
+    { type: 'text', text: 'Y a-t-il un chargeur dans la pupille ?' },
+    { type: 'image_url', image_url: { url: SUCCESSFUL_DOWNLOAD.dataUrl } },
+  ]);
   const options = llm.calls[0].options;
   assert.equal(options.model, 'x/haiku', 'the picture is looked at by the media model (classifier.media)');
   assert.equal(options.role, 'classifier.media');
@@ -2121,6 +2141,22 @@ test('relookImage: one download and one vision request with the question; the an
   const keys = Object.keys(cache).filter((k) => k.startsWith('image:a1:q:'));
   assert.equal(keys.length, 1);
   assert.equal(cache[keys[0]].answer, 'pas de chargeur, juste un reflet');
+});
+
+test('relookImage: with no {{question}} in the prompt the question goes only as the user text part, next to the image', async () => {
+  const hot = relookHot({ prompts: { 'rewatch-answer': 'Answer in at most {{maxChars}} characters.' } });
+  const { describer, llm, imageFetcher } = relookDescriber({ hot, now: clock() });
+  await describer.relookImage('g1', pictureItem('a1', { width: 1306, height: 988 }), 'Quelle couleur ?');
+
+  const [system, user] = llm.calls[0].messages;
+  assert.equal(system.content, 'Answer in at most 1200 characters.');
+  assert.ok(!system.content.includes('{{question}}'));
+  assert.ok(!system.content.includes('Quelle couleur'));
+  assert.deepEqual(user.content, [
+    { type: 'text', text: 'Quelle couleur ?' },
+    { type: 'image_url', image_url: { url: SUCCESSFUL_DOWNLOAD.dataUrl } },
+  ]);
+  assert.equal(imageFetcher.calls[0].url, 'https://media.discordapp.net/x/pic.png?width=512&height=387&format=webp');
 });
 
 test('relookImage: the same question within an hour is free; another question asks again', async () => {
