@@ -135,7 +135,7 @@ test('getGuild: an old guild.json without learned loads it as empty, every other
 
   const store = createStore({ dataDir: dir });
   const guild = store.getGuild('g1');
-  assert.deepEqual(guild, { ...old, learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornLong: null, wornHistory: [], fillers: [], ownMessageCount: 0, notesUpdatedAt: null, notesCheckedAt: null });
+  assert.deepEqual(guild, { ...old, learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornLong: null, wornHistory: [], fillers: [], ownMessageCount: 0, notesUpdatedAt: null, notesCheckedAt: null, notesFlaggedAt: null, notesSampleReviewedAt: null, notesAttemptAt: null });
   store.flush();
   assert.equal(fs.readFileSync(file, 'utf8'), raw, 'reading alone never rewrites the file');
 });
@@ -346,6 +346,45 @@ test('markNotesChecked: a guild never written gets its check stamp, and the stam
   assert.equal(storeB.getGuild('g1').notesUpdatedAt, null, 'checked, never written');
   assert.equal(storeB.getChannel('g1', 'c1').notesCheckedAt, at);
   assert.equal(storeB.getChannel('g1', 'c1').updatedAt, null);
+});
+
+test('markNotesFlagged: stamps notesFlaggedAt on existing channels and the guild only', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.updateChannel('g1', 'c1', { purpose: 'alpha' });
+  const r = store.markNotesFlagged('g1', { channels: ['c1', 'ghost'], guild: true }, Date.UTC(2026, 9, 7));
+  assert.deepEqual(r, { channels: 1, guild: true });
+  assert.equal(store.getChannel('g1', 'c1').notesFlaggedAt, '2026-10-07T00:00:00.000Z');
+  assert.equal(store.getChannel('g1', 'ghost'), null);
+  assert.equal(store.getGuild('g1').notesFlaggedAt, '2026-10-07T00:00:00.000Z');
+});
+
+test('markNotesSampled: reviewed clears the attempt, attempt leaves the review stamp alone', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.updateChannel('g1', 'c1', { purpose: 'alpha' });
+  assert.equal(store.markNotesSampled('g1', 'c1', Date.UTC(2026, 9, 7), { outcome: 'attempt' }), true);
+  assert.equal(store.getChannel('g1', 'c1').notesAttemptAt, '2026-10-07T00:00:00.000Z');
+  assert.equal(store.getChannel('g1', 'c1').notesSampleReviewedAt, null);
+  assert.equal(store.markNotesSampled('g1', 'c1', Date.UTC(2026, 9, 8), { outcome: 'reviewed' }), true);
+  assert.equal(store.getChannel('g1', 'c1').notesSampleReviewedAt, '2026-10-08T00:00:00.000Z');
+  assert.equal(store.getChannel('g1', 'c1').notesAttemptAt, null);
+  assert.equal(store.markNotesSampled('g1', 'guild', Date.UTC(2026, 9, 8), { outcome: 'reviewed' }), true);
+  assert.equal(store.getGuild('g1').notesSampleReviewedAt, '2026-10-08T00:00:00.000Z');
+  assert.equal(store.markNotesSampled('g1', 'ghost', Date.UTC(2026, 9, 8), { outcome: 'attempt' }), false, 'an unknown channel writes nothing');
+});
+
+test('store: files without the notes stamps read back with nulls', () => {
+  const dir = tmpDataDir();
+  const base = path.join(dir, 'guilds', 'g1');
+  fs.mkdirSync(path.join(base, 'channels'), { recursive: true });
+  fs.writeFileSync(path.join(base, 'channels', 'c1.json'), JSON.stringify({ id: 'c1', purpose: 'alpha', notesFlaggedAt: 'yesterday' }));
+  fs.writeFileSync(path.join(base, 'guild.json'), JSON.stringify({ patterns: 'x' }));
+  const store = createStore({ dataDir: dir });
+  const channel = store.getChannel('g1', 'c1');
+  const guild = store.getGuild('g1');
+  for (const item of [channel, guild]) {
+    assert.deepEqual([item.notesFlaggedAt, item.notesSampleReviewedAt, item.notesAttemptAt], [null, null, null]);
+  }
+  assert.equal(channel.purpose, 'alpha');
 });
 
 test('getGuild: notes stamps a hand edit broke read as never stamped', () => {
@@ -827,6 +866,9 @@ test('getChannel: an old channel file without a tally seeds it from the stored t
   assert.deepEqual(channel, {
     ...old,
     notesCheckedAt: null,
+    notesFlaggedAt: null,
+    notesSampleReviewedAt: null,
+    notesAttemptAt: null,
     writers: { 'άλφα': { count: 9, last }, 'βήτα': { count: 7, last }, 'γάμα': { count: 5, last }, 'δέλτα': { count: 3, last }, 'έψιλον': { count: 1, last } },
   });
   assert.deepEqual(store.listChannels('g1'), [channel]);

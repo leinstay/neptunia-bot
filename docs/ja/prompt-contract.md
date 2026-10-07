@@ -30,8 +30,8 @@
 | `memory-voice.md` | いいえ | 2 段階アナライザーのステージ B: ペルソナがキューされたアイテムを自分自身の声で記述。JSON を返す | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
 | `portrait.md` | いいえ | 2 段階ポートレートリフレッシュのステージ A。詳細は後のドキュメンテーションパスにて | `{{name}}` `{{fieldChars}}` |
 | `profile.md` | はい | ウォームアップ / ポートレートリフレッシュ: メッセージサンプルからメンバーのプロファイルを作成 | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
-| `channel.md` | はい | ウォームアップ: メッセージサンプルからチャンネルノートを作成 | `{{fieldChars}}` |
-| `server.md` | はい | ウォームアップ: チャンネルノートとメンバーの要約からサーバーレベルのノートを作成 | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
+| `channel.md` | はい | ウォームアップおよびノートリフレッシュ: メッセージサンプルからチャンネルノートを作成。リフレッシュ時、オプションの `<existing_notes>` ブロックに保存済みノートが評価対象の主張として（証拠としてではなく）含まれる | `{{fieldChars}}` |
+| `server.md` | はい | ウォームアップおよびノートリフレッシュ: チャンネルノートとメンバーの要約からサーバーレベルのノートを作成。リフレッシュ時、オプションの `<existing_notes>` ブロックに保存済みノートが評価対象の主張として含まれる | `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | はい | メディア説明モデルのアウトオブキャラクタープロンプト（`features.mediaDescriptions`）: 画像 1 枚を入力、プレーンテキスト 1 行を出力: 写っているもの、要点、判読可能なテキストは元のスクリプトで引用。常に英語。意見なし、道徳的判断なし、マークダウンなし | `{{today}}` `{{maxChars}}`（オプション） |
 | `describe-video.md` | はい | 動画説明モデルのアウトオブキャラクタープロンプト（`features.videoDescriptions`）: 動画クリップ 1 本（音声付き）を入力、設定可能な長さの完全な説明を出力: 誰が登場するか、何が言われるか（重要なフレーズを引用）、画面上のテキスト、視覚的に何が起きるか、音楽/効果音。常に英語。発話、字幕、画面上のテキストは元の言語で引用。キャラクターカードなし | `{{today}}` `{{maxChars}}` |
 | `describe-gif.md` | いいえ | GIF 説明モデルのアウトオブキャラクタープロンプト（`media.gif.watch`）: 短い無音クリップを入力、ラベル付き 3 行を出力: `reaction`（返信機能、数語または `none`）、`action`（視覚的な出来事、`{{maxChars}}` で制限）、`text`（画面上のテキストをそのまま、または `none`）。常に英語。キャラクターカードなし。ファイルがない場合は `describe-video.md` にフォールバック | `{{today}}` `{{maxChars}}` `{{seconds}}` |
@@ -352,8 +352,8 @@ task.added                               {added}: later messages from the author
 プロンプト内の数値制限はプレースホルダーで、ランタイムに `config.memory.*` と `relationships.maxDeltaPerUpdate` から設定されます。
 
 入力: `<character>` · `<existing_profiles>`（ユーザー ID 別の JSON。各プロファイルは全体またはコンパクト。全体プロファイルは散文フィールド、態度、関心・詳細・エイリアス・エピソードのランク付き上位を含む: 関心は `memory.maxInterests`、詳細は `memory.maxDetails`、エイリアスは `memory.maxAliases`、エピソードは `memory.analyzerEpisodes`（デフォルト 8）で制限。コンパクトプロファイルは `names`、`affinity`、`"compact": true` のみ。バッチが大きすぎて全プロファイルを全体で収められない場合、表示行数の多い著者が全体を保持し、残りはコンパクトになる。ログフィールド `profilesWhole`、`profilesCompact`、`profilesTokens` は `memory: update applied` に記録）· `<existing_lore>` ·
-`<existing_guild>`（JSON: パターン、スターター、内輪ネタ、学んだ項目）· `<existing_channels>`（チャンネル ID 別の JSON: `name`、Discord の `category`、`topic`、保存済みの
-`purpose`、`topics`、`tone`）· `<known_members>`（サーバーバッチのみ、プライベートバッチには含まれない。部分的または完全に欠落する場合あり: このバッチで書き込みをしていない保存済みメンバー。各メンバーの表示名とエイリアス付き。アナライザーがそのメンバーにエイリアスを記録できるようにする。最大 `memory.aliasRosterSize` 件、最近確認された順、`0` = オフ。バジェットではトランスクリプトより前にランクされ、必須ではないためリクエストを失敗させることはない）· `<new_messages>` は `## #channel-name (id:123)` の下にグループ化、行形式は
+`<existing_guild>`（JSON: パターン、スターター、内輪ネタ、学んだ項目。サーバーノートがレビュー待ちの場合 `"stale": { "days": n }` を含むことがある）· `<existing_channels>`（チャンネル ID 別の JSON: `name`、Discord の `category`、`topic`、保存済みの
+`purpose`、`topics`、`tone`。エントリはノートがレビュー待ちの場合 `"stale": { "days": n }` を含むことがある）· `<known_members>`（サーバーバッチのみ、プライベートバッチには含まれない。部分的または完全に欠落する場合あり: このバッチで書き込みをしていない保存済みメンバー。各メンバーの表示名とエイリアス付き。アナライザーがそのメンバーにエイリアスを記録できるようにする。最大 `memory.aliasRosterSize` 件、最近確認された順、`0` = オフ。バジェットではトランスクリプトより前にランクされ、必須ではないためリクエストを失敗させることはない）· `<new_messages>` は `## #channel-name (id:123)` の下にグループ化、行形式は
 `[14:32] nick (id:123): text`、ペルソナ宛の行は `→ ` で始まり、自分の行には `labels.self` を使用。
 
 ユーザーメッセージ内のセクション順（バジェットは下から先にトリム）: 全著者のコンパクトプロファイル、ロスター（`<known_members>`）、トランスクリプト（`<new_messages>`）、全体プロファイル（表示行のある著者のみ、行数の多い順）、最近のノート（`<recent_notes>`）。ギルド、チャンネル、ロアブロックはコンパクトプロファイルの前に配置。プロファイルが全体で収まらない場合はコンパクトで送信。プロファイルが原因でリクエストが失敗することはない。
@@ -376,7 +376,8 @@ task.added                               {added}: later messages from the author
              "learned": { "add": [{ "text": "", "from": "<@id>" }], "seen": [3], "remove": [3] } },
   "channels": { "<channelId>": { "purpose": "", "topics": "", "tone": "" } },
   "lore": [ { "title": "", "keys": [""], "text": "" } ],
-  "self": [""]
+  "self": [""],
+  "note_reviews": [{ "target": "", "status": "" }]
 }
 ```
 
@@ -401,12 +402,13 @@ task.added                               {added}: later messages from the author
 - **ノートはその人がトピックについて何をしているかを記述します**（プレイしている、動画を見ている、言及しただけ）。その人がずっと前にやっていてやめたものは関心ではありません（せいぜい詳細）。周囲の会話なしには理解できないものは記録しません。
 - 意図的に欠如: アイロニーやサーカズムに関するルール。あらゆる種類の不確実性は `"sure": false` で処理します。
 - アナライザープロンプトは短く保ちます。ルールを追加するたびに、既存のテキストを引き締めて対価を支払います。
-- 新しい内容があるユーザーとチャンネルのみ返します。返されたチャンネル / `guild` / `self` はマージ後の全体の値で、保存済みの値を置き換えます。空の `guild` / `self` = 新しい内容なし。
+- 新しい内容があるユーザーとチャンネルのみ返します。返されたチャンネル / `guild` / `self` はマージ後の全体の値で、保存済みの値を置き換えます。空の `guild` / `self` = 新しい内容なし。チャンネルフィールド（purpose、topics、tone）の空文字列は無視され、保存済みテキストはそのまま残ります。
+- **陳腐化ノートレビュー。** `"stale": { "days": n }` を含むチャンネルまたはギルドエントリには、トップレベルの `note_reviews` 配列にちょうど 1 つの項目が必要です: `{ "target": "<channelId>" | "guild", "status": "updated" | "confirmed" | "insufficient_evidence" }`。`updated` はバッチがコンテンツ変更を正当化し、通常の `channels` または `guild` 出力を通じて返されたことを意味します。`confirmed` はアナライザーがこのバッチの関連証拠に基づいて保存済みノートを調査し、変更の根拠がないと判断したことを意味します（バッチレベルのレビューであり、全期間の証明書ではありません）。`insufficient_evidence` はバッチに判断するための関連素材が少なすぎることを意味します。コードは `confirmed` と、保存済みテキストが実際に変更された `updated` に対してのみ `notesCheckedAt` をスタンプします（2 段階モードでは、`patterns`/`starters` のキューされたボイスブリーフが変更としてカウントされます）。`insufficient_evidence`、欠落した項目、テキストが同一の `updated` はスタンプしません。対象は `memory.notesRetryHours` 後に再びフラグされます。フラグごとに `notesFlaggedAt` がスタンプされます。
 - `affinity` は変化量です: 整数の `delta`（通常 ±1…5、際立った出来事で最大 ±`relationships.maxDeltaPerUpdate`）と一行の `reason`（観測されたイベントを記述）。コードは ±`relationships.maxDeltaPerUpdate` にクランプし、−100…100 に累積し、短い履歴を保持します。モデルは絶対スコアを設定しません。`relationships.decayPerDay` が設定されている場合、スコアは毎日ゼロに向かってドリフトします。1 日あたり `decayPerDay * |score| * (|score| / 100) ^ decayPower` を失い、ゼロから遠いほど速くなります。負のスコアも同様にゼロへ向かいます。起動時と毎時、プロファイルのスタンプ `affinity.decayedAt` から整数日単位で適用され、ダウンタイムはキャッチアップされます。一時停止中とウォームアップ中は実行されません。履歴エントリは書き込まれません。
 - `episodes` は追記のみで、書き直しません: 数か月間記憶に値する新しい瞬間だけを返します。侮辱、親切、約束、賭け、喧嘩、共有されたジョーク、ペルソナに何かを頼んだこと、または決してしないよう頼んだこと。`what` は 1 行。`quote` はその人自身の言葉を逐語的に、短く（≤ 120 文字）、または空。`feeling` はペルソナがどう受け取ったかをキャラクターカードを通じて判断。`weight` は 1–5（5 = 決して忘れない）。バッチごとにユーザーあたり最大 `memory.maxNewEpisodes` 件。ほとんどのバッチでは追加なし。入力には保存済みのエピソードが表示されるため、同じ出来事を二度記録しません。コードはメンバーごとに `memory.maxEpisodes` 件保持し、最も軽いものから、次に最も古いものから削除します。
 - `lore` はサーバーのロアブックです: 会話を超えて残るもの、すなわちイベント（「X が去った日」）、繰り返し登場するキャラクターやペット、長期にわたるストーリー、対立、伝統。`title` はアイデンティティ（同じタイトルのエントリは更新であり、マージ後の全体テキストを持つ）、`keys` は 2–6 個の単語または短いフレーズで、そのことが話題になるとき人々が実際に入力するもの（名前、ニックネーム、ミームの文言、チャットの言語で、小文字）、`text` ≤ `lore.textChars`（`{{loreTextChars}}`）。入力の `<existing_lore>` には保存済みのタイトルとキーのリスト、およびバッチが触れるエントリの全テキストが表示されます。オーナーが追加したエントリ（`/nep lore add`）はアナライザーが変更しません。
 - 文字列フィールド ≤ `memory.fieldChars`。詳細 ≤ `memory.maxDetails`、内輪ネタ ≤ `memory.maxInjokes`、self ≤ `memory.maxSelfFacts`。ノートはチャットの言語で記述します。観測された事実のみ。センシティブな情報（住所、電話番号、書類、健康、財務、本名）は記録しません。
-- **`memory: update applied` のカウンター**（各バッチ後にログ出力）: `roster`（`<known_members>` に含まれたメンバー数）、`rosterCandidates`（バジェットに提供されたロスターエントリ数）、`rosterTokens`（送信されたロスターが使用した推定トークン数）、`aliasesChanged`（著者とロスターの中で保存済みエイリアスリストが実際に変更されたメンバー数）、`aliasOnly`（その中のロスターメンバー数）、`droppedUsers`（著者でもプロファイルを持つロスターメンバーでもない id のエントリ数）、`droppedFields`（ロスターメンバーのエントリから破棄された非 `aliases` キー数）。
+- **`memory: update applied` のカウンター**（各バッチ後にログ出力）: `roster`（`<known_members>` に含まれたメンバー数）、`rosterCandidates`（バジェットに提供されたロスターエントリ数）、`rosterTokens`（送信されたロスターが使用した推定トークン数）、`aliasesChanged`（著者とロスターの中で保存済みエイリアスリストが実際に変更されたメンバー数）、`aliasOnly`（その中のロスターメンバー数）、`droppedUsers`（著者でもプロファイルを持つロスターメンバーでもない id のエントリ数）、`droppedFields`（ロスターメンバーのエントリから破棄された非 `aliases` キー数）、`portraitDropped`（著者の非空の `character`/`style` が破棄された数）、`notesFlagged`（このバッチで陳腐化フラグを持つチャンネルまたはギルドエントリ数）。フラグが送信された場合、さらに: `notesUpdated`、`notesConfirmed`、`notesInsufficient`（3 つのレビューステータス）、`notesMissing`（モデルが返さなかったフラグ対象）、`notesIdentical`（テキストがストレージと一致した `updated`）、`notesUnflagged`（フラグされていない対象に返されたレビュー）。
 
 ## チャンネルマップ
 
@@ -430,6 +432,8 @@ task.added                               {added}: later messages from the author
 ### データモデル
 
 `character` と `style` は**自由記述のまま**で、`profile.md` のみが書き込みます: ウォームアップ時とポートレートリフレッシュ時です。ストリームアナライザーは編集しません。保存されたポートレートが見落としている、または矛盾している繰り返し見られる習慣や書き方の変化をバッチが示したメンバーについて、アナライザーは `users.<id>.portrait: "一行: ポートレートが見落としていること"` を返します。コードはそのメンバーのリフレッシュをキューに入れます。`profile.md` が `<draft>` = 保存済みの character + style、`<hint>` = アナライザーの一行で呼び出され、回答の `character` と `style` が保存済みのものを置き換えます（その回答の関心、詳細、エピソード、エイリアスは無視されます。これらはストリームの差分更新を通じて引き続き反映されます）。
+
+メンバーは 2 つのパスのいずれかでポートレートリフレッシュの対象になります。カウンターパス: 前回のポートレート以降少なくとも `memory.portraitRefreshMessages`（デフォルト 300）件の自分のメッセージ、かつ `memory.portraitRefreshDays`（デフォルト 3）日以上経過。エイジパス: ポートレートが `memory.portraitMaxAgeDays`（デフォルト 21）日以上古く、かつ少なくとも `memory.portraitMinMessages`（デフォルト 60）件の自分のメッセージが蓄積。キュー順: 最も長く待っているメンバーが先（`portraitDueAt`: メンバーが初めて対象になった時にスタンプされ、ポートレート完了でクリア）、次にポートレートが最も古い、次に自分のメッセージ数が最多。プロバイダーエラー（リクエスト送信後の HTTP 408/429/5xx またはタイムアウト）はその日のスロットを返却し、前回の試行スタンプを復元するため、メンバーは対象のまま残ります。スケジューラーはそのティックのサイクルを終了します。
 
 態度と `relationship` はウォームアップされません。ライブ会話からのみ蓄積されます。
 

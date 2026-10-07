@@ -30,8 +30,8 @@ All instructions are English in both layers; a character's speech samples may be
 | `memory-voice.md` | no | Stage B of the two-stage analyzer: the persona words queued items in their own voice. Returns JSON. Required when `features.memoryTwoStage` is on | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
 | `portrait.md` | no | Stage A of the two-stage portrait refresh: reads the stored portrait and a message sample, returns a merged `style` text and structured `character` edits. The character edits are queued as a voice item for stage B. Used by the two-stage portrait refresh; details are in a later documentation pass | `{{name}}` `{{fieldChars}}` |
 | `profile.md` | yes | Warmup / portrait refresh: one member's profile from a message sample | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
-| `channel.md` | yes | Warmup: channel notes from a message sample | `{{fieldChars}}` |
-| `server.md` | yes | Warmup: server-level notes from channel notes and member summaries | `{{name}}` `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
+| `channel.md` | yes | Warmup and notes refresh: channel notes from a message sample. On a refresh, an optional `<existing_notes>` block carries the stored notes as claims to evaluate, not as evidence | `{{fieldChars}}` |
+| `server.md` | yes | Warmup and notes refresh: server-level notes from channel notes and member summaries. On a refresh, an optional `<existing_notes>` block carries the stored notes as claims to evaluate | `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | yes | Out-of-character prompt of the media describer (`features.mediaDescriptions`): one picture in, one plain line out: the action and the point, legible text quoted in its original script. Always English. No commentary, no moralising, no markdown | `{{today}}` `{{maxChars}}` (optional) |
 | `describe-video.md` | yes | Out-of-character prompt of the video describer (`features.videoDescriptions`): one video clip in (with sound), a full ordered account out: who appears, what is said (key phrases quoted), text on screen, what happens visually, music/sound when relevant. Configurable length. Always English; speech, captions and on-screen text quoted in their original language. No character card | `{{today}}` `{{maxChars}}` |
 | `describe-gif.md` | no | Out-of-character prompt for the GIF describer (`media.gif.watch`): a short silent clip in, three labelled lines out: `reaction` (the reply function, a few words or `none`), `action` (what visibly happens, capped at `{{maxChars}}`), `text` (on-screen text verbatim or `none`). Always English. No character card. Falls back to `describe-video.md` when absent | `{{today}}` `{{maxChars}}` `{{seconds}}` |
@@ -365,8 +365,8 @@ through the warmup prompts (`profile.md`, `channel.md`, `server.md`), not throug
 The numeric limits in the prompt are placeholders filled at runtime from `config.memory.*` and `relationships.maxDeltaPerUpdate`.
 
 Input: `<character>` · `<existing_profiles>` (JSON by user id; each profile is either whole or compact. A whole profile carries prose fields, attitude, and the ranked top of interests, details, aliases and episodes: interests capped at `memory.maxInterests`, details at `memory.maxDetails`, aliases at `memory.maxAliases`, episodes at `memory.analyzerEpisodes` (default 8). A compact profile carries only `names`, `affinity` and `"compact": true`. When the batch is too large to fit every profile whole, authors with the most shown lines keep theirs whole and the rest arrive compact. Log fields `profilesWhole`, `profilesCompact`, `profilesTokens` on `memory: update applied`) · `<existing_lore>` ·
-`<existing_guild>` (JSON: patterns, starters, in-jokes, learned items) · `<existing_channels>` (JSON by channel id: `name`, Discord `category`, `topic`, stored `purpose`,
-`topics`, `tone`) · `<known_members>` (guild batches only, absent from private batches; may be partial or absent entirely: stored members who did NOT write in this batch, each with their display names and aliases, so the analyzer can record an alias for one of them; at most `memory.aliasRosterSize` entries, most recently seen first, `0` = off; ranked before the transcript in the budget so a heavy batch cannot starve it, not required so it never makes the request fail) · `<new_messages>` grouped under `## #channel-name (id:123)`, lines `[14:32] nick (id:123): text`,
+`<existing_guild>` (JSON: patterns, starters, in-jokes, learned items; may carry `"stale": { "days": n }` when the server notes are due for review) · `<existing_channels>` (JSON by channel id: `name`, Discord `category`, `topic`, stored `purpose`,
+`topics`, `tone`; an entry may carry `"stale": { "days": n }` when its notes are due for review) · `<known_members>` (guild batches only, absent from private batches; may be partial or absent entirely: stored members who did NOT write in this batch, each with their display names and aliases, so the analyzer can record an alias for one of them; at most `memory.aliasRosterSize` entries, most recently seen first, `0` = off; ranked before the transcript in the budget so a heavy batch cannot starve it, not required so it never makes the request fail) · `<new_messages>` grouped under `## #channel-name (id:123)`, lines `[14:32] nick (id:123): text`,
 a line addressed to the persona starts with `→ `, own lines use `labels.self`.
 
 Section order in the user message (budget trims from the bottom first): compact profiles of every author, the roster (`<known_members>`), the transcript (`<new_messages>`), whole profiles (offered only for authors with a shown line, most lines first), recent notes (`<recent_notes>`). The guild, channel and lore blocks sit before the compact profiles. A profile that does not fit whole is sent compact; the request never fails because of a profile.
@@ -390,7 +390,8 @@ of what is already stored, so facts are not degraded by being rewritten batch af
              "learned": { "add": [{ "text": "", "from": "<@id>" }], "seen": [3], "remove": [3] } },
   "channels": { "<channelId>": { "purpose": "", "topics": "", "tone": "" } },
   "lore": [ { "title": "", "keys": [""], "text": "" } ],
-  "self": [""]
+  "self": [""],
+  "note_reviews": [{ "target": "", "status": "" }]
 }
 ```
 
@@ -501,7 +502,8 @@ of what is already stored, so facts are not degraded by being rewritten batch af
 - Deliberately absent: any rule about irony or sarcasm. Uncertainty of every kind goes through `"sure": false`.
 - The analyzer prompt stays short; every added rule is paid for by tightening existing text.
 - Only users and channels with something new. A returned channel / `guild` / `self` is the WHOLE merged value and
-  replaces the stored one; empty `guild` / `self` = nothing new.
+  replaces the stored one; empty `guild` / `self` = nothing new. A returned blank string for a channel field (purpose, topics or tone) is ignored; the stored text stays.
+- **Stale-note review.** A channel or guild entry carrying `"stale": { "days": n }` needs exactly one item in the top-level `note_reviews` array: `{ "target": "<channelId>" | "guild", "status": "updated" | "confirmed" | "insufficient_evidence" }`. `updated` means the batch justified a content change, returned through the normal `channels` or `guild` output. `confirmed` means the analyzer examined the stored notes against relevant evidence in this batch and found no change warranted (a batch-level review, not a certificate for the full period). `insufficient_evidence` means the batch has too little relevant material to judge. Code stamps `notesCheckedAt` only for `confirmed` and for `updated` whose stored text really changed (in two-stage mode, a queued voice brief for `patterns`/`starters` counts as the change). `insufficient_evidence`, a missing item, and `updated` with identical text do not stamp; the target is flagged again after `memory.notesRetryHours`. Every flag stamps `notesFlaggedAt`.
 - `affinity` is a CHANGE: integer `delta` (usually ±1…5, up to ±`relationships.maxDeltaPerUpdate` for something
   striking), one-line `reason` naming an observed event. Code clamps it to ±`relationships.maxDeltaPerUpdate`, accumulates into −100…100, keeps a short
   history. The model never sets the absolute score. Scores drift toward zero daily when `relationships.decayPerDay`
@@ -525,7 +527,7 @@ of what is already stored, so facts are not degraded by being rewritten batch af
   Entries added by the owner (`/nep lore add`) are never changed by the analyzer.
 - String fields ≤ `memory.fieldChars`; details ≤ `memory.maxDetails`, injokes ≤ `memory.maxInjokes`, self ≤ `memory.maxSelfFacts`. Notes in the language the chat speaks.
   Observed facts only; nothing sensitive (addresses, phones, documents, health, finances, real full names).
-- **Counters on `memory: update applied`** (logged after each batch): `roster` (members sent in `<known_members>`), `rosterCandidates` (roster entries offered to the budget), `rosterTokens` (estimated tokens the sent roster took), `aliasesChanged` (members, authors and roster, whose stored alias list really changed), `aliasOnly` (roster members among them), `droppedUsers` (entries for an id that is neither an author nor a roster member with a stored profile), `droppedFields` (non-alias keys dropped from roster members' entries), `portraitDropped` (authors' non-blank `character`/`style` dropped).
+- **Counters on `memory: update applied`** (logged after each batch): `roster` (members sent in `<known_members>`), `rosterCandidates` (roster entries offered to the budget), `rosterTokens` (estimated tokens the sent roster took), `aliasesChanged` (members, authors and roster, whose stored alias list really changed), `aliasOnly` (roster members among them), `droppedUsers` (entries for an id that is neither an author nor a roster member with a stored profile), `droppedFields` (non-alias keys dropped from roster members' entries), `portraitDropped` (authors' non-blank `character`/`style` dropped), `notesFlagged` (channel or guild entries that carried a stale flag in this batch). When flags were sent, also: `notesUpdated`, `notesConfirmed`, `notesInsufficient` (the three review statuses), `notesMissing` (flagged targets the model did not return), `notesIdentical` (`updated` whose text matched storage), `notesUnflagged` (a review returned for a target that was not flagged).
 
 ### Two-stage mode
 
@@ -612,14 +614,12 @@ non-blank value from a stream batch is dropped and counted as `portraitDropped`.
 recurring habit or a change in how they write that the stored portrait misses or contradicts, the analyzer returns
 `users.<id>.portrait: "one line: what the portrait misses"`, and code queues a refresh.
 
-Portraits are also refreshed by code on a periodic schedule (`features.portraitRefresh`). A member is due when they
-have written at least `memory.portraitRefreshMessages` (default 300) own messages since their last portrait AND at
-least `memory.portraitRefreshDays` (default 3) have passed since the last successful refresh. A failed attempt
+Portraits are also refreshed by code on a periodic schedule (`features.portraitRefresh`). A member is due by one of two paths. The counter path: at least `memory.portraitRefreshMessages` (default 300) own messages since their last portrait AND at least `memory.portraitRefreshDays` (default 3) have passed. The age path: the portrait is at least `memory.portraitMaxAgeDays` (default 21) days old AND at least `memory.portraitMinMessages` (default 60) own messages have accumulated since. A failed attempt
 backs off for `memory.portraitRetryHours` (default 24). The scheduler checks every `memory.portraitCheckMinutes`
-(default 60) and refreshes up to `memory.portraitRefreshPerDay` (default 3) members per day, most active first.
+(default 60) and refreshes up to `memory.portraitRefreshPerDay` (default 3) members per day. Queue order: the member waiting longest first (`portraitDueAt`, stamped when a member first becomes due, cleared on a finished portrait), then the oldest portrait, then the most own messages since the last portrait.
 A member with no portrait stamp counts all their messages, so several qualify at once on first deploy; the daily
 cap spreads them over a few days. Code-triggered refreshes, analyzer cue refreshes and `/nep memory refresh` share
-this cap. Each refresh is fitted under the 50k token rail (`llm.maxRequestTokens`), shrinking the sample if needed.
+this cap. Each refresh is fitted under the 50k token rail (`llm.maxRequestTokens`), shrinking the sample if needed. A provider error after the request was sent (HTTP 408/429/5xx or a timeout) gives the day's slot back and restores the previous attempt stamp, so the member stays due; the scheduler ends its cycle for this tick.
 
 `profile.md` is called with `<draft>` = the stored character + style, `<hint>` = the analyzer's line (when present),
 and the answer's `character` and `style` replace the stored ones. The draft is a MERGE base: every point still

@@ -218,6 +218,9 @@ function emptyGuild() {
     updatedAt: null,
     notesUpdatedAt: null, // when patterns, starters or injokes last changed -- see updateGuild
     notesCheckedAt: null, // when the analyzer was last asked to look at them again -- see markNotesChecked
+    notesFlaggedAt: null, // when the analyzer last flagged them stale -- see markNotesFlagged
+    notesSampleReviewedAt: null, // when a sample refresh last reviewed them -- see markNotesSampled
+    notesAttemptAt: null, // when a sample refresh last tried and failed -- see markNotesSampled
   };
 }
 
@@ -252,6 +255,9 @@ export function emptyChannel(id) {
     writers: {}, // { [id]: { count, last } } -- who writes here, see countWriter
     updatedAt: null, // when purpose, topics or tone last changed -- only updateChannel stamps it
     notesCheckedAt: null, // when the analyzer was last asked to look at them again -- see markNotesChecked
+    notesFlaggedAt: null, // when the analyzer last flagged them stale -- see markNotesFlagged
+    notesSampleReviewedAt: null, // when a sample refresh last reviewed them -- see markNotesSampled
+    notesAttemptAt: null, // when a sample refresh last tried and failed -- see markNotesSampled
   };
 }
 
@@ -363,6 +369,9 @@ function normalizeGuild(guild) {
   // Missing or hand-broken -> null: never stamped.
   guild.notesUpdatedAt = isoStampOrNull(guild.notesUpdatedAt);
   guild.notesCheckedAt = isoStampOrNull(guild.notesCheckedAt);
+  guild.notesFlaggedAt = isoStampOrNull(guild.notesFlaggedAt);
+  guild.notesSampleReviewedAt = isoStampOrNull(guild.notesSampleReviewedAt);
+  guild.notesAttemptAt = isoStampOrNull(guild.notesAttemptAt);
 }
 
 /** The `relationshipScore` stamped next to a freshly written `relationship` text: the affinity
@@ -601,6 +610,9 @@ function normalizeChannel(channel) {
   if (!isPlainObject(channel)) return;
   channel.writers = isPlainObject(channel.writers) ? normalizeWriters(channel.writers) : writersFromTop(channel.topWriters, channel.lastMessageAt);
   channel.notesCheckedAt = isoStampOrNull(channel.notesCheckedAt);
+  channel.notesFlaggedAt = isoStampOrNull(channel.notesFlaggedAt);
+  channel.notesSampleReviewedAt = isoStampOrNull(channel.notesSampleReviewedAt);
+  channel.notesAttemptAt = isoStampOrNull(channel.notesAttemptAt);
 }
 
 export function createStore({ dataDir }) {
@@ -1473,6 +1485,74 @@ export function createStore({ dataDir }) {
         }
       }
       return marked;
+    },
+
+    /**
+     * Stamp `notesFlaggedAt` (when the analyzer flagged the notes stale) on the listed channels
+     * that exist and on the guild; dirty only when the value changes, nothing is created.
+     * @param {string} guildId
+     * @param {{ channels?: string[], guild?: boolean }} targets
+     * @param {number} nowMs  Epoch milliseconds; not a finite number -> the wall clock.
+     * @returns {{ channels: number, guild: boolean }}
+     */
+    markNotesFlagged(guildId, targets, nowMs) {
+      const at = new Date(Number.isFinite(nowMs) ? nowMs : Date.now()).toISOString();
+      const marked = { channels: 0, guild: false };
+      const stamp = (item) => {
+        if (item.value.notesFlaggedAt === at) return;
+        item.value.notesFlaggedAt = at;
+        item.dirty = true;
+      };
+
+      const listed = Array.isArray(targets?.channels) ? targets.channels : [];
+      const channelIds = new Set(listed.filter((id) => typeof id === 'string' || typeof id === 'number').map(String));
+      for (const channelId of channelIds) {
+        if (!channelId || !hasChannel(guildId, channelId)) continue;
+        const item = channelEntry(guildId, channelId);
+        if (!isPlainObject(item.value)) continue;
+        stamp(item);
+        marked.channels += 1;
+      }
+
+      if (targets?.guild === true) {
+        const item = entry(guildFile(guildId), emptyGuild);
+        normalizeGuild(item.value);
+        if (isPlainObject(item.value)) {
+          stamp(item);
+          marked.guild = true;
+        }
+      }
+      return marked;
+    },
+
+    /**
+     * Record the outcome of one sample refresh of the notes. `reviewed` sets
+     * `notesSampleReviewedAt` and clears `notesAttemptAt`; `attempt` sets `notesAttemptAt` only.
+     * A channel that does not exist writes nothing.
+     * @param {string} guildId
+     * @param {string} target  `'guild'` or a channel id.
+     * @param {number} nowMs  Epoch milliseconds; not a finite number -> the wall clock.
+     * @param {{ outcome: 'reviewed'|'attempt' }} opts
+     * @returns {boolean}  Whether something was written.
+     */
+    markNotesSampled(guildId, target, nowMs, { outcome } = {}) {
+      if (outcome !== 'reviewed' && outcome !== 'attempt') return false;
+      const at = new Date(Number.isFinite(nowMs) ? nowMs : Date.now()).toISOString();
+      let item;
+      if (target === 'guild') {
+        item = entry(guildFile(guildId), emptyGuild);
+        normalizeGuild(item.value);
+      } else {
+        const channelId = typeof target === 'string' || typeof target === 'number' ? String(target) : '';
+        if (!channelId || !hasChannel(guildId, channelId)) return false;
+        item = channelEntry(guildId, channelId);
+      }
+      if (!isPlainObject(item.value)) return false;
+      const patch = outcome === 'reviewed' ? { notesSampleReviewedAt: at, notesAttemptAt: null } : { notesAttemptAt: at };
+      if (!changesStored(item.value, patch)) return false;
+      Object.assign(item.value, patch);
+      item.dirty = true;
+      return true;
     },
 
     /**

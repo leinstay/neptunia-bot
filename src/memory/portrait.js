@@ -5,12 +5,15 @@
 // were written since the last portrait (the per-member `messageCount` minus the
 // `portraitMessageCount` stamp; a profile with no stamp counts every message, the rollout
 // catch-up) AND `memory.portraitRefreshDays` passed since `portraitRefreshedAt`; a member with
-// no portrait at all is due at `warmup.minMessages`. Any attempt that ended without a stored
+// no portrait at all is due at `warmup.minMessages`. An old portrait is due by age too: refreshed
+// more than `memory.portraitMaxAgeDays` ago with at least `memory.portraitMinMessages` own
+// messages since. Any attempt that ended without a stored
 // portrait (`portraitAttemptAt`) waits `memory.portraitRetryHours`, and a member silent for
 // longer than `warmup.lookbackDays` has no lines in the history a refresh reads, so is never
 // picked. `portraitDue`/`pickDuePortraits` are pure; `createPortraitScheduler` looks every
-// `memory.portraitCheckMinutes` (switch `features.portraitRefresh`) and hands the most active
-// due members to `refreshPortrait` one after another (each one's stored profile re-checked
+// `memory.portraitCheckMinutes` (switch `features.portraitRefresh`), stamps when each due member
+// was first found due (`portraitDueAt`, cleared by a stored portrait) and hands the
+// longest-waiting due members to `refreshPortrait` one after another (each one's stored profile re-checked
 // right before its turn, so a member forgotten since the look is never started), sharing one
 // history read per look, under the one daily cap (`memory.portraitRefreshPerDay`, counted in
 // `PORTRAIT_SLOTS`) that the analyzer's cue and the owner's `/nep memory refresh` share. A look
@@ -61,10 +64,12 @@ export function llmCapReached(stateData, config, nowMs) {
  * config.json; a daily cap that is not a number counts as config.json's value.
  * @param {object} [config]  The live config.
  * @returns {{ messages: number, days: number, perDay: number, retryHours: number, checkMinutes: number,
- *   firstMessages: number, lookbackDays: number }}
+ *   maxAgeDays: number, minMessages: number, firstMessages: number, lookbackDays: number }}
  *   `messages`: `memory.portraitRefreshMessages` (own messages since the last portrait, also the
  *   sample size); `days`: `memory.portraitRefreshDays`; `perDay`: `memory.portraitRefreshPerDay`;
  *   `retryHours`: `memory.portraitRetryHours`; `checkMinutes`: `memory.portraitCheckMinutes`;
+ *   `maxAgeDays`: `memory.portraitMaxAgeDays` and `minMessages`: `memory.portraitMinMessages` (the
+ *   age path: a portrait older than that many days with at least that many own messages since);
  *   `firstMessages`: `warmup.minMessages` (a first portrait, and the thinnest sample worth sending);
  *   `lookbackDays`: `warmup.lookbackDays` (how far back the history a refresh reads goes).
  */
@@ -77,6 +82,8 @@ export function portraitSettings(config) {
     perDay: Number.isFinite(memory.portraitRefreshPerDay) ? memory.portraitRefreshPerDay : 3,
     retryHours: memory.portraitRetryHours ?? 24,
     checkMinutes: memory.portraitCheckMinutes ?? 60,
+    maxAgeDays: memory.portraitMaxAgeDays ?? 21,
+    minMessages: memory.portraitMinMessages ?? 60,
     firstMessages: warmup.minMessages ?? 30,
     lookbackDays: warmup.lookbackDays ?? 60,
   };
@@ -158,12 +165,14 @@ export function waitingPortraits(queue) {
  * @param {object} profile  A stored profile (`messageCount`, `character`, `style`, `lastSeen` and the
  *   stamps `portraitMessageCount`, `portraitRefreshedAt`, `portraitAttemptAt`).
  * @param {number} nowMs
- * @param {{ messages: number, days: number, retryHours: number, firstMessages: number, lookbackDays?: number }} cfg
- *   From `portraitSettings`.
- * @returns {{ due: boolean, reason: 'due'|'first'|'few'|'recent'|'retry-wait'|'quiet'|'none', own: number }}
+ * @param {{ messages: number, days: number, retryHours: number, firstMessages: number, lookbackDays?: number,
+ *   maxAgeDays?: number, minMessages?: number }} cfg  From `portraitSettings`; without `maxAgeDays` /
+ *   `minMessages` the age path is off.
+ * @returns {{ due: boolean, reason: 'due'|'aged'|'first'|'few'|'recent'|'retry-wait'|'quiet'|'none', own: number }}
  *   `own`: messages since the last portrait (`messageCount - portraitMessageCount`, never negative).
  *   `first`: due, no portrait stored yet (`messageCount >= firstMessages`, no day rule); `due`: due
- *   by the counters; `few`: not enough messages; `recent`: refreshed less than `days` ago;
+ *   by the counters; `aged`: due by age (`portraitRefreshedAt` at least `maxAgeDays` ago and
+ *   `own >= minMessages`; a portrait with no stamp never ages); `few`: not enough messages; `recent`: refreshed less than `days` ago;
  *   `retry-wait`: an attempt less than `retryHours` ago; `quiet`: not seen for longer than
  *   `lookbackDays`; `none`: not a profile.
  */
@@ -172,13 +181,17 @@ export function portraitDue(profile, nowMs, cfg) {
   const count = storedCount(profile.messageCount);
   const own = Math.max(0, count - storedCount(profile.portraitMessageCount));
   const empty = !hasText(profile.character) && !hasText(profile.style);
+  let aged = false;
 
   if (empty) {
     if (!(count >= cfg.firstMessages)) return { due: false, reason: 'few', own };
   } else {
-    if (!(own >= cfg.messages)) return { due: false, reason: 'few', own };
     const refreshedAt = stampMs(profile.portraitRefreshedAt);
-    if (refreshedAt !== null && !(nowMs - refreshedAt >= cfg.days * DAY_MS)) return { due: false, reason: 'recent', own };
+    const recent = refreshedAt !== null && !(nowMs - refreshedAt >= cfg.days * DAY_MS);
+    const byCount = own >= cfg.messages && !recent;
+    // The age path: an old portrait with modest new activity since.
+    aged = !byCount && refreshedAt !== null && nowMs - refreshedAt >= cfg.maxAgeDays * DAY_MS && own >= cfg.minMessages;
+    if (!byCount && !aged) return { due: false, reason: own >= cfg.messages ? 'recent' : 'few', own };
   }
 
   const attemptAt = stampMs(profile.portraitAttemptAt);
@@ -189,12 +202,27 @@ export function portraitDue(profile, nowMs, cfg) {
     return { due: false, reason: 'quiet', own };
   }
 
-  return { due: true, reason: empty ? 'first' : 'due', own };
+  return { due: true, reason: empty ? 'first' : aged ? 'aged' : 'due', own };
 }
 
 /**
- * The members due for a portrait refresh, most own messages first, then the most recently seen,
- * then by id; at most `limit`. A member in `waiting` (`waitingPortraits`: a character text still
+ * When a member was first found due (`portraitDueAt`, stamped by the scheduler's look), in epoch
+ * milliseconds; null when missing, unreadable, or not later than `portraitRefreshedAt` (stale: a
+ * portrait was stored since by a path that does not clear the stamp, the voice run's). Pure.
+ * @param {object} profile  A stored profile.
+ * @returns {number|null}
+ */
+export function dueSinceMs(profile) {
+  const dueAt = stampMs(profile?.portraitDueAt);
+  if (dueAt === null) return null;
+  const refreshedAt = stampMs(profile?.portraitRefreshedAt);
+  return refreshedAt !== null && dueAt <= refreshedAt ? null : dueAt;
+}
+
+/**
+ * The members due for a portrait refresh, the longest waiting first (`dueSinceMs` ascending; none
+ * yet counts as `nowMs`, so last), then the oldest portrait (`portraitRefreshedAt` ascending, none
+ * first), then most own messages, then by id; at most `limit`. A member in `waiting` (`waitingPortraits`: a character text still
  * waits for the voice model) is never picked. Pure.
  * @param {object[]} profiles  Stored profiles (`store.listUserProfiles`); entries without an id are skipped.
  * @param {number} nowMs
@@ -211,9 +239,14 @@ export function pickDuePortraits(profiles, nowMs, cfg, limit, { waiting } = {}) 
     if (waiting?.has(String(profile.id))) continue;
     const verdict = portraitDue(profile, nowMs, cfg);
     if (!verdict.due) continue;
-    due.push({ userId: String(profile.id), own: verdict.own, reason: verdict.reason, seen: stampMs(profile.lastSeen) ?? -Infinity });
+    const waitedFrom = dueSinceMs(profile) ?? nowMs;
+    const refreshedAt = stampMs(profile.portraitRefreshedAt) ?? -Infinity;
+    due.push({ userId: String(profile.id), own: verdict.own, reason: verdict.reason, waitedFrom, refreshedAt });
   }
-  due.sort((a, b) => b.own - a.own || (b.seen === a.seen ? 0 : b.seen > a.seen ? 1 : -1) || a.userId.localeCompare(b.userId));
+  const order = (x, y) => (x === y ? 0 : x < y ? -1 : 1);
+  due.sort(
+    (a, b) => order(a.waitedFrom, b.waitedFrom) || order(a.refreshedAt, b.refreshedAt) || b.own - a.own || a.userId.localeCompare(b.userId),
+  );
   return due.slice(0, max).map(({ userId, own, reason }) => ({ userId, own, reason }));
 }
 
@@ -224,7 +257,9 @@ export function pickDuePortraits(profiles, nowMs, cfg, limit, { waiting } = {}) 
  * cycle is in flight, before `memory.portraitCheckMinutes` passed since its last look (kept in
  * memory), with no free daily slot, when today's LLM requests reached `llm.maxRequestsPerDay`
  * (`llmCapReached`), or on a UTC day a refresh already came back refused by that cap at the
- * cap's current value (a live raise lets the next look run). Otherwise it refreshes the due
+ * cap's current value (a live raise lets the next look run). Otherwise it stamps `portraitDueAt`
+ * (now) on every due member without a current one (`dueSinceMs`; one `store.updateUser` each, an
+ * existing stamp is never moved) and refreshes the due
  * members in `pickDuePortraits` order (in two-stage mode, `portraitMode`, without the members
  * whose character text still waits for the voice model: the guild's voice queue is read once
  * per look), one at a time, until today's slots are taken (recounted
@@ -239,7 +274,8 @@ export function pickDuePortraits(profiles, nowMs, cfg, limit, { waiting } = {}) 
  * @param {object} deps
  * @param {object} deps.hot  Live config and prompts; read at the moment of use.
  * @param {object} deps.store  `state.data`, `state.markDirty()`, `listUserProfiles(guildId)`,
- *   `getUser(guildId, userId)`, `getVoiceQueue(guildId)` (read only in two-stage mode).
+ *   `getUser(guildId, userId)`, `updateUser(guildId, userId, fields)` (the `portraitDueAt` stamp),
+ *   `getVoiceQueue(guildId)` (read only in two-stage mode).
  * @param {(guildId: string, userId: string, reason: string, opts: { crawl: object }) =>
  *   Promise<{ ok: boolean, reason?: string, cap?: string }>} deps.refreshPortrait
  *   src/memory/warmup.js#createWarmup's `refreshPortrait`.
@@ -292,6 +328,11 @@ export function createPortraitScheduler({ hot, store, refreshPortrait, isWarming
       // A refresh in two-stage mode would ask stage A again and only replace the waiting item.
       const waiting = portraitMode(hot.config, hot.prompts).stage === 'two' ? waitingPortraits(store.getVoiceQueue(guildId)) : undefined;
       candidates = pickDuePortraits(store.listUserProfiles(guildId), nowMs, settings, Infinity, { waiting });
+      // When each member was first found due, so the queue serves the longest waiting first.
+      for (const { userId } of candidates) {
+        const stored = store.getUser(guildId, userId);
+        if (stored && dueSinceMs(stored) === null) store.updateUser(guildId, userId, { portraitDueAt: new Date(nowMs).toISOString() });
+      }
     } catch (err) {
       log.warn('portrait: look failed', { guildId, reason: 'store-error', error: errorNameOf(err) });
       return { ran: false, reason: 'store-error' };

@@ -25,6 +25,7 @@ import { backfillDiary, createDiary } from './behavior/diary.js';
 import { createMemoryUpdater } from './memory/update.js';
 import { createWarmup } from './memory/warmup.js';
 import { createPortraitScheduler } from './memory/portrait.js';
+import { createNotesScheduler } from './memory/notes-refresh.js';
 import { createEmojiBackfill } from './memory/emoji-backfill.js';
 import { createGifBackfill } from './memory/gif-backfill.js';
 import { createGifRecache } from './memory/gif-recache.js';
@@ -361,6 +362,10 @@ client.once(Events.ClientReady, async () => {
   // memory.portraitCheckMinutes itself; the minute tick only gives it the chance.
   const portraits = createPortraitScheduler({ hot, store, refreshPortrait: warmup.refreshPortrait, isWarmingUp, getGuildId, now: Date.now });
   every(60_000, () => portraits.tick(), 'portraits.tick');
+  // Channel and server notes re-described from a spread sample (features.notesRefresh): the
+  // scheduler looks every memory.notesCheckMinutes itself; the minute tick only gives it the chance.
+  const notes = createNotesScheduler({ hot, store, refreshChannelNotes: warmup.refreshChannelNotes, refreshServerNotes: warmup.refreshServerNotes, isWarmingUp, getGuildId, now: Date.now });
+  every(60_000, () => notes.tick(), 'notes.tick');
   every(3_600_000, sweepAffinityDecay, 'affinity decay');
 
   if (!hot.config.bot.guildId) {
