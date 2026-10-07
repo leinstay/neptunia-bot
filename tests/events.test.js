@@ -3788,12 +3788,14 @@ test('follow-up: a "yes" during a spontaneous turn in its own channel that ends 
   assert.equal(scene.turns.calls[0].triggerKind, 'followUp');
 });
 
-test('follow-up: a deferred "yes" is dropped as answered when the persona posted in its channel after it', async () => {
-  const scene = await deferredFollowUps();
+test('follow-up: a line that arrived after the running turn fetched its history is drained, not dropped as answered', async () => {
+  const scene = await deferredFollowUps({ busyIn: 'c1' });
+  // The running turn in c1 posts after the line, from a history fetched before it arrived.
   await openFollowUpWindow(scene.handler, { guild: scene.guild, channel: scene.channel, ts: FOLLOW_UP_T0 + 5000 });
+  scene.turns.spokeAfterSeeing = () => false;
   const logs = await endTurnAndDrain(scene);
-  assert.equal(scene.turns.calls.length, 0, 'not answered a second time');
-  assert.deepEqual(followUpDropped(logs), [['m1', 'answered']]);
+  assert.deepEqual(followUpDropped(logs), []);
+  assert.deepEqual(startedTurns(scene.turns), [['m1', 'followUp']]);
 });
 
 test('follow-up: a deferred "yes" is dropped when its window closed while it waited', async () => {
@@ -7208,11 +7210,12 @@ test('follow-up: a burst of three candidates during one busy turn costs one clas
   assert.deepEqual(startedTurns(scene.turns), [['m3', 'followUp']]);
 });
 
-test('follow-up: a "yes" classified during the turn is dropped as answered at pickup when that turn answered its channel', async () => {
+test('follow-up: a line the turn had in its history is dropped as answered', async () => {
   const scene = await busyFollowUpScene({ busyIn: 'c1' });
   await busyCandidate(scene, 'm1', 'yes');
-  // The running turn in c1 posts after the candidate: the window's last answer moves past it.
+  // The running turn in c1 posts after the candidate, with the candidate in its history.
   await openFollowUpWindow(scene.handler, { guild: scene.guild, channel: scene.channel, ts: FOLLOW_UP_T0 + 5000 });
+  scene.turns.spokeAfterSeeing = (channelId, messageId) => channelId === 'c1' && messageId === 'm1';
   const drain = await endTurnAndDrain(scene);
   assert.equal(scene.turns.calls.length, 0, 'not answered a second time');
   assert.deepEqual(followUpDropped(drain), [['m1', 'answered']]);
@@ -7527,4 +7530,13 @@ test('follow-up: three messages in a row keep the newest in the slot and the dra
   assert.deepEqual(startedTurns(turns), [['m3', 'overheard']], 'the slot held the last one');
   const fetched = await turns.calls[0].channel.messages.fetch({ limit: 50 });
   assert.deepEqual([...fetched.keys()], ['m1', 'm2', 'm3'], 'the drained turn reads all three in the history');
+});
+
+test('follow-up: an overheard line that arrived after the running turn fetched its history is drained, not dropped as answered', async () => {
+  const scene = await deferredFollowUps({ busyIn: 'c1', answers: ['overheard'], config: baseConfig({ mention: { pendingOverheard: true } }) });
+  await openFollowUpWindow(scene.handler, { guild: scene.guild, channel: scene.channel, ts: FOLLOW_UP_T0 + 5000 });
+  scene.turns.spokeAfterSeeing = () => false;
+  const logs = await endTurnAndDrain(scene);
+  assert.deepEqual(followUpDropped(logs), []);
+  assert.deepEqual(startedTurns(scene.turns), [['m1', 'overheard']]);
 });

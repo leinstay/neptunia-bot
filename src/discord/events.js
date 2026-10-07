@@ -1199,8 +1199,10 @@ export function createMessageHandler({
   // A follow-up the address classifier said `yes` to that found the attention
   // taken waits here too (deferFollowUp, kind `followUp`), and so does an
   // `overheard` one (kind `overheard`, mention.pendingOverheard): one of them
-  // per channel (followUpSlot), logged as `follow-up: ...`; at pickup its window must still be open and
-  // the persona must not have posted there since (followUpStale).
+  // per channel (followUpSlot), logged as `follow-up: ...`; at pickup its
+  // window must still be open (followUpStale) and, like any call, it is
+  // dropped as answered only when the turn that spoke there had it in its
+  // history (turns.spokeAfterSeeing).
   // Never persisted.
   let pendingList = [];
   let draining = false; // guards against a re-entrant drainPending() call (see below)
@@ -1266,8 +1268,8 @@ export function createMessageHandler({
   /**
    * A follow-up `yes` (trigger kind `followUp`) that found the attention
    * taken (startFollowUpTurn): held in the pending queue like a direct call,
-   * answered by drainPending once the turn frees up, after the window and
-   * "already answered" checks there (followUpStale). Read now: muted
+   * answered by drainPending once the turn frees up, after the window check
+   * (followUpStale) and the "already answered" one (spokeAfterSeeing) there. Read now: muted
    * (paused, a warmup run), features.followUp / features.mentions off, or its
    * own channel busy with mention.pendingSameChannel off -- not held, dropped
    * with that reason (`busy` for the last two, as before). An `overheard`
@@ -1324,13 +1326,15 @@ export function createMessageHandler({
   }
 
   /**
-   * Why a deferred follow-up is no longer to be answered at pickup, read now:
-   * `closed` -- the window of its channel is not open any more
-   * (isFollowUpOpen: mention.followUpMinutes and the no-streak, the rule the
-   * classifier used; an expired one is forgotten as the gate does) --, or
-   * `answered` -- the persona posted in that channel after the message
-   * (the window's last answer is later than it). Null: still to answer.
-   * @returns {'closed'|'answered'|null}
+   * Why a deferred follow-up or overheard line is no longer to be answered
+   * at pickup, read now: `closed` -- the window of its channel is not open
+   * any more (isFollowUpOpen: mention.followUpMinutes and the no-streak, the
+   * rule the classifier used; an expired one is forgotten as the gate does).
+   * Null: still to answer. A post of the persona in that channel after the
+   * line does not make it answered by itself: the turn that posted may have
+   * fetched its history before the line arrived. Whether that turn had the
+   * line in view is the drain's spokeAfterSeeing check, made before this one.
+   * @returns {'closed'|null}
    */
   function followUpStale(ping, config) {
     const window = followUpWindows.get(ping.channelId);
@@ -1338,7 +1342,7 @@ export function createMessageHandler({
       if (window) closeFollowUpWindow(ping.channelId);
       return 'closed';
     }
-    return window.lastAnswerAt > ping.trigger.ts ? 'answered' : null;
+    return null;
   }
 
   /**
@@ -1622,8 +1626,8 @@ export function createMessageHandler({
    * channel (`queued`, queuedFor) and the messages folded into it (`added`).
    * A ping queued in a channel whose own turn was running is picked up the
    * same way once that turn frees the channel. A deferred follow-up is never
-   * rolled (counted for spam only) and is dropped when its window closed or
-   * the persona posted in its channel after it (followUpStale), or when
+   * rolled (counted for spam only) and is dropped when its window closed
+   * (followUpStale) or a turn that spoke had it in view, or when
    * features.followUp is off now. Guarded against re-entrancy:
    * the turn this function itself starts also frees the channel through the very same `onIdle`,
    * which would otherwise start a second overlapping drain. A no-op while
@@ -1772,7 +1776,8 @@ export function createMessageHandler({
         }
 
         // A deferred follow-up or overheard line: its window must still be
-        // open and the persona must not have posted there since. A follow-up
+        // open (a post the line came too late for is no answer: the
+        // spokeAfterSeeing check above decides that). A follow-up
         // is counted for spam like a live one, an overheard line is not;
         // neither is rolled for the ignore chance (startFollowUpTurn).
         if (isDeferredFollowUp(ping)) {
