@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createStore } from '../src/memory/store.js';
-import { MEMORY_LIMIT_DEFAULTS, isDue, buildMemoryRequest, applyMemoryUpdate, applyPrivateUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap, characterText, analyzerTemperature, analyzerMode, feedsCalibration, memorySwitches, resolveMoment, notesStale } from '../src/memory/update.js';
+import { MEMORY_LIMIT_DEFAULTS, isDue, buildMemoryRequest, applyMemoryUpdate, applyPrivateUpdate, createMemoryUpdater, touchMemory, computeSeenAt, batchAuthorNamesMap, characterText, analyzerTemperature, analyzerMode, feedsCalibration, memorySwitches, resolveMoment, notesStale, reconcileNoteReviews } from '../src/memory/update.js';
 import { voiceLimits, mergeIntoQueue, retryLater } from '../src/memory/voice.js';
 import { createCalibrator, estimateTokens } from '../src/llm/tokens.js';
 import { SectionsTooLargeError } from '../src/llm/budget.js';
@@ -618,6 +618,8 @@ test('buildMemoryRequest: non-string/garbage entries in memory.mainChannelIds ar
 
 const NOTES_NOW = Date.UTC(2026, 0, 20, 12);
 const notesDaysAgo = (days) => new Date(NOTES_NOW - days * DAY_MS).toISOString();
+/** The `YYYY-MM-DD` (UTC) of `days` days before NOTES_NOW: a key of a channel's `days` tally. */
+const dayOf = (days) => utcDay(NOTES_NOW - days * DAY_MS);
 
 test('notesStale: stale from the later of the two stamps once notesStaleDays passed, days counted from the text; never stamped is stale; 0 is off', () => {
   assert.deepEqual(notesStale({ updatedAt: notesDaysAgo(9) }, NOTES_NOW, 7), { days: 9 });
@@ -646,8 +648,8 @@ function notesChannel(name, extra = {}) {
   return { name, category: null, topic: null, purpose: 'κουβέντα', topics: 'γάτες', tone: 'ήρεμο', ...extra };
 }
 
-/** One guild request over `messages` at NOTES_NOW; `memory` merged into makeConfig().memory. */
-function notesRequest({ messages, channels = {}, guildMemory = {}, memory = {}, stage, prompts = { memory: 'sys', labels } }) {
+/** One guild request over `messages` at NOTES_NOW; `memory` merged into makeConfig().memory; `guildChannels` every stored channel. */
+function notesRequest({ messages, channels = {}, guildChannels, guildMemory = {}, memory = {}, stage, prompts = { memory: 'sys', labels } }) {
   return buildMemoryRequest({
     prompts,
     config: makeConfig({ memory: { ...makeConfig().memory, ...memory } }),
@@ -655,6 +657,7 @@ function notesRequest({ messages, channels = {}, guildMemory = {}, memory = {}, 
     profiles: {},
     guildMemory,
     channels,
+    guildChannels,
     messages,
     selfName: 'Nept',
     now: NOTES_NOW,
@@ -665,17 +668,23 @@ function notesRequest({ messages, channels = {}, guildMemory = {}, memory = {}, 
 const channelsOf = (request) => JSON.parse(blockBody(request.messages[1].content, 'existing_channels'));
 const guildOf = (request) => JSON.parse(blockBody(request.messages[1].content, 'existing_guild'));
 
-test('buildMemoryRequest: every channel with memory.notesMinLines batch lines and stale notes carries stale, main or not; a quiet, fresh or recently checked one does not', () => {
+test('buildMemoryRequest: a channel is flagged when the batch has memory.notesBatchLines of it, memory.notesMinMessages accumulated since the last check, stale notes and no flag within memory.notesRetryHours, main or not', () => {
+  const lots = { [dayOf(0)]: 50 };
   const channels = {
-    c1: notesChannel('γενικό', { updatedAt: notesDaysAgo(10) }),
-    c2: notesChannel('ημερολόγιο', { updatedAt: notesDaysAgo(30) }),
-    c3: notesChannel('ήσυχο', { updatedAt: notesDaysAgo(30) }),
-    c4: notesChannel('φρέσκο', { updatedAt: notesDaysAgo(2) }),
-    c5: notesChannel('άγραφο', { updatedAt: null }),
-    c6: notesChannel('ελεγμένο', { updatedAt: notesDaysAgo(30), notesCheckedAt: notesDaysAgo(1) }),
+    // stale, 40 messages over the last 3 days, 8 lines in the batch
+    c1: notesChannel('γενικό', { updatedAt: notesDaysAgo(10), days: { [dayOf(0)]: 20, [dayOf(1)]: 10, [dayOf(2)]: 10 } }),
+    c2: notesChannel('ήσυχο', { updatedAt: notesDaysAgo(10), days: { [dayOf(0)]: 12 } }),
+    c3: notesChannel('σημαδεμένο', { updatedAt: notesDaysAgo(10), notesFlaggedAt: new Date(NOTES_NOW - 2 * HOUR_MS).toISOString(), days: lots }),
+    c4: notesChannel('λίγες', { updatedAt: notesDaysAgo(10), days: lots }),
+    c5: notesChannel('άγραφο', { updatedAt: null, days: lots }),
+    c6: notesChannel('ελεγμένο', { updatedAt: notesDaysAgo(30), notesCheckedAt: notesDaysAgo(1), days: lots }),
+    c7: notesChannel('περίμενε', { updatedAt: notesDaysAgo(10), notesFlaggedAt: new Date(NOTES_NOW - 25 * HOUR_MS).toISOString(), days: lots }),
+    // busy before the last check, quiet since: only what came after counts
+    c8: notesChannel('παλιό', { updatedAt: notesDaysAgo(30), notesCheckedAt: notesDaysAgo(8), days: { [dayOf(9)]: 100, [dayOf(0)]: 29 } }),
+    c9: notesChannel('φρέσκο', { updatedAt: notesDaysAgo(2), days: lots }),
   };
-  const messages = [...notesLines('c1', 20), ...notesLines('c2', 20), ...notesLines('c3', 19), ...notesLines('c4', 20), ...notesLines('c5', 20), ...notesLines('c6', 20)];
-  const memory = { mainChannelIds: ['c1'] }; // makeConfig().memory carries neither notes key: 7 days, 20 lines
+  const messages = ['c1', 'c2', 'c3', 'c5', 'c6', 'c7', 'c8', 'c9'].flatMap((id) => notesLines(id, 8)).concat(notesLines('c4', 7));
+  const memory = { mainChannelIds: ['c1'], notesBatchLines: 8, notesMinMessages: 30, notesStaleDays: 7, notesRetryHours: 24 };
 
   for (const [stage, prompts] of [
     ['single', { memory: 'sys', labels }],
@@ -684,48 +693,72 @@ test('buildMemoryRequest: every channel with memory.notesMinLines batch lines an
     const request = notesRequest({ messages, channels, memory, stage, prompts });
     const shown = channelsOf(request);
     assert.deepEqual(shown.c1.stale, { days: 10 }, `${stage}: a main channel`);
-    assert.deepEqual(shown.c2.stale, { days: 30 }, `${stage}: a channel that is not main is flagged too`);
-    assert.equal('stale' in shown.c3, false, `${stage}: 19 lines is too quiet`);
-    assert.equal('stale' in shown.c4, false, `${stage}: written 2 days ago`);
+    assert.equal('stale' in shown.c2, false, `${stage}: 12 accumulated is too quiet`);
+    assert.equal('stale' in shown.c3, false, `${stage}: flagged 2 hours ago`);
+    assert.equal('stale' in shown.c4, false, `${stage}: 7 batch lines`);
     assert.deepEqual(shown.c5.stale, { days: null }, `${stage}: never written`);
     assert.equal('stale' in shown.c6, false, `${stage}: checked yesterday`);
+    assert.deepEqual(shown.c7.stale, { days: 10 }, `${stage}: flagged 25 hours ago, the wait is over`);
+    assert.equal('stale' in shown.c8, false, `${stage}: 29 since the check`);
+    assert.equal('stale' in shown.c9, false, `${stage}: written 2 days ago`);
     assert.equal(shown.c1.main, true);
-    assert.equal(shown.c2.purpose, 'κουβέντα', 'the marker adds a field, the notes are shown as stored');
-    assert.deepEqual(request.staleNotes.channels, ['c1', 'c2', 'c5']);
+    assert.equal(shown.c1.purpose, 'κουβέντα', 'the marker adds a field, the notes are shown as stored');
+    assert.equal('days' in shown.c1, false, 'the tally is never shown');
+    assert.deepEqual(request.staleNotes.channels, ['c1', 'c5', 'c7']);
   }
 });
 
-test('buildMemoryRequest: existing_guild carries stale once the batch has memory.notesMinLines lines and the server notes are stale', () => {
-  const messages = [...notesLines('c1', 10), ...notesLines('c2', 10)];
+test('buildMemoryRequest: existing_guild carries stale once the batch has memory.notesBatchLines lines, every stored channel accumulated memory.notesGuildMinMessages since the last check, the notes are stale and no flag went out within memory.notesRetryHours', () => {
+  const messages = [...notesLines('c1', 4), ...notesLines('c2', 4)];
   const old = { patterns: 'μιμίδια', notesUpdatedAt: notesDaysAgo(9) };
+  const busy = [notesChannel('ένα', { days: { [dayOf(0)]: 60 } }), notesChannel('δύο', { days: { [dayOf(1)]: 40, [dayOf(12)]: 500 } })];
+  const memory = { notesBatchLines: 8, notesGuildMinMessages: 100, notesStaleDays: 7, notesRetryHours: 24 };
+  const request = (overrides) => notesRequest({ messages, guildMemory: old, guildChannels: busy, memory, ...overrides });
 
-  const flagged = notesRequest({ messages, guildMemory: old });
-  assert.deepEqual(guildOf(flagged).stale, { days: 9 }, 'lines of every channel count');
+  const flagged = request({});
+  assert.deepEqual(guildOf(flagged).stale, { days: 9 }, 'lines of every channel count, the whole server\'s activity counts');
   assert.equal(flagged.staleNotes.guild, true);
 
-  const quiet = notesRequest({ messages: messages.slice(1), guildMemory: old });
-  assert.equal('stale' in guildOf(quiet), false, '19 lines');
+  const quiet = request({ messages: messages.slice(1) });
+  assert.equal('stale' in guildOf(quiet), false, '7 lines');
   assert.equal(quiet.staleNotes.guild, false);
 
-  const checked = notesRequest({ messages, guildMemory: { ...old, notesCheckedAt: notesDaysAgo(1) } });
-  assert.equal('stale' in guildOf(checked), false, 'answered within notesStaleDays, identical text or not');
+  const thin = request({ guildChannels: [busy[0], notesChannel('δύο', { days: { [dayOf(1)]: 39 } })] });
+  assert.equal(thin.staleNotes.guild, false, '99 accumulated');
 
-  const selfOnly = notesRequest({ messages, guildMemory: { patterns: 'μιμίδια', updatedAt: notesDaysAgo(0) } });
+  const sinceCheck = request({ guildMemory: { ...old, notesCheckedAt: notesDaysAgo(8) } });
+  assert.equal(sinceCheck.staleNotes.guild, true, 'checked 8 days ago, 100 since');
+  const before = request({ guildMemory: { ...old, notesCheckedAt: notesDaysAgo(8) }, guildChannels: [busy[0], notesChannel('δύο', { days: { [dayOf(9)]: 40 } })] });
+  assert.equal(before.staleNotes.guild, false, 'activity before the check does not count');
+
+  const checked = request({ guildMemory: { ...old, notesCheckedAt: notesDaysAgo(1) } });
+  assert.equal('stale' in guildOf(checked), false, 'answered within notesStaleDays');
+
+  const waiting = request({ guildMemory: { ...old, notesFlaggedAt: new Date(NOTES_NOW - 2 * HOUR_MS).toISOString() } });
+  assert.equal(waiting.staleNotes.guild, false, 'flagged 2 hours ago');
+  const waited = request({ guildMemory: { ...old, notesFlaggedAt: new Date(NOTES_NOW - 24 * HOUR_MS).toISOString() } });
+  assert.equal(waited.staleNotes.guild, true, 'flagged notesRetryHours ago');
+
+  const selfOnly = request({ guildMemory: { patterns: 'μιμίδια', updatedAt: notesDaysAgo(0) } });
   assert.deepEqual(guildOf(selfOnly).stale, { days: null }, 'updatedAt (a self fact, a lesson) is no notes stamp');
 });
 
-test('buildMemoryRequest: memory.notesStaleDays 0 sends no marker, and memory.notesMinLines is read at each request', () => {
+test('buildMemoryRequest: memory.notesStaleDays 0 sends no marker, and the notes thresholds are read at each request', () => {
   const messages = notesLines('c1', 5);
-  const channels = { c1: notesChannel('γενικό', { updatedAt: notesDaysAgo(30) }) };
+  const channels = { c1: notesChannel('γενικό', { updatedAt: notesDaysAgo(30), days: { [dayOf(0)]: 5 } }) };
+  const low = { notesBatchLines: 5, notesMinMessages: 5, notesGuildMinMessages: 5 };
 
-  const off = notesRequest({ messages, channels, memory: { notesStaleDays: 0, notesMinLines: 5 } });
+  const off = notesRequest({ messages, channels, memory: { ...low, notesStaleDays: 0 } });
   assert.equal('stale' in channelsOf(off).c1, false);
   assert.equal('stale' in guildOf(off), false);
   assert.deepEqual(off.staleNotes, { channels: [], guild: false });
 
-  const low = notesRequest({ messages, channels, memory: { notesStaleDays: 7, notesMinLines: 5 } });
-  assert.deepEqual(channelsOf(low).c1.stale, { days: 30 });
-  assert.deepEqual(low.staleNotes, { channels: ['c1'], guild: true });
+  const on = notesRequest({ messages, channels, memory: { ...low, notesStaleDays: 7 } });
+  assert.deepEqual(channelsOf(on).c1.stale, { days: 30 });
+  assert.deepEqual(on.staleNotes, { channels: ['c1'], guild: true }, 'without guildChannels the batch\'s channels are the server\'s activity');
+
+  const fallbacks = notesRequest({ messages, channels, memory: { notesStaleDays: 7 } });
+  assert.deepEqual(fallbacks.staleNotes, { channels: [], guild: false }, '8 lines / 30 / 100 by default');
 });
 
 test('buildMemoryRequest: a private batch carries no notes marker', () => {
@@ -747,45 +780,90 @@ test('buildMemoryRequest: a private batch carries no notes marker', () => {
   assert.deepEqual(request.staleNotes, { channels: [], guild: false });
 });
 
-test('run: a successful guild batch hands every flagged target to store.markNotesChecked at the updater\'s clock and logs notesFlagged; a failed one marks nothing', async () => {
-  for (const answer of ['{}', 'καμία απάντηση']) {
+test('run: a successful guild batch records every flagged target with store.markNotesFlagged and stamps store.markNotesChecked only for a valid review; a failed one marks nothing', async () => {
+  const reviews = '{"note_reviews":[{"target":"c1","status":"confirmed"},{"target":"guild","status":"insufficient_evidence"}]}';
+  for (const answer of ['{}', reviews, 'καμία απάντηση']) {
     await withStoreAsync(async (store) => {
       const guildId = 'g1';
       for (const message of [...notesLines('c1', 20), ...notesLines('c2', 3)]) {
         touchMemory(store, guildId, message);
         store.pushBuffer(guildId, message, 100);
       }
+      const flagged = [];
       const marked = [];
+      store.markNotesFlagged = (...args) => flagged.push(args);
       store.markNotesChecked = (...args) => marked.push(args);
-      const hot = { config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 23, minBatchMessages: 1 } }), prompts: { memory: 'sys', labels } };
+      const memory = { ...makeConfig().memory, batchMessages: 23, minBatchMessages: 1, notesBatchLines: 8, notesMinMessages: 20, notesGuildMinMessages: 20 };
+      const hot = { config: makeConfig({ memory }), prompts: { memory: 'sys', labels } };
       const llm = { complete: async () => ({ text: answer }) };
       const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => NOTES_NOW });
 
       const { logs } = await withCapturedLogs(() => updater.run(guildId));
+      const applied = logs.find((entry) => entry.msg === 'memory: update applied');
 
+      if (answer === 'καμία απάντηση') {
+        assert.deepEqual([flagged, marked], [[], []], 'a failed batch is retried, flagged again');
+        return;
+      }
+      assert.deepEqual(flagged, [[guildId, { channels: ['c1'], guild: true }, NOTES_NOW]], 'the quiet channel is not flagged');
+      assert.equal(applied.notesFlagged, 2);
+      for (const key of ['noteReviews', 'changedChannels', 'guildChanged']) assert.equal(key in applied, false, `no ${key} in the log line`);
       if (answer === '{}') {
-        assert.deepEqual(marked, [[guildId, { channels: ['c1'], guild: true }, NOTES_NOW]], 'the quiet channel is not marked');
-        assert.equal(logs.find((entry) => entry.msg === 'memory: update applied').notesFlagged, 2);
+        assert.deepEqual(marked, [], 'no review, no stamp');
+        assert.deepEqual([applied.notesMissing, applied.notesConfirmed, applied.notesInsufficient], [2, 0, 0]);
       } else {
-        assert.deepEqual(marked, [], 'a failed batch is retried, flagged again');
+        assert.deepEqual(marked, [[guildId, { channels: ['c1'], guild: false }, NOTES_NOW]]);
+        assert.deepEqual([applied.notesConfirmed, applied.notesInsufficient, applied.notesMissing], [1, 1, 0]);
+        assert.deepEqual([applied.notesUpdated, applied.notesIdentical, applied.notesUnflagged], [0, 0, 0]);
       }
     });
   }
 });
 
-test('run: a flagged target answered with identical text is not flagged again for memory.notesStaleDays, and is once they pass', async () => {
+test('run: with nothing flagged the log line carries notesFlagged 0 and no review counts', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    for (const message of notesLines('c1', 3)) {
+      touchMemory(store, guildId, message);
+      store.pushBuffer(guildId, message, 100);
+    }
+    const hot = { config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 3, minBatchMessages: 1 } }), prompts: { memory: 'sys', labels } };
+    const llm = { complete: async () => ({ text: '{"note_reviews":[{"target":"c1","status":"confirmed"}]}' }) };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => NOTES_NOW });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+    const applied = logs.find((entry) => entry.msg === 'memory: update applied');
+    assert.equal(applied.notesFlagged, 0);
+    assert.equal('notesUnflagged' in applied, false);
+    assert.equal(store.getChannel(guildId, 'c1').notesCheckedAt, null, 'a review of an unflagged channel stamps nothing');
+  });
+});
+
+test('run: a two-stage batch reconciles note_reviews the same way', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    for (const message of notesLines('c1', 20)) {
+      touchMemory(store, guildId, message);
+      store.pushBuffer(guildId, message, 100);
+    }
+    const marked = [];
+    store.markNotesChecked = (...args) => marked.push(args);
+    const hot = twoStageHot({ batchMessages: 20, minBatchMessages: 1, notesBatchLines: 8, notesMinMessages: 20, notesGuildMinMessages: 20 });
+    const llm = recordingLlm({ note_reviews: [{ target: 'c1', status: 'confirmed' }, { target: 'guild', status: 'updated' }] });
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => NOTES_NOW });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+    const applied = logs.find((entry) => entry.msg === 'memory: update applied');
+    assert.equal(applied.stage, 'two');
+    assert.deepEqual(marked, [[guildId, { channels: ['c1'], guild: false }, NOTES_NOW]]);
+    assert.deepEqual([applied.notesFlagged, applied.notesConfirmed, applied.notesIdentical], [2, 1, 1], 'the guild said updated and changed nothing');
+  });
+});
+
+test('run: a flagged target answered updated with identical text is not stamped, and is flagged again once memory.notesRetryHours pass, not memory.notesStaleDays', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
     let nowValue = NOTES_NOW;
-    // The stamp src/memory/store.js#markNotesChecked writes (`notesCheckedAt` on each listed channel
-    // and on the guild), stood in for while the store has no such method.
-    if (typeof store.markNotesChecked !== 'function') {
-      store.markNotesChecked = (id, { channels, guild }, nowMs) => {
-        const at = new Date(nowMs).toISOString();
-        for (const channelId of channels) store.getChannel(id, channelId).notesCheckedAt = at;
-        if (guild) store.getGuild(id).notesCheckedAt = at;
-      };
-    }
     const batch = () => {
       for (const message of notesLines('c1', 20)) {
         touchMemory(store, guildId, message);
@@ -797,9 +875,14 @@ test('run: a flagged target answered with identical text is not flagged again fo
     store.getChannel(guildId, 'c1').updatedAt = notesDaysAgo(30);
     // Notes written before any stamp existed (a stamp of the wall clock would be "fresh" here).
     store.getGuild(guildId).patterns = 'μιμίδια';
-    // The same notes back: nothing changes, so nothing but the check stamps them.
-    const llm = recordingLlm({ channels: { c1: { purpose: 'κουβέντα' } }, guild: { patterns: 'μιμίδια' } });
-    const hot = { config: makeConfig({ memory: { ...makeConfig().memory, batchMessages: 20, minBatchMessages: 1 } }), prompts: { memory: 'sys', labels } };
+    // The same notes back, claimed as updated: nothing changes, so nothing earns the check stamp.
+    const llm = recordingLlm({
+      channels: { c1: { purpose: 'κουβέντα' } },
+      guild: { patterns: 'μιμίδια' },
+      note_reviews: [{ target: 'c1', status: 'updated' }, { target: 'guild', status: 'updated' }],
+    });
+    const memory = { ...makeConfig().memory, batchMessages: 20, minBatchMessages: 1, notesBatchLines: 8, notesMinMessages: 20, notesGuildMinMessages: 20, notesStaleDays: 7, notesRetryHours: 24 };
+    const hot = { config: makeConfig({ memory }), prompts: { memory: 'sys', labels } };
     const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => nowValue });
     const markers = (call) => {
       const content = llm.calls[call].messages[1].content;
@@ -809,18 +892,92 @@ test('run: a flagged target answered with identical text is not flagged again fo
     const { logs } = await withCapturedLogs(() => updater.run(guildId));
     assert.deepEqual(markers(0), [{ days: 30 }, { days: null }], 'both flagged');
     const applied = logs.find((entry) => entry.msg === 'memory: update applied');
-    assert.deepEqual([applied.notesFlagged, applied.channels, applied.guild], [2, 0, false], 'flagged, answered with the same text');
+    assert.deepEqual([applied.notesFlagged, applied.channels, applied.guild, applied.notesIdentical, applied.notesUpdated], [2, 0, false, 2, 0]);
+    assert.equal(store.getChannel(guildId, 'c1').notesCheckedAt, null, 'not stamped');
+    assert.equal(store.getGuild(guildId).notesCheckedAt, null, 'not stamped');
+    assert.equal(store.getChannel(guildId, 'c1').notesFlaggedAt, new Date(NOTES_NOW).toISOString());
 
-    nowValue = NOTES_NOW + 6 * DAY_MS;
+    nowValue = NOTES_NOW + 23 * HOUR_MS;
     batch();
     await withCapturedLogs(() => updater.run(guildId));
-    assert.deepEqual(markers(1), [null, null], 'checked 6 days ago: no marker, no loop');
+    assert.deepEqual(markers(1), [null, null], 'flagged 23 hours ago: no marker, no loop');
 
-    nowValue = NOTES_NOW + 7 * DAY_MS;
+    nowValue = NOTES_NOW + 24 * HOUR_MS;
     batch();
     await withCapturedLogs(() => updater.run(guildId));
-    assert.deepEqual(markers(2), [{ days: 37 }, { days: null }], 'notesStaleDays after the check: flagged again');
+    assert.deepEqual(markers(2), [{ days: 31 }, { days: null }], 'notesRetryHours after the flag: flagged again');
   });
+});
+
+test('applyMemoryUpdate: note_reviews are kept per target with valid statuses only, the first one wins; changedChannels lists the channels whose text moved', () => withStore((store) => {
+  const guildId = 'g1';
+  const cfg = { fieldChars: 400, maxDetails: 15, maxInjokes: 15, maxSelfFacts: 20 };
+  const known = { knownChannelIds: new Set(['c1', 'c2']) };
+  store.updateChannel(guildId, 'c1', { purpose: 'alpha' });
+  store.updateChannel(guildId, 'c2', { purpose: 'beta' });
+  const result = applyMemoryUpdate(store, guildId, {
+    channels: { c1: { purpose: 'alpha' }, c2: { purpose: 'gamma' } },
+    note_reviews: [
+      { target: 'c1', status: 'confirmed' }, { target: 'c2', status: 'updated' }, { target: 'guild', status: 'insufficient_evidence' },
+      { target: 'c1', status: 'updated' }, { target: 'c9', status: 'bogus' }, 'junk', { status: 'confirmed' }, [], null, { target: '', status: 'confirmed' },
+    ],
+  }, cfg, new Set(), known);
+  assert.deepEqual(result.noteReviews, { c1: 'confirmed', c2: 'updated', guild: 'insufficient_evidence' });
+  assert.deepEqual(result.changedChannels, ['c2']);
+  assert.equal(result.guildChanged, false);
+
+  const none = applyMemoryUpdate(store, guildId, { guild: { patterns: 'νέο' }, note_reviews: 'όχι' }, cfg, new Set(), known);
+  assert.deepEqual([none.noteReviews, none.changedChannels, none.guildChanged], [{}, [], true]);
+}));
+
+test('applyMemoryUpdate: a blank channel field never blanks the stored text', () => withStore((store) => {
+  store.updateChannel('g1', 'c1', { purpose: 'alpha' });
+  const result = applyMemoryUpdate(store, 'g1', { channels: { c1: { purpose: '  ', tone: '' } } }, { fieldChars: 400 }, new Set(), { knownChannelIds: new Set(['c1']) });
+  assert.deepEqual([store.getChannel('g1', 'c1').purpose, result.channels, result.changedChannels], ['alpha', 0, []]);
+}));
+
+test('reconcileNoteReviews: only a confirmed review or an updated one with a real change earns the stamp; everything else is counted', () => {
+  const out = reconcileNoteReviews({
+    flagged: { channels: ['c1', 'c2', 'c3', 'c4'], guild: true },
+    reviews: { c1: 'confirmed', c2: 'updated', c3: 'updated', c4: 'insufficient_evidence', c7: 'confirmed', guild: 'updated' },
+    changedChannels: ['c2'],
+    guildChanged: false,
+  });
+  assert.deepEqual(out.stamp, { channels: ['c1', 'c2'], guild: false });
+  assert.deepEqual(out.counts, { updated: 1, confirmed: 1, insufficient: 1, missing: 0, identical: 2, unflagged: 1 });
+
+  const guild = reconcileNoteReviews({ flagged: { channels: [], guild: true }, reviews: { guild: 'updated' }, changedChannels: [], guildChanged: true });
+  assert.deepEqual(guild.stamp, { channels: [], guild: true });
+});
+
+test('reconcileNoteReviews: a flagged target without a review is missing and not stamped', () => {
+  const out = reconcileNoteReviews({ flagged: { channels: ['c1'], guild: true }, reviews: {}, changedChannels: [], guildChanged: false });
+  assert.deepEqual(out.stamp, { channels: [], guild: false });
+  assert.equal(out.counts.missing, 2);
+});
+
+test('run: in a two-stage batch a guild patterns or starters brief queued for the voice model makes an updated guild review a real change', async () => {
+  for (const [guild, stamped] of [[{ patterns: 'νέες συνήθειες' }, true], [{ starters: 'καλημέρα' }, true], [{}, false]]) {
+    await withStoreAsync(async (store) => {
+      const guildId = 'g1';
+      for (const message of notesLines('c1', 20)) {
+        touchMemory(store, guildId, message);
+        store.pushBuffer(guildId, message, 100);
+      }
+      const marked = [];
+      store.markNotesChecked = (...args) => marked.push(args);
+      const hot = twoStageHot({ batchMessages: 20, minBatchMessages: 1, notesBatchLines: 8, notesMinMessages: 20, notesGuildMinMessages: 20 });
+      const llm = recordingLlm({ guild, note_reviews: [{ target: 'guild', status: 'updated' }] });
+      const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => NOTES_NOW });
+
+      const { logs } = await withCapturedLogs(() => updater.run(guildId));
+      const applied = logs.find((entry) => entry.msg === 'memory: update applied');
+      assert.equal(applied.guild, false, 'the brief is not stored text yet');
+      assert.equal('guildBriefQueued' in applied, false, 'no guildBriefQueued in the log line');
+      assert.deepEqual(marked, stamped ? [[guildId, { channels: [], guild: true }, NOTES_NOW]] : [], JSON.stringify(guild));
+      assert.deepEqual([applied.notesUpdated, applied.notesIdentical], stamped ? [1, 0] : [0, 1]);
+    });
+  }
 });
 
 test('buildMemoryRequest: a request built per stage from the tracked prompts and config.json leaves no {{placeholder}} unfilled', () => {
@@ -1589,7 +1746,8 @@ test('applyMemoryUpdate: garbage input changes nothing and never throws', () => 
     for (const garbage of [null, undefined, 'not an object', 42, [1, 2, 3]]) {
       const result = applyMemoryUpdate(store, guildId, garbage, cfg, new Set(['1']));
       for (const [key, value] of Object.entries(result)) {
-        assert.ok(value === 0 || value === false || (Array.isArray(value) && value.length === 0), `${key} counts nothing`);
+        const empty = Array.isArray(value) ? value.length === 0 : value !== null && typeof value === 'object' && Object.keys(value).length === 0;
+        assert.ok(value === 0 || value === false || empty, `${key} counts nothing`);
       }
     }
     assert.deepEqual(store.getGuild(guildId), before);
@@ -8263,15 +8421,16 @@ test('run: a compact author is still written, and "memory: update applied" count
 
 test('buildMemoryRequest: the notes markers count only the lines the request shows, and run stamps nothing it did not flag', async () => {
   const long = notesLines('c1', 20).map((m) => ({ ...m, content: 'λ'.repeat(400) }));
-  const channels = { c1: notesChannel('γενικό', { updatedAt: notesDaysAgo(30) }) };
+  const channels = { c1: notesChannel('γενικό', { updatedAt: notesDaysAgo(30), days: { [dayOf(0)]: 20 } }) };
   const guildMemory = { patterns: 'μιμίδια', notesUpdatedAt: notesDaysAgo(9) };
+  const notes = { notesBatchLines: 20, notesMinMessages: 20, notesGuildMinMessages: 20 };
   const build = (tokens) =>
-    buildMemoryRequest({ prompts: { memory: 'sys', labels }, config: budgetConfig(tokens), calibrator: createCalibrator(), profiles: {}, guildMemory, channels, messages: long, selfName: 'Nept', now: NOTES_NOW });
+    buildMemoryRequest({ prompts: { memory: 'sys', labels }, config: budgetConfig(tokens, notes), calibrator: createCalibrator(), profiles: {}, guildMemory, channels, messages: long, selfName: 'Nept', now: NOTES_NOW });
 
   const cut = build(2500);
   assert.ok(cut.shown > 0 && cut.shown < 20, `a part of the batch is shown (${cut.shown})`);
-  assert.equal('stale' in channelsOf(cut).c1, false, 'fewer than memory.notesMinLines lines shown in the channel');
-  assert.equal('stale' in guildOf(cut), false, 'fewer than memory.notesMinLines lines shown');
+  assert.equal('stale' in channelsOf(cut).c1, false, 'fewer than memory.notesBatchLines lines shown in the channel');
+  assert.equal('stale' in guildOf(cut), false, 'fewer than memory.notesBatchLines lines shown');
   assert.deepEqual(cut.staleNotes, { channels: [], guild: false });
 
   const whole = build(50000);
@@ -8288,7 +8447,7 @@ test('buildMemoryRequest: the notes markers count only the lines the request sho
     store.getChannel(guildId, 'c1').updatedAt = notesDaysAgo(30);
     const marked = [];
     store.markNotesChecked = (...args) => marked.push(args);
-    const hot = { config: budgetConfig(2500, { batchMessages: 20, minBatchMessages: 1 }), prompts: { memory: 'sys', labels } };
+    const hot = { config: budgetConfig(2500, { ...notes, batchMessages: 20, minBatchMessages: 1 }), prompts: { memory: 'sys', labels } };
     const updater = createMemoryUpdater({ hot, store, llm: recordingLlm({}), calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => NOTES_NOW });
 
     const { logs } = await withCapturedLogs(() => updater.run(guildId));
