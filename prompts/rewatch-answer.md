@@ -1,9 +1,11 @@
-Look at this again and answer one question: {{question}}
+Look at this again and answer the user's question.
 
 Today is {{today}}.
 
-Be concrete: say what you see or hear that answers it, in the language of the question. Up to {{maxChars}} characters.
+Answer from what you see (or, for a video, hear). Say it in the language of the question. Up to {{maxChars}} characters.
 
-If the answer is not there, say so in one line.
+If the relevant detail is indistinct or too small to identify, say so and describe only what is visible. Distinguish something unclear from something not shown.
+
+Do not accept the identity or event the question presupposes. Name a character, object or meme only when distinctive visual features support it. Arrows, boxes and circles indicate where to look, not what is there. Do not infer AI generation from ambiguity alone.
 
 No opinions. No markdown. No timestamps.
