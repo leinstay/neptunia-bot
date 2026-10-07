@@ -27,7 +27,9 @@
  * @property {string} channelId   the channel the call arrived in
  * @property {*} channel        the discord.js channel object the call arrived in
  * @property {object} trigger   the normalized message that called the persona
- * @property {'mention'|'reply'|'name'|'private'|'followUp'} kind  `followUp`: an address-classifier `yes` that found the attention taken (one per channel, events.js#deferFollowUp)
+ * @property {'mention'|'reply'|'name'|'private'|'followUp'|'overheard'} kind  `followUp` / `overheard`: an address-classifier
+ *                              `yes` / `overheard` that found the attention taken (one of them per channel,
+ *                              followUpSlot, events.js#deferFollowUp)
  * @property {number} arrivedAt
  * @property {boolean} [decided] set on a re-queued server call whose ignore roll already said respond
  * @property {*} [destination]  a routed call only: the discord.js channel its turn posts in (the
@@ -84,6 +86,37 @@ export function requeuePending(list, ping, maxPending) {
   const at = list.findIndex((p) => p.arrivedAt >= ping.arrivedAt);
   const next = at === -1 ? [...list, ping] : [...list.slice(0, at), ping, ...list.slice(at)];
   return capped(next, maxPending);
+}
+
+/** The kinds that share a channel's one follow-up slot. */
+const SLOT_KINDS = new Set(['followUp', 'overheard']);
+
+/** The direct calls of a channel that take a waiting overheard line's place. */
+const DIRECT_KINDS = new Set(['mention', 'reply', 'name']);
+
+/**
+ * The priority rule of a channel's follow-up slot -- the one deferred
+ * `followUp` or `overheard` line (never a routed call) a channel may hold --
+ * for a newcomer of `kind` in `channelId`: whether it may be queued
+ * (`admit`) and which waiting entry it takes the place of (`replaced`, null
+ * for none; the caller removes and logs it). A `followUp` replaces either
+ * kind; an `overheard` replaces a waiting `overheard` and is refused next to a
+ * waiting `followUp` (outranked: its turn would read the line in the channel
+ * history anyway); a direct mention, reply or name call replaces a waiting
+ * `overheard` and waits beside a `followUp`. Anything else (a private
+ * message) admits and replaces nothing. Pure; `list` is not mutated.
+ * @param {PendingPing[]} list
+ * @param {string} channelId
+ * @param {PendingPing['kind']} kind
+ * @returns {{ admit: boolean, replaced: PendingPing|null }}
+ */
+export function followUpSlot(list, channelId, kind) {
+  const waiting = list.find((p) => !p.destination && p.channelId === channelId && SLOT_KINDS.has(p.kind)) ?? null;
+  if (!waiting) return { admit: true, replaced: null };
+  if (kind === 'followUp') return { admit: true, replaced: waiting };
+  if (kind === 'overheard') return waiting.kind === 'followUp' ? { admit: false, replaced: null } : { admit: true, replaced: waiting };
+  if (DIRECT_KINDS.has(kind) && waiting.kind === 'overheard') return { admit: true, replaced: waiting };
+  return { admit: true, replaced: null };
 }
 
 /** Whether `ping` is past `pendingMinutes` from the time it arrived, at `now`. */

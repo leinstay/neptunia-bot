@@ -2,7 +2,7 @@
 // (see mention.oneAtATime in src/discord/events.js).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { addPending, authorCalls, foldInto, isExpired, parseMergeAnswer, popOldest, requeuePending } from '../src/behavior/pending.js';
+import { addPending, authorCalls, foldInto, followUpSlot, isExpired, parseMergeAnswer, popOldest, requeuePending } from '../src/behavior/pending.js';
 
 function ping(channelId, arrivedAt, overrides = {}) {
   return { channelId, channel: { id: channelId }, trigger: { id: `m-${channelId}-${arrivedAt}`, authorId: 'u1' }, kind: 'mention', arrivedAt, ...overrides };
@@ -152,4 +152,47 @@ test('parseMergeAnswer: a number of a waiting item, or new; anything else means 
   assert.deepEqual(parseMergeAnswer('4', 3), { index: null, reason: 'out-of-range' });
   assert.deepEqual(parseMergeAnswer('0', 3), { index: null, reason: 'out-of-range' });
   for (const text of ['#2', 'item 2', '2\nnew', 'yes']) assert.deepEqual(parseMergeAnswer(text, 3), { index: null, reason: 'unparsed' }, text);
+});
+
+// --- followUpSlot ------------------------------------------------------------
+
+/** A deferred follow-up (`followUp`) or overheard line waiting in `channelId`. */
+function slotEntry(channelId, kind, id) {
+  return ping(channelId, 100, { kind, trigger: { id, authorId: 'u1' } });
+}
+
+test('followUpSlot: an empty slot admits any newcomer and replaces nothing', () => {
+  const list = [ping('c1', 50)];
+  for (const kind of ['followUp', 'overheard', 'mention', 'reply', 'name', 'private']) {
+    assert.deepEqual(followUpSlot(list, 'c1', kind), { admit: true, replaced: null }, kind);
+  }
+});
+
+test('followUpSlot: a waiting followUp is replaced by a later followUp, never by a later overheard', () => {
+  const waiting = slotEntry('c1', 'followUp', 'f1');
+  const list = [waiting];
+  assert.deepEqual(followUpSlot(list, 'c1', 'followUp'), { admit: true, replaced: waiting });
+  assert.deepEqual(followUpSlot(list, 'c1', 'overheard'), { admit: false, replaced: null }, 'outranked');
+});
+
+test('followUpSlot: a waiting followUp stays beside a direct call of its channel, as before', () => {
+  const list = [slotEntry('c1', 'followUp', 'f1')];
+  for (const kind of ['mention', 'reply', 'name', 'private']) {
+    assert.deepEqual(followUpSlot(list, 'c1', kind), { admit: true, replaced: null }, kind);
+  }
+});
+
+test('followUpSlot: a waiting overheard is replaced by a later followUp, overheard, mention, reply or name', () => {
+  const waiting = slotEntry('c1', 'overheard', 'o1');
+  const list = [ping('c1', 50), waiting];
+  for (const kind of ['followUp', 'overheard', 'mention', 'reply', 'name']) {
+    assert.deepEqual(followUpSlot(list, 'c1', kind), { admit: true, replaced: waiting }, kind);
+  }
+  assert.deepEqual(followUpSlot(list, 'c1', 'private'), { admit: true, replaced: null }, 'a private message has no channel slot');
+});
+
+test('followUpSlot: only the slot of the newcomer\'s own channel counts', () => {
+  const list = [slotEntry('c2', 'followUp', 'f2'), slotEntry('c3', 'overheard', 'o3')];
+  assert.deepEqual(followUpSlot(list, 'c1', 'overheard'), { admit: true, replaced: null });
+  assert.deepEqual(followUpSlot(list, 'c1', 'mention'), { admit: true, replaced: null });
 });
