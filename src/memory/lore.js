@@ -6,6 +6,7 @@
 // disk. See docs/prompt-contract.md ("<lore>" and "lore" in "The
 // analyzer").
 
+import { createHash } from 'node:crypto';
 import { clampText } from './clamp.js';
 import { occursAsWholeWord } from './mentions.js';
 
@@ -18,6 +19,25 @@ const DEFAULT_WEIGHT = 3;
 
 function normalizeTitle(title) {
   return String(title ?? '').trim().toLowerCase();
+}
+
+/**
+ * The file name (without `.json`) of a lorebook entry's version history
+ * (data/guilds/<id>/versions/lore/<key>.json, see src/memory/store.js). Keyed by
+ * the entry's identity, the trimmed lowercase title, so a change of letter case
+ * keeps one history. Scheme: the ASCII letters and digits of that title as a
+ * dash-joined slug (at most 40 characters, for a human browsing the folder),
+ * then `-` and the first 12 hex digits of the SHA-1 of the whole identity (what
+ * makes it unique; a title with no ASCII letter or digit is the hash alone).
+ * Always a safe file name on every platform.
+ * @param {unknown} title
+ * @returns {string}
+ */
+export function loreVersionKey(title) {
+  const identity = normalizeTitle(title);
+  const hash = createHash('sha1').update(identity).digest('hex').slice(0, 12);
+  const slug = identity.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
+  return slug ? `${slug}-${hash}` : hash;
 }
 
 /** Lowercase, trim, drop too-short/duplicate keys, clamp an over-long one to
@@ -110,17 +130,21 @@ function evictOverflow(entries, maxEntries) {
  *   clampTolerance?: number }} opts
  *   `title` is a hard identity clamp at MAX_TITLE; `text` is free prose, clamped tolerantly (see
  *   src/memory/clamp.js) to `textChars` (config.lore.textChars; DEFAULT_MAX_TEXT when absent).
- * @returns {{ entries: object[], upserted: number }}  `upserted`: entries inserted or actually changed.
+ * @returns {{ entries: object[], upserted: number, changes: { title: string, previousText: string, nextText: string }[] }}
+ *   `upserted`: entries inserted or actually changed. `changes`: one pair per existing entry whose
+ *   text this call replaced with a different one (the stored text before, the text after), for the
+ *   store's version history; an inserted entry or a change of keys alone adds none.
  */
 export function upsertLore(entries, incoming, { source, now: nowMs = Date.now(), maxEntries = Infinity, textChars, clampTolerance } = {}) {
   const stored = Array.isArray(entries) ? [...entries] : [];
-  if (!Array.isArray(incoming) || incoming.length === 0) return { entries: stored, upserted: 0 };
+  if (!Array.isArray(incoming) || incoming.length === 0) return { entries: stored, upserted: 0, changes: [] };
 
   const byTitle = new Map(stored.map((entry, index) => [normalizeTitle(entry.title), index]));
   const nowIso = new Date(nowMs).toISOString();
   const effectiveTextChars = Number.isFinite(textChars) && textChars > 0 ? textChars : DEFAULT_MAX_TEXT;
   let upserted = 0;
   let salt = 0;
+  const changes = [];
 
   for (const raw of incoming) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
@@ -162,9 +186,10 @@ export function upsertLore(entries, incoming, { source, now: nowMs = Date.now(),
     if (source === 'owner') updated.always = Boolean(raw.always);
     stored[existingIndex] = updated;
     upserted += 1;
+    if (existing.text !== text) changes.push({ title, previousText: typeof existing.text === 'string' ? existing.text : '', nextText: text });
   }
 
-  return { entries: evictOverflow(stored, maxEntries), upserted };
+  return { entries: evictOverflow(stored, maxEntries), upserted, changes };
 }
 
 /**

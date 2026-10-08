@@ -29,6 +29,10 @@
 //                                            (src/memory/recent.js)
 //   data/guilds/<guildId>/diary.json          the persona's diary posts, newest last, one-line gists
 //                                            (src/behavior/diary.js); never deleted by code
+//   data/guilds/<guildId>/versions/<kind>/<id>.json  the previous texts of the prose fields (see
+//                                            `recordVersion`): users/<userId>, channels/<channelId>,
+//                                            guild/guild, lore/<key> (src/memory/lore.js#loreVersionKey);
+//                                            capped per field, deleted only with their owner
 //
 // Everything is cached in memory, marked dirty on change and flushed on a
 // timer and on shutdown. Writes are atomic (temp file + rename) so a crash
@@ -65,7 +69,8 @@ import { log } from '../log.js';
 import { utcDay } from '../time.js';
 import { emptyAffinity, applyDelta, decayAffinity } from './affinity.js';
 import { mergeEpisodes } from './episodes.js';
-import { upsertLore } from './lore.js';
+import { loreVersionKey, upsertLore } from './lore.js';
+import { sentenceDiff } from './prose.js';
 import { applyInterestOps, normalizeInterests, normalizeTopic } from './interests.js';
 import { applyDetailOps, normalizeDetails } from './details.js';
 import { applyAliasOps } from './aliases.js';
@@ -98,6 +103,17 @@ import {
 } from '../behavior/fillers.js';
 
 const DIARY_HISTORY_POSTS = 150; // diary.historyPosts
+
+/** Version history when a writer's caller passes none: `features.versions`, `memory.versionsKept`. */
+const DEFAULT_VERSIONS = { enabled: true, kept: 20 };
+/** The kinds of version files, one folder each under data/guilds/<id>/versions/. */
+const VERSION_KINDS = ['users', 'channels', 'guild', 'lore'];
+/** The prose fields of a public profile whose previous text is kept (kind `users`). */
+const USER_PROSE = ['character', 'style', 'relationship'];
+/** The prose fields of a channel entry (kind `channels`). */
+const CHANNEL_PROSE = ['purpose', 'topics', 'tone'];
+/** The prose fields of the guild memory (kind `guild`, id `guild`). */
+const GUILD_PROSE = ['patterns', 'starters'];
 
 /** The diary of a guild with no post yet (data/guilds/<id>/diary.json). */
 const emptyDiary = () => ({ posts: [], updatedAt: 0 });
@@ -396,10 +412,14 @@ function relationshipScoreOf(opts, affinity) {
  * @param {object} target  A normalised profile or private layer.
  * @param {unknown} text
  * @param {object} opts    As for `applyProfileOps`.
+ * @param {(previous: unknown, next: string) => void} [onWrite]  Called with the stored text and the
+ *   one replacing it, before the write (the public profile records a version through it).
  */
-function writeRelationship(target, text, opts) {
+function writeRelationship(target, text, opts, onWrite) {
   if (typeof text !== 'string' || !text.trim()) return;
-  target.relationship = clampText(text, opts.relationshipChars ?? opts.fieldChars, { tolerance: opts.clampTolerance });
+  const next = clampText(text, opts.relationshipChars ?? opts.fieldChars, { tolerance: opts.clampTolerance });
+  onWrite?.(target.relationship, next);
+  target.relationship = next;
   target.relationshipScore = relationshipScoreOf(opts, target.affinity);
   target.relationshipWrittenAt = new Date(Number.isFinite(opts.now) ? opts.now : Date.now()).toISOString();
 }
@@ -674,6 +694,10 @@ export function createStore({ dataDir }) {
   const voiceFile = (guildId) => path.join(guildDir(guildId), 'voice.json');
   const recentFile = (guildId) => path.join(guildDir(guildId), 'recent.json');
   const diaryFile = (guildId) => path.join(guildDir(guildId), 'diary.json');
+  const versionsDir = (guildId) => path.join(guildDir(guildId), 'versions');
+  /** A lore id is the entry's title, turned into a safe file name (src/memory/lore.js#loreVersionKey). */
+  const versionsFile = (guildId, kind, id) =>
+    path.join(versionsDir(guildId), kind, `${kind === 'lore' ? loreVersionKey(id) : String(id)}.json`);
   const stateFile = path.join(dataDir, 'state.json');
 
   const stateEntry = entry(stateFile, () => ({}));
@@ -699,6 +723,59 @@ export function createStore({ dataDir }) {
     const item = entry(channelFile(guildId, channelId), () => emptyChannel(String(channelId)));
     normalizeChannel(item.value);
     return item;
+  }
+
+  /** The cache entry of one version file, `{}` when missing; a file that is not an object (a
+   * hand edit gone wrong) reads as `{}` in the cache. Never marked dirty by reading. */
+  function versionsEntry(guildId, kind, id) {
+    const item = entry(versionsFile(guildId, kind, id), () => ({}));
+    if (!isPlainObject(item.value)) item.value = {};
+    return item;
+  }
+
+  /**
+   * Keep the previous text of one prose field before a writer replaces it:
+   * appended to data/guilds/<guildId>/versions/<kind>/<id>.json under `field` as
+   * `{ at, by, chars, before, after, kept, removed, added, text }` -- `text` the
+   * replaced text, `chars` its length in code points, the counts from
+   * src/memory/prose.js#sentenceDiff(previous, next), `at` the ISO time of
+   * `opts.now` (else the wall clock), `by` = `opts.by` (else `'unknown'`). Newest last;
+   * past `opts.versions.kept` per field the oldest go. Nothing is recorded when the
+   * previous text is blank, when it equals the next, or when `opts.versions.enabled`
+   * is false. `opts.versions` omitted -> `DEFAULT_VERSIONS` (config.json's values).
+   * @param {string} guildId
+   * @param {'users'|'channels'|'guild'|'lore'} kind
+   * @param {string} id
+   * @param {string} field
+   * @param {unknown} previous
+   * @param {unknown} next
+   * @param {{ by?: string, now?: number, versions?: { enabled?: boolean, kept?: number } }} [opts]
+   */
+  function recordVersion(guildId, kind, id, field, previous, next, opts = {}) {
+    const settings = opts.versions ?? DEFAULT_VERSIONS;
+    if (settings.enabled === false) return;
+    if (typeof previous !== 'string' || !previous.trim() || typeof next !== 'string' || previous === next) return;
+    const kept = Number.isFinite(settings.kept) ? Math.max(0, Math.floor(settings.kept)) : DEFAULT_VERSIONS.kept;
+    if (kept === 0) return;
+    const item = versionsEntry(guildId, kind, id);
+    const diff = sentenceDiff(previous, next);
+    const by = typeof opts.by === 'string' && opts.by.trim() ? opts.by.trim() : 'unknown';
+    const at = new Date(Number.isFinite(opts.now) ? opts.now : Date.now()).toISOString();
+    const chars = [...previous].length;
+    const list = Array.isArray(item.value[field]) ? item.value[field] : [];
+    item.value[field] = [...list, { at, by, chars, ...diff, text: previous }].slice(-kept);
+    item.dirty = true;
+    log.info('store: version recorded', {
+      guildId,
+      kind,
+      ...(kind === 'channels' ? { channelId: String(id) } : {}),
+      field,
+      by,
+      chars,
+      kept: diff.kept,
+      removed: diff.removed,
+      added: diff.added,
+    });
   }
 
   /** Whether a channel has an entry, cached or on disk (no side effects on the cache). */
@@ -903,11 +980,16 @@ export function createStore({ dataDir }) {
      * only ever changes through `addEpisodes` (src/memory/episodes.js), which
      * appends and evicts instead of overwriting. `interests`/`details`
      * likewise only ever change through `applyProfileOps` below, which merges
-     * incrementally instead of overwriting wholesale.
+     * incrementally instead of overwriting wholesale. A changed `character`/`style`/
+     * `relationship` keeps its previous text (`recordVersion`; `opts.by`, `opts.versions`).
+     * @param {{ by?: string, versions?: { enabled?: boolean, kept?: number } }} [opts]
      */
-    updateUser(guildId, userId, fields) {
+    updateUser(guildId, userId, fields, opts = {}) {
       const item = entry(userFile(guildId, userId), () => emptyProfile(String(userId)));
       const { affinity, episodes, interests, details, detailsSeq, ...safeFields } = fields ?? {};
+      for (const key of USER_PROSE) {
+        if (key in safeFields) recordVersion(guildId, 'users', userId, key, item.value[key], safeFields[key], opts);
+      }
       Object.assign(item.value, safeFields, { updatedAt: new Date().toISOString() });
       item.dirty = true;
       return item.value;
@@ -938,7 +1020,10 @@ export function createStore({ dataDir }) {
      *   noteChars?: number, interestHalfLifeDays?: number, maxDetails?: number, maxDetailsStored?: number,
      *   detailHalfLifeDays?: number, maxAliases?: number, maxAliasesStored?: number, aliasHalfLifeDays?: number,
      *   confirmGapHours?: number, seenAt?: number, now?: number, clampTolerance?: number,
-     *   relationshipScore?: number, relationshipChars?: number }} [opts]
+     *   relationshipScore?: number, relationshipChars?: number, by?: string,
+     *   versions?: { enabled?: boolean, kept?: number } }} [opts]
+     *   `by`/`versions`: a replaced `character`/`style`/`relationship` keeps its previous text
+     *   (`recordVersion`).
      *   `relationshipScore`: stamped as `profile.relationshipScore` whenever a `relationship` text
      *   is written (falls back to the stored score), and `profile.relationshipWrittenAt` = the ISO
      *   time of `opts.now` (else the wall clock) next to it -- the score and the moment the text
@@ -962,10 +1047,13 @@ export function createStore({ dataDir }) {
       for (const key of ['character', 'style']) {
         const value = ops?.[key];
         if (typeof value === 'string' && value.trim()) {
-          profile[key] = clampText(value, opts.fieldChars, { tolerance: opts.clampTolerance });
+          const next = clampText(value, opts.fieldChars, { tolerance: opts.clampTolerance });
+          recordVersion(guildId, 'users', userId, key, profile[key], next, opts);
+          profile[key] = next;
         }
       }
-      writeRelationship(profile, ops?.relationship, opts);
+      writeRelationship(profile, ops?.relationship, opts, (previous, next) =>
+        recordVersion(guildId, 'users', userId, 'relationship', previous, next, opts));
 
       applyItemOps(profile, ops, opts, seenAt);
 
@@ -1050,7 +1138,8 @@ export function createStore({ dataDir }) {
      * queue file rewritten at once -- and every recent line that names them (their
      * token, or one of their stored names or aliases as a whole word, read from
      * the profile before it goes; src/memory/recent.js#purgeRecentFor), the recent
-     * file rewritten at once. See also `wipeGuild` below.
+     * file rewritten at once -- and the version history of their profile's prose
+     * (versions/users/<userId>.json). See also `wipeGuild` below.
      * @param {string} guildId
      * @param {string} userId
      * @returns {{ recentRemoved: number }}  How many recent lines went.
@@ -1062,6 +1151,9 @@ export function createStore({ dataDir }) {
       const file = userFile(guildId, userId);
       entries.delete(file);
       fs.rmSync(file, { force: true });
+      const versions = versionsFile(guildId, 'users', userId);
+      entries.delete(versions);
+      fs.rmSync(versions, { force: true });
       forgetQueued(guildId, userId);
       store.forgetPrivate(guildId, userId);
       return { recentRemoved };
@@ -1411,9 +1503,11 @@ export function createStore({ dataDir }) {
      * same stamp when one of the server notes (`patterns`, `starters`,
      * `injokes`) really changes; `self` alone never moves it, and neither do
      * `applySelfOps` or `applyLearnedOps`, so it tells how old the notes are
-     * (src/memory/update.js#notesStale).
+     * (src/memory/update.js#notesStale). A changed `patterns`/`starters` keeps its previous
+     * text (`recordVersion`; `opts.by`, `opts.versions`).
+     * @param {{ by?: string, versions?: { enabled?: boolean, kept?: number } }} [opts]
      */
-    updateGuild(guildId, fields) {
+    updateGuild(guildId, fields, opts = {}) {
       const item = entry(guildFile(guildId), emptyGuild);
       normalizeGuild(item.value);
       const {
@@ -1435,6 +1529,9 @@ export function createStore({ dataDir }) {
       const notes = Object.fromEntries(Object.entries(safeFields).filter(([key]) => NOTES_FIELDS.includes(key)));
       const stamp = new Date().toISOString();
       const stamps = changesStored(item.value, notes) ? { updatedAt: stamp, notesUpdatedAt: stamp } : { updatedAt: stamp };
+      for (const key of GUILD_PROSE) {
+        if (key in safeFields) recordVersion(guildId, 'guild', 'guild', key, item.value[key], safeFields[key], opts);
+      }
       Object.assign(item.value, safeFields, stamps);
       item.dirty = true;
       return item.value;
@@ -2048,15 +2145,18 @@ export function createStore({ dataDir }) {
      * only when one of them actually changes: an identical re-send is left
      * alone. Nothing else stamps a channel's `updatedAt`, so it is the notes'
      * own stamp (src/memory/update.js#notesStale reads it beside
-     * `notesCheckedAt`, see `markNotesChecked`).
+     * `notesCheckedAt`, see `markNotesChecked`). A changed field keeps its previous text
+     * (`recordVersion`; `opts.by`, `opts.versions`).
+     * @param {{ by?: string, versions?: { enabled?: boolean, kept?: number } }} [opts]
      */
-    updateChannel(guildId, channelId, fields) {
+    updateChannel(guildId, channelId, fields, opts = {}) {
       const item = channelEntry(guildId, channelId);
       const patch = {};
-      for (const key of ['purpose', 'topics', 'tone']) {
+      for (const key of CHANNEL_PROSE) {
         if (typeof fields?.[key] === 'string') patch[key] = fields[key];
       }
       if (!changesStored(item.value, patch)) return item.value;
+      for (const [key, value] of Object.entries(patch)) recordVersion(guildId, 'channels', channelId, key, item.value[key], value, opts);
       Object.assign(item.value, patch, { updatedAt: new Date().toISOString() });
       item.dirty = true;
       return item.value;
@@ -2167,6 +2267,22 @@ export function createStore({ dataDir }) {
       return item.value.backfill;
     },
 
+    /**
+     * The version history of one prose owner (data/guilds/<guildId>/versions/<kind>/<id>.json, see
+     * `recordVersion`): `{ [field]: [{ at, by, chars, before, after, kept, removed, added, text }] }`,
+     * newest last; `{}` when none or for an unknown kind. A lore `id` is the entry's title (matched
+     * trimmed and case-insensitively, as the lorebook matches titles). A copy: changing it changes
+     * nothing stored.
+     * @param {string} guildId
+     * @param {'users'|'channels'|'guild'|'lore'} kind
+     * @param {string} id  A member id, a channel id, `'guild'`, or a lore title.
+     * @returns {object}
+     */
+    listVersions(guildId, kind, id) {
+      if (!VERSION_KINDS.includes(kind)) return {};
+      return structuredClone(versionsEntry(guildId, kind, id).value);
+    },
+
     /** Every stored lorebook entry of a guild (data/guilds/<id>/lore.json). Never auto-created empty on disk. */
     getLore(guildId) {
       return entry(loreFile(guildId), () => []).value;
@@ -2177,11 +2293,14 @@ export function createStore({ dataDir }) {
      * src/memory/lore.js#upsertLore: an analyzer update never touches an
      * owner entry, an owner write always wins. Returns how many were
      * inserted or actually changed (an identical analyzer re-send is neither).
+     * An entry whose text changed keeps its previous text (`recordVersion`, kind `lore`, id
+     * the title; `opts.by`, `opts.versions`).
      */
-    setLore(guildId, incoming, opts) {
+    setLore(guildId, incoming, opts = {}) {
       const item = entry(loreFile(guildId), () => []);
-      const { entries: nextEntries, upserted } = upsertLore(item.value, incoming, opts);
+      const { entries: nextEntries, upserted, changes } = upsertLore(item.value, incoming, opts);
       if (upserted > 0) {
+        for (const change of changes) recordVersion(guildId, 'lore', change.title, 'text', change.previousText, change.nextText, opts);
         item.value = nextEntries;
         item.dirty = true;
       }
@@ -2386,7 +2505,8 @@ export function createStore({ dataDir }) {
      * `forgetPrivate` and `removeLore`, one of the only places in the project allowed to delete
      * stored memory. Removes, from both the cache and disk: every user profile
      * (affinity and episodes included), the whole `private/` directory (every
-     * member's private layer), `guild.json` -- and with it everything it holds:
+     * member's private layer), the whole `versions/` directory (every prose version
+     * history, owner lore's included), `guild.json` -- and with it everything it holds:
      * patterns, starters, in-jokes, self facts, `learned`, `emojiUsage`, the
      * `emojiBackfill` stamp, `ownLines`, the variety pass's `worn` /
      * `wornLong` (the owner's pinned patterns included) / `wornHistory`, the `fillers` (the
@@ -2431,6 +2551,15 @@ export function createStore({ dataDir }) {
 
       {
         const dir = privateDir(guildId);
+        const prefix = dir + path.sep;
+        for (const file of [...entries.keys()]) {
+          if (file.startsWith(prefix)) entries.delete(file);
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+
+      {
+        const dir = versionsDir(guildId);
         const prefix = dir + path.sep;
         for (const file of [...entries.keys()]) {
           if (file.startsWith(prefix)) entries.delete(file);
