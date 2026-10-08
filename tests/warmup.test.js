@@ -3894,3 +3894,223 @@ test('refreshServerNotes: <existing_notes> carries patterns/starters/injokes, lo
   const refreshed = logs.find((entry) => entry.msg === 'warmup: notes refreshed');
   assert.deepEqual([refreshed.target, refreshed.changed, refreshed.channelId], ['server', true, undefined]);
 });
+
+// ---------------------------------------------------------------------------
+// Over the limit: a refresh's rewrite is never cut, it is re-asked once with <over_limit>
+// ---------------------------------------------------------------------------
+
+/** The parsed `<over_limit>` block of any message of a request, or null without one. */
+const overLimitBlockOf = (call) => {
+  for (const message of call.messages) {
+    const match = /<over_limit>\n([\s\S]*?)\n<\/over_limit>/.exec(message.content);
+    if (match) return JSON.parse(match[1]);
+  }
+  return null;
+};
+
+/** The retry is the first request, then the first answer as an assistant turn (`answer`: what the
+ * fake returned, scriptedLlm's JSON text), then a user turn holding only `<over_limit>`. */
+function assertRetryOf(first, retry, expected, answer) {
+  assert.equal(first.messages.length, 2, 'the first request: system and user only');
+  assert.ok(first.messages.every((message) => message.role !== 'assistant'), 'the first request carries no assistant turn');
+  assert.equal(overLimitBlockOf(first), null, 'the first request carries no <over_limit>');
+  assert.equal(retry.messages.length, 4);
+  assert.deepEqual(retry.messages.slice(0, 2), first.messages, 'the same system and user messages, unchanged');
+  assert.deepEqual(retry.messages[2], { role: 'assistant', content: JSON.stringify(answer) }, 'the first answer as returned');
+  assert.equal(retry.messages[3].role, 'user');
+  assert.ok(retry.messages[3].content.startsWith('<over_limit>') && retry.messages[3].content.endsWith('</over_limit>'), 'the last turn is <over_limit> alone');
+  assert.deepEqual(overLimitBlockOf({ messages: [retry.messages[3]] }), expected);
+}
+
+test('refreshPortrait: a style over the limit is re-asked once with <over_limit> and the shorter answer is stored', async () => {
+  const now = T0 + 30 * 3_600_000;
+  // memory.fieldChars 400 with clampTolerance 1.25: 450 is inside the tolerance, yet a rewrite is never widened.
+  const llm = scriptedLlm([
+    { character: 'νέος χαρακτήρας', style: 'λ'.repeat(450) },
+    { character: 'νέος χαρακτήρας', style: 'σύντομο νέο ύφος' },
+  ]);
+  const { warmup, store } = portraitWarmup({ llm, now: () => now });
+  seedPortrait(store, 'a', { messageCount: 420 });
+
+  const result = await warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+
+  assert.equal(result.ok, true);
+  assert.equal(llm.calls.length, 2, 'one retry');
+  const [first, retry] = llm.calls;
+  assertRetryOf(first, retry, { style: { chars: 450, limit: 400 } }, { character: 'νέος χαρακτήρας', style: 'λ'.repeat(450) });
+  const profile = store.getUser('g1', 'a');
+  assert.equal(profile.style, 'σύντομο νέο ύφος');
+  assert.equal(profile.character, 'νέος χαρακτήρας');
+  assert.equal(profile.portraitRefreshedAt, iso(now));
+  assert.equal(store.state.data.portraitCount, 1, 'one daily slot for both requests');
+});
+
+test('refreshPortrait: a second overflow keeps the stored style and ends over-limit with the attempt stamped', async () => {
+  const now = T0 + 30 * 3_600_000;
+  const llm = scriptedLlm([
+    { character: 'νέος', style: 'λ'.repeat(450) },
+    { character: 'νέος', style: 'λ'.repeat(420) },
+    { character: 'νέος', style: 'λ'.repeat(450) },
+  ]);
+  const { warmup, store, hot } = portraitWarmup({ llm, now: () => now });
+  seedPortrait(store, 'a', { messageCount: 420, portraitAttemptAt: iso(now - 30 * 3_600_000) });
+  const windows = [win('c1', lines('c1', 'a', 5, T0))];
+
+  const { result, logs } = await withCapturedLogs(() => warmup.refreshPortrait('g1', 'a', '', { windows }));
+
+  assert.deepEqual(result, { ok: false, reason: 'over-limit', fields: ['style'] });
+  assert.equal(llm.calls.length, 2);
+  assertRetryOf(llm.calls[0], llm.calls[1], { style: { chars: 450, limit: 400 } }, { character: 'νέος', style: 'λ'.repeat(450) });
+  let profile = store.getUser('g1', 'a');
+  assert.equal(profile.style, 'σύντομα', 'the stored style stays, never cut');
+  assert.equal(profile.character, 'μιλάει πολύ', 'the answer is refused whole');
+  assert.equal(profile.portraitAttemptAt, iso(now), 'the attempt is stamped');
+  assert.equal(profile.portraitRefreshedAt ?? null, null);
+  assert.equal(store.state.data.portraitCount, 1, 'the request was sent: the slot stays taken');
+  const failed = logs.find((entry) => entry.msg === 'warmup: portrait refresh failed');
+  assert.deepEqual([failed.reason, failed.sent, failed.fields], ['over-limit', true, ['style']]);
+  assert.ok(!JSON.stringify(logs).includes('λλλ'), 'logs carry field names, never the text');
+
+  hot.config.memory.overLimitRetries = 0;
+  const unretried = await warmup.refreshPortrait('g1', 'a', '', { windows, force: true });
+  assert.deepEqual(unretried, { ok: false, reason: 'over-limit', fields: ['style'] });
+  assert.equal(llm.calls.length, 3, 'memory.overLimitRetries 0: no retry');
+  profile = store.getUser('g1', 'a');
+  assert.equal(profile.style, 'σύντομα');
+});
+
+test('refreshPortrait (two-stage): a stage A style over the limit is re-asked once; the retry answer is taken whole', async () => {
+  const llm = scriptedLlm([
+    portraitAnswer('λ'.repeat(450), { add: ['πρώτη σημείωση'] }),
+    portraitAnswer('νέο ύφος', { add: ['δεύτερη σημείωση'] }),
+  ]);
+  const { warmup, store } = portraitWarmup({ hot: twoStageHot(), llm });
+  seedPortrait(store, 'a');
+
+  const result = await warmup.refreshPortrait('g1', 'a', '', { windows: [win('c1', lines('c1', 'a', 5, T0))] });
+
+  assert.deepEqual([result.ok, result.characterQueued], [true, true]);
+  assert.equal(llm.calls.length, 2);
+  assertRetryOf(llm.calls[0], llm.calls[1], { style: { chars: 450, limit: 400 } }, portraitAnswer('λ'.repeat(450), { add: ['πρώτη σημείωση'] }));
+  assert.equal(store.getUser('g1', 'a').style, 'νέο ύφος');
+  const queue = store.getVoiceQueue('g1');
+  assert.equal(queue.length, 1);
+  assert.deepEqual(queue[0].brief, { add: ['δεύτερη σημείωση'] }, 'the lists of the retry answer');
+});
+
+test('refreshChannelNotes: an overflowing topics is re-asked once; a second overflow writes nothing and stamps the attempt', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.updateChannel('g1', 'c1', { purpose: 'alpha', topics: 'beta', tone: 'gamma' });
+  store.getChannel('g1', 'c1').updatedAt = iso(T0 - 20 * NOTES_DAY);
+  const channel = fakeChannel('c1', spreadHistory(12, 30), { name: 'general' });
+  const hot = notesHot();
+  const long = 'θ'.repeat(450); // over memory.fieldChars 400, inside clampTolerance 1.25
+  const llm = scriptedLlm([
+    { purpose: 'alpha', topics: long, tone: 'gamma' },
+    { purpose: 'alpha', topics: 'beta and delta', tone: 'gamma' },
+    { purpose: 'alpha two', topics: long, tone: 'gamma two' },
+    { purpose: 'alpha two', topics: `${long}θ`, tone: 'gamma two' },
+    { purpose: 'alpha three', topics: long, tone: 'gamma' },
+  ]);
+  const warmup = createWarmup({ hot, store, client: fakeClient(fakeGuild('g1', [channel])), llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => T0 });
+
+  const { result: first } = await withCapturedLogs(() => warmup.refreshChannelNotes('g1', 'c1'));
+  assert.deepEqual([first.ok, first.changed], [true, true]);
+  assert.equal(llm.calls.length, 2, 'one retry');
+  assertRetryOf(llm.calls[0], llm.calls[1], { topics: { chars: 450, limit: 400 } }, { purpose: 'alpha', topics: long, tone: 'gamma' });
+  let stored = store.getChannel('g1', 'c1');
+  assert.equal(stored.topics, 'beta and delta');
+  assert.equal(stored.notesSampleReviewedAt, iso(T0));
+  const versions = store.listVersions('g1', 'channels', 'c1');
+  assert.deepEqual(versions.topics.map((v) => [v.text, v.by]), [['beta', 'refresh']], 'the rewrite keeps the previous text, written by the refresh');
+
+  const { result: second, logs } = await withCapturedLogs(() => warmup.refreshChannelNotes('g1', 'c1'));
+  assert.deepEqual(second, { ok: false, reason: 'over-limit', fields: ['topics'] });
+  assert.equal(llm.calls.length, 4);
+  assertRetryOf(llm.calls[2], llm.calls[3], { topics: { chars: 450, limit: 400 } }, { purpose: 'alpha two', topics: long, tone: 'gamma two' });
+  stored = store.getChannel('g1', 'c1');
+  assert.deepEqual([stored.purpose, stored.topics, stored.tone], ['alpha', 'beta and delta', 'gamma'], 'nothing written, not even the fields that fit');
+  assert.equal(stored.notesAttemptAt, iso(T0));
+  const failed = logs.find((entry) => entry.msg === 'warmup: notes refresh failed');
+  assert.deepEqual([failed.target, failed.channelId, failed.reason, failed.fields], ['channel', 'c1', 'over-limit', ['topics']]);
+  assert.ok(!JSON.stringify(logs).includes('θθθ'), 'logs carry field names, never the text');
+
+  hot.config.memory.overLimitRetries = 0;
+  const { result: third } = await withCapturedLogs(() => warmup.refreshChannelNotes('g1', 'c1'));
+  assert.deepEqual(third, { ok: false, reason: 'over-limit', fields: ['topics'] });
+  assert.equal(llm.calls.length, 5, 'memory.overLimitRetries 0: no retry');
+});
+
+test('refreshServerNotes: same for patterns at fieldChars*2', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.updateGuild('g1', { patterns: 'old patterns', starters: 'old starters', injokes: ['old joke'] });
+  store.getGuild('g1').notesUpdatedAt = iso(T0 - 5 * NOTES_DAY);
+  const main = fakeChannel('c1', spreadHistory(12, 30), { name: 'general' });
+  const hot = notesHot();
+  hot.config.memory.mainChannelIds = ['c1'];
+  const long = 'π'.repeat(900); // over fieldChars*2 = 800, inside clampTolerance 1.25
+  const starters = 'σ'.repeat(500); // over fieldChars 400, within fieldChars*2
+  const llm = scriptedLlm([
+    { patterns: long, starters, injokes: ['old joke'] },
+    { patterns: 'new patterns', starters, injokes: ['old joke'] },
+    { patterns: long, starters: 'other starters', injokes: ['new joke'] },
+    { patterns: long, starters: 'other starters', injokes: ['new joke'] },
+    { patterns: long, starters: 'other starters', injokes: ['new joke'] },
+  ]);
+  const warmup = createWarmup({ hot, store, client: fakeClient(fakeGuild('g1', [main])), llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => T0 });
+
+  const { result: first } = await withCapturedLogs(() => warmup.refreshServerNotes('g1'));
+  assert.deepEqual([first.ok, first.changed], [true, true]);
+  assert.equal(llm.calls.length, 2, 'one retry');
+  assertRetryOf(llm.calls[0], llm.calls[1], { patterns: { chars: 900, limit: 800 } }, { patterns: long, starters, injokes: ['old joke'] });
+  let guild = store.getGuild('g1');
+  assert.equal(guild.patterns, 'new patterns');
+  assert.equal(guild.starters, starters, 'starters at 500 fit fieldChars*2, never cut');
+  assert.deepEqual(store.listVersions('g1', 'guild', 'guild').patterns.map((v) => [v.text, v.by]), [['old patterns', 'refresh']]);
+
+  const { result: second, logs } = await withCapturedLogs(() => warmup.refreshServerNotes('g1'));
+  assert.deepEqual(second, { ok: false, reason: 'over-limit', fields: ['patterns'] });
+  assert.equal(llm.calls.length, 4);
+  guild = store.getGuild('g1');
+  assert.deepEqual([guild.patterns, guild.starters, guild.injokes], ['new patterns', starters, ['old joke']], 'nothing written at all');
+  assert.equal(guild.notesAttemptAt, iso(T0));
+  const failed = logs.find((entry) => entry.msg === 'warmup: notes refresh failed');
+  assert.deepEqual([failed.target, failed.reason, failed.fields], ['server', 'over-limit', ['patterns']]);
+
+  hot.config.memory.overLimitRetries = 0;
+  const { result: third } = await withCapturedLogs(() => warmup.refreshServerNotes('g1'));
+  assert.deepEqual(third, { ok: false, reason: 'over-limit', fields: ['patterns'] });
+  assert.equal(llm.calls.length, 5, 'memory.overLimitRetries 0: no retry');
+});
+
+test('createWarmup: run() first pass still clamps and stores (by warmup)', async () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  const history = [rawMessage(1000, { authorId: 'a', content: 'hi one' }), rawMessage(2000, { authorId: 'a', content: 'hi two' })];
+  const guild = fakeGuild('g1', [fakeChannel('c1', history, { name: 'general' })]);
+  const hot = fakeHot();
+  hot.config.memory.clampTolerance = 1;
+  const words = (n) => Array.from({ length: n }, (_, i) => `λέξη${i}`).join(' ');
+  const llm = scriptedLlm([
+    { purpose: words(120), topics: 'everything', tone: 'casual' },
+    { character: 'friendly', style: 'short', interests: [], details: [], episodes: [], aliases: [] },
+    { patterns: words(250), starters: 'a link', injokes: [], lore: [] },
+    { purpose: 'a calmer purpose', topics: 'everything', tone: 'casual' },
+  ]);
+  const warmup = createWarmup({ hot, store, client: fakeClient(guild), llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => 10_000_000 });
+
+  assert.equal((await warmup.run('g1')).ok, true);
+  assert.equal(llm.calls.length, 3, 'no retry on a first pass');
+  assert.ok(llm.calls.every((call) => overLimitBlockOf(call) === null && call.messages.length === 2), 'no <over_limit>, no assistant turn');
+  const channel = store.getChannel('g1', 'c1');
+  assert.ok(channel.purpose.length > 0 && channel.purpose.length <= 400, 'a first write over the limit is clamped and stored');
+  const guildMemory = store.getGuild('g1');
+  assert.ok(guildMemory.patterns.length > 0 && guildMemory.patterns.length <= 800, 'patterns clamped to fieldChars*2');
+  assert.deepEqual(store.listVersions('g1', 'channels', 'c1'), {}, 'a first write records no version');
+  assert.deepEqual(store.listVersions('g1', 'guild', 'guild'), {});
+
+  // A redo of the channel rewrites a stored note: the previous text is kept, written by the warmup.
+  const firstPurpose = channel.purpose;
+  await warmup.runChannel('g1', 'c1');
+  assert.equal(store.getChannel('g1', 'c1').purpose, 'a calmer purpose');
+  assert.deepEqual(store.listVersions('g1', 'channels', 'c1').purpose.map((v) => [v.text, v.by]), [[firstPurpose, 'warmup']]);
+});
