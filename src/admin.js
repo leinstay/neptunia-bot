@@ -2060,6 +2060,7 @@ export function createAdmin({
     const maxEntries = hot.config?.lore?.maxEntries ?? Infinity;
     const upserted = store.setLore(guildId, [{ title, keys, text, always: Boolean(args?.always) }], {
       source: 'owner',
+      by: 'owner',
       now: Date.now(),
       maxEntries,
       textChars: hot.config?.lore?.textChars,
