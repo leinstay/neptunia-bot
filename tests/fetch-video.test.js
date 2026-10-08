@@ -12,7 +12,7 @@ import { writeFileSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createVideoFetcher } from '../src/discord/fetch-video.js';
+import { createVideoFetcher, proxyReachable } from '../src/discord/fetch-video.js';
 import { withCapturedLogs } from './fixtures/capture-logs.js';
 
 const OPTS = {
@@ -118,9 +118,17 @@ function fakeKill() {
   return { killProcess, kills };
 }
 
-/** createVideoFetcher on a POSIX platform with a fake process.kill, unless overridden. */
+/**
+ * createVideoFetcher on a POSIX platform with a fake process.kill and an
+ * unreachable proxy (no network in tests), unless overridden.
+ */
 function makeFetcher(deps) {
-  return createVideoFetcher({ platform: 'linux', killProcess: fakeKill().killProcess, ...deps });
+  return createVideoFetcher({
+    platform: 'linux',
+    killProcess: fakeKill().killProcess,
+    probeProxy: async () => false,
+    ...deps,
+  });
 }
 
 function enoent(child) {
@@ -827,4 +835,359 @@ test('probeYoutube: pageFallback false without a key makes no request', async ()
   );
   assert.deepEqual(result, { ok: false, reason: 'download' });
   assert.equal(calls.length, 0);
+});
+
+// --- proxy -------------------------------------------------------------------
+
+const PROXY = 'socks5h://user:s3cr%40t@proxy.example:1080';
+
+test('fetchSiteClip: with a proxy and an unknown or long duration the whole download is trimmed even under maxBytes', async () => {
+  for (const durationSec of [null, 125]) {
+    const { spawnImpl, calls } = fakeSpawn(byTool({ ytdlp: writesOutput(500, '-o'), ffmpeg: writesOutput(300) }));
+    const fetcher = makeFetcher({ spawnImpl, tmpDir });
+    const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec, proxy: PROXY });
+    assert.equal(result.ok, true);
+    assert.equal(result.bytes, 300, `the trimmed file is returned for duration ${durationSec}`);
+    assert.equal(result.seconds, 60);
+    assert.equal(calls.length, 2);
+    const ytArgs = calls[0].args;
+    assert.equal(ytArgs[ytArgs.indexOf('--proxy') + 1], PROXY);
+    assert.equal(ytArgs.includes('--download-sections'), false);
+    assert.equal(ytArgs[ytArgs.indexOf('--max-filesize') + 1], '4000');
+    assert.equal(calls[1].command, 'ffmpeg');
+    assert.equal(calls[1].args[calls[1].args.indexOf('-t') + 1], '60');
+    assert.equal(calls[1].args.includes(PROXY), false, 'ffmpeg never gets the proxy');
+    assert.deepEqual(await leftovers(), []);
+  }
+});
+
+test('fetchSiteClip: with a proxy a known short video under maxBytes is returned as-is', async () => {
+  const { spawnImpl, calls } = fakeSpawn(byTool({ ytdlp: writesOutput(500, '-o') }));
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
+  const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec: 58, proxy: PROXY });
+  assert.equal(result.ok, true);
+  assert.equal(result.bytes, 500);
+  assert.equal(result.seconds, 58);
+  assert.equal(calls.length, 1);
+});
+
+test('fetchSiteClip: with a proxy the trim still ends in size when its output stays over maxBytes', async () => {
+  const { spawnImpl, calls } = fakeSpawn(byTool({ ytdlp: writesOutput(500, '-o'), ffmpeg: writesOutput(1001) }));
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
+  const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec: null, proxy: PROXY });
+  assert.deepEqual(result, { ok: false, reason: 'size' });
+  assert.equal(calls.length, 2);
+});
+
+test('fetchSiteClip: without a proxy an unknown duration under maxBytes is not trimmed (sections cut instead)', async () => {
+  const { spawnImpl, calls } = fakeSpawn(byTool({ ytdlp: writesOutput(500, '-o') }));
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
+  const result = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec: null, proxy: '' });
+  assert.equal(result.ok, true);
+  assert.equal(result.bytes, 500);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args.includes('--proxy'), false);
+  assert.equal(calls[0].args[calls[0].args.indexOf('--download-sections') + 1], '*0-60');
+});
+
+test('probeSite: a proxy reaches yt-dlp as --proxy', async () => {
+  const { spawnImpl, calls } = fakeSpawn((child) => {
+    child.stdout.emit('data', Buffer.from('{"duration":12,"title":"t"}'));
+    child.emit('close', 0, null);
+  });
+  const fetcher = makeFetcher({ spawnImpl, tmpDir });
+  const result = await fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY });
+  assert.equal(result.ok, true);
+  assert.equal(calls[0].args[calls[0].args.indexOf('--proxy') + 1], PROXY);
+});
+
+test('logging: failures with a proxy never log the proxy URL or its credentials', async () => {
+  // A spawn error whose message carries the proxy URL, as a careless tool might report it.
+  const leaky = (child) => {
+    const err = new Error(`connect failed via ${PROXY}`);
+    err.code = 'ECONNREFUSED';
+    child.emit('error', err);
+  };
+  const probe = (fetcher) => fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY });
+  const clip = (fetcher) => fetcher.fetchSiteClip(SITE_URL, { ...OPTS, proxy: PROXY });
+  const cases = [
+    [leaky, probe],
+    [leaky, clip],
+    [(child) => child.emit('close', 1, null), probe],
+    [(child) => child.emit('close', 1, null), clip],
+    [byTool({ ytdlp: writesOutput(500, '-o'), ffmpeg: leaky }), clip],
+  ];
+  for (const [behave, run] of cases) {
+    const fetcher = makeFetcher({ spawnImpl: fakeSpawn(behave).spawnImpl, tmpDir });
+    const { result, logs } = await withCapturedLogs(() => run(fetcher));
+    assert.equal(result.ok, false);
+    assert.ok(logs.some((l) => l.msg === 'fetch-video: failed'), 'the failure is logged');
+    const serialized = JSON.stringify(logs) + JSON.stringify(result);
+    assert.equal(serialized.includes('proxy.example'), false);
+    assert.equal(serialized.includes('s3cr'), false);
+    assert.equal(serialized.includes('socks5h'), false);
+  }
+});
+
+// --- proxy fallback ------------------------------------------------------------
+
+const PROBE_JSON = '{"duration":12,"title":"t"}';
+
+/** yt-dlp that fails through the proxy (exit 1) unless `proxyWorks`, and answers the probe directly. */
+function proxyAware({ proxyWorks = false } = {}) {
+  return (child, command, args) => {
+    if (args.includes('--proxy') && !proxyWorks) return child.emit('close', 1, null);
+    child.stdout.emit('data', Buffer.from(PROBE_JSON));
+    return child.emit('close', 0, null);
+  };
+}
+
+/** A settable clock. */
+function clock(start = 1_000_000) {
+  const c = { t: start, now: () => c.t };
+  return c;
+}
+
+test('proxy fallback: a failed proxied probe is retried directly and succeeds; the failure is logged without the proxy', async () => {
+  const { spawnImpl, calls } = fakeSpawn(proxyAware());
+  const fetcher = makeFetcher({ spawnImpl, tmpDir, now: clock().now });
+  const { result, logs } = await withCapturedLogs(() => fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY }));
+  assert.deepEqual(result, { ok: true, durationSec: 12, title: 't' });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].args[calls[0].args.indexOf('--proxy') + 1], PROXY);
+  assert.equal(calls[1].args.includes('--proxy'), false);
+  const failed = logs.filter((l) => l.msg === 'fetch-video: proxy failed');
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].level, 'warn');
+  assert.equal(failed[0].stage, 'probe');
+  assert.equal(failed[0].reason, 'download');
+  assert.equal(failed[0].code, 1);
+  const serialized = JSON.stringify(logs);
+  assert.equal(serialized.includes('proxy.example'), false);
+  assert.equal(serialized.includes('s3cr'), false);
+});
+
+test('proxy fallback: a proxied spawn error or timeout is retried directly too, with its own reason', async () => {
+  const cases = [
+    [enoent, 'tool', 'ENOENT'],
+    [() => {}, 'timeout', 'SIGKILL'],
+  ];
+  for (const [proxied, reason, code] of cases) {
+    const { spawnImpl, calls } = fakeSpawn((child, command, args) =>
+      args.includes('--proxy') ? proxied(child) : proxyAware()(child, command, args));
+    const fetcher = makeFetcher({ spawnImpl, tmpDir, now: clock().now });
+    const { result, logs } = await withCapturedLogs(() =>
+      fetcher.probeSite(SITE_URL, { ...OPTS, toolTimeoutMs: 30, proxy: PROXY }));
+    assert.equal(result.ok, true, reason);
+    assert.equal(calls.length, 2);
+    const [line] = logs.filter((l) => l.msg === 'fetch-video: proxy failed');
+    assert.equal(line.reason, reason);
+    assert.equal(line.code ?? null, code);
+  }
+});
+
+test('proxy fallback: a failed direct retry is reported as before', async () => {
+  const { spawnImpl, calls } = fakeSpawn((child) => child.emit('close', 1, null));
+  const fetcher = makeFetcher({ spawnImpl, tmpDir, now: clock().now });
+  const { result, logs } = await withCapturedLogs(() => fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY }));
+  assert.deepEqual(result, { ok: false, reason: 'download' });
+  assert.equal(calls.length, 2);
+  assert.equal(logs.filter((l) => l.msg === 'fetch-video: failed').length, 1);
+});
+
+test('proxy fallback: within the cooldown the proxy is not tried and the skip is logged once; after it the proxy is tried again', async () => {
+  const time = clock();
+  const { spawnImpl, calls } = fakeSpawn(proxyAware());
+  const fetcher = makeFetcher({ spawnImpl, tmpDir, now: time.now });
+  await withCapturedLogs(() => fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY, proxyRetryMinutes: 10 }));
+  assert.equal(calls.length, 2);
+
+  time.t += 5 * 60_000;
+  const { logs } = await withCapturedLogs(async () => {
+    await fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY, proxyRetryMinutes: 10 });
+    await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec: null, proxy: PROXY, proxyRetryMinutes: 10 });
+  });
+  assert.equal(calls.length, 4, 'one yt-dlp run per call');
+  assert.equal(calls[2].args.includes('--proxy'), false);
+  assert.equal(calls[3].args.includes('--proxy'), false);
+  assert.equal(calls[3].args[calls[3].args.indexOf('--download-sections') + 1], '*0-60', 'the direct clip keeps the cut');
+  const skipped = logs.filter((l) => l.msg === 'fetch-video: proxy skipped');
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0].reason, 'cooldown');
+  assert.equal(JSON.stringify(logs).includes('proxy.example'), false);
+
+  time.t += 6 * 60_000;
+  await withCapturedLogs(() => fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY, proxyRetryMinutes: 10 }));
+  assert.equal(calls[4].args[calls[4].args.indexOf('--proxy') + 1], PROXY, 'the window passed: the proxy is tried again');
+});
+
+test('proxy fallback: the cooldown length follows proxyRetryMinutes', async () => {
+  const time = clock();
+  const { spawnImpl, calls } = fakeSpawn(proxyAware());
+  const fetcher = makeFetcher({ spawnImpl, tmpDir, now: time.now });
+  await withCapturedLogs(() => fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY, proxyRetryMinutes: 1 }));
+  time.t += 61_000;
+  await withCapturedLogs(() => fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY, proxyRetryMinutes: 1 }));
+  assert.ok(calls[2].args.includes('--proxy'));
+});
+
+test('proxy fallback: a proxied success never opens the cooldown', async () => {
+  const time = clock();
+  const { spawnImpl, calls } = fakeSpawn(proxyAware({ proxyWorks: true }));
+  const fetcher = makeFetcher({ spawnImpl, tmpDir, now: time.now });
+  const { logs } = await withCapturedLogs(async () => {
+    await fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY });
+    time.t += 60_000;
+    await fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY });
+  });
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every((c) => c.args.includes('--proxy')));
+  assert.equal(logs.some((l) => l.msg.startsWith('fetch-video: proxy')), false);
+});
+
+test('proxy fallback: a failed proxied clip is downloaded again directly with the sections cut, no local trim', async () => {
+  const { spawnImpl, calls } = fakeSpawn(byTool({
+    ytdlp: (child, command, args) => (args.includes('--proxy')
+      ? child.emit('close', 1, null)
+      : writesOutput(500, '-o')(child, command, args)),
+  }));
+  const fetcher = makeFetcher({ spawnImpl, tmpDir, now: clock().now });
+  const { result, logs } = await withCapturedLogs(() =>
+    fetcher.fetchSiteClip(SITE_URL, { ...OPTS, durationSec: null, proxy: PROXY }));
+  assert.equal(result.ok, true);
+  assert.equal(result.bytes, 500);
+  assert.equal(calls.length, 2, 'proxied yt-dlp, direct yt-dlp, no ffmpeg');
+  const direct = calls[1].args;
+  assert.equal(direct.includes('--proxy'), false);
+  assert.equal(direct[direct.indexOf('--download-sections') + 1], '*0-60');
+  assert.notEqual(direct[direct.indexOf('-o') + 1], calls[0].args[calls[0].args.indexOf('-o') + 1]);
+  const [line] = logs.filter((l) => l.msg === 'fetch-video: proxy failed');
+  assert.equal(line.stage, 'clip');
+  assert.deepEqual(await leftovers(), []);
+});
+
+test('proxy fallback: a link without a proxy (a site outside proxySites) is untouched by the cooldown', async () => {
+  const { spawnImpl, calls } = fakeSpawn(proxyAware());
+  const fetcher = makeFetcher({ spawnImpl, tmpDir, now: clock().now });
+  await withCapturedLogs(() => fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY }));
+  const { result, logs } = await withCapturedLogs(() =>
+    fetcher.probeSite('https://vk.com/video-1_2', { ...OPTS, proxy: null }));
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 3);
+  assert.equal(calls[2].args.includes('--proxy'), false);
+  assert.equal(logs.some((l) => l.msg.startsWith('fetch-video: proxy')), false, 'no skip line for a direct site');
+});
+
+// --- proxy liveness --------------------------------------------------------------
+
+test('proxy liveness: a proxied failure with a reachable proxy is the video\'s own -- no direct retry, no cooldown', async () => {
+  const time = clock();
+  const checked = [];
+  const { spawnImpl, calls } = fakeSpawn(proxyAware());
+  const fetcher = makeFetcher({
+    spawnImpl,
+    tmpDir,
+    now: time.now,
+    probeProxy: async (url) => {
+      checked.push(url);
+      return true;
+    },
+  });
+  const { result, logs } = await withCapturedLogs(async () => {
+    const probe = await fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY });
+    const clip = await fetcher.fetchSiteClip(SITE_URL, { ...OPTS, proxy: PROXY });
+    return { probe, clip };
+  });
+  assert.deepEqual(result.probe, { ok: false, reason: 'download' });
+  assert.deepEqual(result.clip, { ok: false, reason: 'download' });
+  assert.equal(calls.length, 2, 'one proxied run per call, no direct retry');
+  assert.ok(calls.every((c) => c.args.includes('--proxy')), 'the second call still uses the proxy: no cooldown');
+  assert.deepEqual(checked, [PROXY, PROXY], 'the check runs once per failure');
+  const failed = logs.filter((l) => l.msg === 'fetch-video: failed');
+  assert.equal(failed.length, 2);
+  assert.ok(failed.every((l) => l.proxied === true && l.reason === 'download' && l.code === 1));
+  assert.equal(logs.some((l) => l.msg.startsWith('fetch-video: proxy')), false);
+  const serialized = JSON.stringify(logs);
+  assert.equal(serialized.includes('proxy.example'), false);
+  assert.equal(serialized.includes('s3cr'), false);
+  assert.equal(serialized.includes('1080'), false);
+});
+
+test('proxy liveness: an unreachable proxy (false or a throwing check) gets the direct retry and the cooldown', async () => {
+  for (const probeProxy of [async () => false, async () => { throw new Error(`down: ${PROXY}`); }]) {
+    const time = clock();
+    const { spawnImpl, calls } = fakeSpawn(proxyAware());
+    const fetcher = makeFetcher({ spawnImpl, tmpDir, now: time.now, probeProxy });
+    const { result, logs } = await withCapturedLogs(async () => {
+      const first = await fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY });
+      await fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY });
+      return first;
+    });
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 3, 'proxied, direct retry, then direct in the cooldown');
+    assert.equal(calls[1].args.includes('--proxy'), false);
+    assert.equal(calls[2].args.includes('--proxy'), false);
+    assert.equal(logs.filter((l) => l.msg === 'fetch-video: proxy failed').length, 1);
+    assert.equal(JSON.stringify(logs).includes('proxy.example'), false);
+  }
+});
+
+test('proxy liveness: a proxied success never runs the check', async () => {
+  let checks = 0;
+  const { spawnImpl } = fakeSpawn(proxyAware({ proxyWorks: true }));
+  const fetcher = makeFetcher({ spawnImpl, tmpDir, probeProxy: async () => { checks += 1; return false; } });
+  const result = await fetcher.probeSite(SITE_URL, { ...OPTS, proxy: PROXY });
+  assert.equal(result.ok, true);
+  assert.equal(checks, 0);
+});
+
+/** A net.connect stub: records its options and makes the socket `connect`, `error` or stay silent. */
+function fakeConnect(outcome) {
+  const seen = [];
+  const connect = (options) => {
+    seen.push(options);
+    const socket = new EventEmitter();
+    socket.destroyed = false;
+    socket.destroy = () => {
+      socket.destroyed = true;
+    };
+    if (outcome === 'connect') setImmediate(() => socket.emit('connect'));
+    if (outcome === 'error') setImmediate(() => socket.emit('error', Object.assign(new Error('refused'), { code: 'ECONNREFUSED' })));
+    seen.socket = socket;
+    return socket;
+  };
+  return { connect, seen };
+}
+
+test('proxyReachable: a connect is alive, an error or a timeout is down; host and port come from the URL', async () => {
+  const ok = fakeConnect('connect');
+  assert.equal(await proxyReachable(PROXY, { connect: ok.connect, timeoutMs: 50 }), true);
+  assert.deepEqual(ok.seen[0], { host: 'proxy.example', port: 1080 });
+  assert.equal(ok.seen.socket.destroyed, true, 'the socket is closed after the check');
+  assert.equal(await proxyReachable(PROXY, { connect: fakeConnect('error').connect, timeoutMs: 50 }), false);
+  const silent = fakeConnect('silent');
+  assert.equal(await proxyReachable(PROXY, { connect: silent.connect, timeoutMs: 20 }), false);
+  assert.equal(silent.seen.socket.destroyed, true);
+});
+
+test('proxyReachable: default ports per scheme; an unparsable URL or unknown scheme without a port is down', async () => {
+  const cases = [
+    ['socks5h://h.example', 1080],
+    ['socks5://u:p@h.example', 1080],
+    ['http://h.example', 80],
+    ['https://h.example', 443],
+    ['http://h.example:3128', 3128],
+  ];
+  for (const [url, port] of cases) {
+    const fake = fakeConnect('connect');
+    assert.equal(await proxyReachable(url, { connect: fake.connect, timeoutMs: 50 }), true, url);
+    assert.equal(fake.seen[0].port, port, url);
+  }
+  for (const url of ['not a url', 'ftp://h.example', '']) {
+    const fake = fakeConnect('connect');
+    assert.equal(await proxyReachable(url, { connect: fake.connect, timeoutMs: 50 }), false, url);
+    assert.equal(fake.seen.length, 0);
+  }
+  const throwing = () => { throw new Error('boom'); };
+  assert.equal(await proxyReachable(PROXY, { connect: throwing, timeoutMs: 50 }), false);
 });

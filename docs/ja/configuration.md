@@ -345,6 +345,9 @@ GIF を短いクリップとして視聴する機能（`media.gif.watch`）の�
 | `canaryUrl` | `"https://www.youtube.com/watch?v=jNQXAC9IVRw"` | 起動時と `/nep ping classifier.video` でプローブされる固定の YouTube 動画。YouTube API key と再生時間ソースをテストする |
 | `ytdlpPath` | `"yt-dlp"` | `yt-dlp` バイナリのパス。サイト動画リンクと再生時間のプローブに必要 |
 | `ffmpegPath` | `"ffmpeg"` | `ffmpeg` のパス。長い、またはサイズの大きい添付ファイルのトリムとダウンスケールに必要 |
+| `proxy` | `""` | `yt-dlp` 用のプロキシ URL。`yt-dlp` が受け入れる形式（`socks5h://user:pass@host:port`、`http://host:port`）で指定する。`""` = プロキシなし。サイトがサーバーの IP を拒否する場合に使用（YouTube はデータセンターの IP に「ロボットでないことを確認してください」を返す）。`proxySites` のサイトへのリンクのみがプロキシを使用する。値にパスワードを含む場合があり、ログには出力されない。プロキシ経由では動画全体をダウンロードし、`ffmpeg` がローカルで先頭の `maxSeconds` を切り出す。yt-dlp のセクションダウンロードモードは ffmpeg を起動するが、ffmpeg は SOCKS プロキシを使用できないため、ダウンロード上限（4x `maxBytes`）が長い動画の可否を決める |
+| `proxySites` | `["youtube.com", "youtu.be"]` | 再生時間のプローブとダウンロードに `proxy` を使用するサイト。ホストが一覧のサイトと一致するか `.<サイト>` で終わる場合にマッチする。他のサイトへのリンクは直接接続する。`[]` でプロキシをオフにする |
+| `proxyRetryMinutes` | `10` | プロキシ経由のダウンロードまたはプローブが失敗した後、ボットはプロキシが接続を受け入れるかを確認する。受け入れる場合は動画自体の問題であり、リンクは読み込み不可として報告される。プロキシがダウンしている場合、そのリンクはプロキシなしで即座に再試行され、この分数の間すべてのリンクがプロキシをスキップする（`fetch-video: proxy failed`、ウィンドウにつき 1 回の `fetch-video: proxy skipped`）。メモリにのみ保持され、再起動でリセットされる |
 | `errorRetryMinutes` | `60` | エラーキャッシュされた動画が自動リトライされるまでの分数。再視聴分類器からの強制リトライはこの値を無視する |
 | `urlProcessing` | `"agentic"` | 公開 URL 動画パーツに送信される OpenRouter の処理モード。これがないと一部のプロバイダーは 1 フレームしか見ない。`null` でフィールドを省略 |
 | `reasoning` | `{ "effort": "low" }` | すべての動画リクエストに使用する OpenRouter `reasoning` 設定。推論が出力バジェットを消費するのを防ぐ。非オブジェクトでフィールドを省略 |

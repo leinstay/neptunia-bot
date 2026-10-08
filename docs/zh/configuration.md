@@ -345,6 +345,9 @@ GIF 挑选器（`features.gifPicker`）的设置。当角色的第一条发出�
 | `canaryUrl` | `"https://www.youtube.com/watch?v=jNQXAC9IVRw"` | 启动时和 `/nep ping classifier.video` 探测的固定 YouTube 视频，用于测试 YouTube API key 和时长来源 |
 | `ytdlpPath` | `"yt-dlp"` | `yt-dlp` 二进制文件的路径；站点视频链接和探测时长需要此工具 |
 | `ffmpegPath` | `"ffmpeg"` | `ffmpeg` 的路径；裁剪和缩小过长或过大的附件需要此工具 |
+| `proxy` | `""` | `yt-dlp` 的代理 URL，接受其支持的任何格式（`socks5h://user:pass@host:port`、`http://host:port`）；`""` = 无代理。当站点拒绝服务器自身 IP 时使用（YouTube 对数据中心 IP 返回"请确认您不是机器人"）。仅 `proxySites` 中的站点链接通过代理。值可能包含密码，永不写入日志。通过代理下载时会下载整个视频，再由 `ffmpeg` 在本地截取前 `maxSeconds`，因为 yt-dlp 的分段下载模式会启动 ffmpeg，而 ffmpeg 不能使用 SOCKS 代理；因此下载上限（4x `maxBytes`）决定了长视频能否下载 |
+| `proxySites` | `["youtube.com", "youtu.be"]` | 使用 `proxy` 进行时长探测和下载的站点。主机名等于列出的站点或以 `.<站点>` 结尾时匹配。其他站点的链接直接连接。`[]` 关闭代理 |
+| `proxyRetryMinutes` | `10` | 通过代理的下载或探测失败后，机器人检查代理是否仍接受连接。如果接受，说明是视频本身的问题，链接报告为无法加载。如果代理已停机，该链接立即不经代理重试，之后的所有链接在此分钟数内跳过代理（`fetch-video: proxy failed`，窗口内记录一次 `fetch-video: proxy skipped`）。仅存于内存；重启后清除 |
 | `errorRetryMinutes` | `60` | 错误缓存视频自动重试前的等待分钟数；重看分类器的强制重试忽略此值 |
 | `urlProcessing` | `"agentic"` | 公开 URL 视频部分发送的 OpenRouter 处理模式；缺少时某些提供商只能看到单帧。`null` 省略该字段 |
 | `reasoning` | `{ "effort": "low" }` | 每个视频请求的 OpenRouter `reasoning` 设置；防止推理占用输出预算。非对象值省略该字段 |

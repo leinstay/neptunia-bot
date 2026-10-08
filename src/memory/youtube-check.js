@@ -9,6 +9,7 @@
 // nothing written under data/; never logs the URL or the key.
 
 import { log as defaultLog } from '../log.js';
+import { proxyFor } from '../discord/video-sites.js';
 
 /**
  * Whether video vision is on: features.mediaDescriptions AND
@@ -47,7 +48,12 @@ export function createYoutubeCheck({ hot, videoFetcher, youtubeApiKey = null }) 
     const fetchTimeoutMs = hot.config.context?.vision?.fetchTimeoutMs;
 
     try {
-      const site = await videoFetcher.probeSite(url, { ytdlpPath: videoCfg.ytdlpPath, toolTimeoutMs: videoCfg.toolTimeoutMs });
+      const site = await videoFetcher.probeSite(url, {
+        ytdlpPath: videoCfg.ytdlpPath,
+        toolTimeoutMs: videoCfg.toolTimeoutMs,
+        proxy: proxyFor(url, videoCfg),
+        proxyRetryMinutes: videoCfg.proxyRetryMinutes,
+      });
       if (hasDuration(site)) return { status: 'ytdlp', detail: `duration ${site.durationSec}s`, keySet };
       const reasons = [`ytdlp=${site?.ok ? 'no-duration' : reasonOf(site)}`];
 
