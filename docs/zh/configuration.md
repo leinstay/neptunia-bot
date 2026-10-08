@@ -37,6 +37,7 @@
 | `elsewhere` | `true` | 响应机器人可读但不可写的频道中的呼叫（@提及、回复、名字）。回复发送到 `memory.mainChannelIds` 中第一个可用的频道。缺失键 = 开 |
 | `portraitRefresh` | `true` | 根据消息计数器定期刷新成员画像。缺失键 = 开 |
 | `notesRefresh` | `true` | 定期从近期消息的分散样本中重新检查频道和服务器笔记。缺失键 = 开。参见 `memory.notesRefreshDays*` 和[预热：保持笔记更新](warmup.md#保持笔记更新) |
+| `versions` | `true` | 当散文记忆字段的文本被替换时保留版本历史。旧文本保存在 `data/guilds/<id>/versions/`。`/nep memory forget` 和 `/nep memory wipe` 会删除版本文件。缺失键 = 开 |
 | `memoryTwoStage` | `false` | 将记忆分析器拆分为两个阶段：中性 GPT 模型判定变更（阶段 A），然后语音模型撰写角色文本（阶段 B）。必须严格为 `true` 才能启用；缺失键 = 关。参见 `memory.voice.*` |
 | `mentor` | `false` | 手动测试子进程，使用独立模型。必须严格为 `true` 才能启用；缺失的键视为关闭。参见 [Mentor](#mentor) |
 | `promptCache` | `false` | 为系统消息添加提供商的提示缓存标记。缓存读取仅为正常输入成本的一小部分；某些提供商不将缓存读取计入 token 配额。必须严格为 `true` 才能启用；缺失的键视为关闭。参见 `llm.cache.*` |
@@ -468,6 +469,8 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `notesSampleDays` | `30` | 采样刷新时读取的频道历史天数 |
 | `notesSampleMessages` | `160` | 分散样本的目标消息数。消息按天分散（最新一天优先，每轮每天一条），避免仅采样最近的对话 |
 | `notesSampleMaxAuthorShare` | `0.35` | 单个作者在样本中最多占此比例；主导作者的多余消息用其他作者的行替换 |
+| `versionsKept` | `20` | 版本历史中每个字段保留的旧文本数量。超过上限时删除最旧的条目。仅散文字段被版本化：成员 `character`、`style`、`relationship`；频道 `purpose`、`topics`、`tone`；服务器 `patterns`、`starters`；传说 `text` |
+| `overLimitRetries` | `1` | 当模型回答的散文字段超出字符限制时的重试次数。重试将模型自身的回答连同准确的字段名、字符数和限制值一起发回，要求缩短。`0` 关闭重试；任何正值意味着恰好一次重试。适用于语音模型、画像刷新和笔记刷新。流分析器不重试（超出的字段从该批次的写入中排除） |
 | `portraitMaxAgeDays` | `21` | 画像超过此天数（且此后至少有 `portraitMinMessages` 条自身消息）时，即使未达到 `portraitRefreshMessages` 也会进入刷新队列 |
 | `portraitMinMessages` | `60` | 年龄路径（`portraitMaxAgeDays`）触发刷新所需的自上次画像以来的自身消息数 |
 | `privateMaxAgeMinutes` | `360` | 安静的私聊缓冲区在未达到 `minBatchMessages` 时多少分钟后仍进行分析 |
@@ -478,8 +481,8 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `minBatchMessages` | `15` | 更新前的最少消息数 |
 | `maxBatchAgeMinutes` | `180` | 超过此时长强制更新（分钟） |
 | `maxOutputTokens` | `20000` | 分析器最大输出 token 数 |
-| `fieldChars` | `1000` | 档案字段限制（字符） |
-| `clampTolerance` | `1.25` | 分析器输出的文本超出限制的允许倍数，超出后在句或词边界截断，不会在成员引用内部截断 |
+| `fieldChars` | `1000` | 档案散文字段（`character`、`style`）和频道笔记字段（`purpose`、`topics`、`tone`）的字符限制。服务器级 `patterns` 和 `starters` 使用 `fieldChars * 2`。超出限制的改写被拒绝，已存储文本保持不变；只有空字段的首次写入才会截断到限制（参见 `clampTolerance`） |
+| `clampTolerance` | `1.25` | 首次写入允许超出限制的程度。仅在字段为空时适用：文本被接受到 `limit * clampTolerance`，在句或词边界截断，不在成员引用内部截断。改写时（字段已有文本）不应用容差：文本必须在精确限制内，否则被拒绝 |
 | `maxDetails` | `15` | 每档案向角色和分析器展示的细节条目数 |
 | `maxDetailsStored` | `40` | 每档案保存的细节条目数；按频率和近期程度排名最高的会被展示 |
 | `maxInterests` | `12` | 每档案向角色和分析器展示的兴趣条目数 |
@@ -540,7 +543,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `rewriteOnDrift` | `8` | 当分数自写入以来偏移了这么多点时标记重写，即使在同一区间内。`0` = 关 |
 | `rewriteAfterMoves` | `6` | 自写入以来产生了这么多条态度历史记录时标记重写。`0` = 关 |
 | `bandHysteresis` | `2` | 超过旧区间边界多少点才将区间变化视为重写原因。防止在区间边界附近波动时的无谓重写 |
-| `textChars` | `600` | relationship 文本的最大字符数。填充分析器提示词中的 `{{relationshipChars}}` |
+| `textChars` | `600` | relationship 文本的最大字符数。填充分析器提示词中的 `{{relationshipChars}}`。超出限制的改写被拒绝，已存储文本保持不变；只有空字段的首次写入才会截断 |
 
 启用 `damping` 后，推离零点的分数变化会按 `(1 - |score| / 100) ^ dampingPower` 缩放，因此极端值需要持续努力才能达到；趋向零的变化全额应用。分数以小数精度存储，以整数显示；`/nep memory affinity` 可直接设置分数，不受阻尼影响。
 
@@ -553,7 +556,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `maxEntries` | `500` | 每服务器最大世界书条目数 |
 | `scanMessages` | `30` | 扫描关键词匹配的消息数 |
 | `maxMatches` | `8` | 每请求显示的最大条目数 |
-| `textChars` | `600` | 世界书条目文本限制（字符） |
+| `textChars` | `600` | 世界书条目文本限制（字符）。超出限制的改写被拒绝，已存储文本保持不变；只有首次写入才会截断。`/nep lore add` 写入已有标题时，所有者的文本原样保存 |
 
 ## `web`
 

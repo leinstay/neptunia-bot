@@ -37,6 +37,7 @@ Every key in `config.json` with its default, grouped by section.
 | `elsewhere` | `true` | Answer a call (@mention, reply, name) from a channel where the bot can read but not send. The answer goes to the first usable channel in `memory.mainChannelIds`. A missing key counts as on |
 | `portraitRefresh` | `true` | Refresh a member's portrait by message counters on a periodic schedule. A missing key counts as on |
 | `notesRefresh` | `true` | Periodically re-examine channel and server notes from a spread sample of recent messages. A missing key counts as on. See `memory.notesRefreshDays*` and [Warmup: Keeping the notes current](warmup.md#keeping-the-notes-current) |
+| `versions` | `true` | Keep a version history of every prose memory field when its text is replaced. Previous texts are stored in `data/guilds/<id>/versions/`. `/nep memory forget` and `/nep memory wipe` delete version files. A missing key counts as on |
 | `memoryTwoStage` | `false` | Split the memory analyzer into two stages: a neutral GPT model decides what changed (stage A), then the voice model words the persona's texts (stage B). Must be exactly `true` to enable; a missing key counts as off. See `memory.voice.*` |
 | `mentor` | `false` | Manual testing sub-process with its own model. Must be exactly `true` to enable; a missing key counts as off. See [Mentor](#mentor) |
 | `promptCache` | `false` | Mark the system message for the provider's prompt cache. A cached read costs a fraction of normal input; some providers do not count cached reads against token quotas. Must be exactly `true` to enable; a missing key counts as off. See `llm.cache.*` |
@@ -470,6 +471,8 @@ Follow-up windows are persisted in `data/state.json` under `followUpWindows` and
 | `notesSampleDays` | `30` | Days of channel history read for a sample refresh |
 | `notesSampleMessages` | `160` | Target number of messages in the spread sample. Messages are spread over the days (newest day first, one message per day per round) to avoid sampling only the latest conversation |
 | `notesSampleMaxAuthorShare` | `0.35` | One author may hold at most this share of the sample; excess messages from a dominant author are replaced with other authors' lines |
+| `versionsKept` | `20` | Previous texts kept per field in the version history. When a field accumulates more, the oldest entry is dropped. Only prose fields are versioned: member `character`, `style`, `relationship`; channel `purpose`, `topics`, `tone`; server `patterns`, `starters`; lore `text` |
+| `overLimitRetries` | `1` | Retries when a model answer for a prose field exceeds its character limit. The retry sends the model's own answer back with the exact field name, character count and limit, and asks for a shorter version. `0` turns the retry off; any positive value means exactly one retry. Applies to the voice model, the portrait refresh and the notes refresh. The stream analyzer never retries (the overflowing field is dropped from that batch) |
 | `portraitMaxAgeDays` | `21` | A portrait older than this (with at least `portraitMinMessages` own messages since) is due for a refresh even if it has not reached `portraitRefreshMessages` |
 | `portraitMinMessages` | `60` | Own messages since the last portrait for the age-based due path (`portraitMaxAgeDays`) |
 | `privateMaxAgeMinutes` | `360` | Minutes before a quiet private buffer is analyzed even though it has not reached `minBatchMessages` |
@@ -480,8 +483,8 @@ Follow-up windows are persisted in `data/state.json` under `followUpWindows` and
 | `minBatchMessages` | `15` | Min messages before update |
 | `maxBatchAgeMinutes` | `180` | Force update after (min) |
 | `maxOutputTokens` | `20000` | Max analyzer output tokens |
-| `fieldChars` | `1000` | Profile field limit (chars) |
-| `clampTolerance` | `1.25` | Text from the analyzer may exceed a limit by this factor before it is cut; cuts land on a sentence or word boundary and never inside a member reference |
+| `fieldChars` | `1000` | Character limit for profile prose fields (`character`, `style`) and channel note fields (`purpose`, `topics`, `tone`). Server-level `patterns` and `starters` use `fieldChars * 2`. A rewrite that exceeds the limit is refused and the stored text stays; only the first write of an empty field is cut to the limit (see `clampTolerance`) |
+| `clampTolerance` | `1.25` | How far past the limit a first write may go before it is cut. Applies only when the field was empty: the text is accepted up to `limit * clampTolerance`, cut at a sentence or word boundary, never inside a member reference. On a rewrite (the field already has text), tolerance is not applied: the text must fit within the exact limit or it is refused |
 | `maxDetails` | `15` | Detail items shown to the persona and analyzer per profile |
 | `maxDetailsStored` | `40` | Detail items kept per profile; the top by frequency and recency are shown |
 | `maxInterests` | `12` | Interest items shown to the persona and analyzer per profile |
@@ -542,7 +545,7 @@ Settings for stage B of the two-stage analyzer (`features.memoryTwoStage`). Stag
 | `rewriteOnDrift` | `8` | Flag the text for rewrite when the score has drifted this many points since the text was written, even within the same band. `0` = off |
 | `rewriteAfterMoves` | `6` | Flag the text for rewrite after this many attitude history entries since the text was written. `0` = off |
 | `bandHysteresis` | `2` | Points past the old band's edge before a band change is counted as a rewrite cause. Prevents rewrites from scores that hover near a band boundary |
-| `textChars` | `600` | Max characters for the relationship text. Fills `{{relationshipChars}}` in the analyzer prompt |
+| `textChars` | `600` | Max characters for the relationship text. Fills `{{relationshipChars}}` in the analyzer prompt. A rewrite over the limit is refused and the stored text stays; only the first write of an empty field is cut |
 
 With `damping` on, a change that pushes the score further from zero is scaled by `(1 - |score| / 100) ^ dampingPower`, so extremes take sustained effort; a change back toward zero applies at full strength. The score is stored with fractional precision and shown as a whole number; `/nep memory affinity` sets it directly without damping.
 
@@ -555,7 +558,7 @@ With `decayPerDay` set, every stored affinity (public and private) drifts toward
 | `maxEntries` | `500` | Max lorebook entries per server |
 | `scanMessages` | `30` | Messages scanned for key matches |
 | `maxMatches` | `8` | Max entries shown per request |
-| `textChars` | `600` | Lore entry text limit (chars) |
+| `textChars` | `600` | Lore entry text limit (chars). A rewrite over the limit is refused and the stored text stays; only the first write is cut. `/nep lore add` on an existing title stores the owner's text as written |
 
 ## `web`
 

@@ -27,11 +27,11 @@
 | `forced.md` | いいえ | 強制ターン（`/nep interject`、`/nep initiate`）時にモードプロンプトの後に追加される。デフォルトの `<skip/>` を無効化する | `{{name}}` |
 | `memory.md` | はい | ストリームアナライザーのアウトオブキャラクタープロンプト（シングルステージモードおよびプライベートバッチ）: ライブバッチからのメモリへの差分更新 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
 | `memory-decide.md` | いいえ | 2 段階アナライザーのステージ A（`features.memoryTwoStage`）: 変更のニュートラルな判定。`memory.md` と同じ入力ブロック。JSON を返す。ファイルがない場合はシングルステージにフォールバック | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
-| `memory-voice.md` | いいえ | 2 段階アナライザーのステージ B: ペルソナがキューされたアイテムを自分自身の声で記述。JSON を返す | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
-| `portrait.md` | いいえ | 2 段階ポートレートリフレッシュのステージ A。詳細は後のドキュメンテーションパスにて | `{{name}}` `{{fieldChars}}` |
-| `profile.md` | はい | ウォームアップ / ポートレートリフレッシュ: メッセージサンプルからメンバーのプロファイルを作成 | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
-| `channel.md` | はい | ウォームアップおよびノートリフレッシュ: メッセージサンプルからチャンネルノートを作成。リフレッシュ時、オプションの `<existing_notes>` ブロックに保存済みノートが評価対象の主張として（証拠としてではなく）含まれる | `{{fieldChars}}` |
-| `server.md` | はい | ウォームアップおよびノートリフレッシュ: チャンネルノートとメンバーの要約からサーバーレベルのノートを作成。リフレッシュ時、オプションの `<existing_notes>` ブロックに保存済みノートが評価対象の主張として含まれる | `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
+| `memory-voice.md` | いいえ | 2 段階アナライザーのステージ B: ペルソナがキューされたアイテムを自分自身の声で記述。JSON を返す。リトライ時、オプションの `<over_limit>` ブロックに前回の回答が制限を超えたアイテムが列挙される | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
+| `portrait.md` | いいえ | 2 段階ポートレートリフレッシュのステージ A。リトライ時、オプションの `<over_limit>` ブロックに前回の回答が制限を超えたフィールドが列挙される | `{{name}}` `{{fieldChars}}` |
+| `profile.md` | はい | ウォームアップ / ポートレートリフレッシュ: メッセージサンプルからメンバーのプロファイルを作成。リトライ時、オプションの `<over_limit>` ブロックに前回の回答が制限を超えたフィールドが列挙される | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
+| `channel.md` | はい | ウォームアップおよびノートリフレッシュ: メッセージサンプルからチャンネルノートを作成。リフレッシュ時、オプションの `<existing_notes>` ブロックに保存済みノートが評価対象の主張として（証拠としてではなく）含まれる。リトライ時、オプションの `<over_limit>` ブロックに前回の回答が制限を超えたフィールドが列挙される | `{{fieldChars}}` |
+| `server.md` | はい | ウォームアップおよびノートリフレッシュ: チャンネルノートとメンバーの要約からサーバーレベルのノートを作成。リフレッシュ時、オプションの `<existing_notes>` ブロックに保存済みノートが評価対象の主張として含まれる。リトライ時、オプションの `<over_limit>` ブロックに前回の回答が制限を超えたフィールドが列挙される | `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | はい | メディア説明モデルのアウトオブキャラクタープロンプト（`features.mediaDescriptions`）: 画像 1 枚を入力、プレーンテキスト 1 行を出力: 写っているもの、要点、判読可能なテキストは元のスクリプトで引用。常に英語。意見なし、道徳的判断なし、マークダウンなし | `{{today}}` `{{maxChars}}`（オプション） |
 | `describe-video.md` | はい | 動画説明モデルのアウトオブキャラクタープロンプト（`features.videoDescriptions`）: 動画クリップ 1 本（音声付き）を入力、設定可能な長さの完全な説明を出力: 誰が登場するか、何が言われるか（重要なフレーズを引用）、画面上のテキスト、視覚的に何が起きるか、音楽/効果音。常に英語。発話、字幕、画面上のテキストは元の言語で引用。キャラクターカードなし | `{{today}}` `{{maxChars}}` |
 | `describe-gif.md` | いいえ | GIF 説明モデルのアウトオブキャラクタープロンプト（`media.gif.watch`）: 短い無音クリップを入力、ラベル付き 3 行を出力: `reaction`（返信機能、数語または `none`）、`action`（視覚的な出来事、`{{maxChars}}` で制限）、`text`（画面上のテキストをそのまま、または `none`）。常に英語。キャラクターカードなし。ファイルがない場合は `describe-video.md` にフォールバック | `{{today}}` `{{maxChars}}` `{{seconds}}` |
@@ -395,7 +395,7 @@ task.added                               {added}: later messages from the author
   `<known_members>` に含まれるメンバー（ロスターメンバー）には `aliases` のみ適用されます。回答内のその他のキーは破棄されカウントされます。ロスターメンバーにプロファイルが新規作成されることはありません（既に存在している必要があります）。提案されたエイリアスに対する保護（全メンバー、著者とロスター共通）: `<@` トークンまたは `(id:` マーカーを含む場合は破棄、メンバーの保存済み表示名と一致する場合は破棄（大文字小文字不問、句読点無視）。`aliases` の下の単純な配列（`{ add, remove }` ではなく）は、まだ保存されていない名前のみの追加として読み取られます（保存済みのエイリアスをバンプすることはありません）。ロスターメンバーのエイリアスの `firstSeen`/`lastSeen` 日付は、そのメンバー自身がメッセージを書いていないため、バッチ内の最新メッセージから取得されます。
 - **メインチャンネルがポートレートの情報源です。** `memory.mainChannelIds`（デフォルト `[]`）は人々が互いに話すチャンネルをリストします。`<existing_channels>` でそのようなチャンネルは `"main": true` を持ちます（そうでない場合はキー省略）。`character` と `style` はメインチャンネルでその人が他者とどう話すかから判断します。日記やトピック特化チャンネルは関心と詳細を供給し、話し方は供給しません。その人のメインチャンネルメッセージがまだない間は、ポートレートは暫定的で短いものになります。その人のメインチャンネルメッセージを含むバッチでのポートレートリフレッシュは両フィールドを**洗練**します: 全体の新しいテキスト（≤ `memory.fieldChars`）を返し、まだ当てはまるものを引き継ぎ、バッチが示したものを追加し、新しい証拠が古いものより優先され、もう見られないものを削除します。こうしてポートレートは時間と共にその人を追いかけます。メインとマークされたチャンネルがない場合、すべてのチャンネルがメインとして扱われます。
 - **サーバーレベルのノートはサーバーについてです。** ある人が自分のチャンネルでやっていることは `guild` のパターン、スターター、内輪ネタではなく、`lore` でもありません。内輪ネタは複数の人が使っているものです。
-- **制限はモデルに対してはソフト、コード内ではクリーンです。** プロンプトは制限値 L（プレースホルダー、`{{loreTextChars}}` は `lore.textChars` から）を示します。コードは `L * memory.clampTolerance`（デフォルト 1.25）まで受け付け、それを超えた場合は最後の文または単語の境界で切り、`<@id>` トークンの途中では切らず、宙ぶらりんの開き括弧や末尾のセパレーターを除去します。途中で途切れた保存済みノートやテキスト（古いバージョンによるカット）は、その主題が次に話題になった際に全体を書き直します。
+- **制限はカットなしで適用されます。** 記述された文字数制限を超えたプロースフィールドは保存されません。以前のテキストがそのまま残ります。コードはモデルの書き換えを短縮しません。プロンプトがモデルに制限を伝え、コードが正確な数値（コードポイント）で検証します。空のフィールドへの最初の書き込みのみ `memory.clampTolerance`（デフォルト 1.25）で制限まで切り詰められます。失うものがないからです。その場合、文または単語の境界で切り、`<@id>` トークンの途中では切りません。ストリームアナライザーはリトライしません。超過フィールドはそのバッチの書き込みから除外されカウントされます。ボイスモデル、ポートレートリフレッシュ、ノートリフレッシュは 1 回リトライします（`memory.overLimitRetries` が 0 を超える場合）。モデル自身の回答がアシスタントターンとして返され、続くユーザーターンに `<over_limit>` ブロックが含まれ、各超過フィールドの文字数と制限が記載されます。2 回目の超過では以前のテキストがそのまま残ります。途中で途切れた保存済みノートやテキスト（古いバージョンによるカット）は、その主題が次に話題になった際に全体を書き直します。
 - **出力の簡潔さ。** `"sure"` は false のときだけ記述します。`affinity` は変更がないときは省略します。
 - **ファクトの一元管理。** イベントは `episodes` か `lore` に、事実は `details` に、趣味は `interests` に、ペルソナへの教えは `learned` に入れます。同じことを複数のフィールドに書きません。
 - **モデルの知識によるサニティチェック。** ある名前付きのものを別のものに紐付ける（地域、モード、キャラクター、アイテムをゲームに。人物をフランチャイズに）前に、アナライザーはそれらが実際に関連するか確認します。チャットの記述がモデルの知識と矛盾する場合、またはそのものを認識しない場合は紐付けず、そのものを単独で `"sure": false` として記録します。チャットの内容を「修正」することはしません。
@@ -408,7 +408,29 @@ task.added                               {added}: later messages from the author
 - `episodes` は追記のみで、書き直しません: 数か月間記憶に値する新しい瞬間だけを返します。侮辱、親切、約束、賭け、喧嘩、共有されたジョーク、ペルソナに何かを頼んだこと、または決してしないよう頼んだこと。`what` は 1 行。`quote` はその人自身の言葉を逐語的に、短く（≤ 120 文字）、または空。`feeling` はペルソナがどう受け取ったかをキャラクターカードを通じて判断。`weight` は 1–5（5 = 決して忘れない）。バッチごとにユーザーあたり最大 `memory.maxNewEpisodes` 件。ほとんどのバッチでは追加なし。入力には保存済みのエピソードが表示されるため、同じ出来事を二度記録しません。コードはメンバーごとに `memory.maxEpisodes` 件保持し、最も軽いものから、次に最も古いものから削除します。
 - `lore` はサーバーのロアブックです: 会話を超えて残るもの、すなわちイベント（「X が去った日」）、繰り返し登場するキャラクターやペット、長期にわたるストーリー、対立、伝統。`title` はアイデンティティ（同じタイトルのエントリは更新であり、マージ後の全体テキストを持つ）、`keys` は 2–6 個の単語または短いフレーズで、そのことが話題になるとき人々が実際に入力するもの（名前、ニックネーム、ミームの文言、チャットの言語で、小文字）、`text` ≤ `lore.textChars`（`{{loreTextChars}}`）。入力の `<existing_lore>` には保存済みのタイトルとキーのリスト、およびバッチが触れるエントリの全テキストが表示されます。オーナーが追加したエントリ（`/nep lore add`）はアナライザーが変更しません。
 - 文字列フィールド ≤ `memory.fieldChars`。詳細 ≤ `memory.maxDetails`、内輪ネタ ≤ `memory.maxInjokes`、self ≤ `memory.maxSelfFacts`。ノートはチャットの言語で記述します。観測された事実のみ。センシティブな情報（住所、電話番号、書類、健康、財務、本名）は記録しません。
-- **`memory: update applied` のカウンター**（各バッチ後にログ出力）: `roster`（`<known_members>` に含まれたメンバー数）、`rosterCandidates`（バジェットに提供されたロスターエントリ数）、`rosterTokens`（送信されたロスターが使用した推定トークン数）、`aliasesChanged`（著者とロスターの中で保存済みエイリアスリストが実際に変更されたメンバー数）、`aliasOnly`（その中のロスターメンバー数）、`droppedUsers`（著者でもプロファイルを持つロスターメンバーでもない id のエントリ数）、`droppedFields`（ロスターメンバーのエントリから破棄された非 `aliases` キー数）、`portraitDropped`（著者の非空の `character`/`style` が破棄された数）、`notesFlagged`（このバッチで陳腐化フラグを持つチャンネルまたはギルドエントリ数）。フラグが送信された場合、さらに: `notesUpdated`、`notesConfirmed`、`notesInsufficient`（3 つのレビューステータス）、`notesMissing`（モデルが返さなかったフラグ対象）、`notesIdentical`（テキストがストレージと一致した `updated`）、`notesUnflagged`（フラグされていない対象に返されたレビュー）。
+- **`memory: update applied` のカウンター**（各バッチ後にログ出力）: `roster`（`<known_members>` に含まれたメンバー数）、`rosterCandidates`（バジェットに提供されたロスターエントリ数）、`rosterTokens`（送信されたロスターが使用した推定トークン数）、`aliasesChanged`（著者とロスターの中で保存済みエイリアスリストが実際に変更されたメンバー数）、`aliasOnly`（その中のロスターメンバー数）、`droppedUsers`（著者でもプロファイルを持つロスターメンバーでもない id のエントリ数）、`droppedFields`（ロスターメンバーのエントリから破棄された非 `aliases` キー数）、`portraitDropped`（著者の非空の `character`/`style` が破棄された数）、`notesFlagged`（このバッチで陳腐化フラグを持つチャンネルまたはギルドエントリ数）、`overLimit`（制限超過で拒否されたプロースフィールド数）、`overLimitFields`（`kind.field` 名の配列、例: `['channels.topics', 'guild.patterns', 'lore.text', 'users.relationship']`、メンバー id なし）。フラグが送信された場合、さらに: `notesUpdated`、`notesConfirmed`、`notesInsufficient`（3 つのレビューステータス）、`notesMissing`（モデルが返さなかったフラグ対象）、`notesIdentical`（テキストがストレージと一致した `updated`）、`notesUnflagged`（フラグされていない対象に返されたレビュー）。
+
+`memory: voice applied` のカウンター: `overLimit`（リトライ後に拒否されたアイテム数、保存済みテキストが維持された）、`overLimitRetried`（`<over_limit>` ブロック付きで再送されたアイテム数）。リトライリクエスト自体が失敗した場合（不正な JSON、タイムアウト、プロバイダーエラー）、`retryFailed` に理由の文字列が入る。
+
+### ポートレートおよびノートリフレッシュのオーバーフロー
+
+ポートレートリフレッシュが制限を超える `style` または `character` テキストを生成した場合、同じリトライが実行される。2 回目の超過では `warmup: portrait refresh failed` に結果 `over-limit` と `fields`（超過フィールド名）が記録される。試行スタンプが設定され、その日のスロットは使用済み（リクエストは送信された）となるが、何も書き込まれない。
+
+ノートリフレッシュ（リフレッシュモードの `channel.md` または `server.md`）がフィールド超過を生成した場合、同じリトライが実行される。2 回目の超過では `warmup: notes refresh failed`、理由 `over-limit`、`fields` にフィールド名が記録される。そのチャンネルまたはサーバーには何も書き込まれない。次の試行は `memory.notesRetryHours` 後。スケジューラーは次のターゲットに移行する。
+
+### バージョン履歴
+
+`features.versions` がオン（デフォルト）の場合、プロースフィールドのテキストが置換されるたびに、新しいテキストの保存前に以前のテキストが記録される。以前のテキストは `data/guilds/<guildId>/versions/<kind>/<id>.json` に格納される。`kind` は `users`、`channels`、`guild`（id `guild`）、または `lore`（id はエントリタイトルのスラッグと短いハッシュ）。各ファイルはフィールド名をキーとする JSON オブジェクトで、各値はレコードの配列（最新が最後）:
+
+```
+{ "<field>": [ { "at": "ISO", "by": "analyzer"|"voice"|"portrait"|"refresh"|"warmup"|"unknown", "chars": n, "before": n, "after": n, "kept": n, "removed": n, "added": n, "text": "<previous text>" } ] }
+```
+
+`before` と `after` は旧テキストと新テキストの文数。`kept` は両方に存在する文数。`removed` = `before - kept`、`added` = `after - kept`。8 文中 `kept` が 0 の書き換えは、モデルがテキスト全体を置換したことを意味する。フィールドあたり最大 `memory.versionsKept`（デフォルト 20）レコード。上限を超えると最も古いエントリが削除される。初回書き込み（フィールドが空）では何も記録されない。同一内容の書き換えでも何も記録されない。プライベートチャットの relationship テキストはバージョン管理されない。
+
+`/nep memory forget` でメンバーのバージョンファイルを削除。`/nep memory wipe` でサーバーの `versions/` フォルダ全体を削除。
+
+各レコードは `store: version recorded` として `kind`、`field`、`by`、`chars`、`kept`、`removed`、`added` と共にログ出力される（チャンネルバージョンにはチャンネル id、メンバー id は含まれない）。
 
 ## チャンネルマップ
 

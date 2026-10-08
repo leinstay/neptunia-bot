@@ -27,11 +27,11 @@
 | `forced.md` | 否 | 强制回合（`/nep interject`、`/nep initiate`）时追加在模式提示之后。覆盖默认的 `<skip/>` 选项 | `{{name}}` |
 | `memory.md` | 是 | 角色外提示，用于流分析器（单阶段模式和私有批次）：从实时批次中对记忆进行针对性编辑 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
 | `memory-decide.md` | 否 | 两阶段分析器的阶段 A（`features.memoryTwoStage`）：对变更的中性判定。与 `memory.md` 相同的输入块。返回 JSON。文件缺失时回退到单阶段模式 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{maxDetails}}` `{{maxInjokes}}` `{{maxSelfFacts}}` `{{maxNewEpisodes}}` `{{maxEpisodes}}` `{{maxDeltaPerUpdate}}` `{{maxInterests}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{loreTextChars}}` `{{maxLearned}}` `{{learnedChars}}` `{{relationshipChars}}` |
-| `memory-voice.md` | 否 | 两阶段分析器的阶段 B：角色用自己的声音撰写排队的条目。返回 JSON。`features.memoryTwoStage` 开启时必需 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
-| `portrait.md` | 否 | 两阶段画像刷新的阶段 A。详情见后续文档迭代 | `{{name}}` `{{fieldChars}}` |
-| `profile.md` | 是 | 预热 / 画像刷新：从消息样本生成一个成员的档案 | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
-| `channel.md` | 是 | 预热和笔记刷新：从消息样本生成频道笔记。刷新时，可选的 `<existing_notes>` 块包含已存储笔记作为待评估的主张（而非证据） | `{{fieldChars}}` |
-| `server.md` | 是 | 预热和笔记刷新：从频道笔记和成员摘要生成服务器级笔记。刷新时，可选的 `<existing_notes>` 块包含已存储笔记作为待评估的主张 | `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
+| `memory-voice.md` | 否 | 两阶段分析器的阶段 B：角色用自己的声音撰写排队的条目。返回 JSON。`features.memoryTwoStage` 开启时必需。重试时，可选的 `<over_limit>` 块列出前次回答超出限制的条目 | `{{name}}` `{{fieldChars}}` `{{guildFieldChars}}` `{{relationshipChars}}` `{{learnedChars}}` |
+| `portrait.md` | 否 | 两阶段画像刷新的阶段 A。重试时，可选的 `<over_limit>` 块列出前次回答超出限制的字段 | `{{name}}` `{{fieldChars}}` |
+| `profile.md` | 是 | 预热 / 画像刷新：从消息样本生成一个成员的档案。重试时，可选的 `<over_limit>` 块列出前次回答超出限制的字段 | `{{name}}` `{{fieldChars}}` `{{maxInterests}}` `{{maxDetails}}` `{{interestTopicChars}}` `{{interestNoteChars}}` `{{maxNewEpisodes}}` |
+| `channel.md` | 是 | 预热和笔记刷新：从消息样本生成频道笔记。刷新时，可选的 `<existing_notes>` 块包含已存储笔记作为待评估的主张（而非证据）。重试时，可选的 `<over_limit>` 块列出前次回答超出限制的字段 | `{{fieldChars}}` |
+| `server.md` | 是 | 预热和笔记刷新：从频道笔记和成员摘要生成服务器级笔记。刷新时，可选的 `<existing_notes>` 块包含已存储笔记作为待评估的主张。重试时，可选的 `<over_limit>` 块列出前次回答超出限制的字段 | `{{fieldChars}}` `{{maxInjokes}}` `{{loreTextChars}}` |
 | `describe.md` | 是 | 角色外提示，用于媒体描述器（`features.mediaDescriptions`）：输入一张图片，输出一行描述：图中内容、可辨认的文字，使用聊天所用的语言。无评论，无 markdown | 无 |
 | `describe-video.md` | 是 | 角色外提示，用于视频描述器（`features.videoDescriptions`）：输入一个视频片段（含声音），输出可配置长度的完整有序描述：谁出现了、说了什么（关键短语引用）、屏幕上的文字、视觉上发生了什么、音乐/音效。不接收角色卡 | `{{maxChars}}` |
 | `describe-gif.md` | 否 | 角色外提示，用于 GIF 描述器（`media.gif.watch`）：输入一段短无声片段，输出三行标注结果：`reaction`（回复功能，数词或 `none`）、`action`（可见动作，受 `{{maxChars}}` 限制）、`text`（屏幕文字原样引用或 `none`）。始终英语。不接收角色卡。不存在时代码回退到 `describe-video.md` | `{{today}}` `{{maxChars}}` `{{seconds}}` |
@@ -444,10 +444,7 @@ task.added                               {added}: later messages from the author
   频道。
 - **服务器级笔记是关于服务器的。**一个人在自己频道中做的事情不是 `guild` 的规律、开场白或内部梗，也不是
   `lore`；内部梗是多人都在用的东西。
-- **限制对模型是软性的，在代码中保持整洁。**提示指定一个限制 L（占位符，包括 `{{loreTextChars}}`，来自
-  `lore.textChars`）；代码接受最多 `L * memory.clampTolerance`（默认 1.25），超出部分在最后一个句子或词
-  的边界处截断，不会截在 `<@id>` 标记中间，并去除悬挂的左括号和末尾的分隔符。可见地在词中间断开的已
-  存储笔记或文本（被旧版本截断）会在其主题下次出现时被完整重写。
+- **限制不截断直接执行。**超出字符限制的散文字段不被存储：旧文本保持不变。代码从不缩短模型的改写。提示告知模型限制；代码按精确数值（码位）校验。只有空字段的首次写入才会用 `memory.clampTolerance`（默认 1.25）截断到限制，因为没有可保留的旧文本；截断落在句子或词的边界，不会截在 `<@id>` 标记中间。流分析器不重试：超出的字段从该批次的写入中排除并计数。语音模型、画像刷新和笔记刷新重试一次（当 `memory.overLimitRetries` 大于 0 时）：模型自身的回答作为助手回合返回，随后的用户回合包含 `<over_limit>` 块，列出每个超出字段的字符数和限制。第二次超出时旧文本保持不变。可见地在词中间断开的已存储笔记或文本（被旧版本截断）会在其主题下次出现时被完整重写。
 - **输出精简。**`"sure"` 仅在值为 false 时写入；`affinity` 在无变化时省略。
 - **每个事实只归一处。**一个事件归入 `episodes` 或 `lore`，一个事实归入 `details`，一个消遣归入
   `interests`，对角色的教导归入 `learned`；同一事物绝不写入多个字段。
@@ -480,7 +477,29 @@ task.added                               {added}: later messages from the author
 - 字符串字段 ≤ `memory.fieldChars`；细节 ≤ `memory.maxDetails`，内部梗 ≤ `memory.maxInjokes`，自述 ≤
   `memory.maxSelfFacts`。笔记使用聊天所用的语言。仅记录观察到的事实；不记录敏感信息（地址、电话、证件、
   健康、财务、真实全名）。
-- **`memory: update applied` 上的计数器**（每批次后记录）：`roster`（`<known_members>` 中发送的成员数）、`rosterCandidates`（提供给预算的名册条目数）、`rosterTokens`（发送的名册占用的估计 token 数）、`aliasesChanged`（作者和名册中存储别名列表实际发生变化的成员数）、`aliasOnly`（其中的名册成员数）、`droppedUsers`（既非作者也非有存储档案的名册成员的 id 条目数）、`droppedFields`（从名册成员条目中丢弃的非 `aliases` 键数）、`portraitDropped`（丢弃的作者非空 `character`/`style` 数）、`notesFlagged`（本批次中携带过时标记的频道或公会条目数）。当发送了标记时，还包括：`notesUpdated`、`notesConfirmed`、`notesInsufficient`（三种复审状态）、`notesMissing`（模型未返回的已标记目标）、`notesIdentical`（文本与存储一致的 `updated`）、`notesUnflagged`（为未标记目标返回的复审）。
+- **`memory: update applied` 上的计数器**（每批次后记录）：`roster`（`<known_members>` 中发送的成员数）、`rosterCandidates`（提供给预算的名册条目数）、`rosterTokens`（发送的名册占用的估计 token 数）、`aliasesChanged`（作者和名册中存储别名列表实际发生变化的成员数）、`aliasOnly`（其中的名册成员数）、`droppedUsers`（既非作者也非有存储档案的名册成员的 id 条目数）、`droppedFields`（从名册成员条目中丢弃的非 `aliases` 键数）、`portraitDropped`（丢弃的作者非空 `character`/`style` 数）、`notesFlagged`（本批次中携带过时标记的频道或公会条目数）、`overLimit`（因超出限制而被拒绝的散文字段数）、`overLimitFields`（`kind.field` 名称数组，如 `['channels.topics', 'guild.patterns', 'lore.text', 'users.relationship']`；不含成员 id）。当发送了标记时，还包括：`notesUpdated`、`notesConfirmed`、`notesInsufficient`（三种复审状态）、`notesMissing`（模型未返回的已标记目标）、`notesIdentical`（文本与存储一致的 `updated`）、`notesUnflagged`（为未标记目标返回的复审）。
+
+`memory: voice applied` 上的计数器：`overLimit`（重试后被拒绝的条目数，已存储文本保持不变）、`overLimitRetried`（使用 `<over_limit>` 块重新发送的条目数）。当重试请求本身失败时（不良 JSON、超时、提供者错误），`retryFailed` 包含原因字符串。
+
+### 画像和笔记刷新的溢出
+
+当画像刷新生成超出限制的 `style` 或 `character` 文本时，执行相同的重试。第二次超出时在 `warmup: portrait refresh failed` 中记录结果 `over-limit` 和 `fields`（超出的字段名）。尝试戳记被设置，当天的槽位已使用（请求已发送），但不写入任何内容。
+
+当笔记刷新（刷新模式的 `channel.md` 或 `server.md`）生成超出限制的字段时，执行相同的重试。第二次超出时记录 `warmup: notes refresh failed`，原因 `over-limit`，`fields` 包含字段名。该频道或服务器不写入任何内容。下次尝试在 `memory.notesRetryHours` 之后。调度器移至下一个目标。
+
+### 版本历史
+
+当 `features.versions` 开启（默认开）时，每次散文字段的文本被替换，新文本存储前记录旧文本。旧文本存入 `data/guilds/<guildId>/versions/<kind>/<id>.json`，其中 `kind` 为 `users`、`channels`、`guild`（id `guild`）或 `lore`（id 为条目标题的 slug 加短哈希）。每个文件包含一个以字段名为键的 JSON 对象，每个值为记录数组（最新在最后）：
+
+```
+{ "<field>": [ { "at": "ISO", "by": "analyzer"|"voice"|"portrait"|"refresh"|"warmup"|"unknown", "chars": n, "before": n, "after": n, "kept": n, "removed": n, "added": n, "text": "<previous text>" } ] }
+```
+
+`before` 和 `after` 是旧文本和新文本的句子数。`kept` 是两者共有的句子数。`removed` = `before - kept`，`added` = `after - kept`。8 个句子中 `kept` 为 0 的改写表示模型替换了整个文本。每个字段最多 `memory.versionsKept`（默认 20）条记录；超出上限时删除最旧的条目。首次写入（字段为空）不记录。相同内容的改写不记录。私聊 relationship 文本不做版本记录。
+
+`/nep memory forget` 删除该成员的版本文件。`/nep memory wipe` 删除服务器的整个 `versions/` 文件夹。
+
+每条记录以 `store: version recorded` 记录日志，包含 `kind`、`field`、`by`、`chars`、`kept`、`removed`、`added`（频道版本包含频道 id，不包含成员 id）。
 
 ## 频道地图
 
