@@ -612,26 +612,27 @@ function lastStampOf(entry) {
 }
 
 /**
- * The filler lines of the `<worn>` block: the guild's entries still resting
- * (fillersOnCooldown with `ownMessages` and `variety.fillers.cooldownHours` /
- * `cooldownMessages`, read now) plus every pinned entry (the owner pinned it
- * on purpose), in rankFillers order, at most `variety.fillers.max`. Each is
- * `- <labels.variety.fillerLine>` with `{text}` (fillerKey: a prefix entry
- * with its `*`), `{count}` (how many of the persona's own lines scanned
- * contain it, findFillers; 0 is shown too), `{window}` (how many lines were
- * scanned: the newest `variety.window` of the guild's `ownLines` ring,
- * `fillers.ring`, read now) and `{ago}` (since `lastUsedAt`, else since
- * `lastSeen`, via formatDuration and `labels.units`; neither ->
- * `labels.transcript.unknownDuration`). [] when `fillers` is null, or the
- * label is missing or blank.
+ * The filler lines of the `<worn>` block, in two sections: `pinned` (every
+ * pinned entry -- the owner pinned it on purpose -- whether resting or not)
+ * and `learned` (the unpinned entries still resting: fillersOnCooldown with
+ * `ownMessages` and `variety.fillers.cooldownHours` / `cooldownMessages`, read
+ * now). Each section is in rankFillers order, at most `variety.fillers.max`
+ * lines. Each line is `- <labels.variety.fillerLine>` with `{text}`
+ * (fillerKey: a prefix entry with its `*`), `{count}` (how many of the
+ * persona's own lines scanned contain it, findFillers; 0 is shown too),
+ * `{window}` (how many lines were scanned: the newest `variety.window` of the
+ * guild's `ownLines` ring, `fillers.ring`, read now) and `{ago}` (since
+ * `lastUsedAt`, else since `lastSeen`, via formatDuration and `labels.units`;
+ * neither -> `labels.transcript.unknownDuration`). Both [] when `fillers` is
+ * null, or the line label is missing or blank.
  * @param {{ list: unknown, ownMessages: number, now: number, ring?: unknown }|null|undefined} fillers
  * @param {object} labels
  * @param {object} config
- * @returns {string[]}
+ * @returns {{ pinned: string[], learned: string[] }}
  */
-function fillerLines(fillers, labels, config) {
+function fillerSections(fillers, labels, config) {
   const template = usableLabel(labels?.variety?.fillerLine);
-  if (!template || !fillers) return [];
+  if (!template || !fillers) return { pinned: [], learned: [] };
   const settings = fillersSettings(config);
   const list = normalizeFillers(fillers.list);
   const now = fillers.now;
@@ -653,17 +654,19 @@ function fillerLines(fillers, labels, config) {
     }),
   );
   const unknown = labels?.transcript?.unknownDuration ?? '?';
-  return rankFillers(
-    list.filter((entry) => entry.pinned || resting.has(entry)),
-    settings.halfLifeDays,
-  )
-    .slice(0, settings.max)
-    .map((entry) => {
-      const stamp = lastStampOf(entry);
-      const ago = stamp !== null && Number.isFinite(now) && labels?.units ? formatDuration(Math.max(0, now - stamp), labels.units) : unknown;
-      const count = counts.get(fillerKey(entry)) ?? 0;
-      return `- ${fill(template, { text: fillerKey(entry), count, window: scanned.length, ago })}`;
-    });
+  const render = (entries) =>
+    rankFillers(entries, settings.halfLifeDays)
+      .slice(0, settings.max)
+      .map((entry) => {
+        const stamp = lastStampOf(entry);
+        const ago = stamp !== null && Number.isFinite(now) && labels?.units ? formatDuration(Math.max(0, now - stamp), labels.units) : unknown;
+        const count = counts.get(fillerKey(entry)) ?? 0;
+        return `- ${fill(template, { text: fillerKey(entry), count, window: scanned.length, ago })}`;
+      });
+  return {
+    pinned: render(list.filter((entry) => entry.pinned)),
+    learned: render(list.filter((entry) => !entry.pinned && resting.has(entry))),
+  };
 }
 
 /**
@@ -674,7 +677,10 @@ function fillerLines(fillers, labels, config) {
  * `variety.longMaxPatterns` (read now; the long pass's list and the short
  * one's, joined by mergeWorn), then -- advice shown before the reply, never a
  * rewrite after it -- `labels.variety.fillersIntro` and one line per resting
- * filler (fillerLines; left out when either label is missing or blank). ''
+ * learned filler, then `labels.variety.pinnedIntro` and one line per pinned
+ * filler (fillerSections; a section is left out when its intro label or the
+ * line label is missing or blank), then the optional `labels.variety.matchNote`
+ * once after the last filler line. ''
  * when there is neither a pattern nor a filler line, the switch is off, or
  * the labels have no `variety.intro` (an older labels.json renders nothing).
  * @param {{ shape: string, examples: string[] }[]|null|undefined} patterns
@@ -692,10 +698,15 @@ export function renderWorn(patterns, labels, config, fillers = null) {
   const list = normalizePatterns(patterns).slice(0, settings.maxPatterns + settings.longMaxPatterns);
   const withExamples = settings.examplesInBlock;
   const lines = list.map((p) => (withExamples && p.examples.length > 0 ? `- ${p.shape} (${p.examples.map((e) => `"${e}"`).join(', ')})` : `- ${p.shape}`));
-  const fillersIntro = usableLabel(labels?.variety?.fillersIntro);
-  const fillerPart = fillersIntro ? fillerLines(fillers, labels, config) : [];
+  const sections = fillerSections(fillers, labels, config);
+  const fillerPart = [];
+  for (const [key, entries] of [['pinnedIntro', sections.pinned], ['fillersIntro', sections.learned]]) {
+    const head = usableLabel(labels?.variety?.[key]);
+    if (head && entries.length > 0) fillerPart.push(head, ...entries);
+  }
   if (lines.length === 0 && fillerPart.length === 0) return '';
-  return [intro, ...lines, ...(fillerPart.length > 0 ? [fillersIntro, ...fillerPart] : [])].join('\n');
+  const note = usableLabel(labels?.variety?.matchNote);
+  return [intro, ...lines, ...fillerPart, ...(fillerPart.length > 0 && note ? [note] : [])].join('\n');
 }
 
 // ---- the owner's view -------------------------------------------------------

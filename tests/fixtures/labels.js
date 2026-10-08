@@ -233,6 +233,7 @@ export const labels = {
   variety: {
     intro: 'devices you used in your last lines, do not repeat them:',
     fillersIntro: 'filler words still resting, leave them out:',
+    pinnedIntro: 'filler words you were asked to drop, leave them out:',
     fillerLine: '{text} -- {count} of the last {window} lines, last {ago} ago',
   },
   mentor: {
