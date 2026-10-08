@@ -54,6 +54,7 @@ import { DailyCapError, REPLY_REQUEST, TokenLimitError, RETRY_STATUS, helperRequ
 import { ImageCapError, ImageGenError } from '../llm/images.js';
 import { isLimitNotice, limitOf, mirrorChannelLabel, mirrorDryRun, postLimitNotice } from './limits.js';
 import { between, typingMs } from './random.js';
+import { settleWait } from './activity.js';
 import {
   collectPictures,
   collectEmojiItems,
@@ -142,7 +143,10 @@ export function appendPostLedger(ledger, entry, size) {
 }
 
 /** `pace` when a key is missing: config.json's values. */
-const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, prepareMediaMs: 20000, dropAfterMs: 60000, replyHedgeMs: 20000, typingWhilePreparing: false, unpromptedWaits: true });
+const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, prepareMediaMs: 20000, dropAfterMs: 60000, replyHedgeMs: 20000, typingWhilePreparing: false, unpromptedWaits: true, settleMs: 0, settleMaxMs: 15000 });
+
+/** The longest single pause of a settle wait: the author's activity is read again after it. */
+const SETTLE_STEP_MS = 250;
 
 /**
  * The pace of a turn's preparation, read from `config` (the live config):
@@ -168,10 +172,15 @@ const PACE_FALLBACK = Object.freeze({ prepareMs: 6000, prepareSearchMs: 12000, p
  * `unpromptedWaits` (a missing key counts as on; only false turns it off): a
  * turn nobody waits for (unhurried) gets neither the deadline nor the bar --
  * it waits for every stage and posts once ready. Off, every turn keeps the same
- * deadline and bar.
+ * deadline and bar. `settleMs`: how long the author of a turn answering a person must have
+ * been quiet before the turn reads the channel (0 = no wait, also for a negative value or a
+ * non-number); `settleMaxMs`: the longest that wait runs, counted from the author's trigger
+ * message (null for 0, a negative value or a non-number: one settle from it). A missing key
+ * takes config.json's value.
  * @param {object} config
  * @returns {{ prepareMs: number|null, prepareSearchMs: number|null, prepareMediaMs: number|null,
- *   dropAfterMs: number|null, replyHedgeMs: number|null, typingWhilePreparing: boolean, unpromptedWaits: boolean }}
+ *   dropAfterMs: number|null, replyHedgeMs: number|null, typingWhilePreparing: boolean, unpromptedWaits: boolean,
+ *   settleMs: number, settleMaxMs: number|null }}
  */
 export function paceSettings(config) {
   const pace = isPlainObject(config?.pace) ? config.pace : {};
@@ -187,6 +196,8 @@ export function paceSettings(config) {
     replyHedgeMs: limit(pace.replyHedgeMs, PACE_FALLBACK.replyHedgeMs),
     typingWhilePreparing: pace.typingWhilePreparing === true,
     unpromptedWaits: pace.unpromptedWaits !== false,
+    settleMs: limit(pace.settleMs, PACE_FALLBACK.settleMs) ?? 0,
+    settleMaxMs: limit(pace.settleMaxMs, PACE_FALLBACK.settleMaxMs),
   };
 }
 
@@ -934,6 +945,9 @@ function taskInput({ part, queued, added, labels, channelId }) {
  * deadline and no bar: it waits for every helper. Every turn that reaches the reply request logs `turn: timings`.
  * `schedule(fn, ms)` (default: setTimeout) runs that deadline and the typing
  * indicator's refresh; it resolves a function that cancels it.
+ * `activity` (src/behavior/activity.js#createActivity, fed by src/discord/events.js; optional)
+ * tells when each person last wrote in each channel: a turn answering a person waits on it
+ * (pace.settleMs, settleAuthor below); absent, no turn waits.
  */
 export function createTurnRunner({
   hot,
@@ -955,6 +969,7 @@ export function createTurnRunner({
   now: clock = Date.now,
   schedule = scheduleTimer,
   isWarmingUp = () => false,
+  activity = null,
 }) {
   const busy = new Set();
   // channelId -> the chain of parts running there (runChain): its author, its parts, the part
@@ -989,6 +1004,34 @@ export function createTurnRunner({
   /** The custom emoji lookup, or null when there is no index or features.customEmoji is off (read now). */
   function emojiLookup() {
     return emoji && hot.config.features?.customEmoji !== false ? emoji.byName : null;
+  }
+
+  /**
+   * Wait until `trigger`'s author has been quiet in `channelId` for pace.settleMs (read at every
+   * check), never past pace.settleMaxMs from the trigger message's time (the start of the wait
+   * when that is unknown), checking the activity again at least every SETTLE_STEP_MS so a new
+   * message of theirs restarts the count; the pauses run on the injected `schedule`. Resolves
+   * the milliseconds actually waited: 0 with no activity tracker, no trigger author or settle
+   * off. Never rejects: a failing check ends the wait.
+   */
+  async function settleAuthor(channelId, trigger) {
+    const authorId = trigger?.authorId;
+    if (!activity || !authorId) return 0;
+    const settleStartedAt = clock();
+    const triggerAt = Number.isFinite(trigger.ts) ? trigger.ts : settleStartedAt;
+    try {
+      for (;;) {
+        const { settleMs, settleMaxMs } = paceSettings(hot.config);
+        const wait = settleWait({ now: clock(), triggerAt, lastAt: activity.lastAt(channelId, authorId), settleMs, settleMaxMs });
+        if (!(wait > 0)) break;
+        await new Promise((resolve) => {
+          schedule(resolve, Math.min(wait, SETTLE_STEP_MS));
+        });
+      }
+    } catch (err) {
+      log.warn('turn: settle failed', { channel: channelId, error: err });
+    }
+    return clock() - settleStartedAt;
   }
 
   /**
@@ -2981,6 +3024,11 @@ export function createTurnRunner({
       if (oneAtATime && busy.size > 0) return { outcome: 'busy' };
       busy.add(channel.id);
     }
+    // A turn answering a person first lets them finish writing (pace.settleMs), holding the
+    // attention meanwhile; the turn's clocks (its deadline, its bar) start after this wait. The
+    // first part of a split message reuses the history its message already waited for. The
+    // author's activity is read in the trigger's own channel (a routed call's turn posts elsewhere).
+    const settledMs = mode === 'reply' && !reuseHistory ? await settleAuthor(trigger?.channelId ?? channel.id, trigger) : 0;
     // The typing indicator, the preparation's deadline and the turn's bar, ended in `finally`
     // whatever the outcome; the start and the mode a dropped turn logs.
     let stopTyping = () => {};
@@ -3664,6 +3712,7 @@ export function createTurnRunner({
           channel: channel.id,
           mode: finalMode,
           triggerKind: triggerKind ?? null,
+          settleMs: settledMs,
           prepareMs,
           late,
           stages: timings,

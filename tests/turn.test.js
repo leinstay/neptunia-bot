@@ -6093,7 +6093,7 @@ test('paceSettings: 0, a negative value or a non-number turns a limit off; a mis
   for (const off of [0, -5, '500', null, Number.NaN, Infinity]) {
     assert.equal(paceSettings({ pace: { replyHedgeMs: off } }).replyHedgeMs, null, String(off));
   }
-  assert.deepEqual(paceSettings({ pace: { prepareMs: 2500, prepareSearchMs: 7000, prepareMediaMs: 8000, dropAfterMs: 9000, replyHedgeMs: 4000, typingWhilePreparing: false, unpromptedWaits: false } }), {
+  assert.deepEqual(paceSettings({ pace: { prepareMs: 2500, prepareSearchMs: 7000, prepareMediaMs: 8000, dropAfterMs: 9000, replyHedgeMs: 4000, typingWhilePreparing: false, unpromptedWaits: false, settleMs: 3000, settleMaxMs: 9000 } }), {
     prepareMs: 2500,
     prepareSearchMs: 7000,
     prepareMediaMs: 8000,
@@ -6101,8 +6101,88 @@ test('paceSettings: 0, a negative value or a non-number turns a limit off; a mis
     replyHedgeMs: 4000,
     typingWhilePreparing: false,
     unpromptedWaits: false,
+    settleMs: 3000,
+    settleMaxMs: 9000,
   });
   assert.deepEqual(paceSettings({ pace: 'fast' }), missing, 'a group that is not an object counts as missing');
+});
+
+// pace.settleMs: a turn answering a person waits, once it holds the attention, until that
+// person has been quiet for settleMs, so a thought posted as several quick messages is read whole.
+const SETTLE_PACE = { prepareMs: 0, prepareSearchMs: 0, prepareMediaMs: 0, dropAfterMs: 0, replyHedgeMs: 0, typingWhilePreparing: false, unpromptedWaits: true, settleMaxMs: 15000 };
+
+/** A reply scene whose `schedule` moves the clock by each delay and fires at once; history fetches are timed. */
+function settleScene({ settleMs, activity }) {
+  const clock = { t: NOW };
+  const raw = rawMessage({ id: 'm1', ts: NOW - 1000 });
+  const channel = fakeTurnChannel({ historyMessages: [raw] });
+  const fetchedAt = [];
+  const fetchAll = channel.messages.fetch;
+  channel.messages.fetch = async (arg) => {
+    if (arg && typeof arg === 'object' && 'limit' in arg) fetchedAt.push(clock.t);
+    return fetchAll(arg);
+  };
+  const waits = [];
+  const schedule = (fn, ms) => {
+    waits.push(ms);
+    clock.t += ms;
+    activity?.onWait?.(clock.t);
+    setImmediate(fn);
+    return () => {};
+  };
+  const hot = fakeHot({}, {}, { pace: { ...SETTLE_PACE, settleMs } });
+  const turns = createTurnRunner({ hot, store: fakeStore(), llm: fakeLlm('<msg>ok</msg>'), calibrator: identityCalibrator(), client: fakeClient(), now: () => clock.t, schedule, activity });
+  return { turns, channel, raw, fetchedAt, waits };
+}
+
+test('paceSettings: settleMs is 0 (off) for 0, a negative value or a non-number; settleMaxMs is null for those', () => {
+  for (const off of [0, -5, '500', null, Number.NaN, Infinity]) {
+    const pace = paceSettings({ pace: { settleMs: off, settleMaxMs: off } });
+    assert.equal(pace.settleMs, 0, String(off));
+    assert.equal(pace.settleMaxMs, null, String(off));
+  }
+  assert.equal(paceSettings({ pace: { settleMs: 2500 } }).settleMs, 2500);
+});
+
+test('runTurn: with pace.settleMs the history is read only once the author has been quiet that long', async () => {
+  // The author wrote at NOW - 1000; during the first pause they write once more (500 ms before it ends).
+  let last = NOW - 1000;
+  const activity = {
+    lastAt: (channelId, authorId) => (channelId === 'c1' && authorId === 'u1' ? last : null),
+    onWait(t) {
+      if (t === NOW + 250) last = t - 500;
+    },
+  };
+  const scene = settleScene({ settleMs: 4000, activity });
+  const { result, logs } = await withCapturedLogs(() =>
+    scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: normalizedTrigger(scene.raw), triggerKind: 'mention' }),
+  );
+
+  assert.equal(result.outcome, 'spoke');
+  // Quiet from NOW - 250 for 4000 ms: the history is read at NOW + 3750, after every pause.
+  assert.equal(scene.waits.reduce((sum, ms) => sum + ms, 0), 3750);
+  assert.ok(scene.waits.length > 1 && scene.waits.every((ms) => ms > 0 && ms <= 250), String(scene.waits));
+  assert.deepEqual(scene.fetchedAt.slice(0, 1), [NOW + 3750]);
+  const timings = logs.find((l) => l.msg === 'turn: timings');
+  assert.equal(timings.settleMs, 3750);
+  assert.equal(timings.totalMs, 0, 'the turn clock starts after the settle');
+});
+
+test('runTurn: settle off, no tracker or no author to wait for -- no pause before the history', async () => {
+  const recent = { lastAt: () => NOW - 100 };
+  for (const [name, settleMs, activity, params] of [
+    ['settleMs 0', 0, recent, {}],
+    ['no tracker', 4000, undefined, {}],
+    ['spontaneous', 4000, recent, { mode: 'interject', trigger: null, triggerKind: null }],
+  ]) {
+    const scene = settleScene({ settleMs, activity });
+    const { logs } = await withCapturedLogs(() =>
+      scene.turns.runTurn({ channel: scene.channel, mode: 'reply', trigger: normalizedTrigger(scene.raw), triggerKind: 'mention', ...params }),
+    );
+    assert.deepEqual(scene.waits, [], name);
+    assert.deepEqual(scene.fetchedAt.slice(0, 1), [NOW], name);
+    assert.equal(logs.find((l) => l.msg === 'turn: timings').settleMs, 0, name);
+  }
 });
 
 test('runTurn: the helpers before the reply request overlap -- two slow ones take the time of one', async () => {

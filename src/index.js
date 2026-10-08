@@ -15,6 +15,7 @@ import { createCalibrator } from './llm/tokens.js';
 import { createLlm } from './llm/openrouter.js';
 import { createImageGen } from './llm/images.js';
 import { createTurnRunner } from './behavior/turn.js';
+import { createActivity } from './behavior/activity.js';
 import { hasRequiredLabels } from './behavior/prompt.js';
 import { createVarietyPass } from './behavior/variety-pass.js';
 import { createChannelRouter } from './behavior/route-channel.js';
@@ -158,6 +159,9 @@ const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.d
 const routeChannels = createChannelRouter({ hot, store, llm });
 // The search of the server's own history beside the web search (features.recall): the lookup's server part.
 const recall = createRecall({ hot, store, llm, describer });
+// When each person last wrote in each channel (fed by the message handler): a turn answering
+// someone waits until they stop writing (pace.settleMs).
+const activity = createActivity();
 // A warmup run ends a chain of parts (a message answered part by part) before its next part;
 // read through a closure, as the warmup is created just below.
 const turns = createTurnRunner({
@@ -176,6 +180,7 @@ const turns = createTurnRunner({
   getSelfName,
   routeChannels,
   isWarmingUp: () => warmup.isWarmingUp(),
+  activity,
 });
 // THE way memory starts (docs/prompt-contract.md, "The warmup"): sample-based,
 // resumable, mutes the persona while a run is in flight (see isWarmingUp below).
@@ -245,6 +250,8 @@ const onMessage = createMessageHandler({
   llm,
   // web.links.prefill: a posted link is read ahead of time.
   lookup,
+  // pace.settleMs: every member's message is noted for the turn runner's settle wait.
+  activity,
 });
 
 // One attention (mention.oneAtATime): once a turn frees its channel, answer
