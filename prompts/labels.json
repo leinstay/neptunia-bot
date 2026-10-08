@@ -22,6 +22,7 @@
     "gif": "[GIF: {name}]",
     "gifDescribed": "[GIF: {text}]",
     "gifKnown": "[GIF {id}: {text}]",
+    "gifKnownFields": "[GIF {id}: {reaction}; {action}; \"{screen}\"]",
     "gifKnownNoText": "[GIF {id}: {name}]",
     "video": "[video: {name}, {duration}]",
     "videoDescribed": "[video: {name}, {duration} — still frame: {text}]",

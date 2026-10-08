@@ -1322,3 +1322,35 @@ test('lateVideoStates: no known states and no candidates', () => {
   assert.deepEqual([...lateVideoStates([], new Map(), 1)], []);
   assert.deepEqual([...lateVideoStates([{ itemId: 'v1' }], null, 0)], []);
 });
+
+test('mediaLabelFor: a library GIF with a reaction or on-screen text -> gifKnownFields beside the caption', () => {
+  const gif = { kind: 'gif', name: 'a.gif' };
+  const all = { reaction: 'accord ferme', action: 'un chat lève le menton', screen: 'ναι' };
+  assert.deepEqual(mediaLabelFor(gif, { gifHandle: 'g3', description: 'un chat lève le menton', gifFields: all }), {
+    key: 'gifKnownFields',
+    values: { id: 'g3', text: 'un chat lève le menton', reaction: 'accord ferme', action: 'un chat lève le menton', screen: 'ναι' },
+  });
+  assert.deepEqual(mediaLabelFor(gif, { gifHandle: 'g3', description: 'ναι', gifFields: { screen: 'ναι' } }).values, {
+    id: 'g3',
+    text: 'ναι',
+    reaction: '',
+    action: '',
+    screen: 'ναι',
+  });
+  const reactionOnly = mediaLabelFor(gif, { gifHandle: 'g3', description: 'x', gifFields: { reaction: 'accord', action: '', screen: '' } });
+  assert.equal(reactionOnly.key, 'gifKnownFields');
+  const attached = mediaLabelFor(gif, { gifHandle: 'g3', description: 'x', gifFields: all, attachedIndex: 1 });
+  assert.equal(attached.key, 'gifKnownFields', 'an attached GIF alike');
+});
+
+test('mediaLabelFor: gifKnownFields needs a handle, a caption and a reaction or on-screen text', () => {
+  const gif = { kind: 'gif', name: 'a.gif' };
+  const all = { reaction: 'accord ferme', action: 'un chat lève le menton', screen: 'ναι' };
+  assert.deepEqual(mediaLabelFor(gif, { description: 'un chat', gifFields: all }), { key: 'gifDescribed', values: { text: 'un chat' } }, 'no handle: the caption alone');
+  assert.deepEqual(mediaLabelFor(gif, { gifHandle: 'g3', description: 'un chat', gifFields: { reaction: '', action: 'un chat', screen: '' } }), {
+    key: 'gifKnown',
+    values: { id: 'g3', text: 'un chat' },
+  });
+  assert.equal(mediaLabelFor(gif, { gifHandle: 'g3', gifFields: all }).key, 'gifKnownNoText', 'no caption');
+  assert.deepEqual(mediaLabelFor({ kind: 'image' }, { gifHandle: 'g3', gifFields: all }), { key: 'image', values: {} });
+});

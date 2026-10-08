@@ -143,7 +143,7 @@ GIF ピッカー（`features.gifPicker`、デフォルトオン）。ペルソ�
 
 画像の静止フレームエントリは従来通り独自の `<itemId>` キーを保持します。同一アイテムに対して両方が共存できます。
 
-視聴された GIF は GIF 自身の `<itemId>` キー（`video:` プレフィックスなし）でキャッシュされます: `{ text, reaction, action, screen, ts, watched: true, gif: true }`。`text` は一行のアクション（アクション行がない場合はリアクションまたは画面上のテキスト）です。`gifs.reactionChars` がリスト内の `reaction` と `screen` を切り詰め、`gifs.actionChars` が `action` と旧形式の一行キャプションを切り詰めます。`0` = 切り詰めなし。単一フレームのキャプションは `{ text, ts, gif: true }`（視聴を試みて失敗した場合は `watchFailed` 付き）で保存されます。どちらも画像の記述と同じキャッシュ内に配置されます。
+視聴された GIF は GIF 自身の `<itemId>` キー（`video:` プレフィックスなし）でキャッシュされます: `{ text, reaction, action, screen, ts, watched: true, gif: true }`。`text` は一行のアクション（アクション行がない場合はリアクションまたは画面上のテキスト）です。4 つのフィールドはすべて完全な状態で保存され、`media.descriptionChars` のみで制限されます。切り詰めはフィールドが表示される場所、`<gifs>` リストとライブラリ GIF のトランスクリプト行（`transcript.gifKnownFields`）で適用されます: `gifs.reactionChars` が `reaction` と `screen` を、`gifs.actionChars` が `action` と旧形式の一行キャプションを切り詰めます。`0` = 切り詰めなし。単一フレームのキャプションは `{ text, ts, gif: true }`（視聴を試みて失敗した場合は `watchFailed` 付き）で保存されます。どちらも画像の記述と同じキャッシュ内に配置されます。
 
 ウェブルックアップの結果も同じ `data/guilds/<id>/media.json` に動画や画像のエントリと並んでキャッシュされます:
 
@@ -177,6 +177,7 @@ transcript.imageDescribed                {text}
 transcript.gif                           {name}
 transcript.gifDescribed                  {text}
 transcript.gifKnown                      {id} {text}: a GIF that is in the library; id is its handle, text is the caption
+transcript.gifKnownFields                {id} {reaction} {action} {screen}: キャッシュにリアクションまたは画面上のテキストがあるライブラリ GIF。gifKnown に代わって使用。gifs.reactionChars / gifs.actionChars で gifs.entryFields と同様に切り詰め。コードが空フィールドとセパレータを除去。キーが空: gifKnown にフォールバック
 transcript.gifKnownNoText                {id} {name}: a library GIF without a caption; id is the handle, name is the file or link name
 transcript.video                         {name} {duration}
 transcript.videoDescribed                {name} {duration} {text}: text describes ONE frame

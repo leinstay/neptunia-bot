@@ -150,7 +150,7 @@ A re-watch answer is cached under the key `video:<itemId>:q:<hash>` (the first 1
 
 A picture's still-frame entry keeps its own `<itemId>` key as before. Both can coexist for the same item.
 
-A watched GIF is cached under the GIF's own `<itemId>` key (not `video:` prefixed): `{ text, reaction, action, screen, ts, watched: true, gif: true }`; `text` is the one-line action (or the reaction or on-screen text when there is no action line). `gifs.reactionChars` cuts `reaction` and `screen` in the list, `gifs.actionChars` cuts `action` and an old one-line caption; `0` = no cut. A one-frame caption keeps `{ text, ts, gif: true }` (plus `watchFailed` when a watch was attempted). Both sit alongside picture entries in the same cache.
+A watched GIF is cached under the GIF's own `<itemId>` key (not `video:` prefixed): `{ text, reaction, action, screen, ts, watched: true, gif: true }`; `text` is the one-line action (or the reaction or on-screen text when there is no action line). All four are stored whole, bounded only by `media.descriptionChars`. Cuts apply where the fields are shown, in the `<gifs>` list and in a library GIF's transcript line (`transcript.gifKnownFields`) alike: `gifs.reactionChars` cuts `reaction` and `screen`, `gifs.actionChars` cuts `action` and an old one-line caption; `0` = no cut. A one-frame caption keeps `{ text, ts, gif: true }` (plus `watchFailed` when a watch was attempted). Both sit alongside picture entries in the same cache.
 
 Web lookup results are cached in the same `data/guilds/<id>/media.json` alongside video and picture entries:
 
@@ -184,6 +184,7 @@ transcript.imageDescribed                {text}
 transcript.gif                           {name}
 transcript.gifDescribed                  {text}
 transcript.gifKnown                      {id} {text}: a GIF that is in the library; id is its handle, text is the caption
+transcript.gifKnownFields                {id} {reaction} {action} {screen}: a library GIF whose cache has a reaction or on-screen text, used in place of gifKnown; fields cut by gifs.reactionChars / gifs.actionChars as in gifs.entryFields; code drops empty fields and their separators; blanked: falls back to gifKnown
 transcript.gifKnownNoText                {id} {name}: a library GIF without a caption; id is the handle, name is the file or link name
 transcript.video                         {name} {duration}
 transcript.videoDescribed                {name} {duration} {text}: text describes ONE frame

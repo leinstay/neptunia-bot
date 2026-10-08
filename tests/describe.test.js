@@ -2676,7 +2676,7 @@ test('describe: describe-gif alone (no describe-video) is enough to watch GIFs',
 
 // --- The GIF describer's three fields ------------------------------------------
 
-const GIF_FIELD_CAPS = { reactionChars: 40, actionChars: 70, descriptionChars: 200 };
+const GIF_FIELD_CAPS = { descriptionChars: 200 };
 
 test('parseGifDescription: three labelled lines, any order and case, "none" read as empty', () => {
   const parsed = parseGifDescription('Text: "ναι."\nREACTION: firm agreement\naction: a cat lifts its chin', GIF_FIELD_CAPS);
@@ -2697,15 +2697,23 @@ test('parseGifDescription: missing lines are tolerated; an unlabelled answer is 
   assert.equal(parseGifDescription('reaction: none\naction: none\ntext: none', GIF_FIELD_CAPS), null);
 });
 
-test('parseGifDescription: each field is cut at a word boundary with an ellipsis; text keeps descriptionChars', () => {
+test('parseGifDescription: a 60-character on-screen text is stored whole; text is unchanged', () => {
+  const screen = 'Ἐν ἀρχῇ ἦν ὁ λόγος καὶ ὁ λόγος ἦν πρὸς τὸν θεόν, καὶ θεὸς ἦν';
+  assert.equal([...screen].length, 60);
+  const parsed = parseGifDescription(`reaction: firm agreement\naction: a cat lifts its chin\ntext: ${screen}`, GIF_FIELD_CAPS);
+  assert.deepEqual(parsed, { text: 'a cat lifts its chin', reaction: 'firm agreement', action: 'a cat lifts its chin', screen });
+});
+
+test('parseGifDescription: every field is bounded only by descriptionChars, like text', () => {
   const long = Array.from({ length: 30 }, (_, i) => `mot${i}`).join(' ');
-  const parsed = parseGifDescription(`reaction: ${long}\naction: ${long}\ntext: ${long}`, GIF_FIELD_CAPS);
-  for (const [field, cap] of [['reaction', 40], ['action', 70], ['screen', 40]]) {
-    assert.ok([...parsed[field]].length <= cap, `${field}: ${parsed[field].length}`);
-    assert.ok(parsed[field].endsWith('…'), field);
-    assert.ok(long.startsWith(`${parsed[field].slice(0, -1)} `), `${field} cut at a word boundary`);
+  const answer = `reaction: ${long}\naction: ${long}\ntext: ${long}`;
+  const whole = parseGifDescription(answer, GIF_FIELD_CAPS);
+  assert.deepEqual(whole, { text: long, reaction: long, action: long, screen: long }, 'nothing cut under descriptionChars');
+  const bounded = parseGifDescription(answer, { descriptionChars: 50 });
+  for (const field of ['text', 'reaction', 'action', 'screen']) {
+    assert.ok([...bounded[field]].length <= 50, `${field}: ${bounded[field].length}`);
+    assert.ok(long.startsWith(bounded[field]), `${field} is a prefix of the answer`);
   }
-  assert.equal(parsed.text, long, 'the transcript line is the whole action under descriptionChars');
 });
 
 test('describe: a three-field GIF answer is cached as text, reaction, action and screen', async () => {
@@ -2722,14 +2730,14 @@ test('describe: a three-field GIF answer is cached as text, reaction, action and
   );
 });
 
-test('describe: gifs.reactionChars and gifs.actionChars are read at the moment of use', async () => {
+test('describe: gifs.reactionChars and gifs.actionChars never cut the cached fields', async () => {
   const llm = fakeLlm({ text: 'reaction: quiet firm agreement\naction: a small cat lifts its chin slowly' });
   const hot = gifHot();
   hot.config.gifs = { reactionChars: 12, actionChars: 20 };
   const { describer, store } = gifDescriber({ llm, hot });
   await describer.describe('g1', gifEmbedItem());
   const entry = store.getMediaCache('g1')['m1#e0'];
-  assert.deepEqual([entry.reaction, entry.action, entry.text], ['quiet firm…', 'a small cat lifts…', 'a small cat lifts its chin slowly']);
+  assert.deepEqual([entry.reaction, entry.action, entry.text], ['quiet firm agreement', 'a small cat lifts its chin slowly', 'a small cat lifts its chin slowly']);
 });
 
 test('watchGif: an old-format watched entry (no reaction field) is watched again and gains the fields', async () => {

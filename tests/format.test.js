@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   fill,
+  fillGifFields,
   formatClock,
   formatDate,
   formatNow,
@@ -1168,4 +1169,63 @@ test('formatTranscript: labels without transcript.reactions render none', () => 
   };
   const items = reactionTranscript([msg('1', T, { reactions: [{ emoji: '🍣', count: 2, mine: true }] })], { labels: oldLabels });
   assert.ok(items[0].text.endsWith(': text'), items[0].text);
+});
+
+// --- A library GIF's three caption fields (transcript.gifKnownFields) -----------
+
+const GIF_T = Date.UTC(2026, 8, 20, 10, 0, 0);
+const GIF_LINK = { id: 'm1#e0', kind: 'gif', url: 'https://tenor.com/view/chat-123', site: 'Tenor', title: 'Chat' };
+const GIF_FILE = { id: 'att9', kind: 'gif', url: 'https://cdn.discordapp.com/a/att9/réaction.gif', name: 'réaction.gif' };
+const GIF_FULL = { reaction: 'accord ferme', action: 'un chat lève le menton', screen: 'ναι' };
+
+function gifLines(fields, { labelSet = labels, handles = true, item = GIF_LINK } = {}) {
+  const message = msg('m1', GIF_T, item === GIF_FILE ? { attachments: [item] } : { links: [item] });
+  return formatTranscript([message], {
+    timezone: TZ,
+    gapMinutes: 20,
+    maxChars: 800,
+    selfName: 'Nept',
+    labels: labelSet,
+    descriptions: new Map([[item.id, 'un chat lève le menton']]),
+    gifHandles: handles ? new Map([[item.id, 'g4']]) : undefined,
+    gifFields: fields ? new Map([[item.id, fields]]) : undefined,
+  })[0].text;
+}
+
+test('formatTranscript: a library GIF with its three fields renders transcript.gifKnownFields', () => {
+  const tag = fillGifFields(labels.transcript.gifKnownFields, 'g4', GIF_FULL);
+  assert.equal(tag, '[gif g4 -- accord ferme; un chat lève le menton; "ναι"]');
+  assert.ok(gifLines(GIF_FULL).endsWith(tag));
+  assert.ok(gifLines(GIF_FULL, { item: GIF_FILE }).endsWith(tag), 'an attachment alike');
+});
+
+test('formatTranscript: gifKnownFields leaves out an empty field with its separator', () => {
+  assert.ok(gifLines({ reaction: '', action: '', screen: 'ναι' }).endsWith('[gif g4 -- "ναι"]'));
+  assert.ok(gifLines({ reaction: 'accord ferme', action: '', screen: '' }).endsWith('[gif g4 -- accord ferme]'));
+  assert.ok(gifLines({ reaction: '', action: 'un chat', screen: 'ναι' }).endsWith('[gif g4 -- un chat; "ναι"]'));
+});
+
+test('formatTranscript: without a reaction or on-screen text a library GIF keeps gifKnown', () => {
+  const known = fill(labels.transcript.gifKnown, { id: 'g4', text: 'un chat lève le menton' });
+  assert.ok(gifLines({ reaction: '', action: 'un chat lève le menton', screen: '' }).endsWith(known));
+  assert.ok(gifLines(null).endsWith(known));
+});
+
+test('formatTranscript: a blanked transcript.gifKnownFields falls back to gifKnown, then to gifDescribed', () => {
+  const blanked = { ...labels, transcript: { ...labels.transcript, gifKnownFields: '' } };
+  assert.ok(gifLines(GIF_FULL, { labelSet: blanked }).endsWith(fill(labels.transcript.gifKnown, { id: 'g4', text: 'un chat lève le menton' })));
+  const bothBlanked = { ...labels, transcript: { ...labels.transcript, gifKnownFields: '', gifKnown: '' } };
+  assert.ok(gifLines(GIF_FULL, { labelSet: bothBlanked }).endsWith(fill(labels.transcript.gifDescribed, { text: 'un chat lève le menton' })));
+});
+
+test('formatTranscript: a GIF without a handle keeps gifDescribed with the action line only', () => {
+  const line = gifLines(GIF_FULL, { handles: false });
+  assert.ok(line.endsWith(fill(labels.transcript.gifDescribed, { text: 'un chat lève le menton' })), line);
+  assert.ok(!line.includes('accord ferme') && !line.includes('ναι'));
+});
+
+test('fillGifFields: a field the template names but the values lack is left out; {text} and {screen} are both slots', () => {
+  assert.equal(fillGifFields('{id}: {reaction}; {action}; "{text}"', 'g1', { reaction: 'r', action: 'a', text: 't' }), 'g1: r; a; "t"');
+  assert.equal(fillGifFields('{id}: {reaction}; "{screen}"', 'g1', { reaction: 'r' }), 'g1: r');
+  assert.equal(fillGifFields('{id}', 'g1', { reaction: 'r' }), 'g1');
 });
