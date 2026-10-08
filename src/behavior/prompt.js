@@ -1155,7 +1155,9 @@ function lookupCandidates(lookup, labels, timezone) {
  * `gifs` (features.gifs on and a non-empty library) adds `senses.gifs` right after it.
  * `gifWatching` (GIFs are watched now, src/memory/gif-watch.js#gifWatchBlocker)
  * swaps `senses.gifDescribed` for `senses.gifWatched` when the labels have it.
- * Outside a private chat, right after the files line: `senses.channels` (the
+ * Right after the files line, `senses.time` (how to read clock times, line
+ * ages and gap markers), private chats included, when the label is a non-empty string.
+ * Outside a private chat, after it: `senses.channels` (the
  * persona sees only the channels this request shows), then, with an
  * `elsewhereDestination` (`{ name }`, where a call from a read-only channel is
  * answered), `senses.elsewhere` with `{destination}`. With a `diaryChannel`
@@ -1235,6 +1237,8 @@ function renderSenses(
     lines.push(drawQuota.spent ? senses.drawSpent : drawQuota.userSpent ? senses.drawSpentUser : senses.draw);
   }
   lines.push(senses.files);
+  // How to read clock times, line ages and gap markers; private chats too.
+  if (typeof senses.time === 'string' && senses.time) lines.push(senses.time);
   // Which channels the persona sees, and where it answers a call from one it
   // cannot write in: a server turn only.
   if (!privateChat && senses.channels) lines.push(senses.channels);
@@ -1899,6 +1903,10 @@ export function buildRequest(input) {
     maxChars: config.context.maxMessageChars,
     selfName,
     labels,
+    // An old line carries its age against the same clock as `<now>` and `<tempo>`: the chat,
+    // its blind variant, neighbour and pulled channels alike.
+    now,
+    ageMinutes: config.context.ageAfterMinutes ?? 60,
     seeReactions: config.features?.seeReactions !== false,
     reactionsPerMessage: config.context.reactionsPerMessage,
     replyQuoteChars: config.context.replyQuoteChars,

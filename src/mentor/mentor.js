@@ -536,7 +536,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     const examples = anchors.map((situation) => {
       const original = block('original', situation.original.join('\n'));
       const around = calibrated(estimateTokens(block('example', `${block('situation', ' ')}\n${original}`)));
-      const fitted = fittedTranscript(transcriptItems(situation.history, selfName, momentMedia(situation)), share - around);
+      const fitted = fittedTranscript(transcriptItems(situation.history, selfName, momentMedia(situation), Number.isFinite(situation.at) ? situation.at : undefined), share - around);
       dropped += fitted.dropped;
       return block('example', [block('situation', fitted.text), original].filter(Boolean).join('\n'));
     });
@@ -592,9 +592,10 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
    * `media` (a real moment's, see `momentMedia`) renders its media as she saw them, and the
    * links it read when it carries them (`reads`, a Map). A GIF of the guild's library carries
    * its handle, as in her request (src/behavior/prompt.js#buildRequest: `features.gifs` on and a
-   * library with an entry).
+   * library with an entry). `at` (the replayed moment's clock, as its request gets it) gives
+   * an old line its age, as in her chat; omitted, no line carries one.
    */
-  function transcriptItems(history, selfName, media = null) {
+  function transcriptItems(history, selfName, media = null, at = undefined) {
     const config = hot.config;
     return formatTranscript(history, {
       timezone: config.bot?.timezone,
@@ -603,6 +604,8 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       selfName,
       labels: hot.prompts.labels,
       mode: 'chat',
+      now: at,
+      ageMinutes: config.context?.ageAfterMinutes ?? 60,
       seeReactions: config.features?.seeReactions !== false,
       reactionsPerMessage: config.context?.reactionsPerMessage,
       replyQuoteChars: config.context?.replyQuoteChars,
@@ -946,7 +949,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       const { history } = situationHistory(situation, { selfId: self.id, selfName: self.name, at, channel: reference.channel });
       // A real moment's media render as she saw them, in its transcript and in her request alike.
       const media = anchored ? momentMedia(situation) : null;
-      const items = transcriptItems(history, self.name, media);
+      const items = transcriptItems(history, self.name, media, at);
       const transcript = renderTranscript(items, timezone, hot.prompts.labels);
       const record = anchored
         ? { n: i + 1, title: situation.title ?? '', anchor: situation.anchor, original: situation.original ?? [], transcript, answers: [] }

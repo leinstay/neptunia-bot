@@ -92,6 +92,7 @@
     "neighborMaxChannels": 8,
     "maxMessageChars": 800,
     "gapMarkerMinutes": 20,
+    "ageAfterMinutes": 60,
     "reactionsPerMessage": 6,
     "replyQuoteChars": 80,
     "otherProfiles": 6,

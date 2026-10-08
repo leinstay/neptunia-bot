@@ -2504,10 +2504,10 @@ test('renderSenses: shows drawSpentUser when the member\'s quota is spent', () =
 });
 
 test('renderSenses: an older labels set without senses.draw shows no draw line', () => {
-  // An older set has no channel lines either (they follow the files line).
+  // An older set has no time or channel lines either (they follow the files line).
   const older = {
     ...labels,
-    senses: { ...labels.senses, draw: undefined, drawSpent: undefined, drawSpentUser: undefined, channels: undefined, elsewhere: undefined },
+    senses: { ...labels.senses, draw: undefined, drawSpent: undefined, drawSpentUser: undefined, time: undefined, channels: undefined, elsewhere: undefined },
   };
   const senses = sensesOf(buildRequest(baseInput({ prompts: fakePrompts({ labels: older }), drawQuota: DRAW_OPEN }))).split('\n');
   assert.equal(senses[senses.length - 1], labels.senses.files);
@@ -2756,8 +2756,9 @@ test('buildRequest: a pulled channel renders as channel_view after other_channel
   for (let i = 1; i < positions.length; i += 1) assert.ok(positions[i - 1] < positions[i], `${order[i - 1]} before ${order[i]}`);
   assert.deepEqual(bodyOf(text, 'channel_view').split('\n'), [
     fill(labels.pull.header, { channel: 'journal-de-zoé', from: moment(NOW - 130 * MIN), to: moment(NOW - 120 * MIN), ago: formatDuration(120 * MIN, labels.units) }),
-    `#3 [${formatClock(NOW - 130 * MIN, TZ)}] Zoé: πρώτη σελίδα`,
-    `#4 [${formatClock(NOW - 120 * MIN, TZ)}] Zoé: δεύτερη σελίδα`,
+    // Two hours old: past the 60-minute fallback of context.ageAfterMinutes, so both carry their age.
+    `#3 ${fill(labels.transcript.timeAged, { clock: formatClock(NOW - 130 * MIN, TZ), age: formatDuration(130 * MIN, labels.units) })} Zoé: πρώτη σελίδα`,
+    `#4 ${fill(labels.transcript.timeAged, { clock: formatClock(NOW - 120 * MIN, TZ), age: formatDuration(120 * MIN, labels.units) })} Zoé: δεύτερη σελίδα`,
   ]);
 });
 
@@ -3006,7 +3007,8 @@ test('buildRequest: a pulled channel is left out of other_channels', () => {
 test('buildRequest: senses carry the channels line on server turns and the elsewhere line only with a destination', () => {
   const lines = (overrides) => sensesOf(buildRequest(baseInput(overrides))).split('\n');
   const plain = lines({});
-  assert.equal(plain[plain.indexOf(labels.senses.files) + 1], labels.senses.channels, 'right after the files line');
+  assert.equal(plain[plain.indexOf(labels.senses.files) + 1], labels.senses.time, 'the time line right after the files line');
+  assert.equal(plain[plain.indexOf(labels.senses.time) + 1], labels.senses.channels, 'the channels line right after the time line');
   assert.ok(!plain.some((line) => line.startsWith('read-only channels')));
 
   const withDestination = lines({ elsewhereDestination: { name: 'général' }, config: fakeConfig({ features: { privateMessages: true } }) });
@@ -3021,7 +3023,7 @@ test('buildRequest: senses carry the channels line on server turns and the elsew
   assert.ok(!privateLines.includes(labels.senses.channels));
   assert.ok(!privateLines.some((line) => line.startsWith('read-only channels')));
 
-  const { channels, elsewhere, ...olderSenses } = labels.senses;
+  const { time, channels, elsewhere, ...olderSenses } = labels.senses;
   const older = lines({ elsewhereDestination: { name: 'général' }, prompts: fakePrompts({ labels: { ...labels, senses: olderSenses } }) });
   assert.equal(older.at(-1), labels.senses.files, 'an older labels.json adds no line');
 });
@@ -3032,6 +3034,36 @@ test('buildRequest: a private chat renders a pulled channel like the server', ()
   assert.ok(pulled.pulledIds.size > 0);
   const plain = buildRequest(privateScene());
   assert.ok(!userText(plain).includes('<channel_view>'));
+});
+
+test('buildRequest: senses carry the time line right after the files line, in a private chat too', () => {
+  const server = sensesOf(buildRequest(baseInput())).split('\n');
+  assert.equal(server[server.indexOf(labels.senses.files) + 1], labels.senses.time);
+  const privateLines = sensesOf(buildRequest(privateScene())).split('\n');
+  assert.equal(privateLines[privateLines.indexOf(labels.senses.files) + 1], labels.senses.time);
+});
+
+test('buildRequest: senses without a time label show no time line', () => {
+  const { time, ...olderSenses } = labels.senses;
+  const older = sensesOf(buildRequest(baseInput({ prompts: fakePrompts({ labels: { ...labels, senses: olderSenses } }) }))).split('\n');
+  assert.ok(!older.includes(time));
+  assert.equal(older[older.indexOf(labels.senses.files) + 1], labels.senses.channels);
+  const blank = sensesOf(buildRequest(baseInput({ prompts: fakePrompts({ labels: { ...labels, senses: { ...labels.senses, time: '' } } }) }))).split('\n');
+  assert.equal(blank[blank.indexOf(labels.senses.files) + 1], labels.senses.channels);
+});
+
+test('buildRequest: an old chat line carries its age against input.now, a recent one does not', () => {
+  const history = [makeMessage('old', NOW - 3 * HOUR), makeMessage('new', NOW - 10 * MIN)];
+  const config = fakeConfig({ context: { ageAfterMinutes: 30 } });
+  const chat = (now) => bodyOf(userText(buildRequest(baseInput({ history, config, now }))), 'chat');
+  const aged = (now) => fill(labels.transcript.timeAged, { clock: formatClock(NOW - 3 * HOUR, TZ), age: formatDuration(now - (NOW - 3 * HOUR), labels.units) });
+  const text = chat(NOW);
+  assert.ok(text.includes(`#1 ${aged(NOW)} Userold:`), text);
+  assert.ok(text.includes(`#2 [${formatClock(NOW - 10 * MIN, TZ)}] Usernew:`), text);
+  // The same messages an hour later: the age follows the request's clock.
+  const later = chat(NOW + 60 * MIN);
+  assert.ok(later.includes(`#1 ${aged(NOW + 60 * MIN)} Userold:`), later);
+  assert.notEqual(aged(NOW), aged(NOW + 60 * MIN));
 });
 
 test('buildRequest: textFallback re-renders pulled lines without attachment markers', () => {

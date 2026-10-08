@@ -171,6 +171,76 @@ test('formatTranscript: labels drive the wording even for non-English deployment
   assert.ok(items[1].text.startsWith('--- πέρασαν 25 λεπτό ---'));
 });
 
+// --- formatTranscript: line ages against the request's clock --------------
+
+const AGE_NOW = Date.UTC(2026, 8, 20, 10, 0, 0); // 13:00 Moscow
+const ageOptions = { timezone: TZ, gapMinutes: 20, maxChars: 100, selfName: 'Nept', labels, ageMinutes: 60 };
+
+test('formatTranscript: a chat line older than ageMinutes carries its age, a recent one keeps the bare clock', () => {
+  const messages = [msg('a', AGE_NOW - 2 * HOUR), msg('b', AGE_NOW - 10 * MIN)];
+  const items = formatTranscript(messages, { ...ageOptions, now: AGE_NOW });
+  assert.equal(items[0].text, '#1 [11:00 · 2 h ago] Nick: text');
+  // The gap marker keeps its own wording alongside the ages.
+  assert.equal(items[1].text, '--- 1 h 50 min passed ---\n#2 [12:50] Nick: text');
+});
+
+test('formatTranscript: a line exactly ageMinutes old already carries its age', () => {
+  const items = formatTranscript([msg('a', AGE_NOW - 30 * MIN)], { ...ageOptions, ageMinutes: 30, now: AGE_NOW });
+  assert.equal(items[0].text, '#1 [12:30 · 30 min ago] Nick: text');
+});
+
+test('formatTranscript: the age follows the request clock, two clocks give two ages for the same lines', () => {
+  const messages = [msg('a', AGE_NOW - 2 * HOUR)];
+  const first = formatTranscript(messages, { ...ageOptions, now: AGE_NOW });
+  const later = formatTranscript(messages, { ...ageOptions, now: AGE_NOW + 3 * HOUR + 15 * MIN });
+  assert.equal(first[0].text, '#1 [11:00 · 2 h ago] Nick: text');
+  assert.equal(later[0].text, '#1 [11:00 · 5 h 15 min ago] Nick: text');
+});
+
+test('formatTranscript: no now, no ages', () => {
+  const items = formatTranscript([msg('a', AGE_NOW - 2 * HOUR)], ageOptions);
+  assert.equal(items[0].text, '#1 [11:00] Nick: text');
+});
+
+test('formatTranscript: labels without transcript.timeAged (absent or blank) keep the plain head', () => {
+  const messages = [msg('a', AGE_NOW - 2 * HOUR)];
+  const { timeAged, ...olderTranscript } = labels.transcript;
+  assert.ok(timeAged);
+  for (const transcript of [olderTranscript, { ...labels.transcript, timeAged: '' }]) {
+    const items = formatTranscript(messages, { ...ageOptions, labels: { ...labels, transcript }, now: AGE_NOW });
+    assert.equal(items[0].text, '#1 [11:00] Nick: text');
+  }
+});
+
+test('formatTranscript: memory mode never shows ages', () => {
+  const items = formatTranscript([msg('a', AGE_NOW - 2 * HOUR, { authorId: '42' })], { ...ageOptions, mode: 'memory', now: AGE_NOW });
+  assert.equal(items[0].text, '## #general (id:c1)\n[11:00] Nick (id:42): text');
+});
+
+test('formatTranscript: the date marker and the date header still render alongside ages', () => {
+  const before = Date.UTC(2026, 8, 19, 20, 55, 0); // 23:55 Moscow
+  const after = Date.UTC(2026, 8, 19, 21, 4, 0); // 00:04 Moscow, the next day
+  const now = Date.UTC(2026, 8, 20, 9, 4, 0);
+  const items = formatTranscript([msg('a', before), msg('b', after)], { ...ageOptions, now });
+  assert.equal(items[0].text, '#1 [23:55 · 12 h 9 min ago] Nick: text');
+  assert.equal(items[1].text, `--- ${formatDate(after, TZ, labels.locale)} ---\n#2 [00:04 · 12 h ago] Nick: text`);
+  const rendered = renderTranscript(items, TZ, labels).split('\n');
+  assert.equal(rendered[0], `=== ${formatDate(before, TZ, labels.locale)} ===`);
+});
+
+test('formatTranscript: a gap marker with a date change renders alongside ages', () => {
+  const before = Date.UTC(2026, 8, 19, 20, 0, 0); // 23:00 Moscow
+  const after = Date.UTC(2026, 8, 19, 23, 12, 0); // 02:12 Moscow, the next day
+  const items = formatTranscript([msg('a', before), msg('b', after)], { ...ageOptions, now: after + 2 * HOUR });
+  assert.equal(items[1].text, `--- 3 h 12 min passed · ${formatDate(after, TZ, labels.locale)} ---\n#2 [02:12 · 2 h ago] Nick: text`);
+});
+
+test('formatTranscript: the age head takes its wording and units from the labels', () => {
+  const greek = { ...grLabels, transcript: { ...grLabels.transcript, timeAged: '[{clock} · πριν από {age}]' } };
+  const items = formatTranscript([msg('a', AGE_NOW - 2 * HOUR)], { ...ageOptions, labels: greek, now: AGE_NOW });
+  assert.equal(items[0].text, '#1 [11:00 · πριν από 2 ώρα] Nick: text');
+});
+
 // --- formatTranscript: indexOffset (a second block continues the numbering) ---
 
 function offsetMessages() {
