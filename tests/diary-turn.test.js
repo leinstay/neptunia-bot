@@ -241,6 +241,22 @@ test('diary turn: plans on the classifier model, then composes with the card', a
   assert.ok(composeUser.includes(fill(labels.senses.diary, { channel: 'journal' })), 'the senses name the diary');
 });
 
+test('diary turn: a hedged plan request is limited by diary.planTimeoutMs, an unhedged one carries no hedge', async () => {
+  const hedged = fakeHot({ diary: { planTimeoutMs: 120000 } });
+  hedged.config.llm.hedge = { roles: ['classifier.text'], afterMs: 2500, timeoutMs: 8000, longTimeoutMs: 20000 };
+  const llmHedged = fakeLlm({ kind: 'status', brief: 'b', search: '', picture: false }, '<msg>x</msg>');
+  await runner({ hot: hedged, llm: llmHedged }).runTurn({ channel: diaryChannel(), mode: 'diary', diary: {} });
+  assert.equal(llmHedged.options[0].purpose, 'diary-plan');
+  assert.deepEqual(llmHedged.options[0].hedge, { afterMs: 2500, timeoutMs: 120000 });
+
+  const unhedged = fakeHot({ diary: { planTimeoutMs: 120000 } });
+  unhedged.config.llm.hedge = { roles: [], afterMs: 2500, timeoutMs: 8000, longTimeoutMs: 20000 };
+  const llmPlain = fakeLlm({ kind: 'status', brief: 'b', search: '', picture: false }, '<msg>x</msg>');
+  await runner({ hot: unhedged, llm: llmPlain }).runTurn({ channel: diaryChannel(), mode: 'diary', diary: {} });
+  assert.equal(llmPlain.options[0].purpose, 'diary-plan');
+  assert.equal('hedge' in llmPlain.options[0], false);
+});
+
 test('diary turn: a broken plan answer falls back to a weighted kind', async () => {
   const llm = fakeLlm('not json at all', '<msg>ennui</msg>');
   const store = fakeStore();
