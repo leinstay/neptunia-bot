@@ -661,7 +661,7 @@ Settings for the diary channel (`features.diary`). The persona posts in one owne
 | `searchKinds` | `["news", "facts"]` | Kinds that may trigger a web search. The planner writes a query only for these kinds |
 | `pictureKinds` | `["selfPicture", "picture", "meme"]` | Kinds that always get a picture when the day's picture caps allow it, whatever the planner answered. Other kinds draw only when the planner asks |
 | `planMaxOutputTokens` | `300` | Max output tokens for the plan request |
-| `planTimeoutMs` | `20000` | Timeout for the plan request (ms) |
+| `planTimeoutMs` | `20000` | Timeout for the plan request (ms). Also the limit of its hedged call when `llm.hedge.roles` includes `classifier.text`, in place of `llm.hedge.timeoutMs` |
 
 Default `windows`:
 

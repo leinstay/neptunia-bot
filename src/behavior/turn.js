@@ -50,7 +50,7 @@ import { stickyOn, stickyPhrases, stickySettings } from './sticky.js';
 import { captionedEntries, gifPickSettings, parseGifPick, pickCandidates, pickContext, renderGifLibrary } from './gif-pick.js';
 import { turnRequestInput } from './turn-input.js';
 import { parseJsonObject, parseOutput } from '../llm/parse.js';
-import { DailyCapError, REPLY_REQUEST, TokenLimitError, RETRY_STATUS, helperRequestOptions, railReason, sleep } from '../llm/openrouter.js';
+import { DailyCapError, REPLY_REQUEST, TokenLimitError, RETRY_STATUS, hedgeSettings, helperRequestOptions, railReason, sleep } from '../llm/openrouter.js';
 import { ImageCapError, ImageGenError } from '../llm/images.js';
 import { isLimitNotice, limitOf, mirrorChannelLabel, mirrorDryRun, postLimitNotice } from './limits.js';
 import { between, typingMs } from './random.js';
@@ -2353,7 +2353,9 @@ export function createTurnRunner({
    * diary pictures under `diary.maxPicturesPerDay` (2) and the image client's
    * own cap not spent), then the plan request (src/behavior/prompt.js#buildDiaryPlanRequest:
    * prompts/diary-plan.md on the classifier model, `diary.planMaxOutputTokens`
-   * (300), `diary.planTimeoutMs` (20000), usage purpose `diary-plan`) with
+   * (300), `diary.planTimeoutMs` (20000), usage purpose `diary-plan`; when
+   * `llm.hedge` hedges `classifier.text`, the hedged call is limited by
+   * `diary.planTimeoutMs` rather than `llm.hedge.timeoutMs`) with
    * `<seeds>` drawn from prompts/diary-seeds.md (`diary.seedSets`, 2) and,
    * with an owner's topic (`params.topic`, src/behavior/diary.js#diaryTopic),
    * a `<topic>` block after them; the topic also rides on the plan as its
@@ -2416,6 +2418,12 @@ export function createTurnRunner({
         seedsText,
         topicText: renderTopicBlock(topic, labels),
       });
+      const planTimeoutMs = diaryCfg.planTimeoutMs ?? 20000;
+      // A hedged plan request gets the plan's own limit, not llm.hedge.timeoutMs.
+      const hedge = hedgeSettings(config);
+      const planHedge = hedge && hedge.afterMs > 0 && hedge.roles.includes('classifier.text')
+        ? { hedge: { afterMs: hedge.afterMs, timeoutMs: planTimeoutMs } }
+        : {};
       let completion = null;
       try {
         completion = await llm.complete(request.messages, {
@@ -2424,8 +2432,9 @@ export function createTurnRunner({
             role: 'classifier.text',
             maxOutputTokens: diaryCfg.planMaxOutputTokens ?? 300,
             purpose: 'diary-plan',
-            timeoutMs: diaryCfg.planTimeoutMs ?? 20000,
+            timeoutMs: planTimeoutMs,
           }),
+          ...planHedge,
         });
       } catch (err) {
         if (err instanceof DailyCapError || err instanceof TokenLimitError) throw err;
