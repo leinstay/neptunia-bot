@@ -324,7 +324,7 @@ test('renderWorn: a resting or pinned filler absent from the window is still lis
   const ring = ringOf(['nothing here', 'nor here']);
   assert.equal(
     renderWorn([], labels, FILLER_CONFIG, fillersAt(list, ring)),
-    [labels.variety.intro, labels.variety.fillersIntro, fillerLine('pinned', 0, '2 d', 2), fillerLine('resting', 0, '1 h', 2)].join('\n'),
+    [labels.variety.intro, labels.variety.pinnedIntro, fillerLine('pinned', 0, '2 d', 2), labels.variety.fillersIntro, fillerLine('resting', 0, '1 h', 2)].join('\n'),
   );
 });
 
@@ -338,10 +338,10 @@ test('renderWorn: a filler past its cooldown (hours or own messages) or never us
   assert.equal(renderWorn(PATTERNS, labels, FILLER_CONFIG, fillersAt(list)).split('\n').slice(3).join('\n'), [labels.variety.fillersIntro, fillerLine('still', 0, '2 h')].join('\n'));
 });
 
-test('renderWorn: a pinned filler is always listed, aged from lastSeen when never used, ranked first', () => {
+test('renderWorn: a pinned filler is always listed in its own section, aged from lastSeen when never used', () => {
   const seen = new Date(NOW - 2 * 24 * HOUR).toISOString();
   const list = [filler('resting', false, used(1, 1, { uses: 2, weight: 9 })), filler('pinned', false, { pinned: true, lastSeen: seen, weight: 1 })];
-  assert.equal(renderWorn([], labels, FILLER_CONFIG, fillersAt(list)), [labels.variety.intro, labels.variety.fillersIntro, fillerLine('pinned', 0, '2 d'), fillerLine('resting', 0, '1 h')].join('\n'));
+  assert.equal(renderWorn([], labels, FILLER_CONFIG, fillersAt(list)), [labels.variety.intro, labels.variety.pinnedIntro, fillerLine('pinned', 0, '2 d'), labels.variety.fillersIntro, fillerLine('resting', 0, '1 h')].join('\n'));
 });
 
 test('renderWorn: no stamp at all fills {ago} with transcript.unknownDuration', () => {
@@ -349,10 +349,19 @@ test('renderWorn: no stamp at all fills {ago} with transcript.unknownDuration', 
   assert.ok(renderWorn([], labels, FILLER_CONFIG, fillersAt(list)).endsWith(fillerLine('bare', 0, labels.transcript.unknownDuration)));
 });
 
-test('renderWorn: at most variety.fillers.max filler lines, read now', () => {
+test('renderWorn: at most variety.fillers.max filler lines per section, read now', () => {
   const list = ['alpha', 'beta', 'gamma'].map((text, i) => filler(text, false, used(1, 1, { weight: 10 - i })));
   const config = { variety: { fillers: { ...FILLER_CONFIG.variety.fillers, max: 2 } } };
   assert.deepEqual(renderWorn([], labels, config, fillersAt(list)).split('\n').slice(2), [fillerLine('alpha', 0, '1 h'), fillerLine('beta', 0, '1 h')]);
+  const both = [...list, ...['delta', 'omega', 'sigma'].map((text, i) => filler(text, false, { pinned: true, weight: 10 - i }))];
+  assert.deepEqual(renderWorn([], labels, config, fillersAt(both)).split('\n').slice(1), [
+    labels.variety.pinnedIntro,
+    fillerLine('delta', 0, 'less than a minute'),
+    fillerLine('omega', 0, 'less than a minute'),
+    labels.variety.fillersIntro,
+    fillerLine('alpha', 0, '1 h'),
+    fillerLine('beta', 0, '1 h'),
+  ]);
 });
 
 test('renderWorn: a missing or blank fillersIntro or fillerLine leaves the filler lines out', () => {
@@ -1556,4 +1565,48 @@ test('long pass: a word feeds the filler list; patterns the owner pinned stay ah
   assert.ok(logs.some((l) => l.msg === 'fillers: learned' && l.added === 1));
   const shown = await pass.forTurn({ ...TURN, history: ownHistory() });
   assert.equal(shown[0].shape, 'quotes a film line', 'the pin reaches the turn\'s <worn> first');
+});
+
+// ---- the pinned section, the match note ------------------------------------------------------
+
+/** Labels whose line template is just the text, with the optional note. */
+const TEXT_ONLY = { ...labels, variety: { ...labels.variety, fillerLine: '{text}', matchNote: 'a trailing * stands for any ending' } };
+
+test('renderWorn: pinned fillers go under pinnedIntro even when not resting, never under fillersIntro', () => {
+  const list = [filler('τιμ', true, { pinned: true }), filler('free', false, used(40))];
+  assert.equal(renderWorn([], TEXT_ONLY, FILLER_CONFIG, fillersAt(list)), [labels.variety.intro, labels.variety.pinnedIntro, '- τιμ*', TEXT_ONLY.variety.matchNote].join('\n'));
+});
+
+test('renderWorn: a resting learned filler goes under fillersIntro; a free one is not listed', () => {
+  const list = [filler('τιμ', true, used(2)), filler('free', false, used(40)), filler('never', false)];
+  assert.equal(renderWorn([], TEXT_ONLY, FILLER_CONFIG, fillersAt(list)), [labels.variety.intro, labels.variety.fillersIntro, '- τιμ*', TEXT_ONLY.variety.matchNote].join('\n'));
+});
+
+test('renderWorn: both sections, pinned first, the match note once after the last filler line', () => {
+  const list = [filler('τιμ', true, { pinned: true }), filler('café', false, used(2))];
+  const out = renderWorn(PATTERNS, TEXT_ONLY, FILLER_CONFIG, fillersAt(list)).split('\n');
+  assert.deepEqual(out.slice(3), [labels.variety.pinnedIntro, '- τιμ*', labels.variety.fillersIntro, '- café', TEXT_ONLY.variety.matchNote]);
+  assert.equal(out.filter((line) => line === TEXT_ONLY.variety.matchNote).length, 1);
+});
+
+test('renderWorn: no match note without a filler line, or with a blank note', () => {
+  assert.equal(renderWorn(PATTERNS, TEXT_ONLY, FILLER_CONFIG, fillersAt([filler('never', false)])), renderWorn(PATTERNS, labels, FILLER_CONFIG));
+  const blank = { ...TEXT_ONLY, variety: { ...TEXT_ONLY.variety, matchNote: ' ' } };
+  const list = [filler('τιμ', true, { pinned: true })];
+  assert.equal(renderWorn([], blank, FILLER_CONFIG, fillersAt(list)), [labels.variety.intro, labels.variety.pinnedIntro, '- τιμ*'].join('\n'));
+});
+
+test('renderWorn: a missing pinnedIntro drops the pinned section but keeps the learned one', () => {
+  const { pinnedIntro: _omit, ...rest } = TEXT_ONLY.variety;
+  const list = [filler('τιμ', true, { pinned: true }), filler('café', false, used(2))];
+  assert.equal(
+    renderWorn([], { ...TEXT_ONLY, variety: rest }, FILLER_CONFIG, fillersAt(list)),
+    [labels.variety.intro, labels.variety.fillersIntro, '- café', TEXT_ONLY.variety.matchNote].join('\n'),
+  );
+});
+
+test('renderWorn: labels without the new keys (an older labels.json) still render the learned section', () => {
+  const { pinnedIntro: _a, matchNote: _b, ...older } = TEXT_ONLY.variety;
+  const list = [filler('τιμ', true, { pinned: true }), filler('café', false, used(2))];
+  assert.equal(renderWorn([], { ...TEXT_ONLY, variety: older }, FILLER_CONFIG, fillersAt(list)), [labels.variety.intro, labels.variety.fillersIntro, '- café'].join('\n'));
 });
