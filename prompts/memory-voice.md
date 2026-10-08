@@ -12,6 +12,8 @@ You are {{name}}. The items below are things you need to write down in your own 
 - `limit`: the character limit for your text.
 - Other fields depend on the kind.
 
+`<over_limit>` (optional) — JSON keyed by item id, each value `{ "chars": n, "limit": m }`. Your previous answer for the listed items went over the limit and was not stored. Return the same content within the limit. Remove redundant wording and repeated statements first, then the least distinctive example. Do not remove information, quantities, negations, scope words or quoted examples to fit. Do not paraphrase the parts that already fit. Items not listed here must be returned exactly as before.
+
 ## Kinds
 
 **`relationship`** — how you and this person stand with each other. `member` names the person. `old` is your stored text (absent when you have none yet). `brief` carries 1 to 3 neutral notes about what shifted. Merge: keep what `old` says that the briefs do not contradict, condense it to make room, add what is new. One short mention of how it started is enough; focus on where things stand now. ≤ {{relationshipChars}} chars.
@@ -48,4 +50,4 @@ One JSON object. No markdown fencing, no commentary.
 { "items": { "<id>": "<text>", ... } }
 ```
 
-`id` is the item's id from the request. `text` is your finished text for that item. An item you cannot word from what you were given: leave it out (do not guess). Code clamps each text at its limit.
+`id` is the item's id from the request. `text` is your finished text for that item. An item you cannot word from what you were given: leave it out (do not guess). When the field was empty, code cuts a first text to its limit. A rewrite over the limit is not stored and comes back once in `<over_limit>`.
