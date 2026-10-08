@@ -402,8 +402,9 @@ function relationshipScoreOf(opts, affinity) {
 /**
  * Write a `relationship` text onto a public profile or a private layer, in place, with its two
  * stamps -- the one writer of that field for `applyProfileOps` and `applyPrivateOps`. Only a
- * non-empty string is written (an absent or blank one never blanks the stored text), clamped to
- * `opts.relationshipChars` (`relationships.textChars`), else `opts.fieldChars`. Stamped next to
+ * non-empty string is written (an absent or blank one never blanks the stored text). A first write
+ * (the stored text is empty) is clamped to `opts.relationshipChars` (`relationships.textChars`),
+ * else `opts.fieldChars`; a rewrite is stored as given, never cut (`firstWriteText`). Stamped next to
  * it: `relationshipScore` (see `relationshipScoreOf`) and `relationshipWrittenAt`, the ISO time of
  * `opts.now` (else the wall clock) -- the clock the batch's attitude moves are stamped with
  * (src/memory/affinity.js#applyDelta), so src/memory/affinity.js#relationshipStaleOf counts the
@@ -417,11 +418,26 @@ function relationshipScoreOf(opts, affinity) {
  */
 function writeRelationship(target, text, opts, onWrite) {
   if (typeof text !== 'string' || !text.trim()) return;
-  const next = clampText(text, opts.relationshipChars ?? opts.fieldChars, { tolerance: opts.clampTolerance });
+  const next = firstWriteText(target.relationship, text, opts.relationshipChars ?? opts.fieldChars, opts.clampTolerance);
   onWrite?.(target.relationship, next);
   target.relationship = next;
   target.relationshipScore = relationshipScoreOf(opts, target.affinity);
   target.relationshipWrittenAt = new Date(Number.isFinite(opts.now) ? opts.now : Date.now()).toISOString();
+}
+
+/**
+ * The text a prose writer stores: a first write (`previous` empty, nothing to lose yet) is
+ * clamped to `limit` as before; a rewrite is only trimmed, never cut. A rewrite over its limit is
+ * the caller's to refuse (src/memory/prose.js#acceptProse) -- the store never shortens one.
+ * @param {unknown} previous  The stored text.
+ * @param {string} text       A non-blank string.
+ * @param {number} limit
+ * @param {number} [tolerance]
+ * @returns {string}
+ */
+function firstWriteText(previous, text, limit, tolerance) {
+  const first = typeof previous !== 'string' || previous.trim() === '';
+  return first ? clampText(text, limit, { tolerance }) : text.trim();
 }
 
 /** The sighting time of one profile/private batch: `opts.seenAt`, else `opts.now`, else the wall clock. */
@@ -1047,7 +1063,7 @@ export function createStore({ dataDir }) {
       for (const key of ['character', 'style']) {
         const value = ops?.[key];
         if (typeof value === 'string' && value.trim()) {
-          const next = clampText(value, opts.fieldChars, { tolerance: opts.clampTolerance });
+          const next = firstWriteText(profile[key], value, opts.fieldChars, opts.clampTolerance);
           recordVersion(guildId, 'users', userId, key, profile[key], next, opts);
           profile[key] = next;
         }
@@ -1250,7 +1266,7 @@ export function createStore({ dataDir }) {
      * @param {{ relationship?: string,
      *   interests?: { add?: object[], update?: object[], seen?: string[], remove?: string[] },
      *   details?: { add?: unknown[], seen?: unknown[], remove?: unknown[] } }} ops
-     * @param {object} [opts]  As for `applyProfileOps` (the text clamped to `relationshipChars`,
+     * @param {object} [opts]  As for `applyProfileOps` (a first text clamped to `relationshipChars`,
      *   else `fieldChars`, and stamped `relationshipScore` and `relationshipWrittenAt` in this
      *   layer); `relationshipScore` falls back to this layer's own score (the analyzer passes the
      *   effective one it showed the model).

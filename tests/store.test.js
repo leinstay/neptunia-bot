@@ -1065,12 +1065,16 @@ test('applyProfileOps: sets character/style/relationship only when given as non-
   assert.equal(profile.relationship, 'trusts you');
 });
 
-test('applyProfileOps: prose fields are clamped tolerantly to opts.fieldChars (a single long word hard-cuts at the tolerance ceiling)', () => {
+test('applyProfileOps: a first write of a prose field is clamped tolerantly to opts.fieldChars; a rewrite is never cut', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   store.touchUser('g1', 'u1', 'Alice', 1000);
   const profile = store.applyProfileOps('g1', 'u1', { character: '0123456789' }, { fieldChars: 5, now: 1000 });
   assert.equal(profile.character, '012345', '5 * the default tolerance 1.25, floored');
+  // A rewrite over the limit is the caller's to refuse (src/memory/prose.js#acceptProse): the store
+  // stores what it is given and never cuts it.
+  const rewritten = store.applyProfileOps('g1', 'u1', { character: '0123456789abcdef' }, { fieldChars: 5, now: 2000 });
+  assert.equal(rewritten.character, '0123456789abcdef');
 });
 
 test('applyProfileOps: normalizes a hand-edited interests array before applying ops', () => {
@@ -1965,6 +1969,10 @@ test('applyProfileOps: a written relationship is stamped relationshipWrittenAt a
 
   store.applyProfileOps('g1', 'u1', { relationship: '   ' }, { fieldChars: 400, relationshipChars: 50, now: WRITTEN_NOW + 5000 });
   assert.equal(store.getUser('g1', 'u1').relationshipWrittenAt, new Date(WRITTEN_NOW).toISOString(), 'a blank text stamps nothing');
+
+  // Only the first write is clamped: a rewrite over the limit is the caller's to refuse, the store never cuts it.
+  const rewritten = store.applyProfileOps('g1', 'u1', { relationship: LONG_RELATIONSHIP }, { fieldChars: 400, relationshipChars: 50, now: WRITTEN_NOW + 6000 });
+  assert.equal(rewritten.relationship, LONG_RELATIONSHIP);
 });
 
 test('applyPrivateOps: a written private relationship is stamped relationshipWrittenAt and clamped to relationshipChars', () => {
@@ -1978,6 +1986,10 @@ test('applyPrivateOps: a written private relationship is stamped relationshipWri
   assert.equal(priv.relationshipWrittenAt, new Date(WRITTEN_NOW).toISOString());
   assert.equal(priv.relationshipScore, -9);
   assert.equal(store.getUser('g1', 'u1'), null, 'the public profile is not created');
+
+  // Only the first write is clamped: a rewrite over the limit is the caller's to refuse, the store never cuts it.
+  const rewritten = store.applyPrivateOps('g1', 'u1', { relationship: LONG_RELATIONSHIP }, { fieldChars: 400, relationshipChars: 50, now: WRITTEN_NOW + 1000 });
+  assert.equal(rewritten.relationship, LONG_RELATIONSHIP);
 });
 
 test('store: relationshipWrittenAt and relationshipScore survive a restart, public and private', () => {

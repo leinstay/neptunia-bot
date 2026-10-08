@@ -120,7 +120,7 @@ function evictOverflow(entries, maxEntries) {
  * (analyzer or owner alike) and the entry becomes/stays an owner entry, the
  * one way a title becomes protected from the analyzer. An analyzer update
  * that would leave an entry exactly as stored (title, keys, text compared
- * after normalising and clamping) is skipped: not stamped, not counted. Past
+ * after normalising and trimming) is skipped: not stamped, not counted. Past
  * `maxEntries` the stalest analyzer entries leave (see `evictOverflow`): the
  * ones written longest ago, not the ones created first.
  *
@@ -128,8 +128,10 @@ function evictOverflow(entries, maxEntries) {
  * @param {unknown} incoming            Untrusted `{ title, keys, text, always? }[]`.
  * @param {{ source: 'analyzer'|'owner', now?: number, maxEntries?: number, textChars?: number,
  *   clampTolerance?: number }} opts
- *   `title` is a hard identity clamp at MAX_TITLE; `text` is free prose, clamped tolerantly (see
- *   src/memory/clamp.js) to `textChars` (config.lore.textChars; DEFAULT_MAX_TEXT when absent).
+ *   `title` is a hard identity clamp at MAX_TITLE; `text` is free prose: a first write (a new
+ *   entry, or one with no text) is clamped tolerantly (see src/memory/clamp.js) to `textChars`
+ *   (config.lore.textChars; DEFAULT_MAX_TEXT when absent); a rewrite is stored as given, never
+ *   cut (the caller refuses one over the limit, src/memory/prose.js#acceptProse).
  * @returns {{ entries: object[], upserted: number, changes: { title: string, previousText: string, nextText: string }[] }}
  *   `upserted`: entries inserted or actually changed. `changes`: one pair per existing entry whose
  *   text this call replaced with a different one (the stored text before, the text after), for the
@@ -150,11 +152,16 @@ export function upsertLore(entries, incoming, { source, now: nowMs = Date.now(),
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
     const title = typeof raw.title === 'string' ? clampText(raw.title, MAX_TITLE, { tolerance: 1 }) : '';
     const keys = normalizeKeys(raw.keys);
-    const text = typeof raw.text === 'string' ? clampText(raw.text, effectiveTextChars, { tolerance: clampTolerance }) : '';
-    if (!title || keys.length === 0 || !text) continue;
+    if (!title || keys.length === 0 || typeof raw.text !== 'string' || !raw.text.trim()) continue;
 
     const normalized = normalizeTitle(title);
     const existingIndex = byTitle.get(normalized);
+    // Only a first write is clamped (no entry, or one with no text): a rewrite over the limit is the
+    // caller's to refuse (src/memory/prose.js#acceptProse), never cut here.
+    const previousText = existingIndex === undefined ? '' : stored[existingIndex].text;
+    const firstWrite = typeof previousText !== 'string' || previousText.trim() === '';
+    const text = firstWrite ? clampText(raw.text, effectiveTextChars, { tolerance: clampTolerance }) : raw.text.trim();
+    if (!text) continue;
 
     if (existingIndex === undefined) {
       salt += 1;

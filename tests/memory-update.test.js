@@ -1022,17 +1022,22 @@ test('buildMemoryRequest: a request built per stage from the tracked prompts and
 test('analyze: a hot change to lore.textChars between two updates is picked up', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';
-    const longText = 'x'.repeat(200);
+    let text = 'x'.repeat(200);
     const hot = { config: makeConfig({ lore: { textChars: 50 } }), prompts: { memory: 'sys', labels } };
-    const llm = { complete: async () => ({ text: JSON.stringify({ lore: [{ title: 'Event', keys: ['event'], text: longText }] }) }) };
+    const llm = { complete: async () => ({ text: JSON.stringify({ lore: [{ title: 'Event', keys: ['event'], text }] }) }) };
     const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
 
     await updater.analyze(guildId, [slimMessage({ id: 'm1' })]);
-    assert.equal(store.getLore(guildId)[0].text.length, Math.floor(50 * 1.25));
+    assert.equal(store.getLore(guildId)[0].text.length, Math.floor(50 * 1.25), 'a first write is clamped');
+
+    // A rewrite is never cut: over the limit it is refused, within it taken whole.
+    text = 'y'.repeat(150);
+    await updater.analyze(guildId, [slimMessage({ id: 'm2' })]);
+    assert.equal(store.getLore(guildId)[0].text, 'x'.repeat(62), 'over 50: refused');
 
     hot.config.lore.textChars = 150;
-    await updater.analyze(guildId, [slimMessage({ id: 'm2' })]);
-    assert.equal(store.getLore(guildId)[0].text.length, Math.floor(150 * 1.25));
+    await updater.analyze(guildId, [slimMessage({ id: 'm3' })]);
+    assert.equal(store.getLore(guildId)[0].text, 'y'.repeat(150), 'within 150, read fresh on this call');
   });
 });
 
@@ -1046,15 +1051,18 @@ test('analyze: a hot change to memory.clampTolerance between two updates is pick
     };
     // `relationship`: a prose field a stream batch still writes (character/style need the portrait
     // refresh), clamped to relationships.textChars.
-    const llm = { complete: async () => ({ text: JSON.stringify({ users: { 1: { relationship: longText } } }) }) };
+    let author = '1';
+    const llm = { complete: async () => ({ text: JSON.stringify({ users: { [author]: { relationship: longText } } }) }) };
     const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept' });
 
     await updater.analyze(guildId, [slimMessage({ id: 'm1', authorId: '1', authorName: 'nick' })]);
     assert.equal(store.getUser(guildId, '1').relationship.length, 100, 'tolerance 1 -- a hard limit');
 
+    // The tolerance widens only a first write: another member's first text.
     hot.config.memory.clampTolerance = 2;
-    await updater.analyze(guildId, [slimMessage({ id: 'm2', authorId: '1', authorName: 'nick' })]);
-    assert.equal(store.getUser(guildId, '1').relationship.length, 200, 'tolerance 2, read fresh on this call');
+    author = '2';
+    await updater.analyze(guildId, [slimMessage({ id: 'm2', authorId: '2', authorName: 'other' })]);
+    assert.equal(store.getUser(guildId, '2').relationship.length, 200, 'tolerance 2, read fresh on this call');
   });
 });
 
@@ -5653,11 +5661,16 @@ test('applyMemoryUpdate: the relationshipChars option wins; with neither option 
     assert.equal(store.getUser(guildId, '1').relationship, FIRST_SENTENCE);
 
     // Neither a relationshipChars nor a relationships option (a caller passing no limit at all):
-    // the relationship limit of its own, not fieldChars. The configured limit with
+    // the relationship limit of its own (600), not fieldChars. A rewrite of about 530 characters,
+    // over fieldChars * 1.25 and within 600, is taken whole. The configured limit with
     // features.relationships off is the analyze()/analyzePrivate() tests below.
-    applyMemoryUpdate(store, guildId, { users: { 1: { relationship: `${longer} ` } } }, MEMORY_CFG, new Set(['1']));
+    const within = `${'Μιλάμε συχνά για βιβλία και για ταξίδια. '.repeat(13)}`.trim();
+    applyMemoryUpdate(store, guildId, { users: { 1: { relationship: within } } }, MEMORY_CFG, new Set(['1']));
     const stored = store.getUser(guildId, '1').relationship;
     assert.ok([...stored].length > MEMORY_CFG.fieldChars * 1.25, 'not clamped at fieldChars');
+    assert.equal(stored, within);
+    applyMemoryUpdate(store, guildId, { users: { 1: { relationship: longer } } }, MEMORY_CFG, new Set(['1']));
+    assert.equal(store.getUser(guildId, '1').relationship, within, 'a rewrite over 600 is refused');
   });
 });
 
@@ -5701,10 +5714,18 @@ test('applyPrivateUpdate: the relationshipChars option wins over relationships.t
     });
     assert.equal(store.getPrivate(guildId, 'u1').relationship, FIRST_SENTENCE);
 
+    // A rewrite of about 530 characters, over fieldChars * 1.25 and within the relationship limit
+    // of its own (600), is taken whole; one of about 820 is refused (the store never cuts a rewrite).
+    const within = `${'Μιλάμε συχνά για βιβλία και για ταξίδια. '.repeat(13)}`.trim();
     const longer = `${'Μιλάμε συχνά για βιβλία και για ταξίδια. '.repeat(20)}`.trim();
-    applyPrivateUpdate(store, guildId, 'u1', { users: { u1: { relationship: longer } } }, MEMORY_CFG);
+    applyPrivateUpdate(store, guildId, 'u1', { users: { u1: { relationship: within } } }, MEMORY_CFG);
     const stored = store.getPrivate(guildId, 'u1').relationship;
     assert.ok([...stored].length > MEMORY_CFG.fieldChars * 1.25, 'not clamped at fieldChars');
+    assert.equal(stored, within);
+    const refused = applyPrivateUpdate(store, guildId, 'u1', { users: { u1: { relationship: longer } } }, MEMORY_CFG);
+    assert.equal(store.getPrivate(guildId, 'u1').relationship, within);
+    assert.equal(refused.overLimit, 1);
+    assert.deepEqual(refused.overLimitFields, ['private.relationship']);
   });
 });
 
@@ -8456,5 +8477,170 @@ test('buildMemoryRequest: the notes markers count only the lines the request sho
     assert.ok(applied.deferred > 0, 'the cut batch left lines for the next one');
     assert.equal(applied.notesFlagged, 0);
     assert.deepEqual(marked, [], 'nothing was stamped re-checked');
+  });
+});
+
+// ---- applyMemoryUpdate: an overflowing rewrite is refused, never cut ---------
+// A model answer over a prose field's limit is never cut and stored: on a rewrite the stored text
+// stays and the refusal is counted (`overLimit`, `overLimitFields`); only a first write (the field
+// was empty, nothing to lose yet) is clamped. Each test sets its own limits.
+
+const PROSE_CFG = { fieldChars: 1000, clampTolerance: 1 };
+const PROSE_SENTENCE = 'Μιλάμε για βιβλία και ταξίδια κάθε βράδυ. ';
+// About 1200 characters: over fieldChars 1000, relationships.textChars 600 and lore.textChars 600.
+const PROSE_OVER = PROSE_SENTENCE.repeat(29).trim();
+// About 2400 characters: over the server notes' fieldChars * 2.
+const PROSE_OVER_GUILD = `${PROSE_OVER} ${PROSE_OVER}`;
+
+test('applyMemoryUpdate: a channel field over memory.fieldChars keeps the stored text and is counted; a first write is clamped', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    assert.ok([...PROSE_OVER].length > 1150 && [...PROSE_OVER].length < 1250);
+    store.updateChannel(guildId, 'c1', { topics: 'Ένα.' });
+    const result = applyMemoryUpdate(store, guildId, { channels: { c1: { topics: PROSE_OVER, purpose: PROSE_OVER } } }, PROSE_CFG, new Set(), {
+      knownChannelIds: new Set(['c1']),
+    });
+
+    const channel = store.getChannel(guildId, 'c1');
+    assert.equal(channel.topics, 'Ένα.', 'the rewrite over the limit is refused whole');
+    assert.ok(channel.purpose.length > 0 && [...channel.purpose].length <= 1000, 'the first write is clamped to fieldChars');
+    assert.ok(PROSE_OVER.startsWith(channel.purpose));
+    assert.equal(result.overLimit, 1);
+    assert.deepEqual(result.overLimitFields, ['channels.topics']);
+    assert.equal(result.channels, 1, 'the purpose was written');
+
+    const within = PROSE_SENTENCE.repeat(20).trim();
+    const again = applyMemoryUpdate(store, guildId, { channels: { c1: { topics: within } } }, PROSE_CFG, new Set(), { knownChannelIds: new Set(['c1']) });
+    assert.equal(store.getChannel(guildId, 'c1').topics, within, 'a rewrite within the limit is taken as is');
+    assert.equal(again.overLimit, 0);
+    assert.deepEqual(again.overLimitFields, []);
+  });
+});
+
+test('applyMemoryUpdate: relationship, patterns/starters and lore text over their limits keep the stored text', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Zoé', Date.now());
+    store.applyProfileOps(guildId, '1', { relationship: 'Φίλοι.', character: 'Ήρεμη.', style: 'Σύντομα.' }, { fieldChars: 1000, relationshipChars: 600 });
+    store.updateGuild(guildId, { patterns: 'Ένα.', starters: 'Δύο.' });
+    store.setLore(guildId, [{ title: 'Τίτλος', keys: ['κλειδί'], text: 'Παλιό.' }], { source: 'analyzer', textChars: 600 });
+
+    const result = applyMemoryUpdate(
+      store,
+      guildId,
+      {
+        users: { 1: { relationship: PROSE_OVER } },
+        guild: { patterns: PROSE_OVER_GUILD, starters: PROSE_OVER_GUILD },
+        lore: [{ title: 'Τίτλος', keys: ['κλειδί', 'άλλο'], text: PROSE_OVER }],
+      },
+      PROSE_CFG,
+      new Set(['1']),
+      { relationshipChars: 600, lore: { enabled: true, maxEntries: 50, textChars: 600, now: Date.now() } },
+    );
+
+    const profile = store.getUser(guildId, '1');
+    assert.equal(profile.relationship, 'Φίλοι.');
+    assert.equal(store.getGuild(guildId).patterns, 'Ένα.');
+    assert.equal(store.getGuild(guildId).starters, 'Δύο.');
+    const entry = store.getLore(guildId).find((item) => item.title === 'Τίτλος');
+    assert.equal(entry.text, 'Παλιό.');
+    assert.deepEqual(entry.keys, ['κλειδί', 'άλλο'], 'the keys still change, only the text is refused');
+    assert.equal(result.overLimit, 4);
+    assert.deepEqual(result.overLimitFields, ['users.relationship', 'lore.text', 'guild.patterns', 'guild.starters']);
+    assert.equal(result.relationships, 0);
+    assert.equal(result.guild, false);
+
+    // The portrait writers' single-stage character / style: the same rule at fieldChars.
+    const portrait = applyMemoryUpdate(store, guildId, { users: { 1: { character: PROSE_OVER, style: 'Μακριές προτάσεις.' } } }, PROSE_CFG, new Set(['1']), {
+      portraitFields: true,
+    });
+    assert.equal(store.getUser(guildId, '1').character, 'Ήρεμη.');
+    assert.equal(store.getUser(guildId, '1').style, 'Μακριές προτάσεις.');
+    assert.equal(portrait.overLimit, 1);
+    assert.deepEqual(portrait.overLimitFields, ['users.character']);
+  });
+});
+
+test('applyMemoryUpdate: an accepted rewrite records a version with by analyzer', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.updateChannel(guildId, 'c1', { topics: 'Ένα. Δύο.' });
+    applyMemoryUpdate(store, guildId, { channels: { c1: { topics: 'Δύο. Τρία.' } } }, PROSE_CFG, new Set(), { knownChannelIds: new Set(['c1']) });
+
+    const versions = store.listVersions(guildId, 'channels', 'c1');
+    assert.equal(versions.topics.length, 1);
+    assert.equal(versions.topics[0].text, 'Ένα. Δύο.');
+    assert.equal(versions.topics[0].by, 'analyzer');
+
+    applyMemoryUpdate(store, guildId, { channels: { c1: { topics: 'Τέσσερα.' } } }, PROSE_CFG, new Set(), {
+      knownChannelIds: new Set(['c1']),
+      versions: { enabled: false, kept: 20 },
+    });
+    assert.equal(store.getChannel(guildId, 'c1').topics, 'Τέσσερα.');
+    assert.equal(store.listVersions(guildId, 'channels', 'c1').topics.length, 1, 'versions off records nothing');
+  });
+});
+
+test('run: memory: update applied carries overLimit and overLimitFields', async () => {
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    for (const message of notesLines('c1', 3)) {
+      touchMemory(store, guildId, message);
+      store.pushBuffer(guildId, message, 100);
+    }
+    store.updateChannel(guildId, 'c1', { topics: 'Ένα.' });
+    const hot = {
+      config: makeConfig({ memory: { ...makeConfig().memory, fieldChars: 1000, clampTolerance: 1, batchMessages: 3, minBatchMessages: 1, versionsKept: 20 } }),
+      prompts: { memory: 'sys', labels },
+    };
+    const llm = { complete: async () => ({ text: JSON.stringify({ channels: { c1: { topics: PROSE_OVER } } }) }) };
+    const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => NOTES_NOW });
+
+    const { logs } = await withCapturedLogs(() => updater.run(guildId));
+    const applied = logs.find((entry) => entry.msg === 'memory: update applied');
+    assert.equal(applied.overLimit, 1);
+    assert.deepEqual(applied.overLimitFields, ['channels.topics']);
+    assert.equal(store.getChannel(guildId, 'c1').topics, 'Ένα.');
+  });
+});
+
+test('run: features.versions reaches the store; a rewrite is recorded by the analyzer only while it is on', async () => {
+  for (const versions of [false, true]) {
+    await withStoreAsync(async (store) => {
+      const guildId = 'g1';
+      for (const message of notesLines('c1', 3)) {
+        touchMemory(store, guildId, message);
+        store.pushBuffer(guildId, message, 100);
+      }
+      store.updateChannel(guildId, 'c1', { topics: 'Ένα.' });
+      const hot = {
+        config: makeConfig({ features: { versions }, memory: { ...makeConfig().memory, batchMessages: 3, minBatchMessages: 1, versionsKept: 20 } }),
+        prompts: { memory: 'sys', labels },
+      };
+      const llm = { complete: async () => ({ text: JSON.stringify({ channels: { c1: { topics: 'Δύο.' } } }) }) };
+      const updater = createMemoryUpdater({ hot, store, llm, calibrator: createCalibrator(), getSelfName: () => 'Nept', now: () => NOTES_NOW });
+
+      await withCapturedLogs(() => updater.run(guildId));
+      assert.equal(store.getChannel(guildId, 'c1').topics, 'Δύο.');
+      const recorded = store.listVersions(guildId, 'channels', 'c1').topics ?? [];
+      assert.deepEqual(recorded.map((v) => v.by), versions ? ['analyzer'] : [], `features.versions ${versions}`);
+    });
+  }
+});
+
+test('applyMemoryUpdate: an identical relationship text renews its stamps and records no version', () => {
+  withStore((store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Zoé', Date.now());
+    const at = (now) => ({ relationshipChars: 600, relationships: { ...RELATIONSHIPS_CFG, now } });
+    applyMemoryUpdate(store, guildId, { users: { 1: { relationship: 'Φίλοι.' } } }, PROSE_CFG, new Set(['1']), at(RELATIONSHIPS_CFG.now));
+    const result = applyMemoryUpdate(store, guildId, { users: { 1: { relationship: ' Φίλοι. ' } } }, PROSE_CFG, new Set(['1']), at(RELATIONSHIPS_CFG.now + HOUR_MS));
+
+    const profile = store.getUser(guildId, '1');
+    assert.equal(profile.relationship, 'Φίλοι.');
+    assert.equal(profile.relationshipWrittenAt, new Date(RELATIONSHIPS_CFG.now + HOUR_MS).toISOString(), 'the confirmation renews the stamp');
+    assert.equal(result.relationships, 0, 'no text changed');
+    assert.equal(result.overLimit, 0);
+    assert.deepEqual(store.listVersions(guildId, 'users', '1'), {});
   });
 });
