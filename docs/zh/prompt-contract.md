@@ -146,7 +146,7 @@ GIF 挑选器（`features.gifPicker`，默认开启）。当角色写了一条�
 
 图片的静帧条目保留其自身的 `<itemId>` 键。同一个条目可以同时存在两者。
 
-已观看的 GIF 缓存在 GIF 自身的 `<itemId>` 键下（无 `video:` 前缀）：`{ text, reaction, action, screen, ts, watched: true, gif: true }`；`text` 为一行动作描述（无动作行时为反应或屏幕文字）。`gifs.reactionChars` 在列表中截断 `reaction` 和 `screen`，`gifs.actionChars` 截断 `action` 和旧格式的一行说明；`0` = 不截断。单帧说明存储为 `{ text, ts, gif: true }`（尝试观看失败时附加 `watchFailed`）。两者与图片描述位于同一缓存中。
+已观看的 GIF 缓存在 GIF 自身的 `<itemId>` 键下（无 `video:` 前缀）：`{ text, reaction, action, screen, ts, watched: true, gif: true }`；`text` 为一行动作描述（无动作行时为反应或屏幕文字）。四个字段完整存储，仅受 `media.descriptionChars` 限制。截断在字段显示处生效，即 `<gifs>` 列表和库 GIF 的对话记录行（`transcript.gifKnownFields`）：`gifs.reactionChars` 截断 `reaction` 和 `screen`，`gifs.actionChars` 截断 `action` 和旧格式的一行说明；`0` = 不截断。单帧说明存储为 `{ text, ts, gif: true }`（尝试观看失败时附加 `watchFailed`）。两者与图片描述位于同一缓存中。
 
 网络查询结果缓存在同一个 `data/guilds/<id>/media.json` 中，与视频和图片条目并列：
 
@@ -178,6 +178,9 @@ transcript.imageAttached                 {n}: this picture is attached to the re
 transcript.imageDescribed                {text}
 transcript.gif                           {name}
 transcript.gifDescribed                  {text}
+transcript.gifKnown                      {id} {text}: a GIF that is in the library; id is its handle, text is the caption
+transcript.gifKnownFields                {id} {reaction} {action} {screen}: 缓存中有反应或屏幕文字的库 GIF，替代 gifKnown 使用；字段由 gifs.reactionChars / gifs.actionChars 按 gifs.entryFields 同样方式截断；代码去除空字段及其分隔符；键置空时回退到 gifKnown
+transcript.gifKnownNoText                {id} {name}: a library GIF without a caption; id is the handle, name is the file or link name
 transcript.video                         {name} {duration}
 transcript.videoDescribed                {name} {duration} {text}: text describes ONE frame
 transcript.videoWatched                  {name} {duration} {text}: first-hand, the persona saw and heard the clip

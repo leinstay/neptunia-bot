@@ -260,6 +260,34 @@ test('buildRequest: a library gif in the chat carries its handle; a reposted lin
   assert.ok(text.includes('[gif g3: Danse 3]'));
 });
 
+// A 60-character on-screen text, stored whole by the describer.
+const WHOLE_SCREEN = 'Ἐν ἀρχῇ ἦν ὁ λόγος καὶ ὁ λόγος ἦν πρὸς τὸν θεόν, καὶ θεὸς ἦν';
+
+test('buildRequest: a whole stored on-screen text is still cut per field in <gifs> and in the chat', () => {
+  const mediaCache = {
+    k2: { text: 'a cat lifts its chin', reaction: 'firm agreement', action: 'a cat lifts its chin', screen: WHOLE_SCREEN, ts: NOW, watched: true, gif: true },
+  };
+  const history = [{ ...baseInput().history[0], links: [{ id: 'k2', kind: 'gif', url: 'https://tenor.com/view/gif-2', site: 'Tenor', title: 'Danse 2' }] }];
+  const descriptions = new Map([['k2', 'a cat lifts its chin']]);
+  const request = buildRequest(baseInput({ gifs: library([linkEntry(2, 9)]), mediaCache, history, descriptions }));
+  const line = gifsBlock(request)[1];
+  const screen = line.match(/"(.*)"$/)[1];
+  assert.ok([...screen].length <= 40 && screen.endsWith('…'), `the library cuts the on-screen text: ${screen}`);
+  assert.ok(userText(request).includes(`[gif g2 -- firm agreement; a cat lifts its chin; "${screen}"]`), 'the chat cuts it the same way');
+  assert.equal(mediaCache.k2.screen, WHOLE_SCREEN, 'the cache untouched');
+});
+
+test('buildRequest: the chat cuts gifKnownFields by gifs.reactionChars / gifs.actionChars, read at the moment of use', () => {
+  const mediaCache = {
+    k2: { text: 'a cat lifts its chin slowly', reaction: 'quiet firm agreement', action: 'a cat lifts its chin slowly', screen: 'yes yes yes', ts: NOW, watched: true, gif: true },
+  };
+  const history = [{ ...baseInput().history[0], links: [{ id: 'k2', kind: 'gif', url: 'https://tenor.com/view/gif-2', site: 'Tenor', title: 'Danse 2' }] }];
+  const descriptions = new Map([['k2', 'a cat lifts its chin slowly']]);
+  const config = fakeConfig({ gifs: { reactionChars: 8, actionChars: 14 } });
+  const text = userText(buildRequest(baseInput({ config, gifs: library([linkEntry(2, 9)]), mediaCache, history, descriptions })));
+  assert.ok(text.includes('[gif g2 -- quiet…; a cat lifts…; "yes yes…"]'), text);
+});
+
 const HOUR = 3_600_000;
 
 /** THREE with g2 posted by the persona `agoMs` before NOW and g3 posted 30 h before. */

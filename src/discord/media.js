@@ -503,6 +503,15 @@ function extraOf(...extras) {
  * those keys blanked in prompts.local/labels.json, src/discord/format.js
  * falls back to them). Every other kind ignores it.
  *
+ * `context.gifFields` is that GIF's three caption fields (`{ reaction,
+ * action, screen }`, already cut for display, see
+ * src/behavior/prompt.js#gifFieldsMap): a `gif` item with a handle and a
+ * caption whose `reaction` or `screen` is non-empty renders `gifKnownFields`
+ * (`{ id, text, reaction, action, screen }`, `text` being the caption
+ * gifKnown would show) in place of `gifKnown`; with that key blanked
+ * src/discord/format.js falls back to `gifKnown`. A GIF without a handle
+ * ignores it (`gifDescribed` keeps the caption alone).
+ *
  * `context.answer` is a picture's second look on a question (`{ question,
  * text }`, src/memory/describe.js#relookImage): an `image` item, attached or
  * not, appends `imageAnswered` after its own tag. A `gif` item takes a GIF's
@@ -513,18 +522,36 @@ function extraOf(...extras) {
  * @param {{ attachedIndex?: number|null, description?: string|null, unknownDuration?: string,
  *   video?: { state: 'watched'|'limit'|'error'|'pending', text?: string, reason?: string,
  *     answer?: { question: string, text: string } }|null, read?: string|null, gifHandle?: string|null,
+ *   gifFields?: { reaction?: string, action?: string, screen?: string }|null,
  *   answer?: { question: string, text: string }|null }} [context]
  * @returns {{ key: string, values: object,
  *   extra?: { key: string, values: object }|{ key: string, values: object }[] }}
  */
 export function mediaLabelFor(
   item,
-  { attachedIndex = null, description = null, unknownDuration = '?', video = null, read = null, gifHandle = null, answer = null } = {},
+  {
+    attachedIndex = null,
+    description = null,
+    unknownDuration = '?',
+    video = null,
+    read = null,
+    gifHandle = null,
+    gifFields = null,
+    answer = null,
+  } = {},
 ) {
   // A `link`'s attached thumbnail is handled in its own case below.
   if (attachedIndex != null && PICTURE_ATTACHMENT_KINDS.has(item.kind)) {
     if (item.kind === 'video' || item.kind === 'gif') {
-      const base = mediaLabelFor(item, { description, unknownDuration, video, gifHandle, answer: item.kind === 'gif' ? answer : null });
+      const gifOnly = item.kind === 'gif';
+      const base = mediaLabelFor(item, {
+        description,
+        unknownDuration,
+        video,
+        gifHandle,
+        gifFields: gifOnly ? gifFields : null,
+        answer: gifOnly ? answer : null,
+      });
       return { ...base, extra: extraOf({ key: 'frameAttached', values: { n: attachedIndex } }, base.extra) };
     }
     const attached = description
@@ -542,12 +569,16 @@ export function mediaLabelFor(
       const name = item.name || item.title || item.site || '';
       const answered = extraOf(gifAnsweredExtra(answer));
       if (gifHandle) {
-        return withExtra(
-          description
-            ? { key: 'gifKnown', values: { id: gifHandle, text: description } }
-            : { key: 'gifKnownNoText', values: { id: gifHandle, name } },
-          answered,
-        );
+        const field = (value) => (typeof value === 'string' ? value : '');
+        const reaction = field(gifFields?.reaction);
+        const screen = field(gifFields?.screen);
+        const known =
+          description && (reaction || screen)
+            ? { key: 'gifKnownFields', values: { id: gifHandle, text: description, reaction, action: field(gifFields.action), screen } }
+            : description
+              ? { key: 'gifKnown', values: { id: gifHandle, text: description } }
+              : { key: 'gifKnownNoText', values: { id: gifHandle, name } };
+        return withExtra(known, answered);
       }
       return withExtra(description ? { key: 'gifDescribed', values: { text: description } } : { key: 'gif', values: { name } }, answered);
     }

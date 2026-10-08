@@ -89,7 +89,8 @@
 // the GIF library read it unchanged), marked `watched: true`, with the
 // answer's three fields beside it (`reaction`, `action`, `screen`: what reply
 // the clip expresses, what visibly happens, its on-screen text; see
-// parseGifDescription) for the `<gifs>` list. A GIF that
+// parseGifDescription; stored whole, cut per field only where they are
+// shown) for the `<gifs>` list and the transcript. A GIF that
 // cannot be watched -- the switches, no animation, a spent daily rail, a
 // failed fetch, conversion or request -- gets the one-frame description as
 // before (marked `gif: true`, plus `watchFailed` when a watch failed). A
@@ -106,9 +107,9 @@ import {
   railReason,
   VIDEO_TOKENS_PER_SECOND_FALLBACK as STATIC_TOKENS_PER_SECOND_FALLBACK,
 } from '../llm/openrouter.js';
-import { clampText, clampWithEllipsis, oneLine } from './clamp.js';
+import { clampText, oneLine } from './clamp.js';
 import { classifierMediaModel, classifierVideoModel } from '../behavior/mention.js';
-import { fillPromptTemplate, gifFieldChars } from '../behavior/prompt.js';
+import { fillPromptTemplate } from '../behavior/prompt.js';
 import { createYoutubeCheck, isVideoVisionOn } from './youtube-check.js';
 import { gifWatchBlocker as gifWatchBlockerOf, gifWatchCap, gifWatchPrompt } from './gif-watch.js';
 import { log } from '../log.js';
@@ -190,18 +191,20 @@ function gifFieldValue(raw) {
  * a missing line read as empty, `none` read as empty, an unlabelled line after
  * a labelled one continuing that field. An answer with no label at all is the
  * action alone (an older prompt's one-line account, or describe-video's).
- * `reaction` and `screen` (the on-screen text) are cut to `reactionChars`,
- * `action` to `actionChars` (src/memory/clamp.js#clampWithEllipsis: a word
- * boundary, an ellipsis; 0 = no cut); `text`, the line the transcript and every other
+ * `reaction`, `action` and `screen` (the on-screen text) are kept whole, each
+ * bounded only by `descriptionChars` (clampText, a hard limit): the readers
+ * cut them per field at render time (`gifs.reactionChars` /
+ * `gifs.actionChars`, src/behavior/prompt.js#gifFieldChars), so nothing is
+ * lost in the cache. `text`, the line the transcript and every other
  * reader of the cache show, is the whole action -- the reaction, else the
  * on-screen text, when the answer gives no action -- on one line under
  * `descriptionChars` (clampText, a hard limit). Null when every field is
  * empty. Pure.
  * @param {unknown} raw  The model's answer.
- * @param {{ reactionChars: number, actionChars: number, descriptionChars: number }} caps
+ * @param {{ descriptionChars: number }} caps
  * @returns {{ text: string, reaction: string, action: string, screen: string }|null}
  */
-export function parseGifDescription(raw, { reactionChars, actionChars, descriptionChars }) {
+export function parseGifDescription(raw, { descriptionChars }) {
   const source = String(raw ?? '');
   const fields = { reaction: [], action: [], text: [] };
   let current = null;
@@ -219,14 +222,10 @@ export function parseGifDescription(raw, { reactionChars, actionChars, descripti
   const reactionWhole = labelled ? gifFieldValue(fields.reaction.join(' ')) : '';
   const actionWhole = labelled ? gifFieldValue(fields.action.join(' ')) : oneLine(source);
   const screenWhole = labelled ? gifFieldValue(fields.text.join(' ')) : '';
-  const text = clampText(actionWhole || reactionWhole || screenWhole, descriptionChars, { tolerance: 1 });
+  const bound = (value) => clampText(value, descriptionChars, { tolerance: 1 });
+  const text = bound(actionWhole || reactionWhole || screenWhole);
   if (!text) return null;
-  return {
-    text,
-    reaction: clampWithEllipsis(reactionWhole, reactionChars),
-    action: clampWithEllipsis(actionWhole, actionChars),
-    screen: clampWithEllipsis(screenWhole, reactionChars),
-  };
+  return { text, reaction: bound(reactionWhole), action: bound(actionWhole), screen: bound(screenWhole) };
 }
 
 /** A positive number from the config, else `fallback`. */
@@ -566,7 +565,7 @@ export function createDescriber({
    * under the video token cap and output budget, and a slot of the GIF's own
    * `media.gif.maxPerDay` (never the video one) reserved before the fetch and
    * kept on failure. The answer is read as three fields (parseGifDescription,
-   * `gifs.reactionChars` / `gifs.actionChars` read now) and cached under the
+   * each kept whole under `media.descriptionChars`) and cached under the
    * GIF's own item id as `{ text, reaction, action, screen, ts, watched: true,
    * gif: true }`; nothing is cached otherwise.
    * Resolves `{ state: 'watched', text, usage, estimated }`, `{ state:
@@ -621,7 +620,7 @@ export function createDescriber({
       return report({ state: 'failed', reason }, { ...sizes, status: err.statusCode });
     }
 
-    const fields = parseGifDescription(completion.text, { ...gifFieldChars(hot.config.gifs), descriptionChars });
+    const fields = parseGifDescription(completion.text, { descriptionChars });
     if (!fields) return report({ state: 'failed', reason: 'empty' }, sizes);
     const { text, reaction, action, screen } = fields;
     putVideoEntry(guildId, item.itemId, { text, reaction, action, screen, ts: now(), watched: true, gif: true });

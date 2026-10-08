@@ -278,8 +278,8 @@ Settings for the GIF library (`features.gifs`). Uses are counted as each message
 | Key | Default | Meaning |
 |---|---|---|
 | `max` | `40` | GIFs shown in the `<gifs>` block, ranked by recency-weighted use |
-| `reactionChars` | `40` | Characters kept per reaction label in the `<gifs>` list. `0` shows the whole label |
-| `actionChars` | `70` | Characters kept per action line in the `<gifs>` list, cut at a word boundary. `0` shows the whole line |
+| `reactionChars` | `40` | Characters kept per reaction label in the `<gifs>` list and a library GIF's transcript line. `0` shows the whole text |
+| `actionChars` | `70` | Characters kept per action line in the `<gifs>` list and a library GIF's transcript line, cut at a word boundary. `0` shows the whole line |
 | `storeMax` | `300` | GIFs kept in the library; the top `max` are shown |
 | `halfLifeDays` | `30` | Recency half-life for the usage ranking (days); same formula as custom emoji |
 | `maxPerDay` | `40` | GIFs the persona may post per day |

@@ -39,6 +39,7 @@ import { fitSections, requestTokenLimit, sectionCost } from '../llm/budget.js';
 import {
   computeTempo,
   fill,
+  fillGifFields,
   formatClock,
   formatDate,
   formatDuration,
@@ -817,37 +818,24 @@ export function gifFields(entry, mediaCache, { reactionChars, actionChars }) {
   return fields.reaction || fields.action || fields.text ? fields : null;
 }
 
-// A field slot of labels.gifs.entryFields: the placeholder with the quote or
-// bracket that hugs it in the label, if any (`"{text}"`, `({reaction})`).
-const GIF_FIELD_SLOT = /(["'«“„‘([]?)\{(reaction|action|text)\}(["'»”“’)\]]?)/g;
-
 /**
- * `template` (labels.gifs.entryFields) filled with `id` and the non-empty
- * `fields`: an empty field leaves out its slot (the placeholder with any quote
- * or bracket hugging it) together with the label text that separates it from
- * the previous kept field -- the first kept field takes no separator -- so no
- * dangling separator or empty quotes remain. The text before the first slot
- * and after the last one is kept as written. Field values are inserted as
- * they are (a brace in a caption is never read as a placeholder). Pure.
- * @param {string} template
- * @param {string} id
- * @param {{ reaction: string, action: string, text: string }} fields
- * @returns {string}
+ * The transcript's view of the three-field GIF captions: every entry of the
+ * describer cache in that format (gifFields, cut per field by `chars` like
+ * the `<gifs>` list) as cache key -> `{ reaction, action, screen }`, ready
+ * for formatTranscript's `gifFields` option (src/discord/format.js renders
+ * `transcript.gifKnownFields` with them for a GIF of the library). Keys are
+ * the item ids the transcript and `descriptions` use. Pure.
+ * @param {object|null} mediaCache  The describer cache (store.getMediaCache), read only.
+ * @param {{ reactionChars: number, actionChars: number }} chars  gifFieldChars.
+ * @returns {Map<string, { reaction: string, action: string, screen: string }>}
  */
-function fillGifFields(template, id, fields) {
-  const slots = [...template.matchAll(GIF_FIELD_SLOT)];
-  if (slots.length === 0) return fill(template, { id });
-  const endOf = (slot) => slot.index + slot[0].length;
-  let out = fill(template.slice(0, slots[0].index), { id });
-  let kept = 0;
-  for (const [i, slot] of slots.entries()) {
-    const value = fields[slot[2]];
-    if (!value) continue;
-    if (kept > 0) out += fill(template.slice(endOf(slots[i - 1]), slot.index), { id });
-    out += `${slot[1]}${value}${slot[3]}`;
-    kept += 1;
+export function gifFieldsMap(mediaCache, chars) {
+  const map = new Map();
+  for (const itemId of Object.keys(mediaCache ?? {})) {
+    const fields = gifFields({ itemId }, mediaCache, chars);
+    if (fields) map.set(itemId, { reaction: fields.reaction, action: fields.action, screen: fields.text });
   }
-  return out + fill(template.slice(endOf(slots.at(-1))), { id });
+  return map;
 }
 
 /**
@@ -855,7 +843,7 @@ function fillGifFields(template, id, fields) {
  * and the GIF picker lists it (src/behavior/gif-pick.js#renderGifLibrary): an
  * entry described in three fields (gifFields) through `labels.gifs.entryFields`
  * (`{id}`, `{reaction}`, `{action}`, `{text}` = the on-screen text; empty
- * fields left out, see fillGifFields); an older one-line caption (gifCaption,
+ * fields left out, see src/discord/format.js#fillGifFields); an older one-line caption (gifCaption,
  * cut to `actionChars`) -- or a three-field one when the labels have no
  * `entryFields` -- through `labels.gifs.entry` (`{id}`/`{text}`); else
  * `labels.gifs.entryNoText` (`{id}`). A GIF the persona itself posted
@@ -1758,11 +1746,13 @@ function pulledAuthors(pulledFits) {
  *   describes the described ones not in its top list once, under that sub-heading; without
  *   it they keep the inline `transcript.emojiDescribed` tag.
  * @param {object|null} [input.mediaCache]  The describer cache (store.getMediaCache), read only
- *   for the `emoji:<id>` captions of `<emoji>` and the GIF captions of `<gifs>`.
+ *   for the `emoji:<id>` captions of `<emoji>`, the GIF captions of `<gifs>` and the three
+ *   caption fields of a library GIF in the transcript (`transcript.gifKnownFields`, see
+ *   gifFieldsMap).
  * @param {object|null} [input.gifs]  The guild's GIF library (store.getGifs). With `features.gifs`
  *   on (a missing key counts as on) and at least one entry, `<gifs>` renders (see `gifItems`),
  *   `<senses>` carries `senses.gifs`, and a GIF of the library in the transcript carries its
- *   handle (`transcript.gifKnown`/`gifKnownNoText`). Omitted or empty -> none of it.
+ *   handle (`transcript.gifKnownFields`/`gifKnown`/`gifKnownNoText`). Omitted or empty -> none of it.
  * @param {{ shape: string, examples: string[] }[]|null} [input.worn]  What this turn's variety pass
  *   (src/behavior/variety-pass.js, or the mentor's sandbox) named in the persona's own recent
  *   lines; with `features.variety` on (a missing key counts as on) and `labels.variety.intro`
@@ -1921,6 +1911,11 @@ export function buildRequest(input) {
     imageAnswers,
     // A GIF the library knows carries its handle in the transcript.
     gifHandles: gifsOn ? gifHandleMap(gifLibrary) : undefined,
+    // ...and its three caption fields, cut like the `<gifs>` list (transcript.gifKnownFields).
+    gifFields:
+      gifsOn && labels.transcript?.gifKnownFields && input.mediaCache
+        ? gifFieldsMap(input.mediaCache, gifFieldChars(config.gifs))
+        : undefined,
   };
 
   const nameFill = (text) => fillPromptTemplate(text, { name: selfName });

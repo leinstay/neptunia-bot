@@ -149,7 +149,7 @@ recent (лимит `context.caps.recent`) ->
 
 Запись стоп-кадра картинки хранится под собственным ключом `<itemId>`, как и прежде. Обе могут сосуществовать для одного элемента.
 
-Просмотренный GIF кэшируется под собственным ключом `<itemId>` GIF (без префикса `video:`): `{ text, reaction, action, screen, ts, watched: true, gif: true }`; `text` содержит однострочное действие (или реакцию, или текст на экране, если строки действия нет). `gifs.reactionChars` обрезает `reaction` и `screen` в списке, `gifs.actionChars` обрезает `action` и старую однострочную подпись; `0` = без обрезки. Однокадровая подпись хранится как `{ text, ts, gif: true }` (плюс `watchFailed`, если попытка просмотра была). Обе записи находятся рядом с описаниями картинок в том же кэше.
+Просмотренный GIF кэшируется под собственным ключом `<itemId>` GIF (без префикса `video:`): `{ text, reaction, action, screen, ts, watched: true, gif: true }`; `text` содержит однострочное действие (или реакцию, или текст на экране, если строки действия нет). Все четыре поля хранятся целиком, ограничены только `media.descriptionChars`. Обрезка происходит там, где поля показываются, в списке `<gifs>` и в строке транскрипта библиотечного GIF (`transcript.gifKnownFields`): `gifs.reactionChars` обрезает `reaction` и `screen`, `gifs.actionChars` обрезает `action` и старую однострочную подпись; `0` = без обрезки. Однокадровая подпись хранится как `{ text, ts, gif: true }` (плюс `watchFailed`, если попытка просмотра была). Обе записи находятся рядом с описаниями картинок в том же кэше.
 
 Результаты веб-поиска кэшируются в том же `data/guilds/<id>/media.json` рядом с записями видео и картинок:
 
@@ -183,6 +183,7 @@ transcript.imageDescribed                {text}
 transcript.gif                           {name}
 transcript.gifDescribed                  {text}
 transcript.gifKnown                      {id} {text}: a GIF that is in the library; id is its handle, text is the caption
+transcript.gifKnownFields                {id} {reaction} {action} {screen}: GIF из библиотеки, у которого в кэше есть реакция или текст на экране; используется вместо gifKnown; поля обрезаются по gifs.reactionChars / gifs.actionChars как в gifs.entryFields; код убирает пустые поля и их разделители; если ключ пуст: откат к gifKnown
 transcript.gifKnownNoText                {id} {name}: a library GIF without a caption; id is the handle, name is the file or link name
 transcript.video                         {name} {duration}
 transcript.videoDescribed                {name} {duration} {text}: text describes ONE frame
