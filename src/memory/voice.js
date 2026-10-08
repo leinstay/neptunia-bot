@@ -19,7 +19,10 @@
 //                     one audience per request)
 //   buildVoiceRequest / parseVoiceAnswer   the stage B request, fitted to the input cap AND to
 //                     what `memory.voice.maxOutputTokens` can answer, and its answer, by request id
-//   applyVoiceItems   worded texts -> store writes (plain data), by item id
+//   applyVoiceItems   worded texts -> store writes (plain data), by item id; a rewrite over its
+//                     limit is never cut: it is not written and comes back in `overItems`
+//   buildVoiceRetry   the one follow-up request for those items: the first request, the first
+//                     answer as an assistant turn, then an `<over_limit>` block
 //   retryLater / expireItems / degradedApply   exponential back-off from `memory.voice.retryMinutes`
 //                     up to `memory.voice.queueHours`; an item too old or left out of too many
 //                     answers takes the degraded path -- except a `character` item, which is never
@@ -51,6 +54,7 @@ import { EPISODE_CHARS, episodeDate, isSameEpisode } from './episodes.js';
 import { normalizeTopic } from './interests.js';
 import { TEACHER_TOKEN_RE, fromTokens, teacherToken } from './mentions.js';
 import { MEMORY_LIMIT_DEFAULTS, SELF_CHARS } from './text-limits.js';
+import { acceptProse, overLimitOf } from './prose.js';
 
 /**
  * Code fallbacks of the `memory.voice.*` keys this module and the voice run read, equal to
@@ -906,6 +910,34 @@ export function parseVoiceAnswer(text, sent) {
 }
 
 /**
+ * The one follow-up request for the items whose rewrite came back over its limit (applyVoiceItems'
+ * `overItems`), as a dialogue: the first request's messages unchanged, the first answer as the
+ * assistant's turn, exactly as returned, then a user turn with only `<over_limit>`: a JSON object
+ * keyed by the request id the model saw for the item (`String(i + 1)` for `sent[i]`), each value
+ * `{ chars, limit }` (prompts/memory-voice.md). Its answer reads with parseVoiceAnswer and the same
+ * `sent`. An item not in `sent` is left out. Pure: a new array, the input never mutated.
+ * @param {object[]} messages  buildVoiceRequest's `messages`.
+ * @param {string} answer      The first answer's text.
+ * @param {{ id: string, chars: number, limit: number }[]} overItems
+ * @param {string[]} sent      buildVoiceRequest's `sent`.
+ * @returns {object[]}
+ */
+export function buildVoiceRetry(messages, answer, overItems, sent) {
+  const ids = Array.isArray(sent) ? sent : [];
+  const overLimit = {};
+  for (const over of Array.isArray(overItems) ? overItems : []) {
+    const at = ids.indexOf(over?.id);
+    if (at === -1) continue;
+    overLimit[String(at + 1)] = { chars: over.chars, limit: over.limit };
+  }
+  return [
+    ...messages,
+    { role: 'assistant', content: typeof answer === 'string' ? answer : '' },
+    { role: 'user', content: block('over_limit', JSON.stringify(overLimit)) },
+  ];
+}
+
+/**
  * @typedef {object} VoiceWrite  One store write, for the caller to run. A write with
  *   `layer: 'private'` (relationship, reason, feeling) goes to the member's private layer, never
  *   to the public profile; without it, to the public profile or the server's memory.
@@ -952,8 +984,12 @@ function writeOf(item, text) {
  * Turn a parsed stage B answer into store writes, by item id. Pass the sent items that are STILL
  * queued (re-read the queue after the request): an item merged or expired meanwhile is then not
  * written from a stale answer. An item of a kind whose feature was switched off meanwhile is
- * counted `off` and never written, worded or not. Each worded text is `tokenize`d and clamped to
- * its kind's limit (voiceLimits, `memory.clampTolerance`); one left empty counts as missing. Pure.
+ * counted `off` and never written, worded or not. Each worded text is `tokenize`d and judged
+ * against the stored text it rewrites (`oldTextOf`) by src/memory/prose.js#acceptProse at its
+ * kind's limit (voiceLimits): a first text (nothing stored, and every kind without an old text)
+ * is clamped (`memory.clampTolerance`); a rewrite within the limit is taken as it is; a rewrite
+ * over it is not written and comes back in `overItems` (neither applied nor missing: the caller
+ * asks once more or drops it). One left empty counts as missing. Pure.
  * @param {Map<string, string>} worded  parseVoiceAnswer's map.
  * @param {VoiceItem[]} items
  * @param {object} opts
@@ -961,17 +997,23 @@ function writeOf(item, text) {
  * @param {(text: string) => string} [opts.tokenize]  `name (id:...)` -> `<@id>`; omitted = as written.
  * @param {(userId: string, layer?: 'private') => boolean} [opts.hasMember]  Whether the member
  *   still has a profile (with `private`: still has a private layer); omitted = always.
+ * @param {(item: VoiceItem) => (string|null)} [opts.oldTextOf]  As buildVoiceRequest's: the stored
+ *   text a relationship, patterns, starters or character item rewrites; omitted = none.
  * @returns {{ writes: VoiceWrite[], applied: string[], missing: string[], gone: string[],
- *   off: string[], ignored: number, portraits: string[], byKind: Record<string, number> }}
+ *   off: string[], ignored: number, portraits: string[], byKind: Record<string, number>,
+ *   overItems: { id: string, chars: number, limit: number }[] }}
  *   `applied`, `gone` and `off` leave the queue (removeItems); `missing` stays queued (retryLater
  *   with `missed: true`); `ignored`: worded ids matching none of `items`; `portraits`: members
- *   whose character item was applied (stamp their portrait now); `byKind`: applied per kind.
+ *   whose character item was applied (stamp their portrait now); `byKind`: applied per kind;
+ *   `overItems`: rewrites over their limit, nothing written (`chars` in code points of the
+ *   tokenized text, as it would be stored).
  */
-export function applyVoiceItems(worded, items, { config, tokenize = identity, hasMember = () => true } = {}) {
+export function applyVoiceItems(worded, items, { config, tokenize = identity, hasMember = () => true, oldTextOf } = {}) {
   const texts = worded instanceof Map ? worded : new Map();
   const limits = voiceLimits(config);
   const tolerance = config?.memory?.clampTolerance;
-  const result = { writes: [], applied: [], missing: [], gone: [], off: [], ignored: 0, portraits: [], byKind: {} };
+  const oldOf = typeof oldTextOf === 'function' ? oldTextOf : () => '';
+  const result = { writes: [], applied: [], missing: [], gone: [], off: [], ignored: 0, portraits: [], byKind: {}, overItems: [] };
   const seen = new Set();
   for (const item of Array.isArray(items) ? items : []) {
     if (!item?.id || !VOICE_KINDS.includes(item.kind) || seen.has(item.id)) continue;
@@ -985,7 +1027,15 @@ export function applyVoiceItems(worded, items, { config, tokenize = identity, ha
       continue;
     }
     const raw = texts.get(item.id);
-    const text = typeof raw === 'string' ? clampText(String(tokenize(raw.trim()) ?? ''), limits[item.kind], { tolerance }) : '';
+    const next = typeof raw === 'string' ? String(tokenize(raw.trim()) ?? '') : '';
+    const previous = OLD_TEXT_KINDS.has(item.kind) ? oldOf(item) : '';
+    const verdict = acceptProse(previous, next, limits[item.kind], { tolerance });
+    if (verdict.outcome === 'over') {
+      const over = overLimitOf({ text: next.trim() }, { text: limits[item.kind] }).text;
+      result.overItems.push({ id: item.id, ...over });
+      continue;
+    }
+    const text = verdict.outcome === 'empty' ? '' : verdict.text;
     if (!text) {
       result.missing.push(item.id);
       continue;
@@ -1010,8 +1060,9 @@ export function applyVoiceItems(worded, items, { config, tokenize = identity, ha
  * batch that proposes the note again rewrites it. An item of a member gone since is dropped too.
  * An item of a kind whose feature is switched off now is counted `off` and never written. A
  * `character` item is never dropped: it comes back in `kept` for the caller to keep queued
- * (expireItems and mergeIntoQueue never hand one over). Texts are clamped like applyVoiceItems'.
- * Pure.
+ * (expireItems and mergeIntoQueue never hand one over). Every text it writes is a first text (the
+ * kinds it keeps have nothing stored to rewrite), clamped through acceptProse as
+ * applyVoiceItems clamps one. Pure.
  * @param {VoiceItem[]} items
  * @param {object} opts
  * @param {object} opts.config  The live config.
@@ -1036,7 +1087,7 @@ export function degradedApply(items, { config, hasMember = () => true } = {}) {
     }
     const keepsBrief = item.kind === 'feeling' || item.kind === 'learned' || item.kind === 'self';
     const brief = keepsBrief && Array.isArray(item.brief) ? (item.brief.at(-1) ?? '') : '';
-    const text = brief && !(item.userId && !hasMember(item.userId, item.layer)) ? clampText(brief, limits[item.kind], { tolerance }) : '';
+    const text = brief && !(item.userId && !hasMember(item.userId, item.layer)) ? acceptProse('', brief, limits[item.kind], { tolerance }).text : '';
     if (!text) {
       result.dropped.push(item.id);
       continue;

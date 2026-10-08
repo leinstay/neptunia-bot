@@ -25,6 +25,7 @@ import {
   removeItems,
   forgetMember,
   buildVoiceRequest,
+  buildVoiceRetry,
   parseVoiceAnswer,
   applyVoiceItems,
   degradedApply,
@@ -909,6 +910,23 @@ test('parseVoiceAnswer: an answer without an items object throws (a bad answer, 
   assert.throws(() => parseVoiceAnswer('χωρίς json', ['q-a']));
 });
 
+test('buildVoiceRetry: the first request, the first answer as an assistant turn, then <over_limit> keyed by request id', () => {
+  const queue = queueOf([item('self', { brief: ['α'] }), item('relationship', { userId: ELENI, brief: ['β'] })]);
+  const first = request(queue);
+  assert.equal(first.messages.length, 2, 'the first request carries no assistant turn');
+  assert.ok(!first.messages.some((message) => message.content.includes('<over_limit>')), 'and no <over_limit> block');
+  const answer = '{"items":{"1":"εγώ","2":"πολύ μακρύ"}}';
+  const messages = buildVoiceRetry(first.messages, answer, [{ id: first.sent[1], chars: 640, limit: 600 }, { id: 'not-sent', chars: 9, limit: 1 }], first.sent);
+  assert.equal(messages.length, 4);
+  assert.deepEqual(messages.slice(0, 2), first.messages);
+  assert.deepEqual(messages[2], { role: 'assistant', content: answer });
+  assert.equal(messages[3].role, 'user');
+  const match = /^<over_limit>\n([\s\S]*)\n<\/over_limit>$/.exec(messages[3].content);
+  assert.ok(match, messages[3].content);
+  assert.deepEqual(JSON.parse(match[1]), { 2: { chars: 640, limit: 600 } }, 'the id the model saw; an id not sent is left out');
+  assert.equal(first.messages.length, 2, 'the first request is not mutated');
+});
+
 // ---- applying the answer -----------------------------------------------------------
 
 test('applyVoiceItems: a relationship text is tokenized, clamped and written for the member', () => {
@@ -1014,6 +1032,33 @@ test('applyVoiceItems: a private item\'s write carries its layer, and hasMember 
   assert.deepEqual(asked, [[ELENI, 'private'], [NIKOS, 'private']]);
   assert.deepEqual(result.writes, [{ id: queue[0].id, kind: 'relationship', userId: ELENI, layer: 'private', text: 'κείμενο' }]);
   assert.deepEqual(result.gone, [queue[1].id]);
+});
+
+test('applyVoiceItems: a rewrite over its limit is not written and comes back in overItems; the rest apply', () => {
+  const queue = queueOf([item('relationship', { userId: ELENI }), item('patterns', { brief: ['π'] }), item('self', { brief: ['ε'] })]);
+  const olds = { relationship: `παλιό με <@${NIKOS}>`, patterns: 'παλιές συνήθειες' };
+  const long = `με τη Νίκος (id:${NIKOS}) ${'ά'.repeat(600)}`;
+  const worded = new Map([[queue[0].id, long], [queue[1].id, 'ν'.repeat(2000)], [queue[2].id, 'εγώ']]);
+  const result = applyVoiceItems(worded, queue, { config: makeConfig(), tokenize, oldTextOf: (queued) => olds[queued.kind] ?? '' });
+  const chars = [...tokenize(long)].length;
+  assert.deepEqual(result.overItems, [{ id: queue[0].id, chars, limit: 600 }], 'measured after tokenizing, as stored');
+  assert.deepEqual(result.writes.map((write) => [write.kind, write.text]), [['patterns', 'ν'.repeat(2000)], ['self', 'εγώ']], 'exactly at the limit is a rewrite');
+  assert.deepEqual(result.applied, [queue[1].id, queue[2].id]);
+  assert.deepEqual([result.missing, result.gone, result.off], [[], [], []]);
+  assert.deepEqual(result.byKind, { patterns: 1, self: 1 });
+});
+
+test('applyVoiceItems: a rewrite is never clamped, a first write still is; overItems is empty when nothing overflows', () => {
+  const queue = queueOf([item('relationship', { userId: ELENI }), item('relationship', { userId: NIKOS })]);
+  const olds = { [ELENI]: 'παλιό' };
+  const text = 'λ'.repeat(700);
+  const result = applyVoiceItems(new Map([[queue[0].id, 'λ'.repeat(600)], [queue[1].id, text]]), queue, {
+    config: makeConfig(),
+    oldTextOf: (queued) => olds[queued.userId] ?? '',
+  });
+  assert.equal(result.writes[0].text, 'λ'.repeat(600));
+  assert.ok([...result.writes[1].text].length <= 750 && [...result.writes[1].text].length > 0, 'a first write is clamped with the tolerance');
+  assert.deepEqual(result.overItems, []);
 });
 
 // ---- the degraded path --------------------------------------------------------------

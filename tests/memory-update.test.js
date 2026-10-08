@@ -7237,6 +7237,101 @@ test('runVoice: paused, nothing is sent; paused while the request is in flight, 
   assert.equal(failed.logs.some((entry) => entry.msg === 'memory: voice failed'), false, 'a failure while paused writes no back-off');
 });
 
+/**
+ * A store with Aria's stored relationship and two queued items (her relationship, a self fact),
+ * and a voice llm whose first answer words the relationship `first` (over 600) and whose second
+ * words it with `retry(text)` (null = left out); the self fact is worded on both.
+ */
+async function overLimitRun({ first, retry, memory = {} }) {
+  let outcome;
+  await withStoreAsync(async (store) => {
+    const guildId = 'g1';
+    store.touchUser(guildId, '1', 'Aria', VOICE_AT);
+    store.applyProfileOps(guildId, '1', { relationship: 'παλιό κείμενο' }, { relationshipChars: 600 });
+    const hot = voiceHot(memory);
+    queueVoice(store, guildId, [{ kind: 'relationship', userId: '1', brief: ['φίλοι'] }, { kind: 'self', brief: ['της αρέσει ο καφές'] }], VOICE_AT, hot.config);
+    const llm = voiceLlm({
+      word: (item) => {
+        const call = llm.voiceCalls().length;
+        if (item.kind === 'self') return call === 1 ? 'μου αρέσει ο καφές' : 'κάτι άλλο';
+        return call === 1 ? first : retry;
+      },
+    });
+    const { result, logs } = await withCapturedLogs(() => voiceUpdater(store, hot, llm).runVoice(guildId));
+    outcome = {
+      result,
+      calls: llm.voiceCalls(),
+      applied: logs.find((entry) => entry.msg === 'memory: voice applied'),
+      relationship: store.getUser(guildId, '1').relationship,
+      self: store.getGuild(guildId).self,
+      versions: store.listVersions(guildId, 'users', '1').relationship ?? [],
+      queue: store.getVoiceQueue(guildId),
+      voiceCount: store.state.data.voiceCount,
+      logs,
+    };
+  });
+  return outcome;
+}
+
+/** The parsed `<over_limit>` block of a retry's last message. */
+function overLimitOfRetry(messages) {
+  return JSON.parse(blockBody(messages.at(-1).content, 'over_limit'));
+}
+
+test('runVoice: a rewrite over its limit is asked once more as a dialogue and the shorter answer is stored by voice', async () => {
+  const long = 'ά'.repeat(700);
+  const run = await overLimitRun({ first: long, retry: 'σύντομο νέο κείμενο' });
+  assert.equal(run.calls.length, 2, 'the first request, then one retry');
+  const [firstCall, retryCall] = run.calls;
+  assert.equal(firstCall.messages.length, 2);
+  assert.ok(!firstCall.messages.some((message) => message.content.includes('<over_limit>')), 'the first request has no <over_limit>');
+  assert.equal(retryCall.messages.length, 4);
+  assert.deepEqual(retryCall.messages.slice(0, 2), firstCall.messages, 'the first request, unchanged');
+  const relationshipId = voiceItemsOf(firstCall.messages).find((item) => item.kind === 'relationship').id;
+  const selfId = voiceItemsOf(firstCall.messages).find((item) => item.kind === 'self').id;
+  assert.deepEqual(retryCall.messages[2], { role: 'assistant', content: JSON.stringify({ items: { [relationshipId]: long, [selfId]: 'μου αρέσει ο καφές' } }) });
+  assert.equal(retryCall.messages[3].role, 'user');
+  assert.deepEqual(overLimitOfRetry(retryCall.messages), { [relationshipId]: { chars: 700, limit: 600 } }, 'only the over item');
+  assert.deepEqual(retryCall.options, firstCall.options, 'the same role and purpose');
+
+  assert.equal(run.relationship, 'σύντομο νέο κείμενο');
+  assert.deepEqual(run.self, ['μου αρέσει ο καφές'], 'the item applied by the first answer is not written again');
+  assert.equal(run.versions.length, 1);
+  assert.deepEqual([run.versions[0].by, run.versions[0].text], ['voice', 'παλιό κείμενο']);
+  assert.deepEqual(run.queue, []);
+  assert.equal(run.voiceCount, 2, 'the retry counts against memory.voice.maxPerDay');
+  assert.deepEqual(
+    { sent: run.applied.sent, applied: run.applied.applied, missing: run.applied.missing, overLimit: run.applied.overLimit, overLimitRetried: run.applied.overLimitRetried },
+    { sent: 2, applied: 2, missing: 0, overLimit: 0, overLimitRetried: 1 },
+  );
+  assert.deepEqual(run.applied.byKind, { self: 1, relationship: 1 });
+  assert.deepEqual(run.result, { sent: 2, applied: 2 });
+});
+
+test('runVoice: a retry still over the limit, or without the item, keeps the stored text and drops the item as over-limit', async () => {
+  for (const retry of ['έ'.repeat(650), null]) {
+    const run = await overLimitRun({ first: 'ά'.repeat(700), retry });
+    assert.equal(run.calls.length, 2, `retry ${retry === null ? 'missing' : 'over'}`);
+    assert.equal(run.relationship, 'παλιό κείμενο', 'the stored text stays');
+    assert.deepEqual(run.versions, [], 'nothing changed, nothing recorded');
+    assert.deepEqual(run.queue, [], 'never queued again');
+    assert.deepEqual(run.self, ['μου αρέσει ο καφές']);
+    assert.deepEqual(
+      { applied: run.applied.applied, missing: run.applied.missing, overLimit: run.applied.overLimit, overLimitRetried: run.applied.overLimitRetried },
+      { applied: 1, missing: 0, overLimit: 1, overLimitRetried: 1 },
+    );
+    assert.ok(!JSON.stringify(run.logs).includes('έέέ'), 'counts only');
+  }
+});
+
+test('runVoice: memory.overLimitRetries 0 sends no retry; the over item leaves the queue at once', async () => {
+  const run = await overLimitRun({ first: 'ά'.repeat(700), retry: 'σύντομο', memory: { overLimitRetries: 0 } });
+  assert.equal(run.calls.length, 1);
+  assert.equal(run.relationship, 'παλιό κείμενο');
+  assert.deepEqual(run.queue, []);
+  assert.deepEqual({ overLimit: run.applied.overLimit, overLimitRetried: run.applied.overLimitRetried }, { overLimit: 1, overLimitRetried: 0 });
+});
+
 test('waitIdle: waits for a voice request in flight, and its texts land before it resolves', async () => {
   await withStoreAsync(async (store) => {
     const guildId = 'g1';

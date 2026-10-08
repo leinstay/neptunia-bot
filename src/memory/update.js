@@ -57,6 +57,7 @@ import { effectiveAffinity } from '../behavior/private.js';
 import {
   applyVoiceItems,
   buildVoiceRequest,
+  buildVoiceRetry,
   degradedApply,
   dueItems,
   expireItems,
@@ -2322,7 +2323,9 @@ function hasVoiceAddress(item, holderOf) {
  * - learned: `applyLearnedOps`, dated when it was taught; self: `applySelfOps`;
  * - patterns / starters: `updateGuild`;
  * - character: `applyProfileOps` (the portrait stamps are `stampVoicePortraits`').
- * A write of any other kind, or a character write with a layer, is skipped.
+ * A write of any other kind, or a character write with a layer, is skipped. Every prose write
+ * goes out with `by: 'voice'` and the version history settings (`features.versions`,
+ * `memory.versionsKept`), so a replaced text keeps its previous version.
  * @param {object} store
  * @param {string} guildId
  * @param {object[]} writes
@@ -2333,7 +2336,8 @@ function hasVoiceAddress(item, holderOf) {
 function runVoiceWrites(store, guildId, writes, config, nowMs) {
   const cfg = config.memory ?? {};
   const limits = voiceLimits(config);
-  const textOpts = { fieldChars: limits.character, relationshipChars: limits.relationship, clampTolerance: cfg.clampTolerance, now: nowMs };
+  const writeOpts = { by: 'voice', versions: { enabled: config.features?.versions !== false, kept: cfg.versionsKept ?? 20 } };
+  const textOpts = { fieldChars: limits.character, relationshipChars: limits.relationship, clampTolerance: cfg.clampTolerance, now: nowMs, ...writeOpts };
   let landed = 0;
   for (const write of writes) {
     const layer = write.layer === 'private' ? 'private' : undefined;
@@ -2362,7 +2366,7 @@ function runVoiceWrites(store, guildId, writes, config, nowMs) {
     } else if (write.kind === 'self') {
       landed += store.applySelfOps(guildId, { add: [write.text] }, selfOpsOptions(cfg, nowMs)).added;
     } else if (write.kind === 'patterns' || write.kind === 'starters') {
-      store.updateGuild(guildId, { [write.kind]: write.text });
+      store.updateGuild(guildId, { [write.kind]: write.text }, writeOpts);
       landed += 1;
     }
   }
@@ -3533,46 +3537,124 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
   /**
    * Write one parsed voice answer. The queue is read again first (the request was awaited): only
    * the sent items STILL queued are written, so an item merged, replaced or forgotten meanwhile
-   * never takes a stale text; then, in one synchronous read-modify-write, the applied, gone and
-   * switched-off ids leave the queue and the missing ones are backed off as misses -- an item
-   * queued during the request is left as it is. A parsed answer ends the guild's back-off.
+   * never takes a stale text; each text is judged against the stored text it rewrites
+   * (src/memory/voice.js#applyVoiceItems with `voiceOldText`). Then, in one synchronous
+   * read-modify-write, the applied, gone and switched-off ids leave the queue and the missing ones
+   * are backed off as misses -- an item queued during the request is left as it is. A rewrite over
+   * its limit (`overItems`) stays queued untouched for the caller to ask once more, unless
+   * `dropOver`, when it leaves (`over-limit`: the stored text stays). With `only` (the retry), only
+   * those ids are written, any other worded id is ignored (the first answer applied it), and an
+   * item of `only` left out of the answer leaves as over the limit too, never as a miss.
    * @param {string} guildId
    * @param {string[]} sent         buildVoiceRequest's `sent`.
    * @param {Map<string, string>} worded  parseVoiceAnswer's map.
-   * @param {number} outputTokens   buildVoiceRequest's estimate of the longest answer, for the log.
-   * @returns {{ sent: number, applied: number }}
+   * @param {{ only?: Set<string>, dropOver?: boolean }} [opts]
+   * @returns {{ result: object, still: object[], landed: number, portraits: number, overLimit: number }}
+   *   `overLimit`: items that left the queue over the limit.
    */
-  function applyVoiceAnswer(guildId, sent, worded, outputTokens) {
+  function writeVoiceAnswer(guildId, sent, worded, { only, dropOver = false } = {}) {
     const doneMs = now();
     const config = hot.config;
-    const sentIds = new Set(sent);
-    const still = store.getVoiceQueue(guildId).filter((item) => sentIds.has(item.id));
+    const wanted = only ?? new Set(sent);
+    const still = store.getVoiceQueue(guildId).filter((item) => wanted.has(item.id));
+    const answer = only ? new Map([...worded].filter(([id]) => only.has(id))) : worded;
     const { tokenize } = makeTokenizers(store, guildId, new Set(still.map((item) => item.userId).filter(Boolean)));
-    const result = applyVoiceItems(worded, still, { config, tokenize, hasMember: voiceMemberCheck(store, guildId) });
+    const result = applyVoiceItems(answer, still, {
+      config,
+      tokenize,
+      hasMember: voiceMemberCheck(store, guildId),
+      oldTextOf: (item) => voiceOldText(store, guildId, item),
+    });
     const landed = runVoiceWrites(store, guildId, result.writes, config, doneMs);
     const portraits = stampVoicePortraits(store, guildId, still, result.portraits);
-    const leaving = [...result.applied, ...result.gone, ...result.off];
-    store.updateVoiceQueue(guildId, (queue) => retryLater(removeItems(queue, leaving), result.missing, doneMs, config, { missed: true }));
-    voiceBackoff.delete(guildId);
+    const overIds = dropOver ? result.overItems.map((over) => over.id) : [];
+    const missedOver = only ? result.missing : [];
+    const missed = only ? [] : result.missing;
+    const leaving = [...result.applied, ...result.gone, ...result.off, ...overIds, ...missedOver];
+    store.updateVoiceQueue(guildId, (queue) => retryLater(removeItems(queue, leaving), missed, doneMs, config, { missed: true }));
     store.flush();
+    return { result, still, landed, portraits, overLimit: overIds.length + missedOver.length };
+  }
+
+  /**
+   * The one retry of the rewrites a voice answer returned over their limit
+   * (src/memory/voice.js#buildVoiceRetry: the first request, its answer as the assistant's turn,
+   * then `<over_limit>`), counted against `memory.voice.maxPerDay` like any voice request and
+   * checked by the same rails. Its answer is written for those items only; an item still over,
+   * left out, or carried by a retry that failed (refused, an llm error, an unreadable answer)
+   * leaves the queue with the stored text untouched. A failed retry backs nothing off: the first
+   * answer was read. A pause during it writes nothing and leaves the items queued as they were.
+   * @param {string} guildId
+   * @param {{ messages: object[], sent: string[] }} request  The first request (buildVoiceRequest's).
+   * @param {string} answer  The first answer's text, as returned.
+   * @param {{ id: string, chars: number, limit: number }[]} overItems
+   * @returns {Promise<{ paused?: true, written?: object, reason?: string }>}  `reason`: why the
+   *   retry gave no usable answer (`daily-cap`, `token-limit`, `llm-error`, `bad-json`, `truncated`).
+   */
+  async function retryOverLimit(guildId, request, answer, overItems) {
+    const only = new Set(overItems.map((over) => over.id));
+    const startMs = now();
+    let completion;
+    let reason;
+    if (voiceRailReached(startMs)) {
+      reason = 'daily-cap';
+    } else {
+      const day = countVoiceRequest(startMs);
+      try {
+        completion = await llm.complete(buildVoiceRetry(request.messages, answer, overItems, request.sent), voiceRequestOptions(hot.config));
+      } catch (err) {
+        if (err instanceof DailyCapError || err instanceof TokenLimitError) releaseVoiceRequest(day);
+        reason = railReason(err);
+      }
+    }
+    // As after the first request: a pause during it wins, nothing is written.
+    if (store.state.data.paused) return { paused: true };
+    let worded = new Map();
+    if (!reason) {
+      try {
+        worded = parseVoiceAnswer(completion.text, request.sent);
+      } catch {
+        reason = looksTruncated(completion.text, completion.finishReason) ? 'truncated' : 'bad-json';
+      }
+    }
+    return { written: writeVoiceAnswer(guildId, request.sent, worded, { only, dropOver: true }), reason };
+  }
+
+  /**
+   * `memory: voice applied` for one voice run: the first answer's counts plus the retry's
+   * (`overLimitRetried`: items sent again; `overLimit`: items that left the queue over the limit,
+   * the stored text kept; `retryFailed`: why the retry gave no usable answer, only when it did not).
+   * @returns {{ sent: number, applied: number }}
+   */
+  function logVoiceApplied(guildId, sent, first, retry, { outputTokens, overLimitRetried, retryFailed }) {
+    const parts = retry ? [first, retry] : [first];
+    const sum = (count) => parts.reduce((total, part) => total + count(part), 0);
+    const byKind = { ...first.result.byKind };
+    for (const [kind, count] of Object.entries(retry?.result.byKind ?? {})) byKind[kind] = (byKind[kind] ?? 0) + count;
+    const applied = sum((part) => part.result.applied.length);
     log.info('memory: voice applied', {
       guildId,
       sent: sent.length,
-      applied: result.applied.length,
-      missing: result.missing.length,
-      gone: result.gone.length,
-      off: result.off.length,
+      applied,
+      missing: first.result.missing.length,
+      gone: sum((part) => part.result.gone.length),
+      off: sum((part) => part.result.off.length),
       // Sent, but no longer queued as sent once the answer came: merged, replaced or forgotten meanwhile.
-      stale: sent.length - still.length,
-      ignored: result.ignored,
-      landed,
-      portraits,
+      stale: sent.length - first.still.length + (retry ? overLimitRetried - retry.still.length : 0),
+      ignored: first.result.ignored,
+      landed: sum((part) => part.landed),
+      portraits: sum((part) => part.portraits),
+      // Rewrites over their limit: how many were asked once more, and how many were refused in the
+      // end (the stored text stays).
+      overLimit: sum((part) => part.overLimit),
+      overLimitRetried,
+      ...(retryFailed ? { retryFailed } : {}),
       // Applied per kind, and the answer size the request was fitted to (calibrated tokens).
-      byKind: result.byKind,
+      byKind,
       outputTokens,
       queued: store.getVoiceQueue(guildId).length,
     });
-    return { sent: sent.length, applied: result.applied.length };
+    return { sent: sent.length, applied };
   }
 
   /** The body of `runVoice`, under its `running` key. */
@@ -3655,7 +3737,27 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       const reason = looksTruncated(completion.text, completion.finishReason) ? 'truncated' : 'bad-json';
       return voiceFailed(guildId, request.sent, { reason, detail: errorNameOf(err) });
     }
-    return applyVoiceAnswer(guildId, request.sent, worded, request.outputTokens);
+    // A parsed answer ends the guild's back-off.
+    voiceBackoff.delete(guildId);
+    // Read at the moment of use: 0 (or anything not above 0) drops an over item at once.
+    const retrying = Number(hot.config.memory?.overLimitRetries ?? 1) > 0;
+    const first = writeVoiceAnswer(guildId, request.sent, worded, { dropOver: !retrying });
+    const over = first.result.overItems;
+    if (!retrying || over.length === 0) {
+      return logVoiceApplied(guildId, request.sent, first, null, { outputTokens: request.outputTokens, overLimitRetried: 0 });
+    }
+    const retry = await retryOverLimit(guildId, request, completion.text, over);
+    if (retry.paused) {
+      // The first answer is written; the over items stay queued exactly as they were.
+      log.info('memory: voice skipped', { guildId, reason: 'paused', sent: over.length });
+      const counts = logVoiceApplied(guildId, request.sent, first, null, { outputTokens: request.outputTokens, overLimitRetried: over.length });
+      return { ...counts, reason: 'paused' };
+    }
+    return logVoiceApplied(guildId, request.sent, first, retry.written, {
+      outputTokens: request.outputTokens,
+      overLimitRetried: over.length,
+      retryFailed: retry.reason,
+    });
   }
 
   /**
@@ -3674,8 +3776,12 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * (`voiceDay` / `voiceCount` in state.json, shared with a batch's single-stage fallback; 0, or a
    * value that is not a number, never sends). A failed request (`token-limit`,
    * `daily-cap`, `llm-error`, `bad-json`, `truncated`) backs off every item it carried and the
-   * guild (`voiceFailed`); a pause during the request writes nothing at all. A character item is
-   * never dropped, and its portrait stamps are written only when it is applied. Its `running`
+   * guild (`voiceFailed`); a pause during the request writes nothing at all. A rewrite the answer
+   * returns over its limit is never cut: with `memory.overLimitRetries` above 0 (read at the
+   * moment of use; config.json's 1) it is asked ONE more time (`retryOverLimit`, a second
+   * counted request); still over, left out, or with no usable retry answer -- or at once with 0 --
+   * it leaves the queue (`over-limit`) and the stored text stays. A character item is never
+   * dropped otherwise, and its portrait stamps are written only when it is applied. Its `running`
    * key (`voice:<guildId>`) makes `waitIdle()` -- `/nep pause` -- wait for it. Never throws:
    * anything unexpected is logged by name and backs the guild off.
    * @param {string} guildId
