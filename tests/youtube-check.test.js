@@ -60,7 +60,7 @@ test('checkYoutube: ytdlp when the yt-dlp probe returns a duration, probing the 
   assert.equal(typeof result.detail, 'string');
   assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite']);
   assert.equal(videoFetcher.calls[0].url, CANARY);
-  assert.deepEqual(videoFetcher.calls[0].options, { ytdlpPath: 'yt-dlp-test', toolTimeoutMs: 5678 });
+  assert.deepEqual(videoFetcher.calls[0].options, { ytdlpPath: 'yt-dlp-test', toolTimeoutMs: 5678, proxy: null, proxyRetryMinutes: undefined });
 });
 
 test('checkYoutube: a yt-dlp probe without a duration does not count as ytdlp', async () => {

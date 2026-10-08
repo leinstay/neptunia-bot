@@ -100,7 +100,7 @@ import { isPlainObject } from '../config.js';
 import { fitBox, mediaProxyUrl } from '../discord/media.js';
 import { createImageFetcher } from '../discord/fetch-image.js';
 import { createVideoFetcher } from '../discord/fetch-video.js';
-import { isDirectUrlSite, publicVideoUrl, safeLocation, youtubeVideoId } from '../discord/video-sites.js';
+import { isDirectUrlSite, proxyFor, publicVideoUrl, safeLocation, youtubeVideoId } from '../discord/video-sites.js';
 import {
   helperRequestOptions,
   railReason,
@@ -973,7 +973,10 @@ export function createDescriber({
       }
       return got;
     }
-    let probe = await videoFetcher.probeSite(item.url, { ytdlpPath, toolTimeoutMs });
+    // Only the listed sites go through the proxy (media.video.proxySites).
+    const proxy = proxyFor(item.url, videoCfg);
+    const { proxyRetryMinutes } = videoCfg;
+    let probe = await videoFetcher.probeSite(item.url, { ytdlpPath, toolTimeoutMs, proxy, proxyRetryMinutes });
     // yt-dlp can be blocked by YouTube's bot check; the duration alone is
     // still learnable from the Data API or the watch page.
     if (!probe.ok && youtubeVideoId(item.url) !== null) {
@@ -1008,6 +1011,8 @@ export function createDescriber({
       maxBytes,
       toolTimeoutMs,
       durationSec,
+      proxy,
+      proxyRetryMinutes,
     });
     if (clip.ok) return { ok: true, url: clip.dataUrl, seconds: clip.seconds, bytes: clip.bytes, pinned: false };
     // Too long and not clippable: the video will not get shorter, so this is final.

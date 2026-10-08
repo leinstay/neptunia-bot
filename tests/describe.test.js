@@ -864,7 +864,7 @@ test('describeVideo: a direct-URL site within maxSeconds sends the public URL wi
     videoFetcher.calls.map((c) => c.fn),
     ['probeSite'],
   );
-  assert.deepEqual(videoFetcher.calls[0].options, { ytdlpPath: 'yt-dlp-test', toolTimeoutMs: 60_000 });
+  assert.deepEqual(videoFetcher.calls[0].options, { ytdlpPath: 'yt-dlp-test', toolTimeoutMs: 60_000, proxy: null, proxyRetryMinutes: undefined });
   assert.deepEqual(llm.calls[0].messages[1].content, [
     { type: 'video_url', video_url: { url: 'https://www.youtube.com/watch?v=abc', processing: 'agentic' } },
   ]);
@@ -889,6 +889,8 @@ test('describeVideo: a non-direct site downloads a clip; the raw URL never reach
     maxBytes: 8_000_000,
     toolTimeoutMs: 60_000,
     durationSec: 30,
+    proxy: null,
+    proxyRetryMinutes: undefined,
   });
   const body = JSON.stringify(llm.calls[0].messages);
   assert.ok(!body.includes('tiktok.com'), 'only the data URL is sent');
@@ -2835,4 +2837,22 @@ test('rewatchGif: logs one describe: rewatch line with kind gif -- never the que
   assert.ok(!all.includes('a secret answer'));
   assert.ok(!all.includes('a secret question'));
   assert.ok(!all.includes('ex=secret'));
+});
+
+test('describeVideo: media.video.proxy reaches the probe and the clip only for a site in proxySites', async () => {
+  const proxy = 'socks5h://user:pw@proxy.example:1080';
+  const cases = [
+    [{ proxy, proxySites: ['youtube.com', 'youtu.be'] }, 'https://www.youtube.com/watch?v=abc', proxy],
+    [{ proxy, proxySites: ['youtube.com', 'youtu.be'] }, 'https://www.tiktok.com/@a/video/1', null],
+    [{ proxy: '', proxySites: ['youtube.com', 'youtu.be'] }, 'https://www.youtube.com/watch?v=abc', null],
+    [{ proxy, proxySites: [] }, 'https://www.youtube.com/watch?v=abc', null],
+  ];
+  for (const [video, url, expected] of cases) {
+    const hot = videoHot({ video: { ...video, provider: null } });
+    const videoFetcher = fakeVideoFetcher({ probe: { ok: true, durationSec: 125, title: null } });
+    const { describer } = videoDescriber({ hot, videoFetcher });
+    await describer.describeVideo('g1', videoLink(undefined, { url }));
+    assert.deepEqual(videoFetcher.calls.map((c) => c.fn), ['probeSite', 'fetchSiteClip'], url);
+    for (const call of videoFetcher.calls) assert.equal(call.options.proxy, expected, `${call.fn} ${url}`);
+  }
 });

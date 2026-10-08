@@ -4,7 +4,18 @@
 // A video-site link goes through yt-dlp: a metadata-only probe (duration,
 // title) and a clip download of the first `maxSeconds` (whole when it is no
 // longer), capped at the same download ceiling as an attachment; a clip over
-// `maxBytes` is then re-encoded by ffmpeg the same way. A GIF (a .gif file
+// `maxBytes` is then re-encoded by ffmpeg the same way. Through a proxy
+// (`proxy`, resolved by the caller with video-sites.js#proxyFor) the video is
+// downloaded whole -- yt-dlp's sections cut runs ffmpeg, which cannot speak
+// SOCKS -- and ffmpeg trims its first `maxSeconds` locally whenever it may be
+// longer. When a proxied yt-dlp run fails (exit, spawn error, timeout) --
+// and only then -- a plain TCP connect to the proxy (proxyReachable, ~3 s)
+// tells the two cases apart: a reachable proxy means the video itself failed
+// (private, deleted), reported as usual with no retry; an unreachable one is
+// a dead proxy, so the run is retried once directly and the proxy skipped
+// for `proxyRetryMinutes` (in memory, per fetcher) -- one extra attempt per
+// window, not per link. The proxy URL may carry credentials: neither it nor
+// its host or port is ever logged. A GIF (a .gif file
 // or a GIF site's mp4/webm) is downloaded the same way and always converted
 // by ffmpeg into a short mp4, so it can be watched like a video. Where yt-dlp cannot
 // read YouTube (a bot check), probeYoutube learns the duration without it:
@@ -29,9 +40,11 @@
 
 import { spawn } from 'node:child_process';
 import * as fsPromises from 'node:fs/promises';
+import { connect as netConnect } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { log } from '../log.js';
+import { MINUTE_MS } from '../time.js';
 import {
   bareContentType,
   ffmpegGifArgs,
@@ -49,6 +62,9 @@ import {
 const STDOUT_MAX_BYTES = 32 * 1024 * 1024;
 const DOWNLOAD_CEILING_FACTOR = 4;
 const CLOSE_GRACE_MS = 5000;
+// media.video.proxyRetryMinutes in config.json.
+const PROXY_RETRY_MINUTES_FALLBACK = 10;
+const PROXY_CHECK_TIMEOUT_MS = 3000;
 const PAGE_MAX_BYTES = 2 * 1024 * 1024;
 const YOUTUBE_API_LOCATION = 'www.googleapis.com/youtube/v3/videos';
 const PAGE_HEADERS = {
@@ -71,6 +87,57 @@ function isGifType(type) {
   return type === 'image/gif' || isVideoType(type);
 }
 
+// The port a proxy URL means when it names none.
+const PROXY_DEFAULT_PORTS = { 'socks5h:': 1080, 'socks5:': 1080, 'socks4a:': 1080, 'socks4:': 1080, 'http:': 80, 'https:': 443 };
+
+/**
+ * Whether a plain TCP connection to the proxy's host and port opens within
+ * `timeoutMs`. Resolves false for an unparsable URL, an unknown scheme
+ * without a port, a refused or timed-out connection; never rejects, never
+ * logs (the URL may carry credentials, the host is the owner's).
+ * @param {string} proxyUrl
+ * @param {{ timeoutMs?: number, connect?: typeof netConnect }} [options]
+ * @returns {Promise<boolean>}
+ */
+export function proxyReachable(proxyUrl, { timeoutMs = PROXY_CHECK_TIMEOUT_MS, connect = netConnect } = {}) {
+  return new Promise((resolve) => {
+    let parsed;
+    try {
+      parsed = new URL(String(proxyUrl));
+    } catch {
+      resolve(false);
+      return;
+    }
+    const port = parsed.port ? Number(parsed.port) : PROXY_DEFAULT_PORTS[parsed.protocol];
+    const host = parsed.hostname.replace(/^\[|\]$/g, '');
+    if (!host || !Number.isInteger(port)) {
+      resolve(false);
+      return;
+    }
+    let socket = null;
+    let timer = null;
+    const done = (alive) => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      try {
+        socket?.destroy?.();
+      } catch {
+        // already closed
+      }
+      resolve(alive);
+    };
+    try {
+      socket = connect({ host, port });
+    } catch {
+      done(false);
+      return;
+    }
+    timer = setTimeout(() => done(false), timeoutMs);
+    socket.once?.('connect', () => done(true));
+    socket.once?.('error', () => done(false));
+  });
+}
+
 /**
  * @param {object} [deps]
  * @param {typeof spawn} [deps.spawnImpl]
@@ -80,6 +147,9 @@ function isGifType(type) {
  * @param {string} [deps.platform]  `process.platform` by default; 'win32' switches the tree kill to taskkill.
  * @param {typeof process.kill} [deps.killProcess]  Used for the POSIX process-group kill.
  * @param {number} [deps.closeGraceMs]  How long a killed tool may take to close before cleanup goes ahead.
+ * @param {() => number} [deps.now]  Clock for the proxy cooldown window.
+ * @param {(proxyUrl: string) => Promise<boolean>} [deps.probeProxy]  The liveness check after a failed
+ *   proxied run; proxyReachable by default.
  */
 export function createVideoFetcher({
   spawnImpl = spawn,
@@ -89,14 +159,20 @@ export function createVideoFetcher({
   platform = process.platform,
   killProcess = process.kill.bind(process),
   closeGraceMs = CLOSE_GRACE_MS,
+  now = Date.now,
+  probeProxy = proxyReachable,
 } = {}) {
   const isWindows = platform === 'win32';
+  // In memory only: until when a failed proxy is skipped, and whether that window logged its skip.
+  let proxyDownUntil = 0;
+  let proxySkipLogged = false;
 
   /** One warn line per failure (codes only, see the header), then the failure object. */
   function fail(source, url, reason, extra = {}) {
     const meta = { source, reason, location: safeLocation(url) };
     if (extra.code !== undefined && extra.code !== null) meta.code = extra.code;
     if (extra.status !== undefined) meta.status = extra.status;
+    if (extra.proxied === true) meta.proxied = true;
     log.warn('fetch-video: failed', meta);
     return { ok: false, reason };
   }
@@ -203,6 +279,68 @@ export function createVideoFetcher({
         }, timeoutMs);
       }
     });
+  }
+
+  /** Whether a tool run failed: a timeout, a spawn error or a non-zero exit. */
+  function runFailed(run) {
+    return run.timedOut || Boolean(run.spawnError) || run.code !== 0;
+  }
+
+  /**
+   * The proxy to try now: `proxy` unless a proxied run failed within the
+   * cooldown window, in which case the link goes direct and the first such
+   * link of the window logs `fetch-video: proxy skipped`.
+   */
+  function proxyToTry(proxy) {
+    if (typeof proxy !== 'string' || !proxy) return null;
+    if (now() < proxyDownUntil) {
+      if (!proxySkipLogged) {
+        proxySkipLogged = true;
+        log.info('fetch-video: proxy skipped', { reason: 'cooldown' });
+      }
+      return null;
+    }
+    return proxy;
+  }
+
+  /** Log a failed proxied run (codes only, never the proxy) and open the cooldown window. */
+  function proxyFailed(stage, run, proxyRetryMinutes) {
+    const reason = run.timedOut ? 'timeout' : run.spawnError ? 'tool' : 'download';
+    log.warn('fetch-video: proxy failed', { stage, reason, code: runCode(run) });
+    const minutes = Number.isFinite(proxyRetryMinutes) && proxyRetryMinutes >= 0
+      ? proxyRetryMinutes
+      : PROXY_RETRY_MINUTES_FALLBACK;
+    proxyDownUntil = now() + minutes * MINUTE_MS;
+    proxySkipLogged = false;
+  }
+
+  /** Whether the proxy answers a plain TCP connect; any thrown error counts as down. */
+  async function proxyAlive(proxy) {
+    try {
+      return (await probeProxy(proxy)) === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * One yt-dlp run built by `build(proxyOrNull)`: through the proxy when one
+   * is set and not cooling down. A failed proxied run triggers one TCP
+   * liveness check of the proxy (only then, never before a call): a dead
+   * proxy opens the cooldown and the run is retried once directly (today's
+   * arguments, the sections cut included); a live proxy means the failure is
+   * the video's own, so it is returned as is -- no retry, no cooldown.
+   * Resolves `{ run, proxied }` -- `proxied` tells whether `run` went through the proxy.
+   */
+  async function runYtdlp(stage, build, { proxy, proxyRetryMinutes, toolTimeoutMs }) {
+    const via = proxyToTry(proxy);
+    if (via) {
+      const run = await runTool(build(via), toolTimeoutMs);
+      if (!runFailed(run)) return { run, proxied: true };
+      if (await proxyAlive(via)) return { run, proxied: true };
+      proxyFailed(stage, run, proxyRetryMinutes);
+    }
+    return { run: await runTool(build(null), toolTimeoutMs), proxied: false };
   }
 
   /** A fresh per-call directory under tmpDir. */
@@ -396,16 +534,23 @@ export function createVideoFetcher({
   /**
    * yt-dlp metadata only: duration and title of a video-site link. Never rejects.
    * @param {string} url
-   * @param {{ ytdlpPath: string, toolTimeoutMs: number }} options
+   * @param {{ ytdlpPath: string, toolTimeoutMs: number, proxy?: string|null, proxyRetryMinutes?: number }} options
+   *   `proxy`: yt-dlp's `--proxy` for this link (proxyFor), never logged; on a
+   *   proxied failure the probe runs again directly (see runYtdlp).
    * @returns {Promise<{ ok: true, durationSec: number|null, title: string|null }
    *   | { ok: false, reason: 'download'|'tool'|'timeout' }>}
    */
-  async function probeSite(url, { ytdlpPath, toolTimeoutMs } = {}) {
+  async function probeSite(url, { ytdlpPath, toolTimeoutMs, proxy = null, proxyRetryMinutes } = {}) {
     try {
-      const run = await runTool(ytdlpProbeArgs(url, { ytdlpPath }), toolTimeoutMs);
-      if (run.timedOut) return fail('link', url, 'timeout', { code: runCode(run) });
-      if (run.spawnError) return fail('link', url, 'tool', { code: runCode(run) });
-      if (run.code !== 0) return fail('link', url, 'download', { code: runCode(run) });
+      const { run, proxied } = await runYtdlp(
+        'probe',
+        (via) => ytdlpProbeArgs(url, { ytdlpPath, proxy: via }),
+        { proxy, proxyRetryMinutes, toolTimeoutMs },
+      );
+      const extra = { code: runCode(run), proxied };
+      if (run.timedOut) return fail('link', url, 'timeout', extra);
+      if (run.spawnError) return fail('link', url, 'tool', extra);
+      if (run.code !== 0) return fail('link', url, 'download', extra);
       return { ok: true, ...parseProbe(run.stdout) };
     } catch (err) {
       return fail('link', url, 'tool', { code: errorCode(err) });
@@ -420,36 +565,47 @@ export function createVideoFetcher({
    * at `maxBytes * DOWNLOAD_CEILING_FACTOR` (over it yt-dlp writes nothing:
    * `size`); a clip within `maxBytes` is sent as-is, a bigger one is
    * re-encoded by ffmpeg (360p, first `maxSeconds`) and is `size` only when
-   * still over `maxBytes`. A missing or failing ffmpeg there is `tool`. Each
+   * still over `maxBytes`. With a non-empty `proxy` (yt-dlp's `--proxy`,
+   * never logged) the download is always whole, so the same ffmpeg trim also
+   * runs whenever the duration is unknown or over `maxSeconds`, whatever the
+   * size. A failed proxied download is retried once directly with the
+   * sections cut (see runYtdlp). A missing or failing ffmpeg there is `tool`. Each
    * tool run gets its own `toolTimeoutMs`. Never rejects.
    * @param {string} url
    * @param {{ ytdlpPath: string, ffmpegPath: string, maxSeconds: number, maxBytes: number,
-   *   toolTimeoutMs: number, durationSec?: number|null }} options
+   *   toolTimeoutMs: number, durationSec?: number|null, proxy?: string|null,
+   *   proxyRetryMinutes?: number }} options
    * @returns {Promise<{ ok: true, dataUrl: string, mimeType: string, seconds: number, bytes: number }
    *   | { ok: false, reason: 'size'|'download'|'tool'|'timeout' }>}
    */
   async function fetchSiteClip(url, {
-    ytdlpPath, ffmpegPath, maxSeconds, maxBytes, toolTimeoutMs, durationSec = null,
+    ytdlpPath, ffmpegPath, maxSeconds, maxBytes, toolTimeoutMs, durationSec = null, proxy = null,
+    proxyRetryMinutes,
   } = {}) {
     let dir = null;
     try {
       dir = await makeWorkDir();
-      const clipPath = path.join(dir, 'clip.mp4');
+      // A direct retry writes its own file, so a partial proxied download is never resumed.
+      const clipPathFor = (via) => path.join(dir, via ? 'clip-proxy.mp4' : 'clip.mp4');
       const smallPath = path.join(dir, 'small.mp4');
-      const run = await runTool(
-        ytdlpClipArgs(url, {
+      const { run, proxied } = await runYtdlp(
+        'clip',
+        (via) => ytdlpClipArgs(url, {
           ytdlpPath,
           ffmpegPath,
           maxSeconds,
           maxFileSize: maxBytes * DOWNLOAD_CEILING_FACTOR,
-          outPath: clipPath,
+          outPath: clipPathFor(via),
           durationSec,
+          proxy: via,
         }),
-        toolTimeoutMs,
+        { proxy, proxyRetryMinutes, toolTimeoutMs },
       );
-      if (run.timedOut) return fail('link', url, 'timeout', { code: runCode(run) });
-      if (run.spawnError) return fail('link', url, 'tool', { code: runCode(run) });
-      if (run.code !== 0) return fail('link', url, 'download', { code: runCode(run) });
+      const clipPath = clipPathFor(proxied);
+      const runExtra = { code: runCode(run), proxied };
+      if (run.timedOut) return fail('link', url, 'timeout', runExtra);
+      if (run.spawnError) return fail('link', url, 'tool', runExtra);
+      if (run.code !== 0) return fail('link', url, 'download', runExtra);
 
       // yt-dlp exits 0 without writing anything when --max-filesize skips the download.
       const clipBytes = await sizeOf(clipPath);
@@ -457,7 +613,9 @@ export function createVideoFetcher({
       const seconds = Number.isFinite(durationSec) && durationSec < maxSeconds ? durationSec : maxSeconds;
       let outPath = clipPath;
       let bytes = clipBytes;
-      if (clipBytes > maxBytes) {
+      // Through a proxy nothing was cut on download (see ytdlpClipArgs).
+      const uncut = proxied && !(Number.isFinite(durationSec) && durationSec <= maxSeconds);
+      if (clipBytes > maxBytes || uncut) {
         const trim = await runTool(ffmpegTrimArgs(clipPath, smallPath, { ffmpegPath, maxSeconds }), toolTimeoutMs);
         if (trim.timedOut) return fail('link', url, 'timeout', { code: runCode(trim) });
         if (trim.spawnError || trim.code !== 0) return fail('link', url, 'tool', { code: runCode(trim) });

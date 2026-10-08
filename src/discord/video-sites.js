@@ -2,7 +2,8 @@
 // site, a stable cache key for a video URL (so a repost of the same video
 // shares one cache entry), the exact yt-dlp / ffmpeg argument arrays the
 // fetcher (src/discord/fetch-video.js) runs (a GIF's conversion to a short
-// mp4 included), and the parsers behind the
+// mp4 included), which links go through the optional yt-dlp proxy
+// (proxyFor), and the parsers behind the
 // YouTube duration probe that works without yt-dlp (the watch page, the
 // optional Data API). No I/O here -- the child processes and requests live at
 // the edge, these functions only decide what to run and read what came back.
@@ -172,15 +173,40 @@ export function videoUrlCacheKey(url) {
 }
 
 /**
- * A metadata-only yt-dlp run (duration, title), no download.
+ * The proxy yt-dlp should use for `url`: `videoCfg.proxy` when it is a
+ * non-empty string and `url` belongs to one of `videoCfg.proxySites` (same
+ * matching rule as videoSiteFor), else null -- an empty proxy or an empty
+ * list turns it off. The value may carry credentials: never log it.
  * @param {string} url
- * @param {{ ytdlpPath: string }} options
+ * @param {{ proxy?: string, proxySites?: string[] }} [videoCfg]
+ * @returns {string|null}
+ */
+export function proxyFor(url, videoCfg) {
+  const proxy = videoCfg?.proxy;
+  if (typeof proxy !== 'string' || !proxy) return null;
+  return videoSiteFor(url, videoCfg.proxySites) !== null ? proxy : null;
+}
+
+/** `['--proxy', proxy]` for a non-empty string, else nothing. */
+function proxyArgs(proxy) {
+  return typeof proxy === 'string' && proxy ? ['--proxy', proxy] : [];
+}
+
+/**
+ * A metadata-only yt-dlp run (duration, title), no download. A non-empty
+ * `proxy` (see proxyFor) is passed verbatim as `--proxy`.
+ * @param {string} url
+ * @param {{ ytdlpPath: string, proxy?: string|null }} options
  * @returns {{ command: string, args: string[] }}
  */
-export function ytdlpProbeArgs(url, { ytdlpPath } = {}) {
+export function ytdlpProbeArgs(url, { ytdlpPath, proxy = null } = {}) {
   return {
     command: ytdlpPath,
-    args: ['--dump-single-json', '--skip-download', '--no-playlist', '--no-warnings', '--quiet', '--', String(url)],
+    args: [
+      '--dump-single-json', '--skip-download', '--no-playlist', '--no-warnings', '--quiet',
+      ...proxyArgs(proxy),
+      '--', String(url),
+    ],
   };
 }
 
@@ -191,25 +217,31 @@ export function ytdlpProbeArgs(url, { ytdlpPath } = {}) {
  * `maxSeconds` is downloaded whole, with no cut. `maxFileSize` is the
  * download ceiling passed as `--max-filesize` (yt-dlp then writes nothing),
  * not the final size limit: the fetcher re-encodes a download over its
- * `maxBytes` with ffmpegTrimArgs. `--ffmpeg-location` is passed
+ * `maxBytes` with ffmpegTrimArgs. With a non-empty `proxy` (passed
+ * verbatim as `--proxy`) the video is always downloaded whole, never cut:
+ * the sections cut hands the download to ffmpeg, which cannot speak SOCKS,
+ * so the fetcher trims the first `maxSeconds` locally instead (same format
+ * selector, same `--max-filesize`). `--ffmpeg-location` is passed
  * only when `ffmpegPath` contains a path separator: yt-dlp resolves the value
  * as a path, so a bare name like `ffmpeg` is left to its own PATH search.
  * @param {string} url
  * @param {{ ytdlpPath: string, ffmpegPath: string, maxSeconds: number, maxFileSize: number, outPath: string,
- *   durationSec?: number|null }} options
+ *   durationSec?: number|null, proxy?: string|null }} options
  * @returns {{ command: string, args: string[] }}
  */
 export function ytdlpClipArgs(url, {
-  ytdlpPath, ffmpegPath, maxSeconds, maxFileSize, outPath, durationSec = null,
+  ytdlpPath, ffmpegPath, maxSeconds, maxFileSize, outPath, durationSec = null, proxy = null,
 } = {}) {
   const ffmpegPathStr = ffmpegPath == null ? '' : String(ffmpegPath);
   const location = /[\\/]/.test(ffmpegPathStr) ? ['--ffmpeg-location', ffmpegPathStr] : [];
-  const whole = Number.isFinite(durationSec) && durationSec <= maxSeconds;
+  const viaProxy = proxyArgs(proxy);
+  const whole = viaProxy.length > 0 || (Number.isFinite(durationSec) && durationSec <= maxSeconds);
   const cut = whole ? [] : ['--download-sections', `*0-${maxSeconds}`, '--force-keyframes-at-cuts'];
   return {
     command: ytdlpPath,
     args: [
       '--no-playlist', '--no-warnings', '--quiet',
+      ...viaProxy,
       ...location,
       '-f', YTDLP_FORMAT,
       '--merge-output-format', 'mp4',

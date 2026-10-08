@@ -11,6 +11,7 @@ import {
   ytdlpClipArgs,
   ffmpegTrimArgs,
   ytdlpProbeArgs,
+  proxyFor,
   ffmpegGifArgs,
   parseProbe,
   safeLocation,
@@ -342,4 +343,67 @@ test('ytdlpProbeArgs: the URL comes after -- so it is never read as an option', 
   const { args } = ytdlpProbeArgs('--exec=evil');
   assert.equal(args.at(-2), '--');
   assert.equal(args.at(-1), '--exec=evil');
+});
+
+const PROXY = 'socks5h://usér:pä%40ss@proxy.example:1080';
+const PROXY_CFG = { proxy: PROXY, proxySites: ['youtube.com', 'youtu.be'] };
+
+test('proxyFor: a listed site (or its subdomain) gets the proxy, verbatim', () => {
+  for (const url of ['https://youtu.be/abc', 'https://www.youtube.com/watch?v=abc', 'https://m.YouTube.com/shorts/x']) {
+    assert.equal(proxyFor(url, PROXY_CFG), PROXY, url);
+  }
+});
+
+test('proxyFor: a site outside proxySites runs direct', () => {
+  for (const url of ['https://vk.com/video-1_2', 'https://www.tiktok.com/@a/video/1', 'https://notyoutube.com/x', 'not a url']) {
+    assert.equal(proxyFor(url, PROXY_CFG), null, url);
+  }
+});
+
+test('proxyFor: an empty, missing or non-string proxy, or an empty or missing proxySites, never proxies', () => {
+  const url = 'https://youtu.be/abc';
+  for (const proxy of ['', undefined, null, 42]) assert.equal(proxyFor(url, { ...PROXY_CFG, proxy }), null);
+  for (const proxySites of [[], undefined, null, 'youtube.com']) assert.equal(proxyFor(url, { ...PROXY_CFG, proxySites }), null);
+  assert.equal(proxyFor(url, undefined), null);
+});
+
+test('ytdlpProbeArgs: a proxy is passed verbatim as --proxy before the URL; none without one', () => {
+  const withProxy = ytdlpProbeArgs('https://youtu.be/abc', { ytdlpPath: '/opt/yt-dlp', proxy: PROXY });
+  assert.equal(withProxy.command, '/opt/yt-dlp');
+  assert.equal(withProxy.args[withProxy.args.indexOf('--proxy') + 1], PROXY);
+  assert.ok(withProxy.args.indexOf('--proxy') < withProxy.args.indexOf('--'));
+  assert.deepEqual(withProxy.args.slice(-2), ['--', 'https://youtu.be/abc']);
+  for (const proxy of [undefined, '', null, 42]) {
+    const { args } = ytdlpProbeArgs('https://youtu.be/abc', { ytdlpPath: '/opt/yt-dlp', proxy });
+    assert.equal(args.includes('--proxy'), false, `no proxy for ${proxy}`);
+  }
+});
+
+test('ytdlpClipArgs: with a proxy the video is downloaded whole (no sections cut), ceiling and format kept', () => {
+  for (const durationSec of [null, 125, 14]) {
+    const out = ytdlpClipArgs('https://youtu.be/abc', { ...CLIP, ffmpegPath: '/usr/bin/ffmpeg', durationSec, proxy: PROXY });
+    assert.deepEqual(out, {
+      command: '/opt/yt-dlp',
+      args: [
+        '--no-playlist', '--no-warnings', '--quiet',
+        '--proxy', PROXY,
+        '--ffmpeg-location', '/usr/bin/ffmpeg',
+        '-f', FORMAT,
+        '--merge-output-format', 'mp4',
+        '--max-filesize', '8000000',
+        '-o', '/tmp/d/clip.mp4',
+        '--',
+        'https://youtu.be/abc',
+      ],
+    }, `duration ${durationSec}`);
+  }
+});
+
+test('ytdlpClipArgs: an empty or missing proxy keeps the sections cut and adds no --proxy', () => {
+  for (const proxy of [undefined, '']) {
+    const { args } = ytdlpClipArgs('https://youtu.be/abc', { ...CLIP, ffmpegPath: 'ffmpeg', durationSec: 125, proxy });
+    assert.equal(args.includes('--proxy'), false);
+    assert.equal(args[args.indexOf('--download-sections') + 1], '*0-60');
+    assert.ok(args.includes('--force-keyframes-at-cuts'));
+  }
 });
