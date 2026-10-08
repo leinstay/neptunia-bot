@@ -181,6 +181,10 @@ function bufferedMediaIds(buffered) {
  * @param {{ set: (fn: () => void, ms: number) => any, clear: (timer: any) => void }} [deps.timers]
  *   The settle waits of calls from channels the persona cannot write in (see armSettle below).
  *   Default: setTimeout / clearTimeout, each timer unref'd.
+ * @param {{ note: (channelId: string, authorId: string, at: number) => void }} [deps.activity]
+ *   From src/behavior/activity.js#createActivity, shared with the turn runner: every message of
+ *   anyone but the persona in a served channel or a private chat is noted (no contents), so a
+ *   turn answering a person can wait until they stop writing (pace.settleMs). Absent: nothing noted.
  * @returns {(message: import('discord.js').Message) => Promise<void>} Also carries a
  *   `.drainPending()` method: called once a turn finishes anywhere (src/index.js wires it to
  *   src/behavior/turn.js's `setOnIdle`, in the same `finally` that frees the channel) to answer
@@ -210,6 +214,7 @@ export function createMessageHandler({
   now = Date.now,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   timers = { set: setTimeout, clear: clearTimeout },
+  activity = null,
 }) {
   /**
    * Whether the message `replyToId` (normalizeMessage's: a forward has none)
@@ -2151,6 +2156,8 @@ export function createMessageHandler({
     if (features.privateMessages !== true) return;
     const selfId = client.user.id;
     if (message.author.bot && message.author.id !== selfId) return;
+    // When the partner last wrote here (pace.settleMs); the persona's own messages never count.
+    if (message.author.id !== selfId) activity?.note(message.channel.id, message.author.id, message.createdTimestamp);
 
     const guildId = getGuildId();
     if (!guildId) return;
@@ -2304,6 +2311,10 @@ export function createMessageHandler({
       // memory, no trigger is detected, no turn runs, no eavesdrop.
       const dryRunChannelId = config.bot.dryRunChannelId;
       if (dryRunChannelId && message.channel.id === dryRunChannelId) return;
+
+      // 3c. When this author last wrote in this channel, for a turn that waits until the person
+      // it answers stops writing (pace.settleMs). The persona's own messages never count.
+      if (message.author.id !== client.user.id) activity?.note(message.channel.id, message.author.id, message.createdTimestamp);
 
       // 4. Normalize.
       const selfId = client.user.id;

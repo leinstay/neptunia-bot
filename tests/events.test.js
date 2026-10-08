@@ -18,6 +18,7 @@ import { withCapturedLogs } from './fixtures/capture-logs.js';
 import { createStore } from '../src/memory/store.js';
 import { slimMessage } from '../src/memory/update.js';
 import { normalizeMessage } from '../src/discord/collect.js';
+import { createActivity } from '../src/behavior/activity.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -202,6 +203,7 @@ function makeHandler({
   llm,
   lookup,
   timers,
+  activity,
 } = {}) {
   return createMessageHandler({
     hot: prompts !== undefined ? { config: config ?? baseConfig(), prompts } : { config: config ?? baseConfig() },
@@ -220,6 +222,7 @@ function makeHandler({
     now,
     sleep,
     timers,
+    activity,
   });
 }
 
@@ -2945,6 +2948,27 @@ test('private: every gate reason drops the DM without a turn or an observe', asy
     assert.equal(spontaneous.onMessageCalls.length, 0, `${reason}: no eavesdrop`);
     assert.equal(message.channel.sent.length, 0, `${reason}: nothing sent`);
   }
+});
+
+test("activity: a member's server message is noted under its channel; the persona's own message is not", async () => {
+  const activity = createActivity();
+  const t = Date.now();
+  const handler = makeHandler({ activity });
+  await handler(fakeMessage({ id: 'm1', createdTimestamp: t - 2000 }));
+  await handler(fakeMessage({ id: 'm2', author: { id: 'self1', bot: true, username: 'Neptunia' }, cleanContent: 'γεια', createdTimestamp: t }));
+  await settle();
+  assert.equal(activity.lastAt('c1', 'u1'), t - 2000);
+  assert.equal(activity.lastAt('c1', 'self1'), null);
+});
+
+test("activity: a member's DM is noted under the DM channel; the persona's own DM message is not", async () => {
+  const activity = createActivity();
+  const handler = makeDmHandler({ activity });
+  await handler(fakeDmMessage({ createdTimestamp: TODAY_MS - 3000 }));
+  await handler(fakeDmMessage({ id: 'dm-own', author: { id: 'self1', bot: true, username: 'Neptunia' }, createdTimestamp: TODAY_MS }));
+  await settle();
+  assert.equal(activity.lastAt('dm1', 'u1'), TODAY_MS - 3000);
+  assert.equal(activity.lastAt('dm1', 'self1'), null);
 });
 
 test('private: a member missing from the cache is fetched; a fetched member passes', async () => {

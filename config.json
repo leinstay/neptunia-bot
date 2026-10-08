@@ -138,7 +138,7 @@
     "maxMs": 12000,
     "betweenMessagesMs": [700, 3500]
   },
-  "pace": { "prepareMs": 6000, "prepareSearchMs": 12000, "prepareMediaMs": 20000, "dropAfterMs": 60000, "replyHedgeMs": 20000, "typingWhilePreparing": false, "unpromptedWaits": true },
+  "pace": { "prepareMs": 6000, "prepareSearchMs": 12000, "prepareMediaMs": 20000, "dropAfterMs": 60000, "replyHedgeMs": 20000, "typingWhilePreparing": false, "unpromptedWaits": true, "settleMs": 0, "settleMaxMs": 15000 },
   "format": { "stripDashes": true },
   "split": { "minChars": 80, "maxTasks": 4, "contextMessages": 6, "maxOutputTokens": 300, "minPartChars": 20 },
   "route": { "contextMessages": 20, "maxChannels": 40, "purposeChars": 80, "maxOutputTokens": 120 },
