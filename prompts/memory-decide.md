@@ -249,7 +249,7 @@ Fields: `text` one plain line, ≤ {{recentChars}} chars, members as `<@id>`, wr
 
 A note that breaks off mid-word was cut by an older version; return it whole when its subject comes up (`update` for a note, `remove` + `add` for a detail, full merged `text` for lore).
 
-All other prose fields (detail text, guild notes, channel notes) ≤ {{fieldChars}} chars each.
+All other prose fields (detail text, guild notes, channel notes) ≤ {{fieldChars}} chars each. Any prose field returned over its stated limit is discarded whole and the stored text stays, so keep within the limits.
 
 Write notes in the language the chat speaks. Record observed facts only. A first name or nickname that people openly use in chat is not sensitive. Never store sensitive information: addresses, phone numbers, identity documents, health conditions, financial details, real full names.
 

@@ -107,11 +107,16 @@ test('upsertLore: an analyzer re-send identical after normalisation is not stamp
   assert.deepEqual(result.entries, existing, 'the stored entry, updatedAt included, is left as it was');
 });
 
-test('upsertLore: an analyzer re-send identical after clamping counts 0', () => {
+test('upsertLore: only a first write is clamped; a re-send of the clamped text counts 0 and a rewrite is never cut', () => {
   const clamped = upsertLore([], [{ title: 'X', keys: ['valid'], text: 'x'.repeat(1000) }], { ...CLAMP, source: 'analyzer', now: NOW }).entries;
-  const result = upsertLore(clamped, [{ title: 'X', keys: ['valid'], text: 'x'.repeat(2000) }], { ...CLAMP, source: 'analyzer', now: NOW + 60_000 });
-  assert.equal(result.upserted, 0, 'both texts clamp to the same 750 characters');
-  assert.equal(result.entries[0].updatedAt, new Date(NOW).toISOString());
+  assert.equal(clamped[0].text.length, 750, 'the first write is clamped');
+  const same = upsertLore(clamped, [{ title: 'X', keys: ['valid'], text: 'x'.repeat(750) }], { ...CLAMP, source: 'analyzer', now: NOW + 60_000 });
+  assert.equal(same.upserted, 0);
+  assert.equal(same.entries[0].updatedAt, new Date(NOW).toISOString());
+  // A rewrite over the limit is the caller's to refuse (src/memory/prose.js#acceptProse): stored as given.
+  const rewritten = upsertLore(clamped, [{ title: 'X', keys: ['valid'], text: 'x'.repeat(2000) }], { ...CLAMP, source: 'analyzer', now: NOW + 60_000 });
+  assert.equal(rewritten.upserted, 1);
+  assert.equal(rewritten.entries[0].text.length, 2000);
 });
 
 test('upsertLore: an analyzer re-send that changes only the keys is stamped and counted', () => {

@@ -6,6 +6,7 @@
 // disk. See docs/prompt-contract.md ("<lore>" and "lore" in "The
 // analyzer").
 
+import { createHash } from 'node:crypto';
 import { clampText } from './clamp.js';
 import { occursAsWholeWord } from './mentions.js';
 
@@ -18,6 +19,25 @@ const DEFAULT_WEIGHT = 3;
 
 function normalizeTitle(title) {
   return String(title ?? '').trim().toLowerCase();
+}
+
+/**
+ * The file name (without `.json`) of a lorebook entry's version history
+ * (data/guilds/<id>/versions/lore/<key>.json, see src/memory/store.js). Keyed by
+ * the entry's identity, the trimmed lowercase title, so a change of letter case
+ * keeps one history. Scheme: the ASCII letters and digits of that title as a
+ * dash-joined slug (at most 40 characters, for a human browsing the folder),
+ * then `-` and the first 12 hex digits of the SHA-1 of the whole identity (what
+ * makes it unique; a title with no ASCII letter or digit is the hash alone).
+ * Always a safe file name on every platform.
+ * @param {unknown} title
+ * @returns {string}
+ */
+export function loreVersionKey(title) {
+  const identity = normalizeTitle(title);
+  const hash = createHash('sha1').update(identity).digest('hex').slice(0, 12);
+  const slug = identity.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
+  return slug ? `${slug}-${hash}` : hash;
 }
 
 /** Lowercase, trim, drop too-short/duplicate keys, clamp an over-long one to
@@ -100,7 +120,7 @@ function evictOverflow(entries, maxEntries) {
  * (analyzer or owner alike) and the entry becomes/stays an owner entry, the
  * one way a title becomes protected from the analyzer. An analyzer update
  * that would leave an entry exactly as stored (title, keys, text compared
- * after normalising and clamping) is skipped: not stamped, not counted. Past
+ * after normalising and trimming) is skipped: not stamped, not counted. Past
  * `maxEntries` the stalest analyzer entries leave (see `evictOverflow`): the
  * ones written longest ago, not the ones created first.
  *
@@ -108,29 +128,40 @@ function evictOverflow(entries, maxEntries) {
  * @param {unknown} incoming            Untrusted `{ title, keys, text, always? }[]`.
  * @param {{ source: 'analyzer'|'owner', now?: number, maxEntries?: number, textChars?: number,
  *   clampTolerance?: number }} opts
- *   `title` is a hard identity clamp at MAX_TITLE; `text` is free prose, clamped tolerantly (see
- *   src/memory/clamp.js) to `textChars` (config.lore.textChars; DEFAULT_MAX_TEXT when absent).
- * @returns {{ entries: object[], upserted: number }}  `upserted`: entries inserted or actually changed.
+ *   `title` is a hard identity clamp at MAX_TITLE; `text` is free prose: a first write (a new
+ *   entry, or one with no text) is clamped tolerantly (see src/memory/clamp.js) to `textChars`
+ *   (config.lore.textChars; DEFAULT_MAX_TEXT when absent); a rewrite is stored as given, never
+ *   cut (the caller refuses one over the limit, src/memory/prose.js#acceptProse).
+ * @returns {{ entries: object[], upserted: number, changes: { title: string, previousText: string, nextText: string }[] }}
+ *   `upserted`: entries inserted or actually changed. `changes`: one pair per existing entry whose
+ *   text this call replaced with a different one (the stored text before, the text after), for the
+ *   store's version history; an inserted entry or a change of keys alone adds none.
  */
 export function upsertLore(entries, incoming, { source, now: nowMs = Date.now(), maxEntries = Infinity, textChars, clampTolerance } = {}) {
   const stored = Array.isArray(entries) ? [...entries] : [];
-  if (!Array.isArray(incoming) || incoming.length === 0) return { entries: stored, upserted: 0 };
+  if (!Array.isArray(incoming) || incoming.length === 0) return { entries: stored, upserted: 0, changes: [] };
 
   const byTitle = new Map(stored.map((entry, index) => [normalizeTitle(entry.title), index]));
   const nowIso = new Date(nowMs).toISOString();
   const effectiveTextChars = Number.isFinite(textChars) && textChars > 0 ? textChars : DEFAULT_MAX_TEXT;
   let upserted = 0;
   let salt = 0;
+  const changes = [];
 
   for (const raw of incoming) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
     const title = typeof raw.title === 'string' ? clampText(raw.title, MAX_TITLE, { tolerance: 1 }) : '';
     const keys = normalizeKeys(raw.keys);
-    const text = typeof raw.text === 'string' ? clampText(raw.text, effectiveTextChars, { tolerance: clampTolerance }) : '';
-    if (!title || keys.length === 0 || !text) continue;
+    if (!title || keys.length === 0 || typeof raw.text !== 'string' || !raw.text.trim()) continue;
 
     const normalized = normalizeTitle(title);
     const existingIndex = byTitle.get(normalized);
+    // Only a first write is clamped (no entry, or one with no text): a rewrite over the limit is the
+    // caller's to refuse (src/memory/prose.js#acceptProse), never cut here.
+    const previousText = existingIndex === undefined ? '' : stored[existingIndex].text;
+    const firstWrite = typeof previousText !== 'string' || previousText.trim() === '';
+    const text = firstWrite ? clampText(raw.text, effectiveTextChars, { tolerance: clampTolerance }) : raw.text.trim();
+    if (!text) continue;
 
     if (existingIndex === undefined) {
       salt += 1;
@@ -162,9 +193,10 @@ export function upsertLore(entries, incoming, { source, now: nowMs = Date.now(),
     if (source === 'owner') updated.always = Boolean(raw.always);
     stored[existingIndex] = updated;
     upserted += 1;
+    if (existing.text !== text) changes.push({ title, previousText: typeof existing.text === 'string' ? existing.text : '', nextText: text });
   }
 
-  return { entries: evictOverflow(stored, maxEntries), upserted };
+  return { entries: evictOverflow(stored, maxEntries), upserted, changes };
 }
 
 /**

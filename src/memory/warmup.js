@@ -79,6 +79,7 @@ import {
 import { block, fillPromptTemplate } from '../behavior/prompt.js';
 import { topByRank } from './ranking.js';
 import { clampText } from './clamp.js';
+import { acceptProse, overLimitOf } from './prose.js';
 import { INJOKE_CHARS } from './text-limits.js';
 import { normalizeTopic } from './interests.js';
 import { toTokens, fromTokens } from './mentions.js';
@@ -191,14 +192,54 @@ function sampleCounts(sample) {
 }
 
 // A notes refresh's failures that stamp `notesAttemptAt`, so the scheduler backs off the target.
-const NOTES_ATTEMPT_REASONS = new Set(['too-few', 'conflict', 'bad-json', 'llm-error']);
+const NOTES_ATTEMPT_REASONS = new Set(['too-few', 'conflict', 'bad-json', 'llm-error', 'over-limit']);
 
 /** A notes refresh's reason and detail for a failed processChannel / processServer outcome: a
  * request that does not fit even with the fewest lines (`over-cap`) is a `token-limit`, with the
- * original reason as `detail`; every other reason is the refresh's own, its `detail` kept. */
+ * original reason as `detail`; every other reason is the refresh's own, its `detail` and the
+ * `fields` of an `over-limit` kept. */
 function notesRefreshReason(outcome) {
   if (outcome.reason === 'over-cap') return { reason: 'token-limit', detail: 'over-cap' };
-  return { reason: outcome.reason, detail: outcome.detail };
+  return { reason: outcome.reason, detail: outcome.detail, fields: outcome.fields };
+}
+
+/** The version history settings a memory write passes to the store, read from the live config
+ * (fallbacks: config.json's `features.versions` and `memory.versionsKept`). */
+function versionSettings(config) {
+  return { enabled: config?.features?.versions !== false, kept: config?.memory?.versionsKept ?? 20 };
+}
+
+/** Whether a refresh re-asks an answer whose rewrite is over a prose limit, once
+ * (`memory.overLimitRetries`; fallback config.json's 1). */
+function overLimitRetryOn(config) {
+  return (config?.memory?.overLimitRetries ?? 1) > 0;
+}
+
+/** The retry of a refresh whose answer is over a prose limit: the same `messages`, then the
+ * model's own answer as it was returned (`answerText`, an assistant turn), then a user turn holding
+ * only `<over_limit>` (JSON, src/memory/prose.js#overLimitOf). Pure. */
+function withOverLimit(messages, answerText, overLimit) {
+  return [
+    ...messages,
+    { role: 'assistant', content: answerText },
+    { role: 'user', content: block('over_limit', JSON.stringify(overLimit)) },
+  ];
+}
+
+/** src/memory/prose.js#acceptProse over the prose fields of one refresh answer (`answer`: field ->
+ * text, `''` when the answer has none): `accepted` holds what is stored for every field that said
+ * something (a first write clamped as before, a rewrite within its limit as is, an identical text
+ * as stored), `over` the trimmed texts of the rewrites over their limits -- never cut. Pure. */
+function judgeProse(answer, stored, limits, config) {
+  const tolerance = config?.memory?.clampTolerance;
+  const accepted = {};
+  const over = {};
+  for (const [field, text] of Object.entries(answer)) {
+    const verdict = acceptProse(stored[field], text, limits[field], { tolerance });
+    if (verdict.outcome === 'over') over[field] = text.trim();
+    else if (verdict.outcome !== 'empty') accepted[field] = verdict.text;
+  }
+  return { accepted, over };
 }
 
 /** formatTranscript's 'memory'-mode options for a warmup request (channel, person, server,
@@ -676,8 +717,8 @@ function dedupeByIdentity(items, identityField) {
  * Validate and clamp the model's `profile.md` JSON with the same helpers the
  * stream analyzer uses (clampText, normalizeTopic, toTokens/fromTokens).
  * Pure: this function writes nothing, but its result is what gets stored -- a
- * warmup person run writes it whole (`writePersonAnswer`), a single-mode
- * portrait refresh its `character`/`style`. `null` on garbage input.
+ * warmup person run writes it whole (`writePersonAnswer`). A portrait refresh
+ * never clamps a rewrite (refreshWithSlot judges it). `null` on garbage input.
  * @param {unknown} raw
  * @param {object} config  Live config (`config.memory`).
  * @param {(id: string) => (string|null)} nameOf
@@ -744,7 +785,8 @@ export function clampProfileResult(raw, config, nameOf = () => null) {
  * Validate and clamp a two-stage refresh's stage A answer (prompts/portrait.md): `{ "style":
  * "<the whole merged text>", "character": { "keep": [""], "revise": [{ "old": "", "now": "" }],
  * "add": [""], "drop": [{ "old": "" }] } }`. `style` is clamped and resolved like
- * `clampProfileResult`'s (it is stored at once); every note of the lists is tokenized (`name
+ * `clampProfileResult`'s (the refresh itself stores its own unclamped judgement of it, see
+ * refreshWithSlot); every note of the lists is tokenized (`name
  * (id:...)` -> `<@id>`, the form a voice item's brief keeps) and clamped to `memory.fieldChars`;
  * a blank note, a `revise` entry without `now` and a `drop` entry without `old` are left out (a
  * bare string in `drop` is its `old`). `brief`: only the lists that say something, the
@@ -788,7 +830,8 @@ export function clampPortraitDecision(raw, config, nameOf = () => null, { stored
   return { style: clampResolvedField(raw.style, fieldChars, tolerance, tokenize, nameOf), brief, changed };
 }
 
-/** Validate and clamp the model's `channel.md` JSON. `null` on garbage input; nothing stored. */
+/** Validate and clamp the model's `channel.md` JSON. `null` on garbage input; nothing stored.
+ * A warmup pass only: a sample refresh never clamps a rewrite (settleNotesRefresh). */
 export function clampChannelResult(raw, config) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const memoryCfg = config?.memory ?? {};
@@ -830,7 +873,8 @@ export function serverTemplateValues(config, selfName) {
   return { name: selfName, ...serverLimits(config) };
 }
 
-/** Validate and clamp the model's `server.md` JSON. Never `null` -- an empty/garbage answer just
+/** Validate and clamp the model's `server.md` JSON (a warmup pass; a sample refresh takes only
+ * its in-jokes from here, see settleNotesRefresh). Never `null` -- an empty/garbage answer just
  * yields empty fields; `processServer` writes only the non-empty ones (`nonEmptyFields`), so an
  * empty field never blanks what is stored, and `store.setLore` only ever adds or updates.
  * `patterns`/`starters` are cut to `guildFieldChars`, the lore texts to `loreTextChars`, at most
@@ -1248,6 +1292,38 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
   }
 
   /**
+   * The end of a notes refresh (processChannel / processServer with `refresh`) once its answer is
+   * parsed. Every prose field goes through `judgeProse` against the stored text and its limit,
+   * never clamped. A rewrite over its limit re-asks once (`memory.overLimitRetries` > 0): the same
+   * request, the first answer (`text`, as returned) and `<over_limit>` listing the over fields
+   * (withOverLimit); that answer is
+   * judged the same way, whole. An answer with a field still over is `over-limit` (`fields`: the
+   * names) and nothing of it is written: the answer is one object, accepted or refused whole.
+   * `standDown` runs before a retry is sent and right before the write, with no await left until
+   * the write is done (a pause, a forget, newer notes win); `write(accepted, answer)` stores.
+   * A retry that fails is the retry's own outcome (`sendNotesRequest`'s reasons, `bad-json`).
+   */
+  async function settleNotesRefresh({ messages, text, parsed, voice = false, logFields, limits, read, storedOf, standDown, write }) {
+    let answer = parsed;
+    for (let retried = false; ; retried = true) {
+      const stoodDown = standDown();
+      if (stoodDown) return stoodDown;
+      const { accepted, over } = judgeProse(read(answer), storedOf(), limits, hot.config);
+      const overFields = Object.keys(over);
+      if (overFields.length === 0) return write(accepted, answer);
+      if (retried || !overLimitRetryOn(hot.config)) return { ok: false, reason: 'over-limit', fields: overFields };
+      const result = await sendNotesRequest(withOverLimit(messages, text, overLimitOf(over, limits)), { voice });
+      if (!result.ok) return result;
+      try {
+        answer = parseJsonObject(result.completion.text);
+      } catch (err) {
+        log.warn('warmup: notes retry answer could not be parsed', { ...logFields, detail: errorNameOf(err) });
+        return { ok: false, reason: 'bad-json' };
+      }
+    }
+  }
+
+  /**
    * One analyzer-role call, with every warmup rail applied: the token budget
    * (`warmup.maxTokens`, a "stop here, resumable" outcome, never a throw), the per-request cap
    * override, a sustained-429 wait (`rateLimitWaitMinutes` × up to `rateLimitMaxWaits`, then abort,
@@ -1439,7 +1515,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
         knownUserIds,
         // No relationships (attitude is never warmed up) and no lore: not a per-person field.
         // A person run is one of the two writers of a portrait.
-        { episodes: episodesCfg, timing, batchAuthorNames, portraitFields: true },
+        { episodes: episodesCfg, timing, batchAuthorNames, portraitFields: true, by: 'warmup', versions: versionSettings(hot.config) },
       );
     }
     if (answer?.character || answer?.style) {
@@ -1555,26 +1631,40 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       return { ok: false, reason: 'bad-json' };
     }
 
+    if (refresh) {
+      const fieldChars = hot.config.memory?.fieldChars ?? MEMORY_LIMIT_DEFAULTS.fieldChars;
+      const notesOf = (record) => ({ purpose: record?.purpose ?? '', topics: record?.topics ?? '', tone: record?.tone ?? '' });
+      const textOf = (value) => (typeof value === 'string' ? value : '');
+      return settleNotesRefresh({
+        messages: built.messages,
+        text: result.completion.text,
+        parsed,
+        logFields: { channelId: window.id },
+        limits: { purpose: fieldChars, topics: fieldChars, tone: fieldChars },
+        read: (answer) => ({ purpose: textOf(answer?.purpose), topics: textOf(answer?.topics), tone: textOf(answer?.tone) }),
+        storedOf: () => notesOf(store.getChannel(guildId, window.id)),
+        // A pause, a forget or a newer note wins.
+        standDown: () => {
+          if (store.state.data.paused) return { ok: false, reason: 'paused' };
+          const current = store.getChannel(guildId, window.id);
+          if (!current) return { ok: false, reason: 'gone' };
+          if ((current.updatedAt ?? null) !== refresh.version) return { ok: false, reason: 'conflict' };
+          return null;
+        },
+        write: (fields) => {
+          const snapshot = () => JSON.stringify(notesOf(store.getChannel(guildId, window.id)));
+          const before = snapshot();
+          if (Object.keys(fields).length > 0) store.updateChannel(guildId, window.id, fields, { by: 'refresh', versions: versionSettings(hot.config) });
+          const changed = snapshot() !== before;
+          store.markNotesSampled(guildId, window.id, now(), { outcome: 'reviewed' });
+          store.flush();
+          return { ok: true, changed, channel: { id: window.id, name: window.name }, result: fields };
+        },
+      });
+    }
     const clamped = clampChannelResult(parsed, hot.config);
     const fields = nonEmptyFields(clamped);
-    if (refresh) {
-      // Right before the write, with no await left: a pause, a forget or a newer note wins.
-      if (store.state.data.paused) return { ok: false, reason: 'paused' };
-      const current = store.getChannel(guildId, window.id);
-      if (!current) return { ok: false, reason: 'gone' };
-      if ((current.updatedAt ?? null) !== refresh.version) return { ok: false, reason: 'conflict' };
-      const snapshot = () => {
-        const stored = store.getChannel(guildId, window.id);
-        return JSON.stringify([stored?.purpose ?? '', stored?.topics ?? '', stored?.tone ?? '']);
-      };
-      const before = snapshot();
-      if (Object.keys(fields).length > 0) store.updateChannel(guildId, window.id, fields);
-      const changed = snapshot() !== before;
-      store.markNotesSampled(guildId, window.id, now(), { outcome: 'reviewed' });
-      store.flush();
-      return { ok: true, changed, channel: { id: window.id, name: window.name }, result: clamped };
-    }
-    if (Object.keys(fields).length > 0) store.updateChannel(guildId, window.id, fields);
+    if (Object.keys(fields).length > 0) store.updateChannel(guildId, window.id, fields, { by: 'warmup', versions: versionSettings(hot.config) });
     // A channel note without its counters/top writers looks dead and
     // anonymous until live traffic slowly fills them in (see the module
     // header and docs/prompt-contract.md) -- fill them now from the
@@ -1767,24 +1857,49 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     }
 
     const nameOf = buildNameIndex(windows);
+    if (refresh) {
+      const { guildFieldChars } = serverLimits(hot.config);
+      const tokenize = makeTokenizer(nameOf);
+      // Resolved as on a warmup pass (clampResolvedField), without the cut.
+      const textOf = (value) => (typeof value === 'string' ? fromTokens(tokenize(value), nameOf, 'analyzer') : '');
+      return settleNotesRefresh({
+        messages,
+        text: result.completion.text,
+        parsed,
+        voice: true,
+        logFields: {},
+        limits: { patterns: guildFieldChars, starters: guildFieldChars },
+        read: (answer) => ({ patterns: textOf(answer?.patterns), starters: textOf(answer?.starters) }),
+        storedOf: () => {
+          const stored = store.getGuild(guildId);
+          return { patterns: stored.patterns ?? '', starters: stored.starters ?? '' };
+        },
+        // A pause or newer notes win.
+        standDown: () => {
+          if (store.state.data.paused) return { ok: false, reason: 'paused' };
+          if ((store.getGuild(guildId).notesUpdatedAt ?? null) !== refresh.version) return { ok: false, reason: 'conflict' };
+          return null;
+        },
+        write: (fields, answer) => {
+          // The in-jokes are a list, not prose: each is cut to its hard limit, as on a warmup pass.
+          const guildFields = { ...fields, ...nonEmptyFields({ injokes: clampServerResult(answer, hot.config, nameOf).injokes }) };
+          const snapshot = () => {
+            const stored = store.getGuild(guildId);
+            return JSON.stringify([stored.patterns ?? '', stored.starters ?? '', stored.injokes ?? []]);
+          };
+          const before = snapshot();
+          if (Object.keys(guildFields).length > 0) store.updateGuild(guildId, guildFields, { by: 'refresh', versions: versionSettings(hot.config) });
+          const changed = snapshot() !== before;
+          store.markNotesSampled(guildId, 'guild', now(), { outcome: 'reviewed' });
+          store.flush();
+          return { ok: true, changed };
+        },
+      });
+    }
     const clamped = clampServerResult(parsed, hot.config, nameOf);
     const guildFields = nonEmptyFields({ patterns: clamped.patterns, starters: clamped.starters, injokes: clamped.injokes });
-    if (refresh) {
-      // Right before the write, with no await left: a pause or newer notes win.
-      if (store.state.data.paused) return { ok: false, reason: 'paused' };
-      if ((store.getGuild(guildId).notesUpdatedAt ?? null) !== refresh.version) return { ok: false, reason: 'conflict' };
-      const snapshot = () => {
-        const stored = store.getGuild(guildId);
-        return JSON.stringify([stored.patterns ?? '', stored.starters ?? '', stored.injokes ?? []]);
-      };
-      const before = snapshot();
-      if (Object.keys(guildFields).length > 0) store.updateGuild(guildId, guildFields);
-      const changed = snapshot() !== before;
-      store.markNotesSampled(guildId, 'guild', now(), { outcome: 'reviewed' });
-      store.flush();
-      return { ok: true, changed };
-    }
-    if (Object.keys(guildFields).length > 0) store.updateGuild(guildId, guildFields);
+    const written = { by: 'warmup', versions: versionSettings(hot.config) };
+    if (Object.keys(guildFields).length > 0) store.updateGuild(guildId, guildFields, written);
     if (clamped.lore.length > 0) {
       store.setLore(guildId, clamped.lore, {
         source: 'analyzer',
@@ -1792,6 +1907,7 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
         maxEntries: hot.config.lore?.maxEntries,
         textChars: hot.config.lore?.textChars,
         clampTolerance: hot.config.memory?.clampTolerance,
+        ...written,
       });
     }
     markDone('server');
@@ -2030,10 +2146,11 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
   async function refreshNotes({ guildId, target, channelId, promptKey, resolveTarget, work }) {
     const logFields = target === 'channel' ? { target, channelId } : { target };
     const stampTarget = target === 'channel' ? channelId : 'guild';
-    const fail = (reason, detail) => {
+    const fail = (reason, detail, fields) => {
       if (NOTES_ATTEMPT_REASONS.has(reason)) store.markNotesSampled(guildId, stampTarget, now(), { outcome: 'attempt' });
-      log.info('warmup: notes refresh failed', { ...logFields, reason });
-      return detail === undefined ? { ok: false, reason } : { ok: false, reason, detail };
+      const over = Array.isArray(fields) ? { fields } : {};
+      log.info('warmup: notes refresh failed', { ...logFields, reason, ...over });
+      return detail === undefined ? { ok: false, reason, ...over } : { ok: false, reason, detail, ...over };
     };
     if (running || notesRefreshing) return fail('running');
     if (store.state.data.paused) return fail('paused');
@@ -2047,8 +2164,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
     try {
       const outcome = await work(resolved, notesSampleSettings(hot.config));
       if (!outcome.ok) {
-        const { reason, detail } = notesRefreshReason(outcome);
-        return fail(reason, detail);
+        const { reason, detail, fields } = notesRefreshReason(outcome);
+        return fail(reason, detail, fields);
       }
       const counts = sampleCounts(outcome.sample);
       log.info('warmup: notes refreshed', { ...logFields, changed: outcome.changed, ...counts });
@@ -2067,13 +2184,15 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
    * when the channel's notes did not change while the request was in flight (`conflict`
    * otherwise); `changed` says whether the text moved. Never sets the channel facts nor marks
    * warmup progress. Stamps: `notesSampleReviewedAt` on a clean answer (changed or not),
-   * `notesAttemptAt` on `too-few`, `conflict`, `bad-json`, `llm-error`. The request goes through the
+   * `notesAttemptAt` on `too-few`, `conflict`, `bad-json`, `llm-error`, `over-limit`. A rewrite over its
+   * limit is never cut: the request is re-asked once with `<over_limit>`, and an answer still over
+   * is `over-limit` (`fields`), nothing of it written (see settleNotesRefresh). The request goes through the
    * live rails (sendNotesRequest: the 50k request cap, `llm.maxRequestsPerDay`), never the
    * warmup's budget. Started by src/memory/notes-refresh.js's scheduler.
    * @param {string} guildId
    * @param {string} channelId
    * @returns {Promise<{ ok: true, changed: boolean, sample: number, authors: number, days: number } |
-   *   { ok: false, reason: 'running'|'paused'|'gone'|'too-few'|'conflict'|'bad-json'|'llm-error'|'token-limit'|'daily-cap'|'no-prompt', detail?: string }>}
+   *   { ok: false, reason: 'running'|'paused'|'gone'|'too-few'|'conflict'|'bad-json'|'llm-error'|'token-limit'|'daily-cap'|'no-prompt'|'over-limit', detail?: string, fields?: string[] }>}
    *   `detail`: the provider error of an `llm-error`, or `over-cap` for a `token-limit` found while fitting.
    */
   function refreshChannelNotes(guildId, channelId) {
@@ -2111,7 +2230,8 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
    * (`memory.mainChannelIds`; with none, the readable channel with the most stored messages),
    * `<channels>` and `<members>` as on a warmup pass, the stored notes in `<existing_notes>`
    * (member tokens as the analyzer reads them), the version is the guild's `notesUpdatedAt`. Lore
-   * in the answer is ignored (it has its own path). Stamps go on the guild. Same outcomes.
+   * in the answer is ignored (it has its own path). Stamps go on the guild. Same outcomes;
+   * `patterns`/`starters` are judged against twice `memory.fieldChars`.
    * @param {string} guildId
    * @returns {Promise<{ ok: true, changed: boolean, sample: number, authors: number, days: number } |
    *   { ok: false, reason: string, detail?: string }>}
@@ -2278,10 +2398,12 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
 
   /** Log a refresh that stored nothing and return its outcome. `sent`: whether a request (and a
    * daily slot) was spent on it -- a failure after sending is a warning, everything else (an
-   * answer dropped on purpose included, see PORTRAIT_STOOD_DOWN) info. */
+   * answer dropped on purpose included, see PORTRAIT_STOOD_DOWN) info. The field names of an
+   * `over-limit` (`extra.fields`) are logged too. */
   function portraitNotDone(userId, reason, { sent = false, detail, ...extra } = {}) {
     const fields = { userId, reason, sent };
     if (detail !== undefined) fields.detail = detail;
+    if (Array.isArray(extra.fields)) fields.fields = extra.fields;
     if (sent && !PORTRAIT_STOOD_DOWN.has(reason)) log.warn('warmup: portrait refresh failed', fields);
     else log.info('warmup: portrait refresh skipped', fields);
     return { ok: false, reason, ...extra };
@@ -2586,16 +2708,9 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       return portraitNotDone(id, 'llm-error', { sent: true, detail: detailOf(err) });
     }
 
-    if (completion.finishReason === 'length') return portraitNotDone(id, 'truncated', { sent: true });
-    let parsed;
-    try {
-      parsed = parseJsonObject(completion.text);
-    } catch (err) {
-      const why = looksTruncated(completion.text, completion.finishReason) ? 'truncated' : 'bad-json';
-      return portraitNotDone(id, why, { sent: true, detail: errorNameOf(err) });
-    }
-    // Right before the write, with no await left until it is done: what happened while the
-    // request was in flight wins -- a pause, a warmup run, a forget/wipe, a newer portrait.
+    // Before a retry is sent and right before the write, with no await left until it is done:
+    // what happened while a request was in flight wins -- a pause, a warmup run, a forget/wipe, a
+    // newer portrait.
     const standDown = () => {
       if (store.state.data.paused) return portraitNotDone(id, 'paused', { sent: true });
       if (running) return portraitNotDone(id, 'warming-up', { sent: true });
@@ -2605,12 +2720,65 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       }
       return null;
     };
+
+    // The prose of an answer is judged as the store keeps it (member tokens) against the stored
+    // portrait (judgeProse): a rewrite over `memory.fieldChars` is never cut. `style` in both
+    // modes, `character` in the single one (stage A's character is lists for the voice model).
+    // One over re-asks once (`memory.overLimitRetries` > 0, a second request, the same daily slot):
+    // the same request, the first answer as returned, then `<over_limit>` (withOverLimit); that answer is taken
+    // whole and judged the same way, and one still over ends `over-limit`: nothing written, the
+    // attempt stamp (set at the send) backs the member off.
+    const twoStage = mode.stage === 'two';
+    const proseNames = twoStage ? draftNameOf : nameOf;
+    const proseKeys = twoStage ? ['style'] : ['character', 'style'];
+    const proseTokenize = makeTokenizer(proseNames);
+    const proseOf = (answer) =>
+      Object.fromEntries(proseKeys.map((key) => [key, typeof answer?.[key] === 'string' ? proseTokenize(answer[key]) : '']));
+    let parsed;
+    let decision = null;
+    let accepted;
+    for (let retried = false; ; retried = true) {
+      if (completion.finishReason === 'length') return portraitNotDone(id, 'truncated', { sent: true });
+      try {
+        parsed = parseJsonObject(completion.text);
+      } catch (err) {
+        const why = looksTruncated(completion.text, completion.finishReason) ? 'truncated' : 'bad-json';
+        return portraitNotDone(id, why, { sent: true, detail: errorNameOf(err) });
+      }
+      if (twoStage) {
+        decision = clampPortraitDecision(parsed, hot.config, draftNameOf, { storedCharacter: stored.character });
+        if (!decision) return portraitNotDone(id, 'bad-json', { sent: true });
+      }
+      const fieldChars = hot.config.memory?.fieldChars ?? MEMORY_LIMIT_DEFAULTS.fieldChars;
+      const limits = Object.fromEntries(proseKeys.map((key) => [key, fieldChars]));
+      const judged = judgeProse(proseOf(parsed), stored, limits, hot.config);
+      const overFields = Object.keys(judged.over);
+      if (overFields.length === 0) {
+        accepted = judged.accepted;
+        break;
+      }
+      if (retried || !overLimitRetryOn(hot.config)) return portraitNotDone(id, 'over-limit', { sent: true, fields: overFields });
+      const stoodDown = standDown();
+      if (stoodDown) return stoodDown;
+      try {
+        completion = await llm.complete(withOverLimit(messages, completion.text, overLimitOf(judged.over, limits)), portraitRequestOptions({ voice: mode.voice }));
+      } catch (err) {
+        // The first answer was received: the slot stays spent and the attempt stamp stays.
+        if (err instanceof DailyCapError) return portraitNotDone(id, 'daily-cap', { sent: true, cap: 'llm' });
+        if (err instanceof TokenLimitError) return portraitNotDone(id, 'token-limit', { sent: true });
+        return portraitNotDone(id, 'llm-error', { sent: true, detail: detailOf(err) });
+      }
+    }
+    // Resolved back to `name (id:...)` as before: applyMemoryUpdate tokenizes what it stores.
+    const proseText = (key) => (accepted[key] ? fromTokens(accepted[key], proseNames, 'analyzer') : '');
     const seenAt = Number.isFinite(member.lastTs) ? member.lastTs : now();
     const writePortrait = (ops) =>
       applyMemoryUpdate(store, guildId, { users: { [id]: ops } }, hot.config.memory ?? {}, new Set([id]), {
         timing: { seenAtByUser: new Map([[id, seenAt]]), seenAt },
         batchAuthorNames: new Map([[id, member.name]]),
         portraitFields: true,
+        by: 'portrait',
+        versions: versionSettings(hot.config),
       });
     // `stage` and `characterQueued` are said only while the two-stage switch was on when the
     // refresh started (stage A, or the fallback on the voice model): with it off, as before.
@@ -2621,17 +2789,16 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       return { ok: true, userId: id, ...counts, ...marker(characterQueued) };
     };
 
-    if (mode.stage === 'two') {
-      const decision = clampPortraitDecision(parsed, hot.config, draftNameOf, { storedCharacter: stored.character });
-      if (!decision) return portraitNotDone(id, 'bad-json', { sent: true });
-      if (!decision.style && !decision.changed) return portraitNotDone(id, 'empty-answer', { sent: true });
+    if (twoStage) {
+      const style = proseText('style');
+      if (!style && !decision.changed) return portraitNotDone(id, 'empty-answer', { sent: true });
       const stoodDown = standDown();
       if (stoodDown) return stoodDown;
       // The style is neutral: stored at once. The character waits for the voice model, and so do
       // the portrait stamps (the voice run writes them once it is applied); a check that changes
       // nothing is stamped now, so the member is not due again at once (and an older character
       // item still queued goes, see stampPortrait).
-      if (decision.style) writePortrait({ style: decision.style });
+      if (style) writePortrait({ style });
       // A forced refresh of a member with no profile whose answer brought no style to start one:
       // the voice run would find no profile for the character item and drop it as gone.
       if (!store.getUser(guildId, id)) return portraitNotDone(id, 'no-profile', { sent: true });
@@ -2641,10 +2808,11 @@ export function createWarmup({ hot, store, client, llm, calibrator, getSelfName,
       return done(decision.changed);
     }
 
-    const clamped = clampProfileResult(parsed, hot.config, nameOf);
     const ops = {};
-    if (clamped?.character) ops.character = clamped.character;
-    if (clamped?.style) ops.style = clamped.style;
+    for (const key of proseKeys) {
+      const text = proseText(key);
+      if (text) ops[key] = text;
+    }
     if (Object.keys(ops).length === 0) return portraitNotDone(id, 'empty-answer', { sent: true });
     const stoodDown = standDown();
     if (stoodDown) return stoodDown;

@@ -107,6 +107,24 @@ The private analyzer (`analyzePrivate`) runs the same `memory.md` prompt with a 
 
 `/nep memory forget <user>` deletes both the public profile and the private file. `/nep memory wipe` removes the entire `private/` directory for the server. `/nep private forget <user>` deletes only the private file; the public profile is kept.
 
+## When a note would get too long
+
+Every prose memory field (a member's character, style or relationship text; a channel's purpose, topics or tone; the server's patterns and starters; a lorebook entry's text) has a character limit. When the model writes a replacement that exceeds the limit, the new text is not stored: the old text stays as it was. Code never shortens a model's rewrite.
+
+The voice model, the portrait refresh and the notes refresh get one retry. In the retry the model receives its own answer and a note with the exact character count and limit per field, and is asked to fit the same content by removing redundancy first. When the shorter version fits, it is stored normally. When it still does not fit, the old text stays.
+
+The stream analyzer does not retry. If a field in a batch overflows, the rest of the batch's changes are still applied; only that field is skipped.
+
+The one exception is the very first write of an empty field: because there is no old text to keep, the model's answer is accepted and cut to the limit on a sentence boundary.
+
+### Old versions
+
+When `features.versions` is on (the default), every time a prose field's text is replaced the previous text is saved in `data/guilds/<id>/versions/`. Each record stores the date, who wrote it (the analyzer, the voice model, a portrait refresh, a notes refresh, the warmup, or the owner), the previous text and a sentence-level comparison.
+
+The sentence comparison has three numbers: `kept` (sentences present in both the old and new text), `removed` (sentences in the old text but not the new) and `added` (sentences in the new text but not the old). When `kept` is 0 and the old text had several sentences, the model replaced the entire text instead of merging, which is the kind of rewrite the version history is built to catch.
+
+At most `memory.versionsKept` (default 20) records are kept per field. `/nep memory forget` deletes the member's version file. `/nep memory wipe` deletes all version files for the server.
+
 ## Commands
 
 The full command list is in [Commands](owner-commands.md). The most relevant for memory:

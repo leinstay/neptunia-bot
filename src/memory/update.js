@@ -48,6 +48,7 @@ import { topEpisodes } from './episodes.js';
 import { ID_DIGITS, occursAsWholeWord, teacherToken, toTokens, fromTokens, tokenIds } from './mentions.js';
 import { INJOKE_CHARS, MEMORY_LIMIT_DEFAULTS, SELF_CHARS } from './text-limits.js';
 import { clampText } from './clamp.js';
+import { acceptProse } from './prose.js';
 import { RECENT_DEFAULTS, foldText, liveRecent, recentSettings } from './recent.js';
 import { videoStateFromCache } from './describe.js';
 import { isVideoVisionOn } from './youtube-check.js';
@@ -56,6 +57,7 @@ import { effectiveAffinity } from '../behavior/private.js';
 import {
   applyVoiceItems,
   buildVoiceRequest,
+  buildVoiceRetry,
   degradedApply,
   dueItems,
   expireItems,
@@ -1795,12 +1797,29 @@ export function reconcileNoteReviews({ flagged, reviews, changedChannels, guildC
  *   caps, `episodes.maxNew` and `cfg.maxSelfFacts`) is dropped (`recentOverlap`). Absent (the
  *   warmup, the portrait refresh, `features.recent` off) -> the field is ignored and nothing
  *   expires.
+ * @param {string} [options.by]  Who the store's version records name for a replaced prose text
+ *   (src/memory/store.js#recordVersion). Omitted -> `'analyzer'`.
+ * @param {{ enabled: boolean, kept: number }} [options.versions]  The version history settings the
+ *   store writers get: `features.versions` and `memory.versionsKept`, read by the caller at the
+ *   moment of use. Omitted -> on, `cfg.versionsKept` (missing = 20, config.json's value).
+ *
+ * Every prose field (a channel's purpose / topics / tone at `cfg.fieldChars`, the server notes'
+ * patterns / starters at `cfg.fieldChars * 2`, a relationship at its limit, a portrait writer's
+ * character / style at `cfg.fieldChars`, a lore text at `lore.textChars`) goes through
+ * src/memory/prose.js#acceptProse against the stored text: a first write is clamped, a rewrite
+ * within the limit is written as given, a rewrite over it is left out whole (the stored text
+ * stays, a lore entry's keys still change) and counted in `overLimit` / `overLimitFields`.
  * @returns {{ users: number, guild: boolean, self: boolean, affinity: number, relationships: number, channels: number, episodes: number, lore: number,
  *   learned: number, interestsChanged: number, aliasesChanged: number, aliasOnly: number, aliasesDropped: number,
  *   droppedUsers: number, droppedFields: number, portraitDropped: number, portraitRequests: { userId: string, reason: string }[],
  *   selfDropped: number, recentAdded: number, recentOverlap: number, recentRemoved: number, recentExpired: number, recentEvicted: number,
  *   recentDropped: number, recentInvalid: number, recentNoChannel: number, recentStale: number, recentDuplicate: number,
- *   recentOverCap: number, recentUnshown: number, noteReviews: { [target: string]: string }, changedChannels: string[], guildChanged: boolean }}
+ *   recentOverCap: number, recentUnshown: number, noteReviews: { [target: string]: string }, changedChannels: string[], guildChanged: boolean,
+ *   overLimit: number, overLimitFields: string[] }}
+ *   `overLimit`: prose field changes refused for running over their limit; `overLimitFields`: one
+ *   `<kind>.<field>` name per refusal (`channels.topics`, `guild.patterns`, `users.relationship`,
+ *   `users.character`, `lore.text`; no ids), in the order they were met, a name repeated once per
+ *   refused occurrence.
  *   `noteReviews`: the answer's `note_reviews`, keyed `guild` or a channel id, only the three valid
  *   statuses, the first item for a target wins (see `reconcileNoteReviews`). `changedChannels`: the
  *   ids whose stored channel text changed; `guildChanged`: the same as `guild`.
@@ -1828,7 +1847,7 @@ export function applyMemoryUpdate(
   update,
   cfg,
   knownUserIds,
-  { knownChannelIds = new Set(), aliasOnlyIds = new Set(), relationships, episodes, lore, recent, timing, batchAuthorNames, portraitFields = false, relationshipChars } = {},
+  { knownChannelIds = new Set(), aliasOnlyIds = new Set(), relationships, episodes, lore, recent, timing, batchAuthorNames, portraitFields = false, relationshipChars, by = 'analyzer', versions } = {},
 ) {
   const result = {
     users: 0,
@@ -1864,11 +1883,25 @@ export function applyMemoryUpdate(
     recentDuplicate: 0,
     recentOverCap: 0,
     recentUnshown: 0,
+    overLimit: 0,
+    overLimitFields: [],
   };
   if (!update || typeof update !== 'object' || Array.isArray(update)) return result;
 
   const { isKnownId, tokenize, tokenizeArray, tokenizeItemOps, tokenizeEpisodes } = makeTokenizers(store, guildId, knownUserIds, batchAuthorNames);
   const relationshipLimit = relationshipLimitOf(relationshipChars, relationships);
+  // Who wrote and the version settings, on every store write below.
+  const writeOpts = { by, versions: versions ?? { enabled: true, kept: cfg.versionsKept ?? 20 } };
+  // The text to write for one prose field, or null when nothing is written: a blank or identical
+  // answer, or a rewrite over its limit -- left out whole and counted, never cut.
+  const accepted = (name, previous, next, limit) => {
+    const verdict = acceptProse(previous, next, limit, { tolerance: cfg.clampTolerance });
+    if (verdict.outcome === 'over') {
+      result.overLimit += 1;
+      result.overLimitFields.push(name);
+    }
+    return verdict.outcome === 'first' || verdict.outcome === 'replaced' ? verdict.text : null;
+  };
   // The folded texts of the long-term entries this update proposed to a long-term store, whether
   // or not the store keeps them (R-7), within the store's own per-batch caps: a recent add equal
   // to one of them has its home there already (one home per moment).
@@ -1899,7 +1932,7 @@ export function applyMemoryUpdate(
       if (aliasOnly) {
         result.droppedFields += Object.entries(raw).filter(([key, value]) => key !== 'aliases' && hasContent(value)).length;
         if (!hasContent(aliasOps)) continue;
-        store.applyProfileOps(guildId, id, { aliases: aliasOps }, profileOpsOptions(cfg, profileOpsNow, seenAt));
+        store.applyProfileOps(guildId, id, { aliases: aliasOps }, { ...profileOpsOptions(cfg, profileOpsNow, seenAt), ...writeOpts });
         if (JSON.stringify(store.getUser(guildId, id)?.aliases ?? []) !== beforeAliases) {
           result.aliasesChanged += 1;
           result.aliasOnly += 1;
@@ -1908,8 +1941,8 @@ export function applyMemoryUpdate(
       }
 
       // Incremental profile ops (see docs/prompt-contract.md, "The
-      // analyzer"): prose fields pass through as-is, store.applyProfileOps
-      // decides whether they are non-empty and clamps them. `interests`/
+      // analyzer"): a prose field is written only when `accepted` takes it
+      // (a first write clamped, a rewrite over its limit refused). `interests`/
       // `details` are ops objects, the only shape accepted.
       // `character`/`style` stay plain prose (see docs/prompt-contract.md,
       // "Data model"): the stream analyzer never edits them directly -- here
@@ -1925,7 +1958,14 @@ export function applyMemoryUpdate(
           if (raw[key].trim()) result.portraitDropped += 1;
           continue;
         }
-        ops[key] = tokenize(raw[key]);
+        const limit = key === 'relationship' ? relationshipLimit : cfg.fieldChars;
+        const previous = store.getUser(guildId, userId)?.[key];
+        const next = tokenize(raw[key]);
+        const text = accepted(`users.${key}`, previous, next, limit);
+        if (text !== null) ops[key] = text;
+        // An identical relationship text still confirms it: written again, it renews its stamps
+        // (relationshipStale counts from them), as before; the store records no version for it.
+        else if (key === 'relationship' && sameProse(previous, next)) ops[key] = previous;
       }
 
       // `portrait`: the stream analyzer's cue that this member's stored
@@ -1952,7 +1992,7 @@ export function applyMemoryUpdate(
       // delta (computed with the same pure maths adjustAffinity runs below), and with this
       // batch's clock (`profileOpsNow`), which also stamps that delta's history entry.
       const relationshipWritten = typeof ops.relationship === 'string' && ops.relationship.trim() !== '';
-      const profileOpts = profileOpsOptions(cfg, profileOpsNow, seenAt);
+      const profileOpts = { ...profileOpsOptions(cfg, profileOpsNow, seenAt), ...writeOpts };
       profileOpts.relationshipChars = relationshipLimit;
       if (relationshipWritten) profileOpts.relationshipScore = scoreAfterBatch(store.getUser(guildId, userId)?.affinity, raw, relationships, cfg);
       store.applyProfileOps(guildId, userId, ops, profileOpts);
@@ -1989,12 +2029,28 @@ export function applyMemoryUpdate(
     const tokenizedLore = update.lore.map((entry) =>
       entry && typeof entry === 'object' && !Array.isArray(entry) ? { ...entry, text: tokenize(entry.text) } : entry,
     );
-    result.lore = store.setLore(guildId, tokenizedLore, {
+    // The text judged against the stored entry of the same title (identity: the trimmed lowercase
+    // title, as src/memory/lore.js#upsertLore matches). A refused text is replaced by the stored
+    // one, so the entry's keys still change; an owner entry is left to upsertLore, which never
+    // lets the analyzer touch it.
+    const storedLore = typeof store.getLore === 'function' ? store.getLore(guildId) : [];
+    const identity = (title) => String(title ?? '').trim().toLowerCase();
+    const textChars = Number.isFinite(lore.textChars) && lore.textChars > 0 ? lore.textChars : MEMORY_LIMIT_DEFAULTS.loreTextChars;
+    const judgedLore = tokenizedLore.map((entry) => {
+      if (!isPlainObject(entry) || typeof entry.title !== 'string' || typeof entry.text !== 'string' || !entry.text.trim()) return entry;
+      const stored = (Array.isArray(storedLore) ? storedLore : []).find((item) => identity(item?.title) === identity(entry.title));
+      if (stored?.source === 'owner') return entry;
+      const previous = typeof stored?.text === 'string' ? stored.text : '';
+      const text = accepted('lore.text', previous, entry.text, textChars);
+      return { ...entry, text: text ?? previous };
+    });
+    result.lore = store.setLore(guildId, judgedLore, {
       source: 'analyzer',
       now: lore.now,
       maxEntries: lore.maxEntries,
       textChars: lore.textChars,
       clampTolerance: cfg.clampTolerance,
+      ...writeOpts,
     });
     for (const entry of tokenizedLore) takeLongTerm(entry?.text);
   }
@@ -2004,15 +2060,18 @@ export function applyMemoryUpdate(
       if (!knownChannelIds.has(String(channelId))) continue;
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
 
+      const stored = store.getChannel(guildId, channelId);
       const fields = {};
       for (const key of CHANNEL_FIELDS) {
         // A blank field says nothing: it never blanks the stored text.
-        if (typeof raw[key] === 'string' && raw[key].trim() !== '') fields[key] = clampText(tokenize(raw[key]), cfg.fieldChars, { tolerance: cfg.clampTolerance });
+        if (typeof raw[key] !== 'string' || raw[key].trim() === '') continue;
+        const text = accepted(`channels.${key}`, stored?.[key], tokenize(raw[key]), cfg.fieldChars);
+        if (text !== null) fields[key] = text;
       }
 
       // Counted only when the stored text moves: an identical re-send is no change (and unstamped).
-      const before = fieldsSnapshot(store.getChannel(guildId, channelId) ?? emptyChannel(String(channelId)), CHANNEL_FIELDS);
-      if (fieldsSnapshot(store.updateChannel(guildId, channelId, fields), CHANNEL_FIELDS) !== before) {
+      const before = fieldsSnapshot(stored ?? emptyChannel(String(channelId)), CHANNEL_FIELDS);
+      if (fieldsSnapshot(store.updateChannel(guildId, channelId, fields, writeOpts), CHANNEL_FIELDS) !== before) {
         result.channels += 1;
         result.changedChannels.push(String(channelId));
       }
@@ -2022,11 +2081,10 @@ export function applyMemoryUpdate(
   const guildFields = {};
   if (update.guild && typeof update.guild === 'object' && !Array.isArray(update.guild)) {
     const g = update.guild;
-    if (typeof g.patterns === 'string' && g.patterns.trim()) {
-      guildFields.patterns = clampText(tokenize(g.patterns), cfg.fieldChars * 2, { tolerance: cfg.clampTolerance });
-    }
-    if (typeof g.starters === 'string' && g.starters.trim()) {
-      guildFields.starters = clampText(tokenize(g.starters), cfg.fieldChars * 2, { tolerance: cfg.clampTolerance });
+    for (const key of ['patterns', 'starters']) {
+      if (typeof g[key] !== 'string' || !g[key].trim()) continue;
+      const text = accepted(`guild.${key}`, store.getGuild(guildId)[key], tokenize(g[key]), cfg.fieldChars * 2);
+      if (text !== null) guildFields[key] = text;
     }
     if (Array.isArray(g.injokes) && g.injokes.length) {
       // A new in-joke enters a full list, the last carried one leaves (clampStringArray).
@@ -2037,7 +2095,7 @@ export function applyMemoryUpdate(
   if (Object.keys(guildFields).length > 0) {
     const keys = Object.keys(guildFields);
     const before = fieldsSnapshot(store.getGuild(guildId), keys);
-    result.guild = fieldsSnapshot(store.updateGuild(guildId, guildFields), keys) !== before;
+    result.guild = fieldsSnapshot(store.updateGuild(guildId, guildFields, writeOpts), keys) !== before;
   }
   result.guildChanged = result.guild;
 
@@ -2086,7 +2144,7 @@ export function applyMemoryUpdate(
     if (self.length > 0) {
       // Counted only when the stored list moves: a list returned unchanged is no change (and unstamped).
       const before = fieldsSnapshot(store.getGuild(guildId), ['self']);
-      result.self = fieldsSnapshot(store.updateGuild(guildId, { self }), ['self']) !== before;
+      result.self = fieldsSnapshot(store.updateGuild(guildId, { self }, writeOpts), ['self']) !== before;
       // The facts kept, not the ones past `cfg.maxSelfFacts`.
       for (const text of self) takeLongTerm(text);
     }
@@ -2100,6 +2158,11 @@ export function applyMemoryUpdate(
   }
 
   return result;
+}
+
+/** Whether `next` repeats the non-blank stored text `previous` (acceptProse's `same`, trimmed). */
+function sameProse(previous, next) {
+  return typeof previous === 'string' && previous.trim() !== '' && typeof next === 'string' && next.trim() === previous.trim();
 }
 
 /** The listed fields of a stored entry as one comparable string, taken before and after a store
@@ -2142,8 +2205,12 @@ function hasContent(value) {
  *   guild here. A written private relationship is stamped in the private layer: the EFFECTIVE
  *   score after this batch's delta and the batch clock (`relationshipWrittenAt`), the clock this
  *   batch's private move is stamped with, so the move is not one since the text.
+ * A relationship text goes through src/memory/prose.js#acceptProse against the stored private
+ * one, as in `applyMemoryUpdate`: a first write clamped, a rewrite over the limit refused whole.
  * @returns {{ users: number, affinity: number, relationships: number, episodes: number, interestsChanged: number,
+ *   overLimit: number, overLimitFields: string[],
  *   dropped: { users: number, guild: boolean, channels: number, lore: number, self: number, portrait: number, recent: number } }}
+ *   `overLimit` / `overLimitFields`: a relationship rewrite refused for its length (`private.relationship`).
  *   `dropped.recent`: the items of a `recent` field (`add` and `remove` entries; a bare list's
  *   items), read as the guild apply reads the field (`recentFieldOf`).
  */
@@ -2155,6 +2222,8 @@ export function applyPrivateUpdate(store, guildId, userId, update, cfg, { relati
     relationships: 0,
     episodes: 0,
     interestsChanged: 0,
+    overLimit: 0,
+    overLimitFields: [],
     dropped: { users: 0, guild: false, channels: 0, lore: 0, self: 0, portrait: 0, recent: 0 },
   };
   if (!isPlainObject(update)) return result;
@@ -2173,13 +2242,23 @@ export function applyPrivateUpdate(store, guildId, userId, update, cfg, { relati
   result.dropped.portrait = ['character', 'style'].filter((key) => typeof raw[key] === 'string' && raw[key].trim()).length;
 
   const { tokenize, tokenizeItemOps, tokenizeEpisodes } = makeTokenizers(store, guildId, new Set([id]), batchAuthorNames);
+  const before = store.getPrivate(guildId, id);
+  const relationshipLimit = relationshipLimitOf(relationshipChars, relationships);
   const ops = {};
-  if (typeof raw.relationship === 'string') ops.relationship = tokenize(raw.relationship);
+  if (typeof raw.relationship === 'string') {
+    // A rewrite over the limit is refused whole, never cut (the store cuts only a first write); an
+    // identical text is written again, renewing its stamps, as in applyMemoryUpdate.
+    const verdict = acceptProse(before?.relationship, tokenize(raw.relationship), relationshipLimit, { tolerance: cfg.clampTolerance });
+    if (verdict.outcome === 'first' || verdict.outcome === 'replaced' || verdict.outcome === 'same') ops.relationship = verdict.text;
+    if (verdict.outcome === 'over') {
+      result.overLimit += 1;
+      result.overLimitFields.push('private.relationship');
+    }
+  }
   tokenizeItemOps(raw, ops);
 
   const opsNow = relationships?.now ?? episodes?.now ?? Date.now();
   const seenAt = timing?.seenAtByUser?.get(id) ?? timing?.seenAt ?? opsNow;
-  const before = store.getPrivate(guildId, id);
   const beforeInterests = JSON.stringify(before?.interests ?? []);
   const beforeRelationship = before?.relationship ?? '';
 
@@ -2187,7 +2266,7 @@ export function applyPrivateUpdate(store, guildId, userId, update, cfg, { relati
   // relationship is stamped with the effective score this batch lands on.
   const relationshipWritten = typeof ops.relationship === 'string' && ops.relationship.trim() !== '';
   const privateOpts = profileOpsOptions(cfg, opsNow, seenAt);
-  privateOpts.relationshipChars = relationshipLimitOf(relationshipChars, relationships);
+  privateOpts.relationshipChars = relationshipLimit;
   if (relationshipWritten) {
     const privateScore = scoreAfterBatch(before?.affinity, raw, relationships, cfg);
     privateOpts.relationshipScore = effectiveAffinity(store.getUser?.(guildId, id)?.affinity, { score: privateScore }).score;
@@ -2244,7 +2323,9 @@ function hasVoiceAddress(item, holderOf) {
  * - learned: `applyLearnedOps`, dated when it was taught; self: `applySelfOps`;
  * - patterns / starters: `updateGuild`;
  * - character: `applyProfileOps` (the portrait stamps are `stampVoicePortraits`').
- * A write of any other kind, or a character write with a layer, is skipped.
+ * A write of any other kind, or a character write with a layer, is skipped. Every prose write
+ * goes out with `by: 'voice'` and the version history settings (`features.versions`,
+ * `memory.versionsKept`), so a replaced text keeps its previous version.
  * @param {object} store
  * @param {string} guildId
  * @param {object[]} writes
@@ -2255,7 +2336,8 @@ function hasVoiceAddress(item, holderOf) {
 function runVoiceWrites(store, guildId, writes, config, nowMs) {
   const cfg = config.memory ?? {};
   const limits = voiceLimits(config);
-  const textOpts = { fieldChars: limits.character, relationshipChars: limits.relationship, clampTolerance: cfg.clampTolerance, now: nowMs };
+  const writeOpts = { by: 'voice', versions: { enabled: config.features?.versions !== false, kept: cfg.versionsKept ?? 20 } };
+  const textOpts = { fieldChars: limits.character, relationshipChars: limits.relationship, clampTolerance: cfg.clampTolerance, now: nowMs, ...writeOpts };
   let landed = 0;
   for (const write of writes) {
     const layer = write.layer === 'private' ? 'private' : undefined;
@@ -2284,7 +2366,7 @@ function runVoiceWrites(store, guildId, writes, config, nowMs) {
     } else if (write.kind === 'self') {
       landed += store.applySelfOps(guildId, { add: [write.text] }, selfOpsOptions(cfg, nowMs)).added;
     } else if (write.kind === 'patterns' || write.kind === 'starters') {
-      store.updateGuild(guildId, { [write.kind]: write.text });
+      store.updateGuild(guildId, { [write.kind]: write.text }, writeOpts);
       landed += 1;
     }
   }
@@ -2826,6 +2908,8 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
           timing: computeSeenAt(consumed),
           batchAuthorNames: batchAuthorNamesMap(consumed),
           relationshipChars: voiceLimits(hot.config).relationship,
+          by: 'analyzer',
+          versions: { enabled: hot.config.features?.versions !== false, kept: hot.config.memory?.versionsKept ?? 20 },
         };
         // Stage A drops every portrait key, the `portrait` cue included: nothing to report.
         if (stage === 'two') return applyDecision(store, guildId, update, hot.config, knownUserIds, options, nowMs);
@@ -3453,46 +3537,124 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
   /**
    * Write one parsed voice answer. The queue is read again first (the request was awaited): only
    * the sent items STILL queued are written, so an item merged, replaced or forgotten meanwhile
-   * never takes a stale text; then, in one synchronous read-modify-write, the applied, gone and
-   * switched-off ids leave the queue and the missing ones are backed off as misses -- an item
-   * queued during the request is left as it is. A parsed answer ends the guild's back-off.
+   * never takes a stale text; each text is judged against the stored text it rewrites
+   * (src/memory/voice.js#applyVoiceItems with `voiceOldText`). Then, in one synchronous
+   * read-modify-write, the applied, gone and switched-off ids leave the queue and the missing ones
+   * are backed off as misses -- an item queued during the request is left as it is. A rewrite over
+   * its limit (`overItems`) stays queued untouched for the caller to ask once more, unless
+   * `dropOver`, when it leaves (`over-limit`: the stored text stays). With `only` (the retry), only
+   * those ids are written, any other worded id is ignored (the first answer applied it), and an
+   * item of `only` left out of the answer leaves as over the limit too, never as a miss.
    * @param {string} guildId
    * @param {string[]} sent         buildVoiceRequest's `sent`.
    * @param {Map<string, string>} worded  parseVoiceAnswer's map.
-   * @param {number} outputTokens   buildVoiceRequest's estimate of the longest answer, for the log.
-   * @returns {{ sent: number, applied: number }}
+   * @param {{ only?: Set<string>, dropOver?: boolean }} [opts]
+   * @returns {{ result: object, still: object[], landed: number, portraits: number, overLimit: number }}
+   *   `overLimit`: items that left the queue over the limit.
    */
-  function applyVoiceAnswer(guildId, sent, worded, outputTokens) {
+  function writeVoiceAnswer(guildId, sent, worded, { only, dropOver = false } = {}) {
     const doneMs = now();
     const config = hot.config;
-    const sentIds = new Set(sent);
-    const still = store.getVoiceQueue(guildId).filter((item) => sentIds.has(item.id));
+    const wanted = only ?? new Set(sent);
+    const still = store.getVoiceQueue(guildId).filter((item) => wanted.has(item.id));
+    const answer = only ? new Map([...worded].filter(([id]) => only.has(id))) : worded;
     const { tokenize } = makeTokenizers(store, guildId, new Set(still.map((item) => item.userId).filter(Boolean)));
-    const result = applyVoiceItems(worded, still, { config, tokenize, hasMember: voiceMemberCheck(store, guildId) });
+    const result = applyVoiceItems(answer, still, {
+      config,
+      tokenize,
+      hasMember: voiceMemberCheck(store, guildId),
+      oldTextOf: (item) => voiceOldText(store, guildId, item),
+    });
     const landed = runVoiceWrites(store, guildId, result.writes, config, doneMs);
     const portraits = stampVoicePortraits(store, guildId, still, result.portraits);
-    const leaving = [...result.applied, ...result.gone, ...result.off];
-    store.updateVoiceQueue(guildId, (queue) => retryLater(removeItems(queue, leaving), result.missing, doneMs, config, { missed: true }));
-    voiceBackoff.delete(guildId);
+    const overIds = dropOver ? result.overItems.map((over) => over.id) : [];
+    const missedOver = only ? result.missing : [];
+    const missed = only ? [] : result.missing;
+    const leaving = [...result.applied, ...result.gone, ...result.off, ...overIds, ...missedOver];
+    store.updateVoiceQueue(guildId, (queue) => retryLater(removeItems(queue, leaving), missed, doneMs, config, { missed: true }));
     store.flush();
+    return { result, still, landed, portraits, overLimit: overIds.length + missedOver.length };
+  }
+
+  /**
+   * The one retry of the rewrites a voice answer returned over their limit
+   * (src/memory/voice.js#buildVoiceRetry: the first request, its answer as the assistant's turn,
+   * then `<over_limit>`), counted against `memory.voice.maxPerDay` like any voice request and
+   * checked by the same rails. Its answer is written for those items only; an item still over,
+   * left out, or carried by a retry that failed (refused, an llm error, an unreadable answer)
+   * leaves the queue with the stored text untouched. A failed retry backs nothing off: the first
+   * answer was read. A pause during it writes nothing and leaves the items queued as they were.
+   * @param {string} guildId
+   * @param {{ messages: object[], sent: string[] }} request  The first request (buildVoiceRequest's).
+   * @param {string} answer  The first answer's text, as returned.
+   * @param {{ id: string, chars: number, limit: number }[]} overItems
+   * @returns {Promise<{ paused?: true, written?: object, reason?: string }>}  `reason`: why the
+   *   retry gave no usable answer (`daily-cap`, `token-limit`, `llm-error`, `bad-json`, `truncated`).
+   */
+  async function retryOverLimit(guildId, request, answer, overItems) {
+    const only = new Set(overItems.map((over) => over.id));
+    const startMs = now();
+    let completion;
+    let reason;
+    if (voiceRailReached(startMs)) {
+      reason = 'daily-cap';
+    } else {
+      const day = countVoiceRequest(startMs);
+      try {
+        completion = await llm.complete(buildVoiceRetry(request.messages, answer, overItems, request.sent), voiceRequestOptions(hot.config));
+      } catch (err) {
+        if (err instanceof DailyCapError || err instanceof TokenLimitError) releaseVoiceRequest(day);
+        reason = railReason(err);
+      }
+    }
+    // As after the first request: a pause during it wins, nothing is written.
+    if (store.state.data.paused) return { paused: true };
+    let worded = new Map();
+    if (!reason) {
+      try {
+        worded = parseVoiceAnswer(completion.text, request.sent);
+      } catch {
+        reason = looksTruncated(completion.text, completion.finishReason) ? 'truncated' : 'bad-json';
+      }
+    }
+    return { written: writeVoiceAnswer(guildId, request.sent, worded, { only, dropOver: true }), reason };
+  }
+
+  /**
+   * `memory: voice applied` for one voice run: the first answer's counts plus the retry's
+   * (`overLimitRetried`: items sent again; `overLimit`: items that left the queue over the limit,
+   * the stored text kept; `retryFailed`: why the retry gave no usable answer, only when it did not).
+   * @returns {{ sent: number, applied: number }}
+   */
+  function logVoiceApplied(guildId, sent, first, retry, { outputTokens, overLimitRetried, retryFailed }) {
+    const parts = retry ? [first, retry] : [first];
+    const sum = (count) => parts.reduce((total, part) => total + count(part), 0);
+    const byKind = { ...first.result.byKind };
+    for (const [kind, count] of Object.entries(retry?.result.byKind ?? {})) byKind[kind] = (byKind[kind] ?? 0) + count;
+    const applied = sum((part) => part.result.applied.length);
     log.info('memory: voice applied', {
       guildId,
       sent: sent.length,
-      applied: result.applied.length,
-      missing: result.missing.length,
-      gone: result.gone.length,
-      off: result.off.length,
+      applied,
+      missing: first.result.missing.length,
+      gone: sum((part) => part.result.gone.length),
+      off: sum((part) => part.result.off.length),
       // Sent, but no longer queued as sent once the answer came: merged, replaced or forgotten meanwhile.
-      stale: sent.length - still.length,
-      ignored: result.ignored,
-      landed,
-      portraits,
+      stale: sent.length - first.still.length + (retry ? overLimitRetried - retry.still.length : 0),
+      ignored: first.result.ignored,
+      landed: sum((part) => part.landed),
+      portraits: sum((part) => part.portraits),
+      // Rewrites over their limit: how many were asked once more, and how many were refused in the
+      // end (the stored text stays).
+      overLimit: sum((part) => part.overLimit),
+      overLimitRetried,
+      ...(retryFailed ? { retryFailed } : {}),
       // Applied per kind, and the answer size the request was fitted to (calibrated tokens).
-      byKind: result.byKind,
+      byKind,
       outputTokens,
       queued: store.getVoiceQueue(guildId).length,
     });
-    return { sent: sent.length, applied: result.applied.length };
+    return { sent: sent.length, applied };
   }
 
   /** The body of `runVoice`, under its `running` key. */
@@ -3575,7 +3737,27 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
       const reason = looksTruncated(completion.text, completion.finishReason) ? 'truncated' : 'bad-json';
       return voiceFailed(guildId, request.sent, { reason, detail: errorNameOf(err) });
     }
-    return applyVoiceAnswer(guildId, request.sent, worded, request.outputTokens);
+    // A parsed answer ends the guild's back-off.
+    voiceBackoff.delete(guildId);
+    // Read at the moment of use: 0 (or anything not above 0) drops an over item at once.
+    const retrying = Number(hot.config.memory?.overLimitRetries ?? 1) > 0;
+    const first = writeVoiceAnswer(guildId, request.sent, worded, { dropOver: !retrying });
+    const over = first.result.overItems;
+    if (!retrying || over.length === 0) {
+      return logVoiceApplied(guildId, request.sent, first, null, { outputTokens: request.outputTokens, overLimitRetried: 0 });
+    }
+    const retry = await retryOverLimit(guildId, request, completion.text, over);
+    if (retry.paused) {
+      // The first answer is written; the over items stay queued exactly as they were.
+      log.info('memory: voice skipped', { guildId, reason: 'paused', sent: over.length });
+      const counts = logVoiceApplied(guildId, request.sent, first, null, { outputTokens: request.outputTokens, overLimitRetried: over.length });
+      return { ...counts, reason: 'paused' };
+    }
+    return logVoiceApplied(guildId, request.sent, first, retry.written, {
+      outputTokens: request.outputTokens,
+      overLimitRetried: over.length,
+      retryFailed: retry.reason,
+    });
   }
 
   /**
@@ -3594,8 +3776,12 @@ export function createMemoryUpdater({ hot, store, llm, calibrator, getSelfName, 
    * (`voiceDay` / `voiceCount` in state.json, shared with a batch's single-stage fallback; 0, or a
    * value that is not a number, never sends). A failed request (`token-limit`,
    * `daily-cap`, `llm-error`, `bad-json`, `truncated`) backs off every item it carried and the
-   * guild (`voiceFailed`); a pause during the request writes nothing at all. A character item is
-   * never dropped, and its portrait stamps are written only when it is applied. Its `running`
+   * guild (`voiceFailed`); a pause during the request writes nothing at all. A rewrite the answer
+   * returns over its limit is never cut: with `memory.overLimitRetries` above 0 (read at the
+   * moment of use; config.json's 1) it is asked ONE more time (`retryOverLimit`, a second
+   * counted request); still over, left out, or with no usable retry answer -- or at once with 0 --
+   * it leaves the queue (`over-limit`) and the stored text stays. A character item is never
+   * dropped otherwise, and its portrait stamps are written only when it is applied. Its `running`
    * key (`voice:<guildId>`) makes `waitIdle()` -- `/nep pause` -- wait for it. Never throws:
    * anything unexpected is logged by name and backs the guild off.
    * @param {string} guildId

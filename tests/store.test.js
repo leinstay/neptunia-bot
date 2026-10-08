@@ -1065,12 +1065,16 @@ test('applyProfileOps: sets character/style/relationship only when given as non-
   assert.equal(profile.relationship, 'trusts you');
 });
 
-test('applyProfileOps: prose fields are clamped tolerantly to opts.fieldChars (a single long word hard-cuts at the tolerance ceiling)', () => {
+test('applyProfileOps: a first write of a prose field is clamped tolerantly to opts.fieldChars; a rewrite is never cut', () => {
   const dir = tmpDataDir();
   const store = createStore({ dataDir: dir });
   store.touchUser('g1', 'u1', 'Alice', 1000);
   const profile = store.applyProfileOps('g1', 'u1', { character: '0123456789' }, { fieldChars: 5, now: 1000 });
   assert.equal(profile.character, '012345', '5 * the default tolerance 1.25, floored');
+  // A rewrite over the limit is the caller's to refuse (src/memory/prose.js#acceptProse): the store
+  // stores what it is given and never cuts it.
+  const rewritten = store.applyProfileOps('g1', 'u1', { character: '0123456789abcdef' }, { fieldChars: 5, now: 2000 });
+  assert.equal(rewritten.character, '0123456789abcdef');
 });
 
 test('applyProfileOps: normalizes a hand-edited interests array before applying ops', () => {
@@ -1965,6 +1969,10 @@ test('applyProfileOps: a written relationship is stamped relationshipWrittenAt a
 
   store.applyProfileOps('g1', 'u1', { relationship: '   ' }, { fieldChars: 400, relationshipChars: 50, now: WRITTEN_NOW + 5000 });
   assert.equal(store.getUser('g1', 'u1').relationshipWrittenAt, new Date(WRITTEN_NOW).toISOString(), 'a blank text stamps nothing');
+
+  // Only the first write is clamped: a rewrite over the limit is the caller's to refuse, the store never cuts it.
+  const rewritten = store.applyProfileOps('g1', 'u1', { relationship: LONG_RELATIONSHIP }, { fieldChars: 400, relationshipChars: 50, now: WRITTEN_NOW + 6000 });
+  assert.equal(rewritten.relationship, LONG_RELATIONSHIP);
 });
 
 test('applyPrivateOps: a written private relationship is stamped relationshipWrittenAt and clamped to relationshipChars', () => {
@@ -1978,6 +1986,10 @@ test('applyPrivateOps: a written private relationship is stamped relationshipWri
   assert.equal(priv.relationshipWrittenAt, new Date(WRITTEN_NOW).toISOString());
   assert.equal(priv.relationshipScore, -9);
   assert.equal(store.getUser('g1', 'u1'), null, 'the public profile is not created');
+
+  // Only the first write is clamped: a rewrite over the limit is the caller's to refuse, the store never cuts it.
+  const rewritten = store.applyPrivateOps('g1', 'u1', { relationship: LONG_RELATIONSHIP }, { fieldChars: 400, relationshipChars: 50, now: WRITTEN_NOW + 1000 });
+  assert.equal(rewritten.relationship, LONG_RELATIONSHIP);
 });
 
 test('store: relationshipWrittenAt and relationshipScore survive a restart, public and private', () => {
@@ -2860,3 +2872,126 @@ test('pinWornPattern / removeWornPattern: pin a listed pattern in place; remove 
   assert.deepEqual(store.removeWornPattern('g1', 'ends on a question'), { removed: null, list: null });
   assert.deepEqual([store.getGuild('g1').wornLong.patterns, store.getGuild('g1').worn.patterns], [[], []]);
 });
+
+// ---- version history of prose fields ---------------------------------------
+
+function withStore(fn) {
+  const dir = tmpDataDir();
+  return fn(createStore({ dataDir: dir }), dir);
+}
+
+test('store: a prose rewrite records the previous text with who wrote and a sentence diff; a first write records nothing', () => withStore((store) => {
+  store.updateChannel('g1', 'c1', { purpose: 'Ένα. Δύο.' }, { by: 'warmup' });
+  assert.deepEqual(store.listVersions('g1', 'channels', 'c1'), {}, 'first write');
+  store.updateChannel('g1', 'c1', { purpose: 'Δύο. Τρία.' }, { by: 'analyzer' });
+  const v = store.listVersions('g1', 'channels', 'c1');
+  assert.equal(v.purpose.length, 1);
+  assert.equal(v.purpose[0].text, 'Ένα. Δύο.');
+  assert.equal(v.purpose[0].by, 'analyzer');
+  assert.deepEqual([v.purpose[0].kept, v.purpose[0].removed, v.purpose[0].added], [1, 1, 1]);
+  assert.ok(/^\d{4}-\d{2}-\d{2}T/.test(v.purpose[0].at));
+  store.updateChannel('g1', 'c1', { purpose: 'Δύο. Τρία.' }, { by: 'analyzer' });
+  assert.equal(store.listVersions('g1', 'channels', 'c1').purpose.length, 1, 'an identical write records nothing');
+}));
+
+test('store: versions are capped per field at versions.kept, oldest dropped; a caller without by records unknown', () => withStore((store) => {
+  store.updateGuild('g1', { patterns: 'v0' });
+  for (let i = 1; i <= 5; i++) store.updateGuild('g1', { patterns: `v${i}` }, { versions: { enabled: true, kept: 3 } });
+  const v = store.listVersions('g1', 'guild', 'guild').patterns;
+  assert.deepEqual(v.map((x) => x.text), ['v2', 'v3', 'v4']);
+  assert.equal(v[0].by, 'unknown');
+}));
+
+test('store: applyProfileOps and setLore record user and lore versions; versions off records nothing', () => withStore((store, dir) => {
+  store.applyProfileOps('g1', 'u1', { character: 'Calme. Précis.', relationship: 'Amical.' }, { fieldChars: 1000, by: 'analyzer' });
+  assert.deepEqual(store.listVersions('g1', 'users', 'u1'), {}, 'first write');
+  store.applyProfileOps('g1', 'u1', { character: 'Calme. Bavard.', relationship: 'Très amical.' }, { fieldChars: 1000, by: 'voice' });
+  const user = store.listVersions('g1', 'users', 'u1');
+  assert.deepEqual(Object.keys(user).sort(), ['character', 'relationship']);
+  assert.equal(user.character[0].text, 'Calme. Précis.');
+  assert.equal(user.character[0].by, 'voice');
+  assert.equal(user.character[0].chars, [...'Calme. Précis.'].length);
+  assert.deepEqual(
+    [user.character[0].before, user.character[0].after, user.character[0].kept, user.character[0].removed, user.character[0].added],
+    [2, 2, 1, 1, 1],
+  );
+  assert.equal(user.relationship[0].text, 'Amical.');
+
+  const lore = (text) => [{ title: 'Ο Κήπος', keys: ['κήπος'], text }];
+  store.setLore('g1', lore('Πρώτο.'), { source: 'analyzer', now: 1000, by: 'analyzer' });
+  assert.deepEqual(store.listVersions('g1', 'lore', 'Ο Κήπος'), {}, 'first lore write');
+  store.setLore('g1', lore('Δεύτερο.'), { source: 'owner', now: 2000, by: 'owner' });
+  const loreVersions = store.listVersions('g1', 'lore', 'Ο Κήπος');
+  assert.equal(loreVersions.text.length, 1);
+  assert.equal(loreVersions.text[0].text, 'Πρώτο.');
+  assert.equal(loreVersions.text[0].by, 'owner');
+  assert.deepEqual(store.listVersions('g1', 'lore', ' ο κήπος '), loreVersions, 'the title is matched as the lorebook matches it');
+
+  const off = { enabled: false, kept: 20 };
+  store.applyProfileOps('g1', 'u1', { style: 'Bref.' }, { fieldChars: 1000 });
+  store.applyProfileOps('g1', 'u1', { character: 'Autre.', style: 'Long.', relationship: 'Froid.' }, { fieldChars: 1000, versions: off });
+  store.setLore('g1', lore('Τρίτο.'), { source: 'owner', now: 3000, versions: off });
+  store.updateChannel('g1', 'c1', { tone: 'a' });
+  store.updateChannel('g1', 'c1', { tone: 'b' }, { versions: off });
+  store.updateGuild('g1', { starters: 'a' });
+  store.updateGuild('g1', { starters: 'b' }, { versions: off });
+  store.updateUser('g1', 'u1', { style: 'Court.' }, { versions: off });
+  assert.equal(store.listVersions('g1', 'users', 'u1').character.length, 1);
+  assert.equal(store.listVersions('g1', 'users', 'u1').style, undefined);
+  assert.equal(store.listVersions('g1', 'lore', 'Ο Κήπος').text.length, 1);
+  assert.deepEqual(store.listVersions('g1', 'channels', 'c1'), {});
+  assert.deepEqual(store.listVersions('g1', 'guild', 'guild'), {});
+
+  store.updateUser('g1', 'u1', { style: 'Court et net.' }, { by: 'owner' });
+  assert.equal(store.listVersions('g1', 'users', 'u1').style[0].text, 'Court.', 'updateUser records too');
+
+  store.flush();
+  const fresh = createStore({ dataDir: dir });
+  assert.equal(fresh.listVersions('g1', 'users', 'u1').character[0].text, 'Calme. Précis.', 'versions survive a restart');
+}));
+
+test('store: forgetting a member and wiping a guild remove their version files', () => withStore((store, dir) => {
+  const versionsDir = path.join(dir, 'guilds', 'g1', 'versions');
+  for (const text of ['Un.', 'Deux.']) {
+    store.applyProfileOps('g1', 'u1', { character: text }, { fieldChars: 1000 });
+    store.applyProfileOps('g1', 'u2', { character: text }, { fieldChars: 1000 });
+    store.updateChannel('g1', 'c1', { purpose: text });
+    store.updateGuild('g1', { patterns: text });
+  }
+  store.flush();
+  assert.ok(fs.existsSync(path.join(versionsDir, 'users', 'u1.json')));
+
+  store.forgetUser('g1', 'u1');
+  assert.equal(fs.existsSync(path.join(versionsDir, 'users', 'u1.json')), false);
+  assert.deepEqual(store.listVersions('g1', 'users', 'u1'), {});
+  assert.equal(store.listVersions('g1', 'users', 'u2').character.length, 1, 'another member keeps theirs');
+  store.flush();
+  assert.equal(fs.existsSync(path.join(versionsDir, 'users', 'u1.json')), false, 'a flush does not bring it back');
+
+  store.wipeGuild('g1');
+  assert.equal(fs.existsSync(versionsDir), false);
+  for (const [kind, id] of [['users', 'u2'], ['channels', 'c1'], ['guild', 'guild']]) {
+    assert.deepEqual(store.listVersions('g1', kind, id), {}, kind);
+  }
+  store.flush();
+  assert.equal(fs.existsSync(versionsDir), false, 'a flush does not bring it back');
+}));
+
+test('store: version files are not mistaken for channel or user ids', () => withStore((store, dir) => {
+  for (const text of ['Un.', 'Deux.']) {
+    store.applyProfileOps('g1', 'u1', { character: text }, { fieldChars: 1000 });
+    store.updateChannel('g1', 'c1', { purpose: text });
+    store.updateGuild('g1', { patterns: text });
+    store.setLore('g1', [{ title: 'T', keys: ['tt'], text }], { source: 'owner' });
+  }
+  assert.ok(Object.keys(store.listVersions('g1', 'channels', 'c1')).length > 0);
+  assert.ok(Object.keys(store.listVersions('g1', 'users', 'u1')).length > 0);
+  const check = (s) => {
+    assert.deepEqual(s.listChannels('g1').map((c) => c.id), ['c1']);
+    assert.deepEqual(s.listUserProfiles('g1').map((p) => p.id), ['u1']);
+    assert.deepEqual(s.listGuilds(), ['g1']);
+  };
+  check(store);
+  store.flush();
+  check(createStore({ dataDir: dir }));
+}));
