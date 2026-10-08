@@ -135,6 +135,7 @@ The three helper model roles, grouped under one key. Each is set independently, 
 | `neighborMessageChars` | `300` | Characters kept per message from a neighbouring channel (`<other_channels>`) |
 | `maxMessageChars` | `800` | Truncate messages beyond this (chars) |
 | `gapMarkerMinutes` | `20` | Time-gap marker threshold (min) |
+| `ageAfterMinutes` | `60` | When the persona reads a chat, every message at least this many minutes old shows how long ago it was posted next to its time, as in `[14:32 · 2 h 58 min ago]`; newer messages show only `[14:32]`. Applies to the current channel and to pulled and neighbour channels. An empty `transcript.timeAged` in `prompts.local/labels.json` turns ages off |
 | `reactionsPerMessage` | `6` | Max reactions listed per message in the transcript, most frequent first |
 | `replyQuoteChars` | `80` | Code points of the parent message's text shown in a reply tag. The quote is cut at a word boundary. `0` shows the whole text |
 | `otherProfiles` | `6` | Max other profiles shown |

@@ -99,7 +99,7 @@
 | `<channel_view>` | このターンにプルされた別のチャンネル（`features.channelPull`）。プルされたチャンネルごとにヘッダー行（`labels.pull.header`）、該当時の読み取り専用マーク（`labels.server.readOnly`）、ウィンドウがカットされた場合の「古いものは非表示」行、「画像は未確認」カウント、ペルソナへの過去の呼びかけ（応答済み/未応答/スキップマーク付き）、ウィンドウの行。行は `<chat>` と同じトランスクリプト形式だが、チャットの後に番号が続く（チャットは `#1`..`#N`、プルブロックは `#N+1` から）ため、すべての `#n` がブロック間で一意。画像はキャプションまたはブラインドタグのみ、添付画像としては含まない。`labels.pull.header` がない場合ブロックは空 |
 | `<worn>` | ペルソナが使い回している表現手法と語句（`features.variety`）: `labels.variety.intro`、続いて手法ごとに `- <shape>`。`variety.examplesInBlock` がオン（デフォルト false、未設定 = false）の場合は `- <shape> ("<example>", ...)` として例も付与。オフなら形のみ。長いパスのパターン（`wornLong`、`variety-long.md` から）が先、次に短いパス、重複は除去、最大 `variety.maxPatterns` + `variety.longMaxPatterns`。固定フィラーエントリがある場合、パターン行の後に `labels.variety.pinnedIntro`、続いて固定エントリごとに `- <labels.variety.fillerLine>`。クールダウン中の学習フィラーエントリがある場合、`labels.variety.fillersIntro` が続き（両方ある場合は固定セクションの後）、学習エントリごとに `- <labels.variety.fillerLine>`。`fillerLine` プレースホルダー: `{text}`、`{count}`、`{window}`、`{ago}`（デフォルトテンプレートは `{text}` のみ使用）。フィラーエントリが 1 件でも表示された場合、`labels.variety.matchNote` がマッチング構文を説明する行でブロックを閉じる。エントリはランク順、最大 `variety.fillers.max` 件。どちらのパスも結果を出さず、アクティブなフィラーもなく、またはスイッチがオフの場合は省略 |
 | `<lookup>` | ペルソナがこのターンで調べた内容。ウェブ検索（`features.webLookup`）は `labels.lookup.webHeader`、要約された回答、`labels.lookup.sources`。何も見つからなかった場合は `labels.lookup.none`。サーバー検索（`features.recall`）は `labels.lookup.serverHeader`、サマリーノート。サマリーがストレッチを指定した場合はそのストレッチの原文行。両方実行された場合は `labels.lookup.bothNote` がその間に配置。`labels.lookup.stretch` 行が原文ストレッチを導入（`{date}` `{channel}`）。検索分類器が発火し少なくとも 1 つの検索が完了した場合にのみ表示 |
-| `<chat>` | 現在のチャンネルの最新 `context.channelMessages` 件のメッセージ。`context.fetchReplyParents` がオンの場合、トリガーメッセージとウィンドウ末尾の `context.replyParentsFor` 件の返信行（ウィンドウより古いメッセージへの返信）の親が取得され、通常のトランスクリプト行としてウィンドウの前に配置される。トリガーの親はさらにその親も取得可能。ターンあたり最大 `context.replyParentsMax` 件。ギャップマーカーと日付ヘッダーが時間の飛びをカバーし、リプライ行は `transcript.replyTo` で親を引用する。親のメディアは他の行と同様に扱われ、キャッシュ済みの説明はコストなしで提供される。削除済みまたはアクセス不能な親はスキップされ `collect: parent missing` としてログ出力 |
+| `<chat>` | 現在のチャンネルの最新 `context.channelMessages` 件のメッセージ。投稿から `context.ageAfterMinutes`（デフォルト 60）分以上たった行には、どれだけ前の投稿かも表示される（`transcript.timeAged`）。`context.fetchReplyParents` がオンの場合、トリガーメッセージとウィンドウ末尾の `context.replyParentsFor` 件の返信行（ウィンドウより古いメッセージへの返信）の親が取得され、通常のトランスクリプト行としてウィンドウの前に配置される。トリガーの親はさらにその親も取得可能。ターンあたり最大 `context.replyParentsMax` 件。ギャップマーカーと日付ヘッダーが時間の飛びをカバーし、リプライ行は `transcript.replyTo` で親を引用する。親のメディアは他の行と同様に扱われ、キャッシュ済みの説明はコストなしで提供される。削除済みまたはアクセス不能な親はスキップされ `collect: parent missing` としてログ出力 |
 | `<tempo>` | 10 分 / 1 時間 / 1 日のカウント、参加人数、沈黙時間、判定（live / slow / dead） |
 | `<world>` | ペルソナの仮想世界（`prompts/world.md`、`{{name}}` 補完済み）。日記投稿（`mode === 'diary'`）かつ `diary.world === true` の場合のみ。予算圧迫で丸ごと削除。ファイルなしまたはスイッチオフは何も追加しない |
 | `<diary>` | 過去の日記投稿、古い順: `labels.diary.intro`、次に投稿ごとに `labels.diary.line`。計画・生成両方のリクエストに表示。予算圧迫では古い行から先にカット |
@@ -152,7 +152,11 @@ GIF ピッカー（`features.gifPicker`、デフォルトオン）。ペルソ�
 
 トランスクリプト行: `#87 [14:32] nick: text <replyTo> <media…> <sticker> <reactions>`。自分の行には `labels.self` を使用。
 行間に `labels.transcript.gap` / `gapWithDate` / `date`。ブロック冒頭に `labels.transcript.header`。隣接チャンネル:
-`#n` なしの同じ行形式、`# channel-name` の下に配置。
+`#n` なしの同じ行形式、`# channel-name` の下に配置。リクエスト時点（`<now>` と同じ時刻）で投稿から
+`context.ageAfterMinutes`（デフォルト 60）分以上たった行は、時刻部分が `labels.transcript.timeAged` で描画される:
+`#87 [14:32 · 2 h 58 min ago] nick: text …`。経過時間が付くのは `<chat>`、`<channel_view>`、`<other_channels>` の行だけで、
+リクエストごとに計算され、保存されない。それ以外のトランスクリプト（分類器、サーバー検索の原文ストレッチ、アナライザー、
+ウォームアップ）は時刻のみ。
 
 ## ラベル
 
@@ -163,9 +167,10 @@ locale                                   BCP-47 tag for dates
 ping.prompt                              the whole user message of `/nep ping`; must make any model answer one short word
 self                                     {name}
 units.lessThanMinute | minute | hour | day
-transcript.gap                           {duration}
-transcript.gapWithDate                   {duration} {date}
+transcript.gap                           {duration}: `context.gapMarkerMinutes` 分以上離れた隣り合う 2 行の間の時間。メッセージの経過時間と読まれない書き方にする
+transcript.gapWithDate                   {duration} {date}: 同上、2 行の間で日付が変わった場合。date は下の行の日付
 transcript.date | header                 {date}
+transcript.timeAged                      {clock} {age}: 投稿から `context.ageAfterMinutes` 分以上たった行の、角括弧を含む時刻部分全体を置き換える。age は `labels.units` 単位の時間。それより新しい行は `[{clock}]` のまま。キーがないか空の場合、経過時間は表示されない
 transcript.empty | replyToOld | image
 transcript.replyTo                       {index} {author} {quote}: 親メッセージの番号、その著者（親がペルソナ自身の場合は self ラベル）、親テキストの引用（`context.replyQuoteChars`（デフォルト 80、`0` = 全文）で単語境界にカット。メディアのみの親はそのメディアラベルを引用する）
 transcript.file | sticker                {name}
@@ -276,6 +281,7 @@ server.lastMessage                       {when}: humanised age of the channel's 
 server.topWriters                        {names}: current names of the members who write there most
 server.diary                             `<server>` マップの日記チャンネルに表示。ペルソナの日記
 server.readOnly                          shown on a channel the bot can read and react in but not write in; never shown on the current channel. Appears in the `<server>` map entry and as a line after a pulled channel's header
+senses.time                              すべての `<senses>` ブロックで files 行の直後に表示（プライベートチャットを含む）: メッセージの時刻は `<now>` と同じタイムゾーン、古い行には経過時間が付く、ギャップマーカーは隣り合う 2 行の間の沈黙を示すだけ、出来事がどれだけ前かはその出来事自身の行から読み、ギャップマーカーや `<tempo>` からは読まない。プレースホルダーなし。キーがないか空の場合は何も表示しない
 senses.channels                          shown on every server turn: which channels this request shows (the chat, `<other_channels>`, `<channel_view>`); never claim to have looked at a channel not shown
 senses.elsewhere                         {destination}: shown when `features.elsewhere` is on and `memory.mainChannelIds` has a usable channel; says a call from a read-only channel is answered in {destination} with a link
 pull.header                              REQUIRED {channel} {from} {to} {ago}: first line of a pulled channel. Without it no `<channel_view>` renders. {from}/{{to}} are formatted dates, {ago} is a duration phrase from labels.units

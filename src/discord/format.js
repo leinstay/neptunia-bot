@@ -4,6 +4,7 @@
 // from `labels` (see prompts/labels.json and docs/prompt-contract.md);
 // this module only knows the shape of a transcript line, e.g.:
 //   #87 [14:32] nick: text (replyTo marker) [image]
+//   #12 [13:43 · 2 h 58 min ago] nick: text   (chat mode, an old line with its age)
 //   --- {duration} passed ---
 // Time gaps and date changes are spelled out because the model must tell a
 // live conversation from a dead chat that somebody has just poked.
@@ -15,6 +16,9 @@ import { clampWithEllipsis, oneLine } from '../memory/clamp.js';
 
 // config.json's context.replyQuoteChars: how much of a reply's parent its line quotes.
 const DEFAULT_REPLY_QUOTE_CHARS = 80;
+
+// config.json's context.ageAfterMinutes: from what age a chat line shows how long ago it was.
+const DEFAULT_AGE_MINUTES = 60;
 
 // A language-neutral marker (memory transcript only) for a message addressed
 // to the persona, so the analyzer can weigh "how people talk TO it" apart
@@ -425,6 +429,14 @@ function renderForwarded(snapshot, labels, context, maxChars, channelName) {
  *   is numbered `indexOffset + 1`, and every index (the `#index`, a reply target inside the
  *   list, `item.index`) shifts by it, so a second block (another channel's lines) continues
  *   the numbering of the first and its indices never collide with it.
+ * @param {number} [options.now]  The request's clock (epoch ms), the same moment as its `<now>` and
+ *   `<tempo>`; never read here from the system clock. In `mode: 'chat'`, a line at least
+ *   `ageMinutes` older than `now` renders its head time as `transcript.timeAged` with `{clock}`
+ *   and `{age}` (formatDuration of `now - ts`). No `now`, or labels without a non-empty
+ *   `transcript.timeAged`, keeps the plain `[clock]`. Memory mode never shows ages. The age is
+ *   relative to this clock, so the items' text is for this request only and is never stored.
+ * @param {number} [options.ageMinutes]  `context.ageAfterMinutes` (60 when omitted): how old a
+ *   line must be, in minutes, to carry its age.
  * @throws {RangeError} when `indexOffset` is given but is not an integer of at least 0.
  * @returns {{ id: string, index: number, ts: number, text: string }[]}
  *
@@ -444,6 +456,10 @@ export function formatTranscript(messages, options) {
   const locale = labels.locale;
   const selfLabel = fill(labels.self, { name: selfName });
   const indexOffset = options.indexOffset ?? 0;
+  // A line's age (chat mode only): relative to the request's clock, never Date.now().
+  const agedTemplate = labels.transcript.timeAged;
+  const agesOn = mode === 'chat' && typeof options.now === 'number' && typeof agedTemplate === 'string' && agedTemplate !== '';
+  const ageMs = (options.ageMinutes ?? DEFAULT_AGE_MINUTES) * MINUTE_MS;
   // A bad offset is a caller bug: counting it as 0 would renumber a second
   // block from #1 over the first block's indices, so a tag aimed at one line
   // would silently land on another.
@@ -480,7 +496,10 @@ export function formatTranscript(messages, options) {
 
     const name = message.self ? selfLabel : message.authorName;
     const who = mode === 'memory' && !message.self ? `${name} (id:${message.authorId})` : name;
-    const head = mode === 'memory' ? `[${formatClock(message.ts, timezone, locale)}]` : `#${index} [${formatClock(message.ts, timezone, locale)}]`;
+    const clock = formatClock(message.ts, timezone, locale);
+    const age = options.now - message.ts;
+    const time = agesOn && age >= ageMs ? fill(agedTemplate, { clock, age: formatDuration(age, labels.units) }) : `[${clock}]`;
+    const head = mode === 'memory' ? time : `#${index} ${time}`;
 
     const body = [];
     if (message.content) body.push(clipWithEllipsis(message.content, maxChars));

@@ -99,7 +99,7 @@
 | `<channel_view>` | 拉入本轮的另一个频道（`features.channelPull`）。每个拉取的频道一个条目：标题行（`labels.pull.header`）、适用时的只读标记（`labels.server.readOnly`）、窗口被截断时的"更早的未显示"行、"图片未查看"计数、角色的早期呼叫（带已回复/未回复/已跳过标记），然后是窗口行。行使用与 `<chat>` 相同的对话记录格式，但编号在对话后继续（对话为 `#1`..`#N`，拉取块从 `#N+1` 开始），因此每个 `#n` 在块间唯一。图片仅以说明或盲标签形式出现，不作为附加图片。没有 `labels.pull.header` 时块为空 |
 | `<worn>` | 角色过度使用的手法和词语（`features.variety`）：`labels.variety.intro`，然后每个手法一行 `- <shape>`。`variety.examplesInBlock` 开启时（默认 false，缺失 = false），示例随形一起出现为 `- <shape> ("<example>", ...)`；否则仅显示形。长过程的手法（`wornLong`，来自 `variety-long.md`）在前，然后是短过程的，去重后最多 `variety.maxPatterns` + `variety.longMaxPatterns` 个。有固定填充词条目时，手法行后跟 `labels.variety.pinnedIntro`，然后每个固定条目一行 `- <labels.variety.fillerLine>`。有冷却中的学习填充词条目时，`labels.variety.fillersIntro` 跟随其后（两者都有时在固定部分之后），然后每个学习条目一行 `- <labels.variety.fillerLine>`。`fillerLine` 占位符：`{text}`、`{count}`、`{window}`、`{ago}`（默认模板仅使用 `{text}`）。如有任何填充词条目被列出，`labels.variety.matchNote` 以匹配语法说明行关闭该块。条目按排名排列，最多 `variety.fillers.max` 条。两者都无结果且无活跃填充词，或开关关闭时省略 |
 | `<lookup>` | 角色本轮查询的内容。网络搜索（`features.webLookup`）携带 `labels.lookup.webHeader`、浓缩的答案、`labels.lookup.sources`，未找到时为 `labels.lookup.none`。服务器搜索（`features.recall`）携带 `labels.lookup.serverHeader`、摘要笔记，摘要指出一段时还有逐字原文。两者都运行时 `labels.lookup.bothNote` 位于两部分之间。`labels.lookup.stretch` 行引入一段逐字原文（`{date}` `{channel}`）。仅在搜索分类器触发且至少一项搜索完成后出现 |
-| `<chat>` | 当前频道最新的 `context.channelMessages` 条消息。`context.fetchReplyParents` 开启时，触发消息和窗口末尾 `context.replyParentsFor` 条回复早于窗口之消息的行的父消息会被拉取并作为普通对话记录行放在窗口之前；触发消息的父消息还可拉取其自身的父消息。每轮最多 `context.replyParentsMax` 条。间隔标记和日期标题覆盖时间跳跃；回复行通过 `transcript.replyTo` 引用父消息；父消息的媒体与其他行同样处理，缓存的描述免费提供。已删除或不可访问的父消息被跳过并记录为 `collect: parent missing` |
+| `<chat>` | 当前频道最新的 `context.channelMessages` 条消息。发出已满 `context.ageAfterMinutes`（默认 60）分钟的行还会显示距今多久（`transcript.timeAged`）。`context.fetchReplyParents` 开启时，触发消息和窗口末尾 `context.replyParentsFor` 条回复早于窗口之消息的行的父消息会被拉取并作为普通对话记录行放在窗口之前；触发消息的父消息还可拉取其自身的父消息。每轮最多 `context.replyParentsMax` 条。间隔标记和日期标题覆盖时间跳跃；回复行通过 `transcript.replyTo` 引用父消息；父消息的媒体与其他行同样处理，缓存的描述免费提供。已删除或不可访问的父消息被跳过并记录为 `collect: parent missing` |
 | `<tempo>` | 10 分钟 / 1 小时 / 1 天的消息计数，不同人数，沉默时长，一个判定（活跃 / 缓慢 / 沉寂） |
 | `<world>` | 角色的虚拟世界（`prompts/world.md`，`{{name}}` 已填充）。仅在日记帖子（`mode === 'diary'`）且 `diary.world === true` 时出现。预算压力下整体丢弃。无文件或开关关闭则不添加 |
 | `<diary>` | 过去的日记帖子，从旧到新：`labels.diary.intro`，然后每篇帖子一行 `labels.diary.line`。在计划和生成请求中均展示。预算压力下最旧的行先被截断 |
@@ -155,7 +155,10 @@ GIF 挑选器（`features.gifPicker`，默认开启）。当角色写了一条�
 
 对话记录行：`#87 [14:32] nick: text <replyTo> <media…> <sticker> <reactions>`；角色自身的行使用 `labels.self`；行间使用
 `labels.transcript.gap` / `gapWithDate` / `date`；区块以 `labels.transcript.header` 开头。相邻频道：相同的行
-格式但不含 `#n`，位于 `# channel-name` 之下。
+格式但不含 `#n`，位于 `# channel-name` 之下。按请求时刻（与 `<now>` 相同）计算，发出已满 `context.ageAfterMinutes`（默认 60）
+分钟的行，其时间部分通过 `labels.transcript.timeAged` 渲染：`#87 [14:32 · 2 h 58 min ago] nick: text …`。只有 `<chat>`、
+`<channel_view>` 和 `<other_channels>` 的行显示距今时间，每次请求重新计算，从不存储；其他对话记录（分类器、服务器搜索的
+逐字原文、分析器、预热）只显示时间。
 
 ## 标签
 
@@ -166,9 +169,10 @@ locale                                   BCP-47 tag for dates
 ping.prompt                              the whole user message of `/nep ping`; must make any model answer one short word
 self                                     {name}
 units.lessThanMinute | minute | hour | day
-transcript.gap                           {duration}
-transcript.gapWithDate                   {duration} {date}
+transcript.gap                           {duration}: 相隔至少 `context.gapMarkerMinutes` 分钟的两条相邻行之间的时间；措辞不能让人把它当成消息的距今时间
+transcript.gapWithDate                   {duration} {date}: 同上，两行之间跨日时使用；date 是下方那一行的日期
 transcript.date | header                 {date}
+transcript.timeAged                      {clock} {age}: 替换发出已满 `context.ageAfterMinutes` 分钟的行的整个方括号时间；age 是以 `labels.units` 表示的时长；较新的行保持 `[{clock}]`；键缺失或为空时不显示距今时间
 transcript.empty | replyToOld | image
 transcript.replyTo                       {index} {author} {quote}: 父消息的编号、其作者（父消息为角色自己的时使用 self 标签）和父文本的引用（在词边界截断至 `context.replyQuoteChars`（默认 80；`0` = 完整）；仅含媒体的父消息引用其媒体标签）
 transcript.file | sticker                {name}
@@ -226,6 +230,7 @@ senses.drawSpent                         replaces draw when the daily picture qu
 senses.drawSpentUser                     replaces draw when this member's daily quota is spent
 senses.privateChat                       shown in a DM turn: this is a one-on-one conversation, what is said here stays between the two of them
 senses.privateAware                      shown on a server turn when features.privateMessages is on: the persona knows they have private chats and never repeats or hints at anything from them
+senses.time                              显示在每个 `<senses>` 块中 files 行之后，私聊也包括：消息时间与 `<now>` 同一时区，较旧的行带有距今时间，间隔标记只是两条相邻行之间的沉默；某件事发生在多久以前取自它自己的行，绝不取自间隔标记或 `<tempo>`。无占位符；键缺失或为空时不渲染
 lookup.header                            {query}: heading of the `<lookup>` block (web search)
 lookup.sources                           {list}: site names, comma-separated by code
 lookup.none                              shown in `<lookup>` when the search found nothing useful
