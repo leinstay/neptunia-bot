@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { block, buildDrawPrompt, buildRequest, hasRequiredLabels, renderProfile, fillPromptTemplate } from '../src/behavior/prompt.js';
+import { block, buildDrawPrompt, buildRequest, hasRequiredLabels, renderProfile, fillPromptTemplate, usesFollowUpTask } from '../src/behavior/prompt.js';
 import { estimateTokens } from '../src/llm/tokens.js';
 import { fill, formatClock, formatDate, formatDuration } from '../src/discord/format.js';
 import { zonedDay } from '../src/time.js';
@@ -149,6 +149,87 @@ test('buildRequest: triggerKind "followUp" falls back to labels.triggers.reply w
   );
   const user = request.messages[1].content;
   assert.ok(user.includes(labels.triggers.reply));
+});
+
+// A follow-up (a classifier yes) and an untagged reply (a Discord reply to the persona with no
+// typed tag, taggedCall false) take prompts['follow-up'] as their task; every other call keeps reply.md.
+const FOLLOW_UP_TASK = 'FOLLOW_UP_TASK: {{author}} {{trigger}} at {{target}}; you are {{name}}.';
+
+test('buildRequest: triggerKind "followUp" takes prompts["follow-up"] as its task, every placeholder filled, no reply.md text', () => {
+  const m1 = makeMessage(1, NOW - 2 * MIN);
+  const trigger = makeMessage(2, NOW - MIN, { authorName: 'Élodie' });
+  const request = buildRequest(
+    baseInput({ prompts: fakePrompts({ 'follow-up': FOLLOW_UP_TASK }), history: [m1, trigger], trigger, triggerKind: 'followUp' }),
+  );
+  const user = request.messages[1].content;
+  assert.ok(user.includes(`FOLLOW_UP_TASK: Élodie ${labels.triggers.followUp} at #2; you are Nept.`), user);
+  assert.ok(!user.includes('Called by'), 'reply.md is not used on a follow-up');
+});
+
+test('buildRequest: an untagged reply (taggedCall false) takes prompts["follow-up"] with the reply label', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Élodie' });
+  const request = buildRequest(
+    baseInput({ prompts: fakePrompts({ 'follow-up': FOLLOW_UP_TASK }), history: [trigger], trigger, triggerKind: 'reply', taggedCall: false }),
+  );
+  const user = request.messages[1].content;
+  assert.ok(user.includes(`FOLLOW_UP_TASK: Élodie ${labels.triggers.reply} at #1; you are Nept.`), user);
+  assert.ok(!user.includes('Called by'));
+});
+
+test('buildRequest: a tagged reply, a reply without taggedCall, a mention and a name call keep reply.md', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Élodie' });
+  const cases = [
+    { triggerKind: 'reply', taggedCall: true },
+    { triggerKind: 'reply' },
+    { triggerKind: 'mention', taggedCall: false },
+    { triggerKind: 'name', taggedCall: false },
+    { triggerKind: 'private', taggedCall: false },
+  ];
+  for (const extra of cases) {
+    const request = buildRequest(baseInput({ prompts: fakePrompts({ 'follow-up': FOLLOW_UP_TASK }), history: [trigger], trigger, ...extra }));
+    const user = request.messages[1].content;
+    assert.ok(user.includes(`Called by Élodie, they ${labels.triggers[extra.triggerKind] ?? ''}. Answer #1 as Nept.`), JSON.stringify(extra));
+    assert.ok(!user.includes('FOLLOW_UP_TASK'), JSON.stringify(extra));
+  }
+});
+
+test('buildRequest: a follow-up in a private chat keeps reply.md', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Élodie' });
+  const request = buildRequest(
+    baseInput({
+      prompts: fakePrompts({ 'follow-up': FOLLOW_UP_TASK }),
+      history: [trigger],
+      trigger,
+      triggerKind: 'followUp',
+      privateChat: { userId: 'author-1' },
+    }),
+  );
+  const user = request.messages[1].content;
+  assert.ok(user.includes('Called by Élodie'));
+  assert.ok(!user.includes('FOLLOW_UP_TASK'));
+});
+
+test('buildRequest: without prompts["follow-up"] (missing or blank) a follow-up and an untagged reply use reply.md', () => {
+  const trigger = makeMessage(1, NOW - MIN, { authorName: 'Élodie' });
+  for (const followUp of [undefined, '', '   ']) {
+    for (const extra of [{ triggerKind: 'followUp' }, { triggerKind: 'reply', taggedCall: false }]) {
+      const request = buildRequest(baseInput({ prompts: fakePrompts({ 'follow-up': followUp }), history: [trigger], trigger, ...extra }));
+      const user = request.messages[1].content;
+      assert.ok(user.includes(`Called by Élodie, they ${labels.triggers[extra.triggerKind]}. Answer #1 as Nept.`), JSON.stringify({ followUp, ...extra }));
+    }
+  }
+});
+
+test('usesFollowUpTask: a follow-up or an untagged reply in reply mode, never routed, private or another mode', () => {
+  assert.equal(usesFollowUpTask({ mode: 'reply', triggerKind: 'followUp' }), true);
+  assert.equal(usesFollowUpTask({ mode: 'reply', triggerKind: 'reply', taggedCall: false }), true);
+  assert.equal(usesFollowUpTask({ mode: 'reply', triggerKind: 'reply', taggedCall: true }), false);
+  assert.equal(usesFollowUpTask({ mode: 'reply', triggerKind: 'reply', taggedCall: null }), false);
+  assert.equal(usesFollowUpTask({ mode: 'reply', triggerKind: 'mention', taggedCall: false }), false);
+  assert.equal(usesFollowUpTask({ mode: 'reply', triggerKind: 'overheard' }), false);
+  assert.equal(usesFollowUpTask({ mode: 'reply', triggerKind: 'followUp', routed: true }), false);
+  assert.equal(usesFollowUpTask({ mode: 'reply', triggerKind: 'followUp', privateChat: true }), false);
+  assert.equal(usesFollowUpTask({ mode: 'interject', triggerKind: 'followUp' }), false);
 });
 
 // An overheard turn: a line about the persona, said to someone else or to the room.

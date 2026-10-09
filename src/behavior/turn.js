@@ -25,7 +25,7 @@ import {
   withTextPreviews,
 } from '../discord/collect.js';
 import { audienceAllows, captionPulled, checkPull, fetchPull } from '../discord/pull-fetch.js';
-import { block, buildDiaryPlanRequest, buildDrawPrompt, buildRequest, classifierTranscript, fillPromptTemplate, gifFieldChars } from './prompt.js';
+import { block, buildDiaryPlanRequest, buildDrawPrompt, buildRequest, classifierTranscript, fillPromptTemplate, gifFieldChars, usesFollowUpTask } from './prompt.js';
 import {
   DIARY_DAILY,
   DIARY_PICTURES_DAILY,
@@ -42,7 +42,7 @@ import {
 } from './diary.js';
 import { channelPullOn, pullSettings, pullTargets } from './pull.js';
 import { audienceCovers, markSeen, messageLink, resolveDestination, stampPings } from './elsewhere.js';
-import { classifierTextModel } from './mention.js';
+import { classifierTextModel, isTaggedCall } from './mention.js';
 import { parseLookupAnswer, recallSettings } from './recall.js';
 import { parseSplitAnswer, splitCandidate, splitSettings } from './split.js';
 import { fillerKey, fillersSettings, findFillers } from './fillers.js';
@@ -983,6 +983,9 @@ export function createTurnRunner({
   // turn that spoke anywhere while showing it (noteSpokeSaw). The pending-ping drain
   // (src/discord/events.js) skips a ping such a turn already had in view.
   const spokeSaw = new Map();
+  // Whether the last turn that wanted prompts['follow-up'] found it missing or blank: `turn:
+  // prompt missing` is warned once each time this turns true (the turn falls back to reply.md).
+  let followUpPromptMissing = false;
 
   /**
    * `text` with every `#name` of one of the guild's text channels turned into its `<#id>` link
@@ -3588,6 +3591,15 @@ export function createTurnRunner({
       const notAnswered =
         triggerAt === -1 ? tasks.deferred : new Set([...tasks.deferred, ...history.slice(triggerAt + 1).map((m) => m.id)]);
       const guildMemory = memoryOn ? store.getGuild(guildId) : null;
+      // Whether the call tags the persona, read as decideMention reads it (events.js decideAndLog):
+      // an untagged reply takes the follow-up task (usesFollowUpTask).
+      const taggedCall = trigger ? isTaggedCall(trigger, selfId) : null;
+      if (usesFollowUpTask({ mode: finalMode, triggerKind, taggedCall, routed: source?.reason === 'routed', privateChat: isPrivate })) {
+        const followUpPrompt = prompts?.['follow-up'];
+        const missing = !(typeof followUpPrompt === 'string' && followUpPrompt.trim());
+        if (missing && !followUpPromptMissing) log.warn('turn: prompt missing', { name: 'follow-up', reason: 'no-prompt', channel: channel.id });
+        followUpPromptMissing = missing;
+      }
       // Every input named (turnRequestInput throws on one left undefined); null marks an absent one.
       const request = buildRequest(
         turnRequestInput({
@@ -3602,6 +3614,7 @@ export function createTurnRunner({
           neighbors,
           trigger,
           triggerKind,
+          taggedCall,
           guildMemory: guildMemory ?? {},
           interlocutor: memoryOn && trigger ? (store.getUser(guildId, trigger.authorId) ?? null) : null,
           // A private chat: the partner's private layer joins their public profile (only there).

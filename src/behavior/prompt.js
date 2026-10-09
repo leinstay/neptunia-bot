@@ -1663,6 +1663,22 @@ function pulledAuthors(pulledFits) {
 }
 
 /**
+ * Whether a turn's task text is `prompts['follow-up']` instead of `prompts.reply`: a reply-mode
+ * turn answering a follow-up (`followUp`: an untagged line the address classifier marked as said
+ * to the persona) or an untagged `reply` (a Discord reply to the persona's line with no typed tag,
+ * `taggedCall` exactly false -- src/behavior/mention.js#isTaggedCall, as decideMention reads it).
+ * A mention, a tagged reply (or one whose tagged state is unknown), a name call, an overheard
+ * line, a routed call and a private chat keep their usual task. Pure.
+ * @param {{ mode: string, triggerKind: string|null|undefined, taggedCall?: boolean|null,
+ *   routed?: boolean, privateChat?: boolean }} turn
+ * @returns {boolean}
+ */
+export function usesFollowUpTask({ mode, triggerKind, taggedCall = null, routed = false, privateChat = false }) {
+  if (mode !== 'reply' || routed || privateChat) return false;
+  return triggerKind === 'followUp' || (triggerKind === 'reply' && taggedCall === false);
+}
+
+/**
  * @param {object} input
  * @param {object} input.config            Live config.
  * @param {object} input.prompts           Live prompts keyed by file name.
@@ -1687,6 +1703,11 @@ function pulledAuthors(pulledFits) {
  *   someone else or to the room) takes `prompts.overheard` as its task text instead of
  *   `prompts[mode]` when that file is a non-empty string, falls back to the `followUp` then the
  *   `reply` label, and renders the author's profile without `labels.profile.interlocutorMark`.
+ *   `followUp` and an untagged `reply` take `prompts['follow-up']` instead of `prompts.reply`
+ *   (usesFollowUpTask) when that file is a non-empty string; missing or blank, `prompts.reply`.
+ * @param {boolean|null} [input.taggedCall]  Whether the trigger tags the persona
+ *   (src/behavior/mention.js#isTaggedCall); read only for a `reply` trigger: exactly false makes it
+ *   an untagged reply. Null or missing counts as tagged.
  * @param {object} input.guildMemory
  * @param {object|null} input.interlocutor Profile of the trigger's author (the public one).
  * @param {{ userId: string }|null} [input.privateChat]  Set for a private (DM) turn: the
@@ -1986,6 +2007,15 @@ export function buildRequest(input) {
   // An overheard turn has its own task text (prompts.overheard) INSTEAD of the mode's; without
   // it (missing or blank) the mode's text frames the line as said to the persona: degraded.
   const overheardTask = overheard && typeof prompts.overheard === 'string' && prompts.overheard.trim() ? prompts.overheard : null;
+  // A follow-up or an untagged reply has its own task text (prompts['follow-up']) INSTEAD of
+  // reply.md; without it (missing or blank) reply.md frames it, as before the file existed.
+  const followUpPrompt = prompts['follow-up'];
+  const followUpTask =
+    usesFollowUpTask({ mode, triggerKind, taggedCall: input.taggedCall, routed, privateChat }) &&
+    typeof followUpPrompt === 'string' &&
+    followUpPrompt.trim()
+      ? followUpPrompt
+      : null;
   // A line put to everyone present (a room question), found in the chat.
   const focus = privateChat ? null : (input.focus ?? null);
   const focusItem = focus ? chatItems.find((item) => item.id === focus.id) : null;
@@ -2004,7 +2034,7 @@ export function buildRequest(input) {
       target: callItem ? `#${callItem.index}` : '',
       ...(sourceChannel ? { channel: sourceChannel.name, destination: here } : {}),
     };
-    const baseTask = fillPromptTemplate(overheardTask ?? prompts[mode] ?? '', taskValues);
+    const baseTask = fillPromptTemplate(overheardTask ?? followUpTask ?? prompts[mode] ?? '', taskValues);
     // Owner-forced turn (`/nep interject`/`/nep initiate`): tell the model
     // `<skip/>` is not the expected outcome this time -- optional, missing
     // prompts.forced (an older/undeployed labels layer) leaves the task as-is.

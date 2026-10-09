@@ -650,6 +650,19 @@ test('answerReply: a follow-up and a name call keep their trigger labels; a spon
   assert.ok(odd.request.user.includes('REPLY_TASK'));
 });
 
+test('answerReply: a follow-up and an untagged reply are replayed with the follow-up task; a tagged reply keeps reply.md', async () => {
+  const hot = kindHot();
+  hot.prompts = { ...hot.prompts, 'follow-up': 'FOLLOW_UP_TASK {{author}}: {{trigger}}' };
+  const followUp = await replay({ ...storedMoment(), mode: 'reply', kind: 'followUp', triggerId: TRIGGER_ID }, { hot });
+  assert.ok(followUp.request.user.includes(`FOLLOW_UP_TASK Alice: ${labels.triggers.followUp}`), followUp.request.user);
+  assert.ok(!followUp.request.user.includes('REPLY_TASK'));
+  const untagged = await replay({ ...storedMoment({ replyToSelf: true }), mode: 'reply', kind: 'reply', triggerId: TRIGGER_ID }, { hot });
+  assert.ok(untagged.request.user.includes(`FOLLOW_UP_TASK Alice: ${labels.triggers.reply}`), untagged.request.user);
+  const tagged = await replay({ ...storedMoment({ replyToSelf: true, mentions: [SELF_ID] }), mode: 'reply', kind: 'reply', triggerId: TRIGGER_ID }, { hot });
+  assert.ok(tagged.request.user.includes(`REPLY_TASK Alice: ${labels.triggers.reply}`), tagged.request.user);
+  assert.ok(!tagged.request.user.includes('FOLLOW_UP_TASK'));
+});
+
 test('answerReply: a moment with a pulled channel is replayed with its <channel_view>', async () => {
   const kitchen = storedWindow(KITCHEN, [['800000000000000101', BRUNO, 'Bruno', 'PULLED_LINE the oven is on']]);
   const result = await replay({ ...storedMoment(), pulled: [kitchen] });
