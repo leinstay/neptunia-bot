@@ -49,8 +49,36 @@ export function createTagHistory() {
 }
 
 /**
+ * Whether `normalized` (src/discord/collect.js#normalizeMessage) tags the
+ * persona for real: `selfId` is among its mentioned users and not only
+ * because of Discord's reply ping (`replyPingUserId`). A reply to the
+ * persona that only carries the reply ping is untagged (decideMention).
+ * @param {{ mentionedUserIds?: string[], replyPingUserId?: string|null }} normalized
+ * @param {string} selfId
+ * @returns {boolean}
+ */
+export function isTaggedCall(normalized, selfId) {
+  const ids = normalized?.mentionedUserIds ?? [];
+  return ids.includes(selfId) && normalized.replyPingUserId !== selfId;
+}
+
+/**
+ * Whether the persona answers a call. The base ignore chance depends on the
+ * kind: a follow-up -- kind `followUp` (an untagged line the address
+ * classifier marked as said to the persona; `overheard` never reaches this
+ * roll) or an untagged `reply` (a Discord reply to the persona's line with no
+ * tag, `tagged` false) -- starts from `mention.followUpIgnoreChance`
+ * (missing = 0), so the persona sometimes lets the other person have the last
+ * word; a `mention`, a tagged `reply` (`tagged` true or not given) start
+ * from `mention.ignoreChance`; a `name` call rolls
+ * `mention.nameTriggerChance` alone. The spam threshold, the bare-ping chance,
+ * the repeat penalty, the affinity adjustment and the 0.97 clamp apply on top
+ * as for any call; neverIgnore always answers. An ignored follow-up's reason
+ * is `ignored:follow-up` (or `ignored:repeat` / `ignored:spam` when those
+ * set the chance).
  * @param {object} input
- * @param {'mention'|'reply'|'name'} input.kind
+ * @param {'mention'|'reply'|'name'|'followUp'} input.kind
+ * @param {boolean} [input.tagged]      A `reply` only: whether it tags the persona (isTaggedCall).
  * @param {number} input.textLength     Length of the message without the mention.
  * @param {number} input.recentCalls    Calls by this user within the repeat window, this one included.
  * @param {boolean} input.neverIgnore
@@ -62,7 +90,7 @@ export function createTagHistory() {
  * @returns {{ respond: boolean, reason: string, ignoreChance: number, roll?: number }}  `roll`
  *   is the rng value drawn (absent for neverIgnore, which rolls nothing), for the decision log.
  */
-export function decideMention({ kind, textLength, recentCalls, neverIgnore, affinityScore, cfg, rng }) {
+export function decideMention({ kind, tagged, textLength, recentCalls, neverIgnore, affinityScore, cfg, rng }) {
   if (neverIgnore) return { respond: true, reason: 'never-ignore', ignoreChance: 0 };
 
   if (kind === 'name') {
@@ -71,8 +99,9 @@ export function decideMention({ kind, textLength, recentCalls, neverIgnore, affi
     return { respond, reason: respond ? 'name' : 'name-unnoticed', ignoreChance: 1 - cfg.nameTriggerChance, roll };
   }
 
-  let ignoreChance = cfg.ignoreChance;
-  let reason = 'random';
+  const followUp = kind === 'followUp' || (kind === 'reply' && tagged === false);
+  let ignoreChance = followUp ? (cfg.followUpIgnoreChance ?? 0) : cfg.ignoreChance;
+  let reason = followUp ? 'follow-up' : 'random';
   if (recentCalls >= cfg.spamThreshold) {
     ignoreChance = cfg.spamIgnoreChance;
     reason = 'spam';
