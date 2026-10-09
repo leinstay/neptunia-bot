@@ -25,6 +25,7 @@
 // private chat is ever built.
 
 import { buildRequest } from '../behavior/prompt.js';
+import { isTaggedCall } from '../behavior/mention.js';
 import { MINUTE_MS } from '../time.js';
 import { pickOtherProfiles } from '../behavior/turn.js';
 import { REPLY_REQUEST, cacheTtlFor } from '../llm/openrouter.js';
@@ -358,6 +359,8 @@ export function sandboxRequestInput({
     history,
     trigger,
     triggerKind,
+    // As a live turn reads it: an untagged reply takes the follow-up task.
+    taggedCall: trigger ? isTaggedCall(trigger, selfId) : null,
     guildMemory: memoryOn ? memory.getGuild() : {},
     interlocutor: memoryOn && trigger ? memory.getUser(trigger.authorId) : null,
     otherProfiles: memoryOn ? pickOtherProfiles(viewAsStore, SANDBOX_GUILD, history, trigger?.authorId, config.context.otherProfiles) : [],

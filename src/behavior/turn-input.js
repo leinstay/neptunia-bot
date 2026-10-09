@@ -23,6 +23,7 @@ export const TURN_INPUT_KEYS = Object.freeze([
   'neighbors',
   'trigger',
   'triggerKind',
+  'taggedCall',
   'guildMemory',
   'interlocutor',
   'privateChat',

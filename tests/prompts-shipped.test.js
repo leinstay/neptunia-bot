@@ -121,6 +121,7 @@ const CHARACTER = ['character-card', 'rules'];
 /** The prompt files each request below must carry whole, by request. */
 const LOADS = {
   reply: [...SYSTEM, 'reply'],
+  followUp: [...SYSTEM, 'follow-up'],
   overheard: [...SYSTEM, 'overheard'],
   interject: [...SYSTEM, 'interject'],
   forcedInitiate: [...SYSTEM, 'initiate', 'forced'],
@@ -542,9 +543,19 @@ test('labels: the tracked labels.json passes the startup check and carries every
 test('buildRequest: a reply fills system-prompt, character-card, rules, format and reply for every trigger kind', async () => {
   for (const triggerKind of ['mention', 'reply', 'name', 'followUp']) {
     const request = buildRequest(await turnInput({ triggerKind }));
-    const text = assertFilled(request.messages, { files: LOADS.reply, blocks: TURN_BLOCKS }, `reply (${triggerKind})`);
+    // A follow-up takes the follow-up task instead of reply.md; a reply with no tagged state stays on reply.md.
+    const files = triggerKind === 'followUp' ? LOADS.followUp : LOADS.reply;
+    const text = assertFilled(request.messages, { files, blocks: TURN_BLOCKS }, `reply (${triggerKind})`);
+    assert.equal(carries(text, 'reply'), triggerKind !== 'followUp', `${triggerKind}: which task file frames the turn`);
     assert.ok(text.includes(LABELS.triggers[triggerKind]), `${triggerKind}: the trigger label fills {{trigger}}`);
   }
+  // A Discord reply to the persona: untagged takes the follow-up task, tagged keeps reply.md.
+  const untagged = buildRequest(await turnInput({ triggerKind: 'reply', taggedCall: false }));
+  const untaggedText = assertFilled(untagged.messages, { files: LOADS.followUp, blocks: TURN_BLOCKS }, 'reply (untagged reply)');
+  assert.ok(!carries(untaggedText, 'reply'), 'an untagged reply: reply.md is not sent as well');
+  const tagged = buildRequest(await turnInput({ triggerKind: 'reply', taggedCall: true }));
+  const taggedText = assertFilled(tagged.messages, { files: LOADS.reply, blocks: TURN_BLOCKS }, 'reply (tagged reply)');
+  assert.ok(!carries(taggedText, 'follow-up'), 'a tagged reply: the follow-up task is not sent');
   // A failed drawing someone asked for: its reason through labels.draw.reasons.
   const failed = buildRequest(await turnInput({ triggerKind: 'drawFailed', drawReason: 'moderation', drawQuota: undefined }));
   assertFilled(failed.messages, { files: LOADS.reply }, 'reply (drawFailed)');
