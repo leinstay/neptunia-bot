@@ -503,6 +503,31 @@ test('events: a reply to its own message is detected as kind "reply"', async () 
   assert.equal(seenArgs.triggerKind, 'reply');
 });
 
+test('events: an untagged reply meets followUpIgnoreChance, a reply with a typed tag meets ignoreChance', async () => {
+  // [label, message fields, expected reason]
+  const cases = [
+    ['no ping', {}, 'ignored:follow-up'],
+    ['reply ping only', { content: 'έχεις δίκιο', mentions: { users: new Map([['self1', { id: 'self1' }]]), repliedUser: { id: 'self1' } } }, 'ignored:follow-up'],
+    ['typed tag', { content: '<@self1> έχεις δίκιο', mentions: { users: new Map([['self1', { id: 'self1' }]]), repliedUser: { id: 'self1' } } }, 'respond'],
+  ];
+  for (const [label, extra, reason] of cases) {
+    const turns = recordingTurns();
+    const config = baseConfig({ mention: { ignoreChance: 0, followUpIgnoreChance: 1 } });
+    const guild = fakeGuild();
+    const channel = fakeChannel('c1', guild, {
+      messages: { cache: new Map([['m100', { author: { id: 'self1' } }]]), fetch: async () => null },
+    });
+    const handler = makeHandler({ config, turns, rng: () => 0.5 });
+    const { logs } = await withCapturedLogs(async () => {
+      await handler(fakeMessage({ guild, channel, channelId: 'c1', cleanContent: 'έχεις δίκιο', reference: { messageId: 'm100' }, ...extra }));
+      await Promise.resolve();
+    });
+    const decided = logs.filter((l) => l.msg === 'mention: decided').map((l) => [l.kind, l.reason]);
+    assert.deepEqual(decided, [['reply', reason]], label);
+    assert.equal(turns.calls.length, reason === 'respond' ? 1 : 0, label);
+  }
+});
+
 test('events: a name trigger respects config.mention.nameTriggerChance', async () => {
   let calls = 0;
   const config = baseConfig({ bot: { nameTriggers: ['νεπτούνια'] }, mention: { nameTriggerChance: 0.5 } });
@@ -3787,7 +3812,7 @@ test('follow-up: a "yes" during a turn elsewhere is deferred, then picked up and
     logs.filter((l) => l.msg === 'follow-up: picked up').map((l) => [l.channel, l.kind, l.message]),
     [['c1', 'followUp', 'm1']],
   );
-  assert.equal(logs.some((l) => l.msg === 'mention: decided'), false, 'a follow-up is never rolled for the ignore chance');
+  assert.deepEqual(logs.filter((l) => l.msg === 'mention: decided').map(({ kind, reason, deferred }) => [kind, reason, deferred]), [['followUp', 'respond', true]], 'rolled once, when picked up');
   assert.equal(scene.turns.calls.length, 1);
   const [call] = scene.turns.calls;
   assert.equal(call.channel, scene.channel);
@@ -3795,6 +3820,66 @@ test('follow-up: a "yes" during a turn elsewhere is deferred, then picked up and
   assert.equal(call.triggerKind, 'followUp');
   assert.equal(call.trigger.id, 'm1');
   assert.equal(tagHistory.hits, 1);
+});
+
+test('follow-up: a deferred "yes" the followUpIgnoreChance roll lets pass runs no turn when picked up', async () => {
+  const tagHistory = countingTagHistory();
+  const config = baseConfig({ mention: { ignoreChance: 0, followUpIgnoreChance: 1 } });
+  const scene = await deferredFollowUps({ config, tagHistory });
+  const logs = await endTurnAndDrain(scene);
+  assert.deepEqual(
+    logs.filter((l) => l.msg === 'mention: decided').map(({ kind, reason, deferred }) => [kind, reason, deferred]),
+    [['followUp', 'ignored:follow-up', true]],
+  );
+  assert.equal(scene.turns.calls.length, 0);
+  assert.equal(tagHistory.hits, 1, 'still counted for spam');
+});
+
+test('follow-up: a live "yes" the followUpIgnoreChance roll lets pass runs no turn and leaves the window open', async () => {
+  const tagHistory = countingTagHistory();
+  const llm = fakeFollowUpLlm();
+  const turns = recordingTurns();
+  const store = fakeStateStore();
+  const config = baseConfig({ mention: { ignoreChance: 0, followUpIgnoreChance: 1, followUpNoStreak: 1 } });
+  const handler = makeHandler({ config, turns, llm, tagHistory, store, rng: () => 0.5, prompts: fakeAddressPrompts() });
+  const guild = fakeGuild();
+  const channel = fakeChannelWithHistory('c1', guild, []);
+  await openFollowUpWindow(handler, { guild, channel, ts: Date.now() });
+
+  const { logs } = await withCapturedLogs(async () => {
+    const p = handler(plainFollowUpMessage({ id: 'm1', guild, channel, content: 'and then?' }));
+    await tick();
+    llm.respond('yes');
+    await p;
+  });
+  assert.equal(turns.calls.length, 0);
+  assert.deepEqual(
+    logs.filter((l) => l.msg === 'mention: decided').map(({ kind, reason }) => [kind, reason]),
+    [['followUp', 'ignored:follow-up']],
+  );
+  assert.equal(tagHistory.hits, 1, 'still counted for spam');
+  assert.equal(store.state.data.followUpWindows.c1.noStreak, 0, 'the no-streak is not bumped');
+  assert.equal(logs.some((l) => l.msg === 'follow-up: window closed'), false);
+
+  // The window is still open: the next line goes to the classifier again.
+  const p2 = handler(plainFollowUpMessage({ id: 'm2', guild, channel, content: 'well?' }));
+  await tick();
+  assert.equal(llm.calls.length, 2);
+  llm.respond('no');
+  await p2;
+});
+
+test('follow-up: an "overheard" answer is never rolled for followUpIgnoreChance', async () => {
+  const config = baseConfig({ mention: { followUpIgnoreChance: 1 } });
+  const { llm, handler, guild, channel, turns } = await overheardScene({ config });
+  const { logs } = await withCapturedLogs(async () => {
+    const p = handler(plainFollowUpMessage({ id: 'm1', guild, channel, content: 'she always says that' }));
+    await tick();
+    llm.respond('overheard');
+    await p;
+  });
+  assert.deepEqual(turns.calls.map((c) => c.triggerKind), ['overheard']);
+  assert.equal(logs.some((l) => l.msg === 'mention: decided'), false);
 });
 
 test('follow-up: a "yes" during a spontaneous turn in its own channel that ends not-now is answered after it', async () => {
@@ -7121,7 +7206,11 @@ test('follow-up: a candidate arriving during a turn in another channel is classi
 
   const drain = await endTurnAndDrain(scene);
   assert.deepEqual(followUpDropped(drain), []);
-  assert.equal(drain.some((l) => l.msg === 'mention: decided'), false, 'never rolled for the ignore chance');
+  assert.deepEqual(
+    drain.filter((l) => l.msg === 'mention: decided').map(({ kind, reason, deferred }) => [kind, reason, deferred]),
+    [['followUp', 'respond', true]],
+    'rolled once, when picked up',
+  );
   assert.deepEqual(startedTurns(scene.turns), [['m1', 'followUp']]);
 });
 

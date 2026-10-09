@@ -28,6 +28,7 @@ import {
   followUpPreFilter,
   parseAddressAnswer,
   followUpTriggerKind,
+  isTaggedCall,
   classifierTextModel,
   roomPreFilter,
 } from '../behavior/mention.js';
@@ -808,7 +809,9 @@ export function createMessageHandler({
    * (deferFollowUp); so does an `overheard` one while
    * mention.pendingOverheard is on (missing = on, read at that moment),
    * keeping its kind; with the switch off it is dropped (`follow-up:
-   * dropped`, `busy`).
+   * dropped`, `busy`). A `followUp` the ignore roll lets pass
+   * (mention.followUpIgnoreChance, `ignored:follow-up`) starts no turn and
+   * returns false, so a line held meanwhile is classified next.
    * @param {{ message: object, normalized: object }} candidate
    * @param {'followUp'|'overheard'} triggerKind
    * @returns {boolean}
@@ -822,11 +825,13 @@ export function createMessageHandler({
       else log.info('follow-up: dropped', { channel: channelId, message: normalized.id, reason: 'busy' });
       return false;
     }
-    // A follow-up is still counted for spam (mention.spamThreshold, future
-    // explicit pings), just never rolled for the ignore chance -- it is a
-    // continuation, not a ping (see docs/prompt-contract.md). Talk about the
-    // persona (overheard) is not a call to it: not counted.
-    if (triggerKind === 'followUp') tagHistory.hit(normalized.authorId, now(), repeatWindowMs(config.mention));
+    // A follow-up is counted for spam (mention.spamThreshold, future
+    // explicit pings) and rolled for mention.followUpIgnoreChance
+    // (decideAndLog): the persona may let the other person have the last
+    // word. An ignored one starts no turn and leaves the window and its
+    // no-streak as they are. Talk about the persona (overheard) is not a call
+    // to it: neither counted nor rolled.
+    if (triggerKind === 'followUp' && !decideAndLog(channel, normalized, 'followUp', config).respond) return false;
     turns
       .runTurn({ channel, mode: 'reply', trigger: normalized, triggerKind })
       .then((result) => {
@@ -1581,7 +1586,9 @@ export function createMessageHandler({
    * the caller's `hot.config`, read at the moment of use; `deferred` marks a
    * ping answered from the pending queue; `destination` is the channel a
    * routed call's turn posts in (logged beside `channel`, where the call was
-   * written).
+   * written). Whether the call tags the persona (isTaggedCall: not by the
+   * reply ping alone) is read off `trigger`, so an untagged reply meets
+   * mention.followUpIgnoreChance like a follow-up (decideMention).
    * @returns {{ respond: boolean, reason: string, ignoreChance: number, roll?: number }}
    */
   function decideAndLog(channel, trigger, kind, config, { deferred = false, destination = null } = {}) {
@@ -1594,6 +1601,7 @@ export function createMessageHandler({
         : undefined;
     const decision = decideMention({
       kind,
+      tagged: isTaggedCall(trigger, client.user?.id),
       textLength: strippedLength(trigger.content, getSelfName(guildId)),
       recentCalls,
       neverIgnore: config.mention.neverIgnore.includes(trigger.authorId),
@@ -1782,16 +1790,18 @@ export function createMessageHandler({
 
         // A deferred follow-up or overheard line: its window must still be
         // open (a post the line came too late for is no answer: the
-        // spokeAfterSeeing check above decides that). A follow-up
-        // is counted for spam like a live one, an overheard line is not;
-        // neither is rolled for the ignore chance (startFollowUpTurn).
+        // spokeAfterSeeing check above decides that). A follow-up is
+        // counted for spam and rolled for the ignore chance like a live one,
+        // an overheard line is neither (startFollowUpTurn).
         if (isDeferredFollowUp(ping)) {
           const stale = followUpStale(ping, config);
           if (stale) {
             logPending(ping, 'dropped', { reason: stale });
             continue;
           }
-          if (ping.kind === 'followUp' && !ping.decided) tagHistory.hit(ping.trigger.authorId, now(), repeatWindowMs(config.mention));
+          if (ping.kind === 'followUp' && !ping.decided) {
+            if (!decideAndLog(ping.channel, ping.trigger, ping.kind, config, { deferred: true }).respond) continue;
+          }
         }
         // A re-queued ping was already counted and decided `respond` on the
         // pass whose turn found another one running: not counted or rolled again.

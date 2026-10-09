@@ -382,7 +382,8 @@ At most one re-watch or retry per turn. Answers are cached for one hour per ques
 
 | Key | Default | Meaning |
 |---|---|---|
-| `ignoreChance` | `0` | Base ignore chance; raise to make the persona skip some pings |
+| `ignoreChance` | `0` | Base ignore chance for a message whose text @mentions the persona; raise to make the persona skip some pings |
+| `followUpIgnoreChance` | `0` | Chance that the persona leaves a follow-up unanswered so the other person gets the last word. A follow-up is an untagged message the address classifier judged to be said to the persona, or a Discord reply to one of the persona's messages when the member who replied did not type an @mention of the persona; the automatic ping Discord adds to a reply does not count. For these messages it replaces `ignoreChance`, and the repeat penalty, the spam threshold and the affinity bonuses apply as usual; a skipped follow-up is not a `no` for `followUpNoStreak` |
 | `emptyMentionIgnoreChance` | `0` | Ignore chance for bare @mention; raise to make the persona skip some |
 | `repeatWindowMinutes` | `10` | Repeat tracking window (min) |
 | `repeatPenalty` | `0` | Added ignore chance per repeat; raise to penalize repeats |

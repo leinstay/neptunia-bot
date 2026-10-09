@@ -108,6 +108,7 @@
   },
   "mention": {
     "ignoreChance": 0,
+    "followUpIgnoreChance": 0,
     "emptyMentionIgnoreChance": 0,
     "repeatWindowMinutes": 10,
     "repeatPenalty": 0,

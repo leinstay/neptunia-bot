@@ -16,6 +16,7 @@ import {
   parseFollowUpVerdict,
   parseAddressAnswer,
   followUpTriggerKind,
+  isTaggedCall,
   roomPreFilter,
 } from '../src/behavior/mention.js';
 
@@ -202,6 +203,68 @@ test('decideMention: plain random ignore uses the base ignoreChance for a non-em
   assert.equal(result.ignoreChance, CFG.ignoreChance);
   assert.equal(result.reason, 'ignored:random');
   assert.equal(result.respond, false); // rng 0 < 0.12
+});
+
+// --- decideMention: follow-ups (mention.followUpIgnoreChance) ----------------
+
+/** One decideMention call with no repeat, spam, affinity or neverIgnore in play. */
+function decideOnce(kind, cfg, roll, extra = {}) {
+  return decideMention({ kind, textLength: 5, recentCalls: 1, neverIgnore: false, cfg, rng: rngReturning(roll), ...extra });
+}
+
+test('decideMention: a followUp starts from followUpIgnoreChance, not ignoreChance', () => {
+  const ignored = decideOnce('followUp', { ...CFG, ignoreChance: 0, followUpIgnoreChance: 1 }, 0.5);
+  assert.equal(ignored.respond, false);
+  assert.equal(ignored.ignoreChance, 0.97, 'clamped like any other chance');
+  assert.equal(ignored.reason, 'ignored:follow-up');
+
+  const answered = decideOnce('followUp', { ...CFG, ignoreChance: 1, followUpIgnoreChance: 0 }, 0);
+  assert.equal(answered.respond, true);
+  assert.equal(answered.ignoreChance, 0);
+  assert.equal(answered.reason, 'respond');
+});
+
+test('decideMention: an untagged reply starts from followUpIgnoreChance; a tagged or unspecified one from ignoreChance', () => {
+  const cfg = { ...CFG, ignoreChance: 0, followUpIgnoreChance: 1 };
+  const untagged = decideOnce('reply', cfg, 0.5, { tagged: false });
+  assert.deepEqual([untagged.respond, untagged.reason], [false, 'ignored:follow-up']);
+  for (const tagged of [true, undefined]) {
+    const result = decideOnce('reply', cfg, 0.5, { tagged });
+    assert.deepEqual([result.respond, result.ignoreChance], [true, 0], `tagged ${tagged}`);
+  }
+});
+
+test('decideMention: a mention is unaffected by followUpIgnoreChance, tagged or not', () => {
+  for (const tagged of [true, false, undefined]) {
+    const result = decideOnce('mention', { ...CFG, ignoreChance: 0, followUpIgnoreChance: 1 }, 0.5, { tagged });
+    assert.deepEqual([result.respond, result.ignoreChance, result.reason], [true, 0, 'respond'], `tagged ${tagged}`);
+  }
+});
+
+test('decideMention: a missing followUpIgnoreChance counts as 0 for a followUp and an untagged reply', () => {
+  const cfg = { ...CFG, ignoreChance: 0.5 };
+  delete cfg.followUpIgnoreChance;
+  for (const [kind, tagged] of [['followUp', undefined], ['reply', false]]) {
+    const result = decideOnce(kind, cfg, 0, { tagged });
+    assert.deepEqual([result.respond, result.ignoreChance], [true, 0], kind);
+  }
+});
+
+test('decideMention: the affinity adjustment applies on top of followUpIgnoreChance', () => {
+  const cfg = { ...CFG, ignoreChance: 0, followUpIgnoreChance: 0.2, affinityIgnoreBonus: 0.3, affinityLikeBonus: 0.1 };
+  const disliked = decideOnce('followUp', cfg, 0.4, { affinityScore: -100 });
+  assert.ok(Math.abs(disliked.ignoreChance - 0.5) < 1e-9, String(disliked.ignoreChance));
+  assert.equal(disliked.respond, false);
+  const liked = decideOnce('followUp', cfg, 0.15, { affinityScore: 100 });
+  assert.ok(Math.abs(liked.ignoreChance - 0.1) < 1e-9, String(liked.ignoreChance));
+  assert.equal(liked.respond, true);
+});
+
+test('isTaggedCall: a typed tag counts, the reply ping alone does not', () => {
+  assert.equal(isTaggedCall({ mentionedUserIds: ['s1'], replyPingUserId: null }, 's1'), true);
+  assert.equal(isTaggedCall({ mentionedUserIds: ['s1'], replyPingUserId: 's1' }, 's1'), false);
+  assert.equal(isTaggedCall({ mentionedUserIds: ['u2'], replyPingUserId: null }, 's1'), false);
+  assert.equal(isTaggedCall({}, 's1'), false);
 });
 
 // --- decideMention: affinityScore -------------------------------------------
