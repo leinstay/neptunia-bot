@@ -2829,9 +2829,8 @@ function routedInput(overrides = {}) {
 test('buildRequest: a pulled channel renders as channel_view after other_channels', () => {
   const history = [destMessage(1, NOW - 5 * MIN), destMessage(2, NOW - MIN)];
   const neighbors = [{ channelId: 'n1', channelName: 'random', messages: [makeMessage(9, NOW - 5 * MIN)] }];
-  const worn = [{ shape: 'a closing question', examples: ['ça va ?'] }];
-  const text = userText(buildRequest(baseInput({ history, neighbors, worn, pulled: [pulledChannel()], currentChannelId: DEST })));
-  const order = ['<other_channels>', '<channel_view>', '<worn>', '<chat>', '<task>'];
+  const text = userText(buildRequest(baseInput({ history, neighbors, pulled: [pulledChannel()], currentChannelId: DEST })));
+  const order = ['<other_channels>', '<channel_view>', '<chat>', '<task>'];
   const positions = order.map((tag) => text.indexOf(tag));
   assert.ok(positions.every((p) => p !== -1), JSON.stringify(positions));
   for (let i = 1; i < positions.length; i += 1) assert.ok(positions[i - 1] < positions[i], `${order[i - 1]} before ${order[i]}`);

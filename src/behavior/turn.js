@@ -21,7 +21,6 @@ import {
   fetchReplyParents,
   fetchNeighbors,
   isWritableChannel,
-  PAGE as HISTORY_PAGE,
   withTextPreviews,
 } from '../discord/collect.js';
 import { audienceAllows, captionPulled, checkPull, fetchPull } from '../discord/pull-fetch.js';
@@ -45,14 +44,12 @@ import { audienceCovers, markSeen, messageLink, resolveDestination, stampPings }
 import { classifierTextModel, isTaggedCall } from './mention.js';
 import { parseLookupAnswer, recallSettings } from './recall.js';
 import { parseSplitAnswer, splitCandidate, splitSettings } from './split.js';
-import { fillerKey, fillersSettings, findFillers } from './fillers.js';
-import { stickyOn, stickyPhrases, stickySettings } from './sticky.js';
 import { captionedEntries, gifPickSettings, parseGifPick, pickCandidates, pickContext, renderGifLibrary } from './gif-pick.js';
 import { turnRequestInput } from './turn-input.js';
 import { parseJsonObject, parseOutput } from '../llm/parse.js';
 import { DailyCapError, REPLY_REQUEST, TokenLimitError, RETRY_STATUS, hedgeSettings, helperRequestOptions, railReason, sleep } from '../llm/openrouter.js';
 import { ImageCapError, ImageGenError } from '../llm/images.js';
-import { isLimitNotice, limitOf, mirrorChannelLabel, mirrorDryRun, postLimitNotice } from './limits.js';
+import { limitOf, mirrorChannelLabel, mirrorDryRun, postLimitNotice } from './limits.js';
 import { between, typingMs } from './random.js';
 import { settleWait } from './activity.js';
 import {
@@ -202,7 +199,7 @@ export function paceSettings(config) {
 }
 
 /** The stages of a turn's preparation, in the order `turn: timings` names them. */
-const PREPARE_STAGES = Object.freeze(['history', 'previews', 'captions', 'videos', 'rewatch', 'links', 'lookup', 'neighbors', 'pulled', 'variety']);
+const PREPARE_STAGES = Object.freeze(['history', 'previews', 'captions', 'videos', 'rewatch', 'links', 'lookup', 'neighbors', 'pulled']);
 
 /**
  * The trigger kinds that are a direct call (a private chat message included): the typing
@@ -891,14 +888,6 @@ function taskInput({ part, queued, added, labels, channelId }) {
  * `features.videoDescriptions` (a missing key counts as on) are on and the describer has
  * `describeVideos`; otherwise they render without a watch.
  *
- * `variety` (src/behavior/variety-pass.js#createVarietyPass) is optional: when
- * present, every turn but a `drawFailed` one looks up its pass on the persona's
- * own recent lines as soon as the history is known, alongside the rest of the
- * preparation, and the request carries its answer as `<worn>`; every message
- * posted in a server channel joins its ring of own lines; and once a turn's
- * text is out (not in a dry run), the pass for the next turn starts ahead
- * (`variety.ahead`, when the pass has it). Absent -> none of these.
- *
  * `getSelfName` (src/index.js) is the persona's display name in a guild;
  * default: the client's cached guild member, else the bot user's name.
  *
@@ -932,8 +921,7 @@ function taskInput({ part, queued, added, labels, channelId }) {
  *
  * Everything a turn prepares before its reply request (the file previews, the
  * captions, the videos and their re-watch, the link reads, the search
- * classifier with its searches, the neighbours, the pulled channels, the
- * variety pass) starts as soon as its inputs exist and runs alongside the
+ * classifier with its searches, the neighbours, the pulled channels) starts as soon as its inputs exist and runs alongside the
  * rest, under one deadline (paceSettings: `pace.prepareMs` from the turn's
  * start, `pace.prepareSearchMs` once the search classifier asked for a
  * search -- and at most that long while its verdict is still out --,
@@ -963,7 +951,6 @@ export function createTurnRunner({
   recall = null,
   images,
   emoji,
-  variety,
   getSelfName = (guildId) => client.guilds?.cache?.get(guildId)?.members?.me?.displayName ?? client.user?.username ?? 'bot',
   routeChannels,
   now: clock = Date.now,
@@ -1423,38 +1410,6 @@ export function createTurnRunner({
   }
 
   /**
-   * The guild's filler list (`fillers`, src/behavior/fillers.js), its count
-   * of the persona's own messages and its ring of the persona's own lines (`ownLines`,
-   * what `<worn>` counts a filler in); null when the list is empty. `known`:
-   * the guild memory the caller already read, else it is read here.
-   * @param {string} guildId
-   * @param {object|null} [known]
-   * @returns {{ list: object[], ownMessages: number, ring: object[] }|null}
-   */
-  function guildFillers(guildId, known = null) {
-    const guild = known ?? (typeof store.getGuild === 'function' ? store.getGuild(guildId) : null);
-    const list = Array.isArray(guild?.fillers) ? guild.fillers : [];
-    if (list.length === 0) return null;
-    const ring = Array.isArray(guild.ownLines) ? guild.ownLines : [];
-    return { list, ownMessages: Number.isInteger(guild.ownMessageCount) ? guild.ownMessageCount : 0, ring };
-  }
-
-  /**
-   * The request's `fillers` input (src/behavior/variety.js#renderWorn): the
-   * guild's filler list, own-message count and own-line ring (guildFillers,
-   * over `known` when the turn already read the guild memory) with the turn's
-   * `now`; null when the list is empty.
-   * @param {string} guildId
-   * @param {object|null} known
-   * @param {number} now
-   * @returns {{ list: object[], ownMessages: number, ring: object[], now: number }|null}
-   */
-  function requestFillers(guildId, known, now) {
-    const fillers = guildFillers(guildId, known);
-    return fillers ? { ...fillers, now } : null;
-  }
-
-  /**
    * The GIF picker (src/behavior/gif-pick.js), on the turn's FIRST message as
    * the model wrote it (a picked GIF takes its place; the rest are posted as
    * written): with features.gifPicker and features.gifs on (a missing key counts as
@@ -1545,100 +1500,13 @@ export function createTurnRunner({
   }
 
   /**
-   * The sticky-phrase guard after a post (src/behavior/sticky.js): the
-   * phrases the persona keeps reusing in its own newest lines (the guild's
-   * `ownLines` ring, which already holds this turn's lines; a limit notice is
-   * never one of them, `variety.sticky` read now) go into the filler list as
-   * EXACT entries (store.learnFillers with `exact`): a phrase the list
-   * already covers bumps that entry by its line count, a new one is added
-   * with that weight. Logs `fillers: sticky` (`guildId`, `found`, `added`,
-   * `bumped`) when a phrase was found. Nothing with features.stickyGuard off
-   * (a missing key counts as on). Never throws (`fillers: sticky failed`).
-   * @returns {string[]} The keys of the entries it added: notePosted stamps
-   *   them used now, so the very next turn's `<worn>` lists them as resting.
-   */
-  function noteSticky(guildId) {
-    try {
-      const config = hot.config;
-      if (!stickyOn(config) || typeof store.learnFillers !== 'function' || typeof store.getGuild !== 'function') return [];
-      const guild = store.getGuild(guildId);
-      const labels = hot.prompts?.labels;
-      const lines = (Array.isArray(guild?.ownLines) ? guild.ownLines : [])
-        .map((line) => line?.text)
-        .filter((text) => typeof text === 'string' && !isLimitNotice(labels, text));
-      const found = stickyPhrases(lines, stickySettings(config));
-      if (found.length === 0) return [];
-      const before = new Set((Array.isArray(guild?.fillers) ? guild.fillers : []).map(fillerKey));
-      const patterns = found.map(({ text, count }) => ({ word: text, count, exact: true }));
-      const { added, bumped } = store.learnFillers(guildId, patterns, clock(), fillersSettings(config));
-      log.info('fillers: sticky', { guildId, found: found.length, added, bumped });
-      if (added === 0) return [];
-      const after = store.getGuild(guildId)?.fillers;
-      return (Array.isArray(after) ? after : []).map(fillerKey).filter((key) => !before.has(key));
-    } catch (err) {
-      log.warn('fillers: sticky failed', { guildId, error: err });
-      return [];
-    }
-  }
-
-  /**
-   * After the persona's messages are posted: the guild's `ownMessageCount`
-   * grows by how many were posted, the sticky-phrase guard runs (noteSticky),
-   * then every filler the posted texts still hold (`texts`, as the persona
-   * wrote them) and every entry the sticky guard just added are stamped used
-   * at that count and now (store.markFillers, one stamp each): the stamps
-   * that decide which fillers the next turns' `<worn>` lists. Nothing while paused or when nothing was posted; never throws into the
-   * turn (`fillers: note failed`).
-   * @param {string} guildId
-   * @param {string[]} texts
-   */
-  function notePosted(guildId, texts) {
-    if (texts.length === 0 || typeof store.countOwnMessages !== 'function' || store.state?.data?.paused) return;
-    try {
-      store.countOwnMessages(guildId, texts.length);
-      const sticky = noteSticky(guildId);
-      const fillers = guildFillers(guildId);
-      if (!fillers) return;
-      const used = findFillers(texts.join('\n\n'), fillers.list).map(fillerKey);
-      const keys = [...new Set([...used, ...sticky])];
-      if (keys.length > 0) store.markFillers(guildId, keys, clock());
-    } catch (err) {
-      log.warn('fillers: note failed', { guildId, error: err });
-    }
-  }
-
-  /**
-   * Start the variety pass for the next turn (src/behavior/variety-pass.js#ahead)
-   * once this turn's text is out: on this turn's history plus the `posted`
-   * lines, cut to what the next fetchHistory returns (the last
-   * `context.channelMessages`, read now, at most one page), so the next turn's
-   * own lines carry the same ids and find the answer ready. Nothing when the
-   * pass has no `ahead` or nothing was posted. Never awaited, never throws
-   * into the turn.
-   */
-  function startAhead({ guildId, channelId, history, posted, selfName, privateChat }) {
-    if (typeof variety?.ahead !== 'function' || posted.length === 0) return;
-    const failed = (err) => log.warn('turn: variety ahead failed', { channel: channelId, error: err });
-    try {
-      const cap = Math.min(HISTORY_PAGE, hot.config.context?.channelMessages);
-      const all = [...history, ...posted];
-      const seen = Number.isFinite(cap) && cap > 0 ? all.slice(-cap) : all;
-      Promise.resolve(variety.ahead({ guildId, channelId, history: seen, selfName, privateChat })).catch(failed);
-    } catch (err) {
-      failed(err);
-    }
-  }
-
-  /**
    * Post the turn for real. Resolves `{ delivered, answered }` -- whether
    * anything reached the chat (a reaction put, a message, the GIF or the
    * picture posted; a limit notice is not the persona's answer), and the ids
    * of the pulled lines what reached it answered (a reaction put on one, a
    * message, the GIF or the picture posted answering one: stampShownCalls) --
    * plus `drawFailed` from draw() when the persona's picture could not be
-   * posted. Once the text
-   * messages are out (before the GIF and the picture), the variety pass for
-   * the next turn starts ahead (startAhead) on this chat's history.
+   * posted.
    *
    * Everything is posted in `channel`. A reaction on a pulled line
    * (`pulledIds`) is put in that line's channel when the bot may react there,
@@ -1652,7 +1520,7 @@ export function createTurnRunner({
    * A message whose send fails ends the posting: `turn: send failed`
    * (`channel`, `index` -- 0-based among the turn's messages --, `error`), no
    * later message, GIF or picture, and the turn resolves what reached the chat
-   * before it (the pass ahead starts on those lines).
+   * before it.
    *
    * In a server channel every posted message, GIF and picture is recorded in
    * the post ledger (recordPost) with `mode`, the trigger, the newest line of
@@ -1664,12 +1532,10 @@ export function createTurnRunner({
    * After the reactions, the GIF picker (pickGif) runs alongside the first
    * message's typing imitation: both start together, the first message waits
    * for both; a GIF it picks is posted in place of the first message (that
-   * text is not sent nor counted by notePosted), replying where it would have,
+   * text is not sent), replying where it would have,
    * and the other messages follow in order, each waited for and typed; a
    * picked GIF that fails to send (`turn: gif failed`) leaves every message to
-   * be posted as written, so nothing is lost. Once
-   * the messages are out (all, or those before a failed send), notePosted
-   * counts them and stamps the fillers they hold.
+   * be posted as written, so nothing is lost.
    * @param {{ channel: object, guildId: string, privateChat: boolean, parsed: object,
    *   idByIndex: Map<number, string>, history: object[], startedAt: number, mode: string,
    *   triggerKind: TriggerKind|null, plain: boolean, trigger: object|null, selfName: string,
@@ -1734,9 +1600,9 @@ export function createTurnRunner({
     }
 
     // Each posted message as the next fetchHistory will normalize it (its own id and time, the
-    // persona's text as written): the lines the pass ahead looks at.
+    // persona's text as written).
     const ownPosted = [];
-    // The texts posted, as the persona wrote them: what notePosted counts and stamps.
+    // The texts posted, as the persona wrote them.
     const postedTexts = [];
     let sendFailed = false;
     // The GIF picker starts first (its request is sent at once), then the first message's typing.
@@ -1811,20 +1677,6 @@ export function createTurnRunner({
         content: message.text,
         replyToId: replyId,
       });
-      // The ring of own lines the variety pass reads for the other channels: server channels only,
-      // the persona's text as it wrote it, with what it answered (the line it answered, here or
-      // in a pulled channel, else the trigger).
-      if (variety && channel.guild) {
-        const answeredId = replyId ?? pulledId;
-        const answeredLine = answeredId ? lines.find((m) => m.id === answeredId) : trigger;
-        variety.record(channel.guild.id, {
-          id: posted?.id ?? null,
-          ts: clock(),
-          channelId: channel.id,
-          text: message.text,
-          to: typeof answeredLine?.content === 'string' ? answeredLine.content : undefined,
-        });
-      }
       log.info('turn: sent', {
         channel: channel.id,
         chars: text.length,
@@ -1835,8 +1687,6 @@ export function createTurnRunner({
         ...(link ? { link: true } : {}),
       });
     }
-    notePosted(guildId, postedTexts);
-    startAhead({ guildId, channelId: channel.id, history, posted: ownPosted, selfName, privateChat });
     const messageIds = ownPosted.map((line) => line.id).filter((id) => typeof id === 'string' && id);
     const posted = { messageIds, texts: postedTexts, drew: false };
     if (sendFailed) return { delivered, answered, ...posted };
@@ -3108,9 +2958,7 @@ export function createTurnRunner({
         const hedge = hedgeMs !== null && hedgeMs < timeoutMs ? { hedge: { afterMs: hedgeMs, timeoutMs } } : {};
         return { ...REPLY_REQUEST, timeoutMs, signal: barAbort.signal, ...hedge };
       };
-      // A drawFailed turn only says the picture failed: no classifier or
-      // at-turn variety pass is paid for a second time (once it posts, its
-      // pass ahead for the next turn starts like any turn's).
+      // A drawFailed turn only says the picture failed: no classifier is paid for a second time.
       const answersDrawFailure = triggerKind === 'drawFailed';
       // Someone asked for this turn (askedFor): not a spontaneous or an overheard one.
       const asked = askedFor(trigger, triggerKind);
@@ -3201,16 +3049,6 @@ export function createTurnRunner({
       // A routed call lives in its source: the search classifier reads the source's lines around
       // it, with their captions, instead of this chat; the re-watch is not offered (below).
       const routedPull = source?.reason === 'routed' ? (early?.pulled.find((entry) => entry.channelId === source.channelId) ?? null) : null;
-
-      // The variety pass on the persona's own recent lines is looked up now (ready, in flight, or
-      // asked) and runs alongside everything below (descriptions, re-watch, lookup, neighbours); it
-      // never rejects and the turn waits for it at most variety.timeoutMs, so it can never fail the
-      // turn. A request still running then keeps going and its answer serves the next turn.
-      const varietyStartedAt = clock();
-      const wornPending =
-        variety && typeof variety.forTurn === 'function' && !answersDrawFailure
-          ? variety.forTurn({ guildId, channelId: channel.id, history, selfName, privateChat: isPrivate }).catch(() => null)
-          : null;
 
       // Everything below starts as soon as its inputs exist and runs alongside the rest; the turn
       // waits for all of it together, at most until the deadline (paceSettings, counted from the
@@ -3497,9 +3335,8 @@ export function createTurnRunner({
             const found = await fetchNeighbors(channel, config, selfId, now, { accept });
             return { neighbors: found, hidden };
           });
-      // The pulled channels and the variety pass started earlier: timed from their own start.
+      // The pulled channels started earlier: timed from their own start.
       const pulledStage = isPrivate && !likeServer ? null : track('pulled', () => pulledPending, pullStartedAt);
-      const varietyStage = wornPending ? track('variety', () => wornPending, varietyStartedAt) : null;
 
       // Parts in time end the wait at once: the whole message's preparation is set aside.
       const partsReady = splitStage ? splitStage.settled.then(() => (hasParts() ? undefined : new Promise(() => {}))) : null;
@@ -3514,7 +3351,6 @@ export function createTurnRunner({
             lookupChain,
             neighborsStage?.settled,
             pulledStage?.settled,
-            varietyStage?.settled,
             splitStage?.settled,
           ]),
           deadline.reached,
@@ -3558,7 +3394,6 @@ export function createTurnRunner({
       const neighborsHidden = neighborsFound?.hidden ?? 0;
       // Pulled ahead of a chooser, the channels keep their cached captions when the fresh ones are late.
       const pulled = pulledStage?.done && Array.isArray(pulledStage.value) ? pulledStage.value : (early?.pulled ?? []);
-      const worn = varietyStage?.done ? varietyStage.value : null;
 
       // A neighbour's pictures get only the captions the cache already holds, under the
       // chat captions' switch: cachedDescriptions never sends a request or counts a day.
@@ -3654,10 +3489,6 @@ export function createTurnRunner({
           // The cached captions of both lists.
           mediaCache:
             emoji || (features.gifs !== false && typeof store.getGifs === 'function') ? (store.getMediaCache(guildId) ?? null) : null,
-          // The `<worn>` block: what this turn's variety pass named, or nothing.
-          worn: worn ?? null,
-          // ...and, in the same block, the guild's resting fillers as advice before the reply.
-          fillers: requestFillers(guildId, guildMemory, now),
           // `<channel_view>`: the channels pulled into this turn, the one it is about, the chat
           // line put to the room, where a call from a read-only channel is answered.
           pulled,

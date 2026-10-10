@@ -233,12 +233,6 @@ export const labels = {
     notice: 'limit reached ({limit}, {used}/{cap})',
     paused: 'paused for now, back later',
   },
-  variety: {
-    intro: 'devices you used in your last lines, do not repeat them:',
-    fillersIntro: 'filler words still resting, leave them out:',
-    pinnedIntro: 'filler words you were asked to drop, leave them out:',
-    fillerLine: '{text} -- {count} of the last {window} lines, last {ago} ago',
-  },
   mentor: {
     intended: ['a limit notice is a feature'],
     examples: 'real moments, each with the rejected original answer',

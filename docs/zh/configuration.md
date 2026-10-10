@@ -47,9 +47,6 @@
 | `channelLinks` | `true` | 角色在消息中写服务器频道的 `#频道名` 时，发送的消息包含真实的频道链接而非文字。名称按最长匹配；已有的链接保持不变。关闭时文本原样发送。缺失的键视为开启 |
 | `pauseNotice` | `true` | 角色在暂停时被呼叫会发布一条简短通知。缺失的键视为开启。参见 `mention.pauseNoticeMinutes` 和 `labels.limits.paused` |
 | `diary` | `true` | 角色在拥有者选择的频道中按随机时间表自发发帖。缺失的键视为开启。未设置 `diary.channelId` 时不生效。参见[日记](diary.md) |
-| `variety` | `true` | 模型过程识别角色在近期消息中过度使用的表达手法。结果作为 `<worn>` 块包含在回合请求中。缺失的键视为开启 |
-| `varietyPrecompute` | `true` | 角色发布文本后立即启动多样性过程，使下一回合可以直接使用结果。关闭时过程仅在回合时运行，但迟到的结果仍会保存。缺失的键视为开启 |
-| `stickyGuard` | `true` | 每次发帖后查找角色卡住的短语（在 3+ 条近期消息中重复，在旧消息中罕见），作为填充词条目添加，使下一回合的建议列表包含它。无需模型。缺失的键视为开启 |
 | `splitTasks` | `true` | 将长且有结构的直接呼叫拆分为多个部分，每个部分在自己的回合中回答。缺失的键视为开启。需要 `prompts/split.md` 和 `labels.task.part` |
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
@@ -116,7 +113,7 @@
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `text` | `"anthropic/claude-sonnet-4.6"` | 文本分类器：地址分类器（`features.followUp`）、搜索分类器、链接阅读器、搜索浓缩器和 recall 摘要（`features.webLookup`、`features.recall`）、重看分类器（`features.videoRewatch`）、房间分类器（`spontaneous.roomQuestionChance`）、频道路由分类器（`features.channelRoute`）和多样性过程（`features.variety`） |
+| `text` | `"anthropic/claude-sonnet-4.6"` | 文本分类器：地址分类器（`features.followUp`）、搜索分类器、链接阅读器、搜索浓缩器和 recall 摘要（`features.webLookup`、`features.recall`）、重看分类器（`features.videoRewatch`）、房间分类器（`spontaneous.roomQuestionChance`）和频道路由分类器（`features.channelRoute`） |
 | `media` | `"anthropic/claude-haiku-4.5"` | 图片描述器（`features.mediaDescriptions`）：为图片、GIF 帧、视频封面、贴纸、自定义表情和链接缩略图生成单行描述 |
 | `video` | `"google/gemini-3.8-flash"` | 视频描述器（`features.videoDescriptions`）：观看短片段，基于问题重看，按请求重试。必须同时接受视频和音频输入 |
 
@@ -210,7 +207,7 @@
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `prepareMs` | `6000` | 回合开始到发出对话请求前的毫秒数。LLM 调用前运行的所有任务（历史、说明、多样性过程、路由和搜索分类器）必须在此窗口内完成。`0` 或非数字移除此限制 |
+| `prepareMs` | `6000` | 回合开始到发出对话请求前的毫秒数。LLM 调用前运行的所有任务（历史、说明、路由和搜索分类器）必须在此窗口内完成。`0` 或非数字移除此限制 |
 | `prepareSearchMs` | `12000` | 搜索分类器决策期间以及分类器请求的搜索执行期间，截止时间延长到此值。「无需搜索」的判定立即释放持有。不会短于 `prepareMs`。`0` 或非数字移除此限制 |
 | `prepareMediaMs` | `20000` | 直接呼叫的触发消息（或其回复的消息）包含描述器或视频阶段将处理的图片、GIF 或视频时的延长截止时间。不会短于 `prepareMs`；当搜索延长也适用时，取较大值。`0` 或非数字移除此延长 |
 | `dropAfterMs` | `60000` | 从回合开始计的毫秒数。如果到此时完成的回答仍未到手，回合被丢弃不发布（`turn: dropped`）。`0` 或非数字移除此限制 |
@@ -676,54 +673,6 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 早晨（7–11）关闭。白天（12–16）抽取 0 或 1 篇帖子。晚上（18–次日 01）抽取 0、1 或 2 篇。深夜（01–05）抽取 0 或 1 篇。所有时间均为 `bot.timezone`。`to` 不大于 `from` 的窗口跨越午夜: `{ "from": 18, "to": 1 }` 从今天 18:00 到明天 01:00。
 
-## `variety`
-
-多样性过程的设置（`features.variety`）。角色近期的消息会发送给 `classifier.text` 模型，由其识别重复的表达手法。当 `features.varietyPrecompute` 开启时，过程在角色发布文本后立即启动，使下一回合可以直接使用结果；回合时使用缓存的结果，或加入正在进行的过程并最多等待 `variety.timeoutMs`。结果以 `<worn>` 块的形式出现在本轮请求中。超时或过程失败不会延迟或中断本轮，本轮会在没有该块的情况下继续。第二个更长时间窗口的过程（`variety.longLines`）至多每 `variety.longEveryHours` 小时运行一次，读取角色在所有频道中的消息环，使用 `prompts/variety-long.md` 在 `classifier.text` 模型上运行。其手法列表存储为服务器记忆中的 `wornLong`，在下次长过程前一直有效；回合的 `<worn>` 块先放长过程的手法，然后是短过程的，去重后最多 `variety.maxPatterns` + `variety.longMaxPatterns` 个。全部热重载。
-
-| 键 | 默认值 | 说明 |
-|---|---|---|
-| `window` | `16` | 过程查看的角色自身消息数：先取本轮频道的，再取其他频道的 |
-| `recentMinutes` | `180` | 超过此分钟数的消息不纳入 |
-| `minLines` | `3` | 消息少于此数时跳过过程 |
-| `contextChars` | `120` | 每条消息所回复内容保留的字符数（`(to: ...)` 上下文） |
-| `maxPatterns` | `4` | 一次过程最多可识别的手法数 |
-| `shapeChars` | `140` | 一个手法描述的最大字符数 |
-| `examplesInBlock` | `false` | 在 `<worn>` 块中随形显示示例引用。关闭时块仅列形。缺失键视为关闭 |
-| `maxOutputTokens` | `500` | 过程的最大输出 token 数 |
-| `timeoutMs` | `8000` | 回合等待过程结果的时间（毫秒）。超过此等待的过程继续运行至 `requestTimeoutMs`；迟到的结果会保存并在下一回合使用。Mentor 沙盒将此值用作请求超时 |
-| `requestTimeoutMs` | `30000` | 多样性模型调用的请求超时（毫秒）。过程在此时间截止；`variety.timeoutMs` 仅为回合的等待时间 |
-| `history` | `20` | 服务器记忆中历史过程环保留的过程数 |
-| `longLines` | `300` | 长过程从环中读取的角色消息数，跨所有频道无时间限制。`0` 关闭长过程 |
-| `longEveryHours` | `6` | 两次长过程之间的小时数；失败也计入，避免每次发帖后重试 |
-| `longMinLines` | `60` | 环中消息少于此数时跳过长过程 |
-| `longMaxPatterns` | `3` | 长过程最多可识别的手法数 |
-
-### `variety.fillers`
-
-填充词建议列表的设置。条目分两种类型：PREFIX 条目以 `*` 结尾（`*` 前至少 3 个字母），在词边界匹配所有以该前缀开头的词；EXACT 条目（无 `*`）精确匹配整个词或短语。多样性过程是主要来源：过程发现的词类习惯会成为条目，权重等于其计数。列表的排名与淘汰机制类似兴趣：容量 `max`，权重带时间衰减（`halfLifeDays`），满时淘汰最弱的。所有者添加的条目被固定（不淘汰、不衰减）。冷却中的条目（在 `cooldownHours` 小时内或 `cooldownMessages` 条自身消息内使用过的；固定条目始终）在回复前以 `<worn>` 块显示给角色，按排名排列，最多 `max` 条。角色提前看到并自行避免。服务器记忆中的状态：`fillers` 和 `ownMessageCount`。
-
-| 键 | 默认值 | 说明 |
-|---|---|---|
-| `cooldownHours` | `36` | 条目最后使用后经过的小时数，之后可再次使用 |
-| `cooldownMessages` | `300` | 条目最后使用后角色自身发布的消息数，之后可再次使用 |
-| `max` | `12` | 列表保留的条目数；满时淘汰排名最低的条目 |
-| `halfLifeDays` | `14` | 条目排名的时间衰减半衰期（天）；与兴趣相同的衰减公式 |
-
-### `variety.sticky`
-
-机械粘滞 token 检测器（`features.stickyGuard`）的设置。角色每次发帖后（或短多样性过程完成时），代码扫描两个窗口：角色最近 `lines` 条自己的消息（近期窗口）和环的较旧部分（至 `variety.longLines`，基线）。由 1 到 `maxWords` 个词组成的短语，当出现在至少 `minRepeats` 条近期消息中且在不超过 `baselineMax` 条旧消息中时，被判定为粘滞，因此角色一直使用的日常词汇不会命中。单词短语需要 `minChars` 个字符，含数字时至少 2 个字符。旧消息少于 `baselineMin` 条时，单词仅在含数字时计入。`ignore` 列表中的词不计入。重叠短语中最长的胜出。每个匹配项成为精确填充词条目，权重等于其计数，冷却已经开始，使下一回合的建议列表包含它。日志：`fillers: sticky`。
-
-| 键 | 默认值 | 说明 |
-|---|---|---|
-| `minRepeats` | `3` | 短语被计入所需的最少近期消息条数 |
-| `minRepeatsWord` | `4` | 不含数字的单个词需要出现在这么多近期行中才算作粘滞。两个及以上词的短语和含数字的标记使用 `minRepeats` |
-| `lines` | `40` | 扫描的近期自身消息条数 |
-| `maxWords` | `3` | 一个短语的最大词数 |
-| `minChars` | `4` | 不含数字的单词短语的最小字符数 |
-| `baselineMax` | `1` | 短语被判定为粘滞时在旧环中的最大出现次数 |
-| `baselineMin` | `100` | 旧消息少于此数时，单词仅在含数字时计入 |
-| `ignore` | `[]` | 永远不作为粘滞 token 计数的词 |
-
 ## `private`
 
 私聊设置（`features.privateMessages`）。全部热重载。门控在无 LLM 请求的情况下本地检查。
@@ -807,7 +756,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 ### 文本分类器（`classifier.text`）
 
-能可靠回答 "yes" 或 "no" 的最便宜的文本模型。运行地址分类器（`features.followUp`）、搜索分类器、链接阅读器、搜索浓缩器和 recall 摘要（`features.webLookup`、`features.recall`）、重看分类器（`features.videoRewatch`）、房间分类器（`spontaneous.roomQuestionChance`）、频道路由分类器（`features.channelRoute`）和多样性过程（`features.variety`）。默认：`anthropic/claude-sonnet-4.6`。
+能可靠回答 "yes" 或 "no" 的最便宜的文本模型。运行地址分类器（`features.followUp`）、搜索分类器、链接阅读器、搜索浓缩器和 recall 摘要（`features.webLookup`、`features.recall`）、重看分类器（`features.videoRewatch`）、房间分类器（`spontaneous.roomQuestionChance`）和频道路由分类器（`features.channelRoute`）。默认：`anthropic/claude-sonnet-4.6`。
 
 ### 图片（`classifier.media`）
 

@@ -17,7 +17,6 @@ import { createImageGen } from './llm/images.js';
 import { createTurnRunner } from './behavior/turn.js';
 import { createActivity } from './behavior/activity.js';
 import { hasRequiredLabels } from './behavior/prompt.js';
-import { createVarietyPass } from './behavior/variety-pass.js';
 import { createChannelRouter } from './behavior/route-channel.js';
 import { createRecall } from './behavior/recall-run.js';
 import { createEmojiIndex } from './discord/emoji.js';
@@ -151,8 +150,6 @@ const lookup = createLookup({
 });
 // The served guild's custom emoji (features.customEmoji): a live view over discord.js's own cache.
 const emoji = createEmojiIndex(client, getGuildId);
-// The variety pass (features.variety): before each turn, the devices worn out in the persona's own recent lines.
-const variety = createVarietyPass({ hot, store, llm });
 // The persona's display name in a guild: the one name every request, the warmup and the analyzer use.
 const getSelfName = (guildId) => client.guilds.cache.get(guildId)?.members.me?.displayName ?? client.user?.username ?? 'bot';
 // The route classifier (features.channelRoute): picks a channel the conversation is about for <channel_view>.
@@ -176,7 +173,6 @@ const turns = createTurnRunner({
   recall,
   images,
   emoji,
-  variety,
   getSelfName,
   routeChannels,
   isWarmingUp: () => warmup.isWarmingUp(),

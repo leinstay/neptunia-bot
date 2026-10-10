@@ -47,8 +47,6 @@ export const TURN_INPUT_KEYS = Object.freeze([
   'customEmoji',
   'mediaCache',
   'gifs',
-  'worn',
-  'fillers',
   'pulled',
   'source',
   'focus',

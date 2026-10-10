@@ -30,12 +30,6 @@
 // target (`memory`) is refused by `run` and skipped by `check`, both naming it
 // as unsupported; nothing else reads it.
 //
-// A situation exercises the variety pass as a live turn does
-// (src/behavior/variety.js): the persona's own lines of that situation's
-// history go to the same pass, charged to the mentor's budget, and its answer
-// becomes the `<worn>` block of every sample of that situation; the patterns
-// are saved on the situation record (`worn`). The judge never sees them.
-//
 // Everything expensive is bounded: the mentor's own daily token budget is
 // checked before every request and charged after every completion, the
 // per-request token cap of the llm client stays in force, and nothing counts
@@ -51,10 +45,7 @@
 
 import { resolveDestination } from '../behavior/elsewhere.js';
 import { block, fillPromptTemplate, learnedConfig, learnedText } from '../behavior/prompt.js';
-import { isLimitNotice } from '../behavior/limits.js';
-import { classifierTextModel } from '../behavior/mention.js';
 import { usableDestination } from '../behavior/turn.js';
-import { buildVarietyRequest, parseVariety, selectOwnLines, varietyOn, varietySettings } from '../behavior/variety.js';
 import { fill, formatTranscript, renderTranscript } from '../discord/format.js';
 import { requestTokenLimit } from '../llm/budget.js';
 import { TokenLimitError } from '../llm/openrouter.js';
@@ -330,14 +321,10 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
    * One request to the mentor model: the switches and the budget first (the
    * prompt as the llm client's rail measures it -- calibrated -- plus the most
    * the answer may cost, `maxOutputTokens` at `outputTokenWeight`), charged
-   * after; an abort ends the run. `as` sends
-   * the request for another role through the same rails and budget (the
-   * variety pass: its model, role, output cap, timeout, `purpose` and a
-   * `signal` of its own that cuts it without ending the run); omitted, the
-   * mentor's own. Every request carries `origin: 'mentor'` (the `llm: usage`
+   * after; an abort ends the run. Every request carries `origin: 'mentor'` (the `llm: usage`
    * line tells it from live chat traffic).
    */
-  async function askMentor(ctx, system, user, as = {}) {
+  async function askMentor(ctx, system, user) {
     const config = hot.config;
     checkEnabled(config);
     const cfg = config.mentor ?? {};
@@ -345,7 +332,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       { role: 'system', content: system },
       { role: 'user', content: user },
     ];
-    const maxOutputTokens = as.maxOutputTokens ?? cfg.maxOutputTokens;
+    const maxOutputTokens = cfg.maxOutputTokens;
     const estimate = calibrated(estimateMessages(messages));
     const possibleOutput = positive(maxOutputTokens, 6000) * outputTokenWeight(cfg);
     if (!budget.canSpend(estimate + possibleOutput)) throw new RunEnd('stopped', 'budget');
@@ -353,15 +340,14 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     let completion;
     try {
       completion = await llm.complete(messages, {
-        model: as.model ?? cfg.model,
-        role: as.role ?? 'mentor',
+        model: cfg.model,
+        role: 'mentor',
         maxOutputTokens,
-        timeoutMs: as.timeoutMs ?? cfg.timeoutMs,
+        timeoutMs: cfg.timeoutMs,
         countAgainstDailyCap: false,
         skipCalibration: true,
         origin: 'mentor',
-        ...(as.purpose ? { purpose: as.purpose } : {}),
-        signal: as.signal ? AbortSignal.any([ctx.signal, as.signal]) : ctx.signal,
+        signal: ctx.signal,
       });
     } catch (err) {
       if (ctx.signal.aborted) throw new RunEnd('stopped', 'owner');
@@ -755,70 +741,11 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     return record;
   }
 
-  /**
-   * The variety pass of one situation, as a live turn runs it
-   * (src/behavior/variety.js): the persona's own lines of the situation's
-   * history (`variety.window` of them, newest kept, no age limit: the
-   * situation's own timeline is what counts), at least `variety.minLines`,
-   * sent through `askMentor` on the `classifier.text` model (charged to the
-   * mentor's budget, never to the chat's daily cap). As the live pass
-   * (src/behavior/variety-pass.js#ask), the whole pass -- every retry of the
-   * llm client included -- is cut at `variety.requestTimeoutMs` by one
-   * AbortController, so a stalled classifier costs one request, not one per
-   * attempt. As the live pass, the bot's limit notices (`labels.limits.notice`,
-   * read from `view`) are not the persona's lines and are left out. Null -- no pass, no
-   * block, nothing saved -- with `features.variety` off, no `variety` prompt,
-   * too few own lines, a failed or cut request or an answer that is not the expected
-   * JSON; a stop or a spent budget ends the run as usual. Logs counts only.
-   */
-  async function wornFor(ctx, { history, view, record, self, caseId }) {
-    const config = view.config;
-    const prompt = view.prompts?.variety;
-    if (!varietyOn(config) || typeof prompt !== 'string' || !prompt.trim()) return null;
-    const settings = varietySettings(config);
-    const labels = view.prompts?.labels;
-    const spoken = (Array.isArray(history) ? history : []).filter((m) => !(m?.self && isLimitNotice(labels, m.content)));
-    const lines = selectOwnLines({ history: spoken, window: settings.window });
-    if (lines.length < settings.minLines) return null;
-    const request = buildVarietyRequest({ prompt, selfName: self.name, lines, config });
-    const controller = new AbortController();
-    // Cleared as soon as the pass settles. Unref'd: it only bounds a request and never keeps a process alive.
-    const timer = setTimeout(() => controller.abort(), settings.requestTimeoutMs);
-    timer.unref?.();
-    let text;
-    try {
-      text = await askMentor(ctx, request.messages[0].content, request.messages[1].content, {
-        model: classifierTextModel(config),
-        role: 'classifier.text',
-        purpose: 'variety',
-        maxOutputTokens: settings.maxOutputTokens,
-        timeoutMs: settings.requestTimeoutMs,
-        signal: controller.signal,
-      });
-    } catch (err) {
-      if (err instanceof RunEnd) throw err;
-      log.warn('mentor: variety pass failed', {
-        caseId,
-        n: record.n,
-        lines: lines.length,
-        name: err?.name,
-        status: err?.statusCode ?? null,
-        timedOut: controller.signal.aborted,
-      });
-      return null;
-    } finally {
-      clearTimeout(timer);
-    }
-    const parsed = parseVariety(text, request.texts, view.config);
-    log.info('mentor: variety pass', { caseId, n: record.n, lines: lines.length, parse: parsed.ok ? 'ok' : 'error', kept: parsed.patterns.length, dropped: parsed.dropped });
-    return parsed.ok ? parsed.patterns : null;
-  }
-
   /** Answers every prepared situation on its own view (`entry.view`: a real moment's is filtered to its time). */
-  async function answerAll(ctx, { prepared, self, reference, caseId = null }) {
+  async function answerAll(ctx, { prepared, self, reference }) {
     let previous = 1;
     for (const entry of prepared) {
-      const { situation, record, history, at, channel, view, media, samples } = entry;
+      const { situation, record, at, channel, view, media, samples } = entry;
       checkEnabled();
       if (!budget.canSpend(previous)) throw new RunEnd('stopped', 'budget');
       checkAborted(ctx);
@@ -827,9 +754,6 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       const onUsage = (usage, estimated) => {
         charged += charge(ctx, usage, estimated);
       };
-      // One variety pass per situation, its block shared by every sample; the patterns go on the record.
-      const worn = await wornFor(ctx, { history, view, record, self, caseId });
-      if (worn) record.worn = worn;
       // Read once per situation: its samples see the same lists, and its answers' GIFs are found in them.
       const lists = turnLists();
       const result = await answerReply({
@@ -845,7 +769,6 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
         onUsage,
         descriptions: media?.descriptions,
         videos: media?.videos,
-        worn,
         ...lists,
         ...sensesInputs(view),
       });
@@ -978,7 +901,7 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
     into.prepared = prepared;
     into.records = records;
     into.hidden = hidden;
-    await answerAll(ctx, { prepared, self, reference, caseId: item.id });
+    await answerAll(ctx, { prepared, self, reference });
     // Tagged with their situation: a phrase shared only by the samples of one situation is no habit.
     const all = records.flatMap((s) => s.answers.map((a) => ({ situation: s.n, messages: a.messages.map((text) => ({ text })) })));
     const repeated = repeatedPhrases(all);
@@ -1081,8 +1004,6 @@ export function createMentor({ hot, store, llm, client, cases, budget, getGuildI
       models: {
         mentor: config.mentor?.model ?? null,
         voice: config.llm?.model ?? null,
-        // The variety pass's model: the one other model a run calls.
-        classifierText: classifierTextModel(config) || null,
       },
       reference: { profile: null, samples: 0 },
       situations: [],

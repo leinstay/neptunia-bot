@@ -281,7 +281,7 @@ test('buildRequest: a routed call with no room for its line leaves the task with
   assert.deepEqual(request.stats.pulled, { used: 0, kept: 0, dropped: 1, lines: 8, linesCut: 8 });
   // The shorter task is what the budget line counts.
   assert.ok(request.stats.fixed.used < roomy.stats.fixed.used);
-  const sections = ['fixed', 'interlocutor', 'lookup', 'aboutChat', 'self', 'lore', 'server', 'pulled', 'chat', 'people', 'worn', 'neighbors', 'emoji', 'gifs'];
+  const sections = ['fixed', 'interlocutor', 'lookup', 'aboutChat', 'self', 'lore', 'server', 'pulled', 'chat', 'people', 'neighbors', 'emoji', 'gifs'];
   assert.equal(request.stats.used, sections.reduce((sum, name) => sum + request.stats[name].used, 0));
   assert.ok(request.stats.used <= request.stats.limit);
 });

@@ -21,7 +21,6 @@ import { DAY_MS, HOUR_MS, MINUTE_MS, utcDay, zonedDay } from '../src/time.js';
 import { buildDiaryPlanRequest, buildDrawPrompt, buildRequest, hasRequiredLabels } from '../src/behavior/prompt.js';
 import { parseSeedFamilies, pickSeeds, renderSeedsBlock } from '../src/behavior/diary.js';
 import { fill, formatDate } from '../src/discord/format.js';
-import { buildVarietyRequest, selectLongLines, selectOwnLines } from '../src/behavior/variety.js';
 import { createTurnRunner } from '../src/behavior/turn.js';
 import { createRecall } from '../src/behavior/recall-run.js';
 import { createChannelRouter } from '../src/behavior/route-channel.js';
@@ -111,8 +110,6 @@ const PENDING_LABELS = {
   'recent.line': 'the <recent> view (spec-recall R3): its wording is the writer\'s next task',
   'recent.lineIn': 'the <recent> view (spec-recall R3): its wording is the writer\'s next task',
   'recent.episode': 'the <recent> view (spec-recall R3): its wording is the writer\'s next task',
-  'variety.fillersIntro': 'the resting fillers in <worn>: its wording is the writer\'s next task',
-  'variety.fillerLine': 'the resting fillers in <worn>: its wording is the writer\'s next task',
 };
 
 const SYSTEM = ['system-prompt', 'character-card', 'rules', 'format'];
@@ -134,8 +131,6 @@ const LOADS = {
   memory: ['memory', ...CHARACTER],
   memoryDecide: ['memory-decide', ...CHARACTER],
   voice: ['memory-voice', ...CHARACTER],
-  variety: ['variety'],
-  varietyLong: ['variety-long'],
   warmupChannel: ['channel'],
   warmupPerson: ['profile', ...CHARACTER],
   warmupServer: ['server', ...CHARACTER],
@@ -157,7 +152,6 @@ const LOADS = {
   gifPick: ['gif-pick'],
   turn:[...SYSTEM, 'reply'],
   mentorSituations: ['mentor-situations', 'mentor-signs'],
-  mentorVariety: ['variety'],
   mentorSandbox: [...SYSTEM, 'reply'],
   mentorScore: ['mentor-score', 'mentor-signs', ...CHARACTER],
   mentorDiagnose: ['mentor-diagnose', 'mentor-signs', ...SYSTEM, 'reply'],
@@ -344,8 +338,6 @@ const RECENT_LINES = [
   { id: 1, at: NOW - 2 * HOUR_MS, addedAt: iso(NOW - HOUR_MS), channelId: GARDEN, text: `<@${NIKOS}> planted garlic`, who: [NIKOS], weight: 2 },
 ];
 
-const WORN = [{ shape: 'a closing rhetorical question', examples: ['pauvre tomate'], count: 2 }];
-
 const LOOKUP_RESULT = {
   query: 'tomato frost',
   text: 'Tomatoes die below zero degrees [1].',
@@ -502,7 +494,6 @@ async function turnInput(overrides = {}) {
     customEmoji: CUSTOM_EMOJI,
     mediaCache: { 'emoji:E1': { text: 'a small waving hand', ts: NOW - DAY_MS } },
     gifs: gifLibrary(history),
-    worn: WORN,
     readOnlyIds: new Set([DIARY]),
     recentLines: RECENT_LINES,
     recentAudience: () => true,
@@ -511,7 +502,7 @@ async function turnInput(overrides = {}) {
 }
 
 // The blocks a fully fed server turn renders, each headed or filled by labels.
-const TURN_BLOCKS = ['now', 'senses', 'about_chat', 'emoji', 'gifs', 'server', 'lore', 'self_facts', 'people', 'other_channels', 'worn', 'lookup', 'chat', 'tempo', 'task'];
+const TURN_BLOCKS = ['now', 'senses', 'about_chat', 'emoji', 'gifs', 'server', 'lore', 'self_facts', 'people', 'other_channels', 'lookup', 'chat', 'tempo', 'task'];
 
 // ---- the layer itself ---------------------------------------------------------------
 
@@ -820,31 +811,6 @@ test('buildVoiceRequest: memory-voice.md is filled for every kind of item', () =
     assert.deepEqual(request.sent, [item.id], `${item.kind}: the item is sent`);
     assertFilled(request.messages, { files: LOADS.voice, blocks: ['character', 'items'] }, `voice (${item.kind}${item.layer ? `, ${item.layer}` : ''})`);
   }
-});
-
-test('buildVarietyRequest: variety.md is filled', async () => {
-  const history = await generalHistory();
-  const config = shippedConfig();
-  const lines = selectOwnLines({ history, now: NOW, window: config.variety.window });
-  assert.ok(lines.length > 0);
-  const request = buildVarietyRequest({ prompt: SHIPPED.prompts.variety, selfName: SELF_NAME, lines, config });
-  assertFilled(request.messages, { files: LOADS.variety, blocks: ['lines'] }, 'variety');
-});
-
-test('buildVarietyRequest: variety-long.md is filled (the long pass: its lines from the ring, its own maxPatterns)', async () => {
-  const history = await generalHistory();
-  const config = shippedConfig();
-  const ring = history.filter((m) => m.self).map((m) => ({ id: m.id, ts: m.ts, channelId: m.channelId, text: m.content }));
-  const lines = selectLongLines(ring, config.variety.longLines);
-  assert.ok(lines.length > 0);
-  const request = buildVarietyRequest({
-    prompt: SHIPPED.prompts['variety-long'],
-    selfName: SELF_NAME,
-    lines,
-    config,
-    maxPatterns: config.variety.longMaxPatterns,
-  });
-  assertFilled(request.messages, { files: LOADS.varietyLong, blocks: ['lines'] }, 'variety-long');
 });
 
 // ---- the warm-up and the portrait refresh ---------------------------------------------------
@@ -1269,7 +1235,7 @@ function oneCase(text) {
   };
 }
 
-test('createMentor: a failing run fills the situations, variety, sandbox, score and diagnosis requests', async () => {
+test('createMentor: a failing run fills the situations, sandbox, score and diagnosis requests', async () => {
   const hot = shippedHot({ features: { mentor: true }, mentor: { model: 'x/mentor' } });
   const situation = (title) => ({
     title,
@@ -1286,7 +1252,6 @@ test('createMentor: a failing run fills the situations, variety, sandbox, score 
   const kindOf = (messages, options) => {
     const user = contentText(messages[1]?.content);
     if (options.purpose === 'reply') return 'sandbox';
-    if (options.role === 'classifier.text') return 'variety';
     if (user.includes('<verdict>\n')) return 'diagnose';
     if (user.includes('<answers>\n')) return 'score';
     return 'situations';
@@ -1294,7 +1259,6 @@ test('createMentor: a failing run fills the situations, variety, sandbox, score 
   const llm = recordingLlm((messages, options) => {
     const kind = kindOf(messages, options);
     if (kind === 'situations') return JSON.stringify({ situations: [situation('the frozen tomato'), situation('the bet')] });
-    if (kind === 'variety') return JSON.stringify({ patterns: [] });
     if (kind === 'sandbox') return '<msg>oui, plus de dessins aujourd\'hui</msg>';
     if (kind === 'score') {
       const ids = JSON.parse(/<answers>\n([\s\S]*?)\n<\/answers>/.exec(contentText(messages[1].content))[1]).map((a) => a.id);
@@ -1342,7 +1306,6 @@ test('createMentor: a failing run fills the situations, variety, sandbox, score 
   const byKind = (kind) => llm.calls.filter((call) => kindOf(call.messages, call.options) === kind);
   const expected = [
     ['situations', LOADS.mentorSituations, ['case', 'members', 'reference', 'samples', 'signs']],
-    ['variety', LOADS.mentorVariety, ['lines']],
     ['sandbox', LOADS.mentorSandbox, ['senses', 'people', 'chat', 'tempo', 'task']],
     ['score', LOADS.mentorScore, ['case', 'signs', 'character', 'rules', 'situation', 'answers', 'facts']],
     ['diagnose', LOADS.mentorDiagnose, ['case', 'verdict', 'signs', 'worst', 'seen']],

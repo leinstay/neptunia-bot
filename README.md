@@ -64,9 +64,6 @@ Neptunia knows what is in the pictures that were recently posted in other channe
 **03.10.2026**  
 When Neptunia has not talked to someone in a while, their attitude toward that person gradually returns to neutral.
 
-**01.10.2026**  
-Neptunia notices which phrases and devices they have been repeating too often and stops using them.
-
 **30.09.2026**  
 Neptunia uses the server's custom emoji in their messages on their own. They also post GIFs from the ones people share on the server. They see what is happening in a GIF. They know today's date.
 
@@ -228,8 +225,6 @@ prompts/
   mentor-diagnose.md       mentor: explain weak answers after scoring
   split.md                 classifier: does a direct call hold several separate requests
   merge.md                 classifier: does a new message belong to something already waiting
-  variety.md               classifier: name the devices the persona is overusing
-  variety-long.md          classifier: name the devices across a longer stretch
   profile.md               warmup: one member's profile from a message sample
   channel.md               warmup: channel notes from a message sample
   server.md                warmup: server-level notes from channel notes and member summaries

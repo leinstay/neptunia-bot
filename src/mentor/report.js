@@ -188,17 +188,6 @@ function answerLines(answer) {
   return lines;
 }
 
-/**
- * `worn: <shape> x<count> ("<example>", ...); ...` -- the devices the variety
- * pass named for a situation; `worn: nothing named` for an empty list.
- */
-function wornLine(worn) {
-  const items = worn
-    .filter((p) => p && typeof p.shape === 'string')
-    .map((p) => `${p.shape} x${num(p.count)} (${(Array.isArray(p.examples) ? p.examples : []).map((e) => `"${e}"`).join(', ')})`);
-  return `worn: ${items.length ? items.join('; ') : 'nothing named'}`;
-}
-
 /** A multi-line text indented under a list item. */
 function indented(text) {
   return String(text ?? '').replace(/\n/g, '\n    ');
@@ -225,9 +214,8 @@ function diagnosisLines(diagnosis) {
 }
 
 /**
- * The file attached to the card: the case, the models (the mentor's, the
- * voice model (`llm.model`) and the `classifier.text` model of the variety pass; a run
- * stored before that names none), the verdict, the reference, every
+ * The file attached to the card: the case, the models (the mentor's and the
+ * voice model (`llm.model`); a run stored before that names none), the verdict, the reference, every
  * situation with its transcript (its header carries its anchor id for a real moment, then its median overall and
  * goal, `-` for none, unless the run was stored without them; a real moment
  * shows the persona's original answer after its transcript) and every
@@ -245,7 +233,7 @@ export function renderFile(run) {
   const lines = [
     `Mentor ${run?.kind === 'check' ? 'check' : 'run'} ${run?.id ?? '(not saved)'} -- case ${run?.caseId} (${run?.target})`,
     `started ${run?.startedAt ?? '-'}, finished ${run?.finishedAt ?? '-'}`,
-    `models: mentor ${run?.models?.mentor ?? '-'}, voice ${run?.models?.voice ?? '-'}, classifier.text ${run?.models?.classifierText ?? '-'}`,
+    `models: mentor ${run?.models?.mentor ?? '-'}, voice ${run?.models?.voice ?? '-'}`,
     `outcome: ${run?.error ? `error: ${run.error}` : outcome(run)}`,
   ];
   if (Array.isArray(run?.reasons) && run.reasons.length > 0) lines.push(`reasons: ${run.reasons.join('; ')}`);
@@ -269,8 +257,6 @@ export function renderFile(run) {
       const medians = situationMedian(run, situation.n);
       lines.push(`medians: overall ${num(medians?.overall)} · goal ${num(medians?.goal)}`);
     }
-    // What the variety pass named in the persona's own lines of this situation, on one line.
-    if (Array.isArray(situation.worn)) lines.push(wornLine(situation.worn));
     lines.push(RULE, String(situation.transcript ?? ''));
     if (isAnchor(situation) && Array.isArray(situation.original) && situation.original.length > 0) {
       lines.push('', 'original answer:', ...situation.original.map((text) => `  ${String(text).replace(/\n/g, '\n  ')}`));

@@ -58,8 +58,6 @@ All instructions are English in both layers; a character's speech samples may be
 | `mentor-score.md` | no | Mentor: score the persona's answers to a situation (`features.mentor`). Receives the character card. Returns JSON only | `{{name}}` |
 | `mentor-signs.md` | no | Mentor: known habits of model-written text, sent as the `<signs>` block in every mentor request (`features.mentor`). Omitted when missing or empty | `{{name}}` |
 | `mentor-diagnose.md` | no | Mentor: explain weak answers after scoring by pointing at specific text in the persona's context (`features.mentor`). The result is an unverified opinion stored as `diagnosis` on the run. Omitted when `mentor.diagnose` is false or the file is missing | `{{name}}` |
-| `variety.md` | no | `classifier.text` request: name the repeated devices in the persona's own recent lines (`features.variety`). No character card | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
-| `variety-long.md` | no | Long variety pass: name the devices across the whole ring of own lines (`features.variety`, `variety.longLines`). Same placeholders, `<lines>` block and answer format as `variety.md`. Uses the `classifier.text` model. No character card. Falls back to no long pass when absent | `{{name}}` `{{maxPatterns}}` `{{shapeChars}}` |
 | `gif-pick.md` | no | Classifier: pick a GIF from the library to replace a short text reply (`features.gifPicker`). Receives the last `gifs.pick.contextMessages` chat lines with the answered message named, the persona's reply and the whole captioned library. The length gate is `gifs.pick.maxChars` (default 160); with several outgoing messages only the first is replaced. Output is one handle from the library or `none`. No character card | `{{name}}` |
 | `split.md` | no | Classifier: does a direct call hold several separate requests (`features.splitTasks`). Receives a short `<transcript>` and the new message as `<candidate>`. Output is the word `one`, or 2 to `{{maxTasks}}` lines each starting with `- ` and holding one part in the author's own words. No character card. Without this file the splitter is off | `{{name}}` `{{maxTasks}}` |
 | `merge.md` | no | Classifier: does a new message from an author with waiting items belong to one of them. Receives a numbered `<waiting>` list and the new message as `<candidate>`. Output is one line: a number from the list or the word `new`. No character card. Without this file a new call is always queued as its own item | `{{name}}` |
@@ -73,7 +71,7 @@ On a forced turn (`/nep interject`, `/nep initiate`), `forced.md` is appended af
 On an `overheard` turn, `overheard.md` REPLACES the mode prompt (it is the task text, not an append). When `overheard.md` is missing or blank, the mode prompt is used instead (degraded: the mode prompt frames the line as said to the persona, which is not what happened).
 In a private chat, `private.md` is appended after the mode prompt (before `forced.md`) with the same `{{name}}` and `{{author}}` placeholders.
 The analyzer and the warmup's `profile.md` and `server.md` receive the character card and `rules.md` as a
-`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `describe-gif.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md`, `search-summary.md`, `recall-summary.md`, `room.md`, `route-channel.md`, `elsewhere.md`, `variety.md` and `variety-long.md` do not receive the card.
+`<character>` block in the user message. `channel.md`, `describe.md`, `describe-video.md`, `describe-gif.md`, `draw.md`, `rewatch.md`, `rewatch-answer.md`, `address.md`, `lookup.md`, `read-link.md`, `search-summary.md`, `recall-summary.md`, `room.md`, `route-channel.md` and `elsewhere.md` do not receive the card.
 
 `{{guildFieldChars}}` is `fieldChars * 2`, the limit code clamps guild-level patterns and starters to.
 `{{maxEpisodes}}` is the total episodes kept per person. Both are filled from config but not used by the default
@@ -98,7 +96,6 @@ The blocks of the user message. Empty ones are omitted; the order below is the o
 | `<attitudes>` | The top `context.attitudes` (default 6, `0` = off) members the persona feels most strongly about, ranked by the size of the attitude score, warm and cool mixed. Skips the interlocutor and anyone already in `<people>`. One line per member (`labels.attitudes.line`): name and attitude band. Header: `labels.attitudes.header`. Cap `context.caps.attitudes` (default 400). Present in server turns and private chats |
 | `<other_channels>` | Up to `context.neighborMessages` messages per neighbouring channel, not older than `context.neighborMaxAgeMinutes`. When `features.mediaDescriptions` is on, a picture in a neighbour's line carries its cached caption when the describer cache already holds one; no new describe request is ever made for neighbours. A channel whose block is shown in `<channel_view>` is left out of `<other_channels>`; if the budget dropped the pulled block, the channel reappears here as an ordinary neighbour |
 | `<channel_view>` | Another channel pulled into this turn (`features.channelPull`). Contains one item per pulled channel: a header line (`labels.pull.header`), a read-only mark when applicable (`labels.server.readOnly`), an "older not shown" line when the window was cut, a "pictures not seen" count, earlier calls to the persona (with answered/unanswered/skipped marks), then the window lines. Lines use the same transcript format as `<chat>` but are numbered on after the chat (the chat has `#1`..`#N`, the pulled block starts at `#N+1`), so every `#n` is unique across blocks. Pictures appear as captions or blind tags only, never as attached images. Without `labels.pull.header` the block is empty |
-| `<worn>` | Devices and words the persona is overusing (`features.variety`): `labels.variety.intro`, then `- <shape>` per pattern. With `variety.examplesInBlock` on (default false, missing = false), examples are appended as `- <shape> ("<example>", ...)`; otherwise only the shape. The long pass's patterns (`wornLong`, from `variety-long.md`) come first, then the short pass's, duplicates removed, at most `variety.maxPatterns` + `variety.longMaxPatterns`. When pinned filler entries exist, `labels.variety.pinnedIntro` follows the patterns, then one `- <labels.variety.fillerLine>` per pinned entry. When learned filler entries on cooldown exist, `labels.variety.fillersIntro` follows (after the pinned section when both are present), then one `- <labels.variety.fillerLine>` per learned entry. `fillerLine` placeholders: `{text}`, `{count}`, `{window}`, `{ago}` (the default template uses `{text}` only). When any filler entries were listed, `labels.variety.matchNote` closes the block with a line explaining the matching syntax. Entries are ranked, at most `variety.fillers.max`. Omitted when neither pass produced anything, no fillers are active, or the switch is off |
 | `<lookup>` | What the persona looked up this turn. A web search (`features.webLookup`) carries `labels.lookup.webHeader`, the condensed answer, `labels.lookup.sources` and, when nothing was found, `labels.lookup.none`. A server search (`features.recall`) carries `labels.lookup.serverHeader`, the summary note and, when the summary names a stretch, the verbatim lines of that stretch. When both ran, `labels.lookup.bothNote` sits between them. A `labels.lookup.stretch` line introduces a verbatim stretch (`{date}` `{channel}`). Appears only when a search classifier fired and at least one search completed |
 | `<chat>` | Up to `context.channelMessages` latest messages of the current channel. A line at least `context.ageAfterMinutes` (default 60) minutes old also shows how long ago it was posted (`transcript.timeAged`). When `context.fetchReplyParents` is on, the trigger message and the last `context.replyParentsFor` window lines that are replies to older messages have their parents fetched and placed before the window as ordinary transcript lines; the trigger's parent can also bring its own parent. At most `context.replyParentsMax` parents per turn. A gap marker and date header cover the time jump; the reply line quotes the parent through `transcript.replyTo`; media in a parent is handled like any other line, and a cached description is served for free. A deleted or inaccessible parent is skipped and logged as `collect: parent missing` |
 | `<tempo>` | Counts for 10 min / hour / day, distinct people, silence, a verdict (live / slow / dead) |
@@ -115,8 +112,8 @@ Budget priority (sections are trimmed from the bottom of this list first): syste
 (never cut) -> caller's profile with episodes -> lookup (kept or dropped whole; may hold a web part, a server part or both) -> about_chat -> self_facts -> lore -> server -> chat (newest first) ->
 pulled (`<channel_view>`, capped at `context.caps.pulled`; on a turn that answers a call from a read-only channel the pulled block sits before the chat instead of after it) ->
 recent (capped at `context.caps.recent`) ->
-other profiles -> attitudes (capped at `context.caps.attitudes`) -> worn (kept or dropped whole) ->
-diary mode only: `<found>` (right after `<lookup>`), `<world>` (one piece, right after `<worn>`), `<diary>` (oldest lines cut first), `<plan>` + `<kinds>` + `<seeds>` + `<topic>` (never cut) ->
+other profiles -> attitudes (capped at `context.caps.attitudes`) ->
+diary mode only: `<found>` (right after `<lookup>`), `<world>` (one piece, right after attitudes), `<diary>` (oldest lines cut first), `<plan>` + `<kinds>` + `<seeds>` + `<topic>` (never cut) ->
 other channels -> emoji (entries from the bottom, then the whole block; `context.caps.emoji`) -> gifs (same trimming; `context.caps.gifs`).
 
 GIF picker (`features.gifPicker`, default on). After the persona writes a short reply (at most `gifs.pick.maxChars` characters, default 160) and chose no GIF herself, a classifier (`classifier.text`, purpose `gif-pick`, `gifs.pick.maxOutputTokens` 60, prompt `prompts/gif-pick.md`) receives the last `gifs.pick.contextMessages` (default 4) chat lines with the answered message named in the context, the persona's first message and the whole captioned library (every entry with its caption, each carrying the own-mark when recently posted by the persona). The classifier answers one handle or `none`. On a handle the GIF replaces the first outgoing message and replies where it would have; the remaining messages follow in order. When the GIF fails to send, every message goes as written. The classifier runs during the first message's typing simulation; the daily GIF rail `gifs.maxPerDay` applies. Logged as `gifs: picked` (handle true/false, library size) or `gifs: pick failed`.
@@ -328,11 +325,6 @@ mentor.examples                          first line inside the `<examples>` bloc
 mentor.original                          first line inside the `<original>` block in a score request: introduces the persona's rejected answer
 room.focus                               {target} {author}: appended to the reply task when a room question triggers the turn
 address.author                           {name} {aliases}: the candidate author's display name and known aliases, shown to the address classifier when the member has aliases
-variety.intro                            first line of the `<worn>` block: general guidance for varying wording without losing the point or the voice
-variety.fillersIntro                     separator before the learned filler lines; present only when learned entries on cooldown follow
-variety.pinnedIntro                      separator before the pinned filler lines; present only when pinned entries exist. Pinned entries appear on every turn until the owner removes them
-variety.fillerLine                       {text} {count} {window} {ago}: one filler entry (learned or pinned). text is the word stem (trailing `*` for prefix) or the exact phrase; count, window and ago are available but the default template uses {text} only
-variety.matchNote                        one line after all filler entries explaining the matching syntax (trailing `*` = word prefix, otherwise whole word or phrase, case-insensitive); present only when at least one filler entry was listed
 recent.header                            REQUIRED {hours}: the block's first line. A missing header or a missing `recent.line` means no `<recent>` block
 recent.line                              REQUIRED {date} {time} {text}: one note from the turn's own channel or an unnamed channel
 recent.lineIn                            OPTIONAL {date} {time} {channel} {text}: a note from another named channel; {channel} arrives without '#'. Without it `recent.line` is used
@@ -777,85 +769,6 @@ The `<lookup>` block follows the same audience rule as `<other_channels>` (`cont
 
 Rails: at most one web search and one server search per turn. The classifier, the web condenser and the recall summary each count against `llm.maxRequestsPerDay`; the web search counts against `web.maxPerDay` (shared with link reads); the recall run counts against `recall.maxPerDay` (stored in `state.json` as `recallDay` / `recallCount`). Web results are cached for `web.search.cacheHours` (default 24) hours per normalised query. The classifier fires when either `features.webLookup` or `features.recall` is on. Switches: `features.webLookup` (missing = off), `features.recall` (missing = on).
 
-## Variety pass
-
-A `classifier.text` pass reads the persona's own most recent lines and names the repeated devices
-(turns of phrase, structural moves, recurring joke shapes) the persona has fallen into. The result becomes a `<worn>`
-block in the turn's request. Switch `features.variety` (missing = on).
-
-A second pass with a longer view runs at most once per `variety.longEveryHours` (default 6) hours after the persona
-posts in a server channel, reading the newest `variety.longLines` (default 300; `0` = off) of the ring across all
-channels with no age limit. When the ring holds at least `variety.longMinLines` (default 60) lines and
-`prompts/variety-long.md` exists, the pass is asked on the `classifier.text` model under
-usage purpose `variety-long`, with the same `<lines>` block and answer format as the short pass and at most
-`variety.longMaxPatterns` (default 3) patterns. Its list is stored as `wornLong` in guild memory and stays in force
-until the next long pass; a failure keeps the previous list. A turn's `<worn>` block carries the long pass's patterns
-first, then the short pass's, duplicates removed (shape compared case-insensitively with whitespace collapsed), at most
-`variety.maxPatterns` + `variety.longMaxPatterns`. The long pass never runs before a reply, never holds a turn, never
-runs for a private chat. Logs: `variety: long` on success, `variety: pass failed` with `cause: 'long'` on failure.
-
-With `features.varietyPrecompute` on (the default), the pass starts right after the persona posts text, on the lines the next `fetchHistory` will return. A turn looks up its own line set: when a cached answer matches, it is used without a model request; when a pass for those lines is already in flight, the turn joins it and waits at most `variety.timeoutMs`; otherwise the turn starts its own request. A request runs to `variety.requestTimeoutMs` (default 30000): if a turn's wait of `variety.timeoutMs` runs out first, the request keeps going and a late answer is stored for the next turn. A turn that joined a pass which then fails gets no block and starts no request of its own. Nothing is stored while paused or with `features.variety` off.
-
-### Line selection
-
-Up to `variety.window` (default 16) of the persona's own lines, taken first from the turn's channel (newest kept),
-then from other server channels (a ring stored in guild memory as `ownLines`, written whenever the persona posts in a
-server channel). Only lines younger than `variety.recentMinutes` (default 180) are kept. Fewer than `variety.minLines`
-(default 3) skips the pass entirely. A limit notice (`labels.limits.notice`) posted by the bot is never counted as the
-persona's own line.
-
-### The `<lines>` format
-
-Each line is numbered `#1`, `#2`, ... oldest first, whitespace collapsed to a single line. When the line answered a
-message (a reply), `(to: <that message clipped to variety.contextChars>)` is appended. `variety.contextChars` of 0
-omits the context.
-
-### Output and validation
-
-One bare JSON object:
-
-```
-{ "patterns": [ { "shape": "", "examples": ["", ""], "count": 0, "word": "" } ] }
-```
-
-`shape`: what the device does, 3 to `variety.shapeChars` characters, in the language the lines use. `examples`: 1 to 3
-verbatim pieces from the persona's own words (not from the `(to: ...)` context), each at most 80 characters, kept only
-when the text occurs in a sent line (case-insensitive). `count`: at least 2, capped at the number of lines sent. `word`: the base form of the word or the fixed phrase when the habit is a word or phrase used as a filler, tag, intensifier or sign-off; empty string for a construction, a stance or a source of material. At
-most `variety.maxPatterns` valid patterns; an empty list is the normal answer. An answer that is not the expected JSON
-produces no block.
-
-### Cache and storage
-
-A per-guild cache, keyed by the SHA-1 of the line ids, reuses the previous answer without a model request. A cache slot keeps one landed entry; a newer landed pass replaces the stored one. Up to 4 passes may be in flight per slot at once; a turn whose key matches any of them joins it. A failure is never cached, so the same lines are asked again by the next turn.
-
-`worn` is stored in guild memory (`data/guilds/<id>/guild.json`): the latest pass with `{ at, key, channelId, lines,
-patterns }`. `wornHistory` is a ring of up to `variety.history` (default 20) past passes, shapes and counts only, no
-examples. A pass that runs in a private chat produces patterns for that turn but saves nothing to guild memory, so
-nothing said in private reaches the owner's view or another conversation.
-
-### Timeout and failure
-
-`variety.timeoutMs` (default 8000) is how long a turn waits for a pass result. `variety.requestTimeoutMs` (default 30000) is the request's own cut. A pass that outlives the turn's wait keeps running; a late answer is stored and serves the next turn. A timeout or a failure produces no `<worn>` block for that turn; the turn proceeds without one.
-
-### Mentor
-
-The mentor sandbox runs one variety pass per situation, charged to the mentor's token budget (not to
-`llm.maxRequestsPerDay`). The sandbox uses `variety.timeoutMs` as its request timeout (it has no later turn that could use a late answer). The patterns are saved as `worn` on the situation record. The judge never sees the `<worn>` block.
-
-## Filler advice list
-
-A ranked list of words and phrases the persona overuses, shown inside the `<worn>` block BEFORE the reply so the persona can avoid them on its own. Nothing rewrites the reply after the model writes it.
-
-**Data sources.** The variety passes are the main feeder: a word-type habit the pass finds becomes an entry with weight equal to its count. A mechanical detector (`features.stickyGuard`) also feeds the list after each post, finding phrases that recur in 3+ recent lines but rarely in the older ring, and adding each as an exact entry with cooldown already started (log `fillers: sticky`).
-
-**Ranking.** The list is ranked with eviction like interests: capacity `variety.fillers.max` (default 12), weight with recency decay (`variety.fillers.halfLifeDays`, default 14), the weakest evicted when full; owner-added entries are pinned (never evicted or decayed).
-
-**Cooldown = which entries are shown.** An entry is on cooldown when the persona used it within `variety.fillers.cooldownHours` (default 36) hours OR within `variety.fillers.cooldownMessages` (default 300) of the persona's own posted messages, whichever comes first; a use resets both counters. Pinned entries are always on cooldown. Only entries on cooldown appear in the advice list. Two kinds of entry: a PREFIX entry ends with `*` (at least 3 letters) and matches every word starting with that prefix on a word boundary, in any script; an EXACT entry (no `*`) matches the word or phrase whole.
-
-**Rendering.** After the worn pattern lines, pinned entries get `labels.variety.pinnedIntro`, then one `- labels.variety.fillerLine` per entry. Learned entries on cooldown get `labels.variety.fillersIntro`, then the same `fillerLine` per entry. When any filler entries were listed, `labels.variety.matchNote` closes the block. `fillerLine` placeholders: `{text}` (the word stem with trailing `*` for a prefix entry, or the exact phrase), `{count}` (how many of the persona's newest `variety.window` own lines contain the entry; 0 when absent), `{window}` (how many lines were scanned), `{ago}` (time since the last use, e.g. "3 h 12 min", or `?:??` when unknown). The default template uses `{text}` only. Entries are ranked, at most `variety.fillers.max`.
-
-**State.** Guild memory: `fillers` (the entry list) and `ownMessageCount` (a counter of the persona's own posted messages, used for the message-based cooldown). Logs: `fillers: sticky` (the detector added an entry), `fillers: learned` (a variety pass added or bumped an entry).
-
 ## Task splitter
 
 A direct call (mention, reply, name, follow-up, private message) that is long and structured enough (`split.minChars` characters with links and Discord tokens excluded, at least two runs of separators) is given to a classifier (`prompts/split.md` on `classifier.text`, purpose `split`) alongside the turn's preparation. The classifier reads a short `<transcript>` of the last `split.contextMessages` messages with the persona's own lines marked by `labels.self`, then the new message as `<candidate>` (`<author name>: <text>`). Its answer is the word `one`, or 2 to `split.maxTasks` (default 4) lines each starting with `- ` and holding one part in the author's own words. After parsing, a part shorter than `split.minPartChars` (default 20) characters (links and Discord tokens excluded, like `minChars`) is folded into the next part (the last into the previous); when fewer than two parts remain the message is one request (`folded`). An empty, unparsable or late answer (the turn's preparation finished first) is treated as one request and logged `split: failed`. Switch `features.splitTasks` (missing = on).
@@ -964,8 +877,7 @@ unknown or has weight 0, the whole answer is replaced by a weighted random kind 
 Brave path (cached, `web.maxPerDay`). The result text becomes a `<found>` block in the compose request. A failed or
 capped search turns the post into the same kind without the find.
 
-**Compose** (`prompts/diary.md` as the task, the main model with the character card and all memory blocks,
-`<worn>` included). The compose request receives `<world>` (under `diary.world`), `<diary>`, `<plan>`, and `<found>`
+**Compose** (`prompts/diary.md` as the task, the main model with the character card and all memory blocks). The compose request receives `<world>` (under `diary.world`), `<diary>`, `<plan>`, and `<found>`
 (when the search produced one). The `<diary>` block is fitted by `fitSections`: the oldest lines are cut first, then
 the whole block. `<plan>` and `<kinds>` are never cut.
 
@@ -1237,7 +1149,7 @@ After scoring, when the run did not end early and the case failed or any situati
 
 The result is stored on the run as `diagnosis` and printed in the report. These are hypotheses for the owner to review; the mentor does not edit anything.
 
-Layers a cause may name: `rules` (a rule in the rules block), `prompt` (the engine's system prompt, format or task), `card` (the character card), `self` (a note the persona keeps about themselves), `learned` (something people taught the persona), `guild` (a server habit or in-joke), `profile` (what the persona remembers about a person), `labels` (a string from `labels.json`), `variety` (something in the `<worn>` block), `lore` (a lorebook entry), `channel` (a channel note), `recent` (a line in the `<recent>` block), `missing` (an instruction that should be there is absent).
+Layers a cause may name: `rules` (a rule in the rules block), `prompt` (the engine's system prompt, format or task), `card` (the character card), `self` (a note the persona keeps about themselves), `learned` (something people taught the persona), `guild` (a server habit or in-joke), `profile` (what the persona remembers about a person), `labels` (a string from `labels.json`), `lore` (a lorebook entry), `channel` (a channel note), `recent` (a line in the `<recent>` block), `missing` (an instruction that should be there is absent).
 
 #### Diagnosis schema
 

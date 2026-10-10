@@ -56,7 +56,6 @@ import { classifierTextModel, classifierMediaModel, classifierVideoModel } from 
 import { buildDrawPrompt } from './behavior/prompt.js';
 import { imageFileName } from './behavior/turn.js';
 import { initiateCooldownUntil } from './behavior/spontaneous.js';
-import { varietyStatusLine } from './behavior/variety.js';
 import { effectiveAffinity, privateRepliesToday } from './behavior/private.js';
 import { ImageCapError, ImageGenError, UnsupportedImageModelError, familyOf as imageFamilyOf, IMAGE_ROLE } from './llm/images.js';
 import { matchRoute, resolveProvider, llmCountToday } from './llm/openrouter.js';
@@ -1336,8 +1335,6 @@ export function createAdmin({
       // The pause after a topic the persona started (spontaneous.initiateCooldownHours), only while it holds.
       const initiateUntil = initiateCooldownUntil(data, guildId, Date.now(), cfg?.spontaneous);
       if (initiateUntil !== null) lines.push(`initiate cooldown until ${new Date(initiateUntil).toISOString()}`);
-      // The variety pass: the switch, how many patterns its latest list holds and how old it is.
-      lines.push(varietyStatusLine(typeof store.getGuild === 'function' ? store.getGuild(guildId)?.worn : null, cfg, Date.now()));
       // The voice lines exist only while the two-stage analyzer is on (features.memoryTwoStage).
       if (cfg?.features?.memoryTwoStage === true) {
         const voiceCap = cfg?.memory?.voice?.maxPerDay;
@@ -1980,7 +1977,7 @@ export function createAdmin({
     if (confirm !== guildName) {
       return (
         'This deletes everything remembered about this server: every member profile and private memory, the server habits, ' +
-        'the learned list, the emoji ranking, the variety history, the voice queue, the recent lines, the channel map, analyzer lore and the warmup progress. ' +
+        'the learned list, the emoji ranking, the voice queue, the recent lines, the channel map, analyzer lore and the warmup progress. ' +
         `To confirm, run again with confirm: ${guildName}`
       );
     }
@@ -1996,7 +1993,7 @@ export function createAdmin({
       `channels removed: ${counts.channels}`,
       `lore removed: ${counts.loreRemoved} (kept: ${counts.loreKept})`,
       `buffer messages cleared: ${counts.bufferMessages}`,
-      'Also removed: the server habits, the learned list, the emoji ranking, the variety history, the voice queue, the recent lines and the warmup progress.',
+      'Also removed: the server habits, the learned list, the emoji ranking, the voice queue, the recent lines and the warmup progress.',
       'Kept: owner lore, the GIF library, the media description cache, token calibration, the daily request counts and the spontaneous schedule.',
     ].join('\n');
   }
