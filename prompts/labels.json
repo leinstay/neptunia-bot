@@ -249,13 +249,6 @@
     "examples": "Real moments from this chat. Each shows the transcript up to the trigger and the answer the persona gave, which the owner rejected.",
     "original": "The persona's answer at the time. The owner rejected it. A known-bad reference, not an answer to score."
   },
-  "variety": {
-    "intro": "Vary your wording. Keep the point and your voice. Do not invent a comparison, change the subject, or force a sentence merely to avoid an item here. Do not mention this guidance.",
-    "fillersIntro": "Learned (soft): when an equally natural wording keeps the point, consider it. Do not sacrifice naturalness to avoid a repeat:",
-    "pinnedIntro": "Pinned (stay until removed, regardless of recent use). Choose wording that does not match these. Use one only when avoiding it would make the reply noticeably unnatural or change the point; sounding natural is not by itself a reason:",
-    "fillerLine": "{text}",
-    "matchNote": "A trailing * marks a word prefix and covers every word starting with those letters; otherwise the entry matches the whole word or phrase, case-insensitive."
-  },
   "address": {
     "author": "{name}, also called: {aliases}"
   },

@@ -41,7 +41,7 @@ function fakeRun(overrides = {}) {
     kind: 'run',
     startedAt: '2026-09-30T10:00:00.000Z',
     finishedAt: '2026-09-30T10:05:00.000Z',
-    models: { mentor: 'x/mentor', voice: 'x/voice', classifierText: 'x/classifier' },
+    models: { mentor: 'x/mentor', voice: 'x/voice' },
     reference: { profile: { messages: 100 }, samples: 40 },
     situations,
     dropped: 1,
@@ -307,19 +307,6 @@ test('renderCard: a stored repair block is ignored', () => {
   }
 });
 
-test('renderFile: a situation with a variety pass shows the named devices on one line; without one, no line', () => {
-  const run = fakeRun();
-  run.situations[0].worn = [
-    { shape: 'mock promise ending in (no)', examples: ['fix it (no)', 'behave (no)'], count: 3 },
-    { shape: 'names what was said', examples: ['what a surprise'], count: 2 },
-  ];
-  run.situations[1].worn = [];
-  const text = renderFile(run).text;
-  assert.match(text, /^worn: mock promise ending in \(no\) x3 \("fix it \(no\)", "behave \(no\)"\); names what was said x2 \("what a surprise"\)$/m);
-  assert.match(text, /^worn: nothing named$/m);
-  assert.equal(text.match(/^worn: /gm).length, 2, 'the other situations carry no line');
-});
-
 test('renderFile: an answer shows its GIF with the caption and its drawing; one without them shows neither', () => {
   const run = fakeRun();
   run.situations[0].answers[0] = replyAnswer(1, 1, { messages: [], gif: { handle: 'g7', caption: 'a cat\nwaving' }, draw: 'a café\nat night' });
@@ -331,6 +318,6 @@ test('renderFile: an answer shows its GIF with the caption and its drawing; one 
   assert.doesNotMatch(plain, /^(gif|draw):/m);
 });
 
-test('renderFile: the models line names the mentor, the voice model and the classifier.text model', () => {
-  assert.match(renderFile(fakeRun()).text, /^models: mentor x\/mentor, voice x\/voice, classifier\.text x\/classifier$/m);
+test('renderFile: the models line names the mentor and the voice model', () => {
+  assert.match(renderFile(fakeRun()).text, /^models: mentor x\/mentor, voice x\/voice$/m);
 });

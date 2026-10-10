@@ -344,9 +344,9 @@ test('helperRequestOptions: counted, never calibrated, on llm.helperTimeoutMs un
   config.llm.helperTimeoutMs = 7000; // a hot edit between two calls: nothing is remembered
   assert.equal(helperRequestOptions(config, { role: 'classifier.media' }).timeoutMs, 7000);
 
-  // A helper with its own clock (the variety pass) passes it, with its abort signal.
+  // A helper with its own clock passes it, with its abort signal.
   const controller = new AbortController();
-  const own = helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: 500, purpose: 'variety', signal: controller.signal, timeoutMs: 8000 });
+  const own = helperRequestOptions(config, { role: 'classifier.text', maxOutputTokens: 500, purpose: 'lookup', signal: controller.signal, timeoutMs: 8000 });
   assert.equal(own.timeoutMs, 8000);
   assert.equal(own.signal, controller.signal);
 

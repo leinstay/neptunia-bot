@@ -355,8 +355,7 @@ test('run: the run object carries situations, answers, scores and the verdict', 
     assert.equal(run.caseText, CASE_TEXT);
     assert.equal(run.target, 'reply');
     assert.equal(run.kind, 'run');
-    // No classifier.text model is configured here: the run names none for its variety pass.
-    assert.deepEqual(run.models, { mentor: 'x/mentor', voice: 'x/voice', classifierText: null });
+    assert.deepEqual(run.models, { mentor: 'x/mentor', voice: 'x/voice' });
     assert.equal(run.dropped, 1);
     assert.equal(run.situations.length, 2);
     assert.equal(run.reference.profile.messages, 2);
@@ -1883,145 +1882,6 @@ test('run: the mentor requests are routed as the mentor role, the sandbox person
     for (const { options } of talkCalls) assert.deepEqual([options.role, options.purpose], ['voice', 'reply']);
   }));
 
-// ---- the variety pass in the sandbox ---------------------------------------------
-
-const WORN_SITUATIONS = {
-  situations: [
-    {
-      title: 'three own lines',
-      lines: [
-        { authorId: 'self', authorName: 'self', text: 'I promise to behave (no)', replyTo: null },
-        { authorId: BRUNO, authorName: 'Bruno', text: 'sure you do', replyTo: 0 },
-        { authorId: 'self', authorName: 'self', text: 'I will fix it (no)', replyTo: null },
-        { authorId: 'self', authorName: 'self', text: 'never again (no)', replyTo: null },
-        { authorId: ALICE, authorName: 'Alice', text: 'are you out of drawings today?', replyTo: null },
-      ],
-    },
-    {
-      title: 'one own line',
-      lines: [
-        { authorId: 'self', authorName: 'self', text: 'ναι', replyTo: null },
-        { authorId: BRUNO, authorName: 'Bruno', text: 'why so quiet?', replyTo: 0 },
-      ],
-    },
-  ],
-};
-
-const WORN_ANSWER = JSON.stringify({ patterns: [{ shape: 'mock promise ending in (no)', examples: ['fix it (no)', 'not in the lines'], count: 3 }] });
-
-/** A fake llm whose classifier.text calls answer as the variety pass. */
-function varietyLlm(answer = WORN_ANSWER) {
-  return fakeLlm({
-    situations: WORN_SITUATIONS,
-    hook: (call) => (call.options.role === 'classifier.text' ? { text: answer, usage: USAGE, estimated: 50 } : undefined),
-  });
-}
-
-const VARIETY_PROMPT = 'VARIETY {{name}} {{maxPatterns}}';
-
-test('run: a reply situation with enough own lines gets one variety pass, its <worn> block in every sample, the patterns on the record', () =>
-  withSetup({ config: { mentor: { situationLines: [2, 6] } }, prompts: { variety: VARIETY_PROMPT }, llm: varietyLlm() }, async ({ mentor, cases, llm, hot }) => {
-    hot.config.classifier = { text: 'x/classifier' };
-    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
-    const { result: run } = await withCapturedLogs(async () => (await mentor.run(item.id)).done);
-
-    const passes = llm.calls.filter((c) => c.options.role === 'classifier.text');
-    assert.equal(passes.length, 1, 'one pass for the situation with three own lines, none for the other');
-    assert.equal(passes[0].system, 'VARIETY Zoë 4');
-    assert.equal(passes[0].user, '<lines>\n#1 I promise to behave (no)\n#2 I will fix it (no)\n#3 never again (no)\n</lines>');
-    assert.equal(passes[0].options.model, 'x/classifier');
-    assert.equal(passes[0].options.countAgainstDailyCap, false);
-    assert.equal(passes[0].options.maxOutputTokens, 500);
-
-    assert.deepEqual(run.situations[0].worn, [{ shape: 'mock promise ending in (no)', examples: ['fix it (no)'], count: 3 }]);
-    assert.equal('worn' in run.situations[1], false, 'too few own lines: nothing saved');
-
-    const talks = llm.calls.filter((c) => c.kind === 'talk' && c.options.role === 'voice');
-    const withBlock = talks.filter((c) => c.user.includes(`<worn>\n${labels.variety.intro}\n- mock promise ending in (no)\n</worn>`));
-    assert.equal(withBlock.length, 2, 'both samples of the first situation carry the block');
-    assert.equal(talks.length - withBlock.length, 2, 'the second situation has no block');
-    for (const score of llm.calls.filter((c) => c.kind === 'score')) assert.ok(!score.user.includes('<worn>'), 'the judge never sees it');
-  }));
-
-test('run: the variety pass is charged to the mentor budget', async () => {
-  const spent = [];
-  for (const prompts of [{ variety: VARIETY_PROMPT }, {}]) {
-    await withSetup({ config: { mentor: { situationLines: [2, 6], diagnose: false } }, prompts, llm: varietyLlm() }, async ({ mentor, cases, budget }) => {
-      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
-      const { result: run } = await withCapturedLogs(async () => (await mentor.run(item.id)).done);
-      assert.equal(run.tokens.spent, budget.snapshot().used);
-      spent.push(run.tokens.spent);
-    });
-  }
-  // USAGE weighs 150 (100 prompt + 10 output at weight 5): exactly one pass more.
-  assert.equal(spent[0] - spent[1], 150);
-});
-
-test('run: features.variety off, or no variety prompt -> no pass, no block, nothing saved', async () => {
-  for (const options of [
-    { config: { features: { mentor: true, variety: false }, mentor: { situationLines: [2, 6] } }, prompts: { variety: VARIETY_PROMPT } },
-    { config: { mentor: { situationLines: [2, 6] } } },
-  ]) {
-    await withSetup({ ...options, llm: varietyLlm() }, async ({ mentor, cases, llm }) => {
-      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
-      const { result: run } = await withCapturedLogs(async () => (await mentor.run(item.id)).done);
-      assert.equal(llm.calls.filter((c) => c.options.role === 'classifier.text').length, 0);
-      assert.ok(run.situations.every((s) => !('worn' in s)));
-      assert.ok(llm.calls.every((c) => !c.user.includes('<worn>')));
-    });
-  }
-});
-
-test('run: a variety answer that is not JSON, or a failed pass, leaves the situation without a block and the run goes on', async () => {
-  const failing = fakeLlm({
-    situations: WORN_SITUATIONS,
-    hook: (call) => {
-      if (call.options.role === 'classifier.text') throw Object.assign(new Error('bad gateway'), { statusCode: 502 });
-      return undefined;
-    },
-  });
-  for (const llm of [varietyLlm('no json'), failing]) {
-    await withSetup({ config: { mentor: { situationLines: [2, 6] } }, prompts: { variety: VARIETY_PROMPT }, llm }, async ({ mentor, cases }) => {
-      const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
-      const { result: run, logs } = await withCapturedLogs(async () => (await mentor.run(item.id)).done);
-      assert.equal(run.error, undefined);
-      assert.ok(run.situations.every((s) => !('worn' in s)));
-      assert.ok(run.situations[0].answers.length > 0);
-      assert.ok(!JSON.stringify(logs).includes('promise to behave'), 'logs carry no lines');
-    });
-  }
-});
-
-test('run: the bot\'s limit notices among the persona\'s own lines never reach the variety pass', () => {
-  const notice = labels.limits.notice.replace('{limit}', 'llm.maxRequestsPerDay').replace('{used}', '300').replace('{cap}', '300');
-  const situations = {
-    situations: [
-      {
-        title: 'own lines and a notice',
-        lines: [
-          { authorId: 'self', authorName: 'self', text: 'I promise to behave (no)', replyTo: null },
-          { authorId: 'self', authorName: 'self', text: notice, replyTo: null },
-          { authorId: BRUNO, authorName: 'Bruno', text: 'sure you do', replyTo: 0 },
-          { authorId: 'self', authorName: 'self', text: 'I will fix it (no)', replyTo: null },
-          { authorId: 'self', authorName: 'self', text: 'never again (no)', replyTo: null },
-          { authorId: ALICE, authorName: 'Alice', text: 'are you out of drawings today?', replyTo: null },
-        ],
-      },
-    ],
-  };
-  const llm = fakeLlm({
-    situations,
-    hook: (call) => (call.options.role === 'classifier.text' ? { text: WORN_ANSWER, usage: USAGE, estimated: 50 } : undefined),
-  });
-  return withSetup({ config: { mentor: { situationLines: [2, 6] } }, prompts: { variety: VARIETY_PROMPT }, llm }, async ({ mentor, cases }) => {
-    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
-    await withCapturedLogs(async () => (await mentor.run(item.id)).done);
-    const passes = llm.calls.filter((c) => c.options.role === 'classifier.text');
-    assert.equal(passes.length, 1);
-    assert.equal(passes[0].user, '<lines>\n#1 I promise to behave (no)\n#2 I will fix it (no)\n#3 never again (no)\n</lines>');
-  });
-});
-
 // ---- parity with a live turn: custom emoji and GIFs ---------------------------
 
 const WAVE = { id: '600000000000000001', name: 'wave', animated: false };
@@ -2075,19 +1935,6 @@ test('run: features.gifs off and no emoji index -> no <gifs>, no <emoji>, and a 
 });
 
 // ---- small rules -----------------------------------------------------------------
-
-test('run: the run names the classifier.text model its variety pass uses, never an analyzer model', () =>
-  withSetup({}, async ({ mentor, cases, hot }) => {
-    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
-    hot.config.classifier = { text: 'x/classifier', media: 'x/media' };
-    const named = await (await mentor.run(item.id)).done;
-    assert.equal(named.models.classifierText, 'x/classifier');
-    assert.equal('analyzer' in named.models, false);
-    // An empty classifier.text falls back to classifier.media, as the variety pass does.
-    hot.config.classifier = { text: '', media: 'x/media' };
-    const fallback = await (await mentor.run(item.id)).done;
-    assert.equal(fallback.models.classifierText, 'x/media');
-  }));
 
 test('run: the budget pre-check measures a request as the llm rail does, calibrated', () =>
   withSetup({ calibrator: { ratio: 10000, apply: (n) => n * 10000 } }, async ({ mentor, cases, llm }) => {
@@ -2255,38 +2102,3 @@ test('run: a wired lookup with a search key gives the sandbox the search line of
   }
 });
 
-test('run: a stalled variety pass is cut once at variety.requestTimeoutMs, one request per situation, and the run goes on', () => {
-  const llm = fakeLlm({
-    situations: WORN_SITUATIONS,
-    hook: (call) => {
-      if (call.options.role !== 'classifier.text') return undefined;
-      return new Promise((resolve, reject) => {
-        call.options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
-      });
-    },
-  });
-  return withSetup({ config: { mentor: { situationLines: [2, 6] } }, prompts: { variety: VARIETY_PROMPT }, llm }, async ({ mentor, cases, hot }) => {
-    hot.config.variety = { requestTimeoutMs: 20 };
-    const item = cases.add(GUILD, { text: CASE_TEXT, target: 'reply' });
-    // The cut's timer is unref'd (a live request holds the process); this fake holds nothing, so the test does.
-    const keepAlive = setInterval(() => {}, 1000);
-    let result;
-    try {
-      result = await withCapturedLogs(async () => (await mentor.run(item.id)).done);
-    } finally {
-      clearInterval(keepAlive);
-    }
-    const { result: run, logs } = result;
-    const passes = llm.calls.filter((c) => c.options.role === 'classifier.text');
-    assert.equal(passes.length, 1, 'one situation has enough own lines: one request');
-    assert.equal(passes[0].options.timeoutMs, 20);
-    assert.equal(passes[0].options.origin, 'mentor');
-    assert.equal(passes[0].options.purpose, 'variety');
-    assert.equal(run.error, undefined);
-    assert.equal(run.stopped, undefined);
-    assert.ok(run.situations.every((s) => !('worn' in s)));
-    const failed = logs.filter((l) => l.msg === 'mentor: variety pass failed');
-    assert.equal(failed.length, 1);
-    assert.equal(failed[0].timedOut, true);
-  });
-});

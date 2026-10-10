@@ -8,11 +8,8 @@
 //                                            windows, the ring of calls from other channels and the seen marks
 //                                            of the channels a turn pulled in
 //   data/guilds/<guildId>/guild.json         how this server talks, in-jokes, what the persona said about itself,
-//                                            what people taught it (`learned`), the persona's own recent lines and
-//                                            the variety pass's latest lists and history (src/behavior/variety.js),
-//                                            the filler list and the count of the persona's own messages
-//                                            (src/behavior/fillers.js), and when the server notes last changed and
-//                                            were last re-checked
+//                                            what people taught it (`learned`), and when the server notes last
+//                                            changed and were last re-checked
 //   data/guilds/<guildId>/buffer.json        messages observed since the last memory update
 //   data/guilds/<guildId>/users/<userId>.json  one profile per active member
 //   data/guilds/<guildId>/private/<userId>.json  what the persona learned from one member in direct
@@ -80,27 +77,6 @@ import { mergeEmojiUsage, normalizeEmojiUsage } from './emoji-usage.js';
 import { emptyGifs, findGif, markOwnGif, mergeGifs, normalizeBackfillStamp, normalizeGifs, resetGifCounts } from './gifs.js';
 import { FEELING_CHARS, REASON_CHARS, SELF_CHARS, forgetMember, normalizeQueue } from './voice.js';
 import { emptyRecent, mergeRecent, normalizeRecent, purgeRecentFor } from './recent.js';
-import {
-  appendOwnLine,
-  appendWornHistory,
-  carryPinned,
-  dropPattern,
-  normalizeOwnLines,
-  normalizeWorn,
-  normalizeWornHistory,
-  normalizeWornLong,
-  pinPattern,
-} from '../behavior/variety.js';
-import {
-  fillerKey,
-  learnFillers,
-  markUsed,
-  normalizeFillers,
-  normalizeOwnMessageCount,
-  ownMessageCounter,
-  pinFiller,
-  removeFiller,
-} from '../behavior/fillers.js';
 
 const DIARY_HISTORY_POSTS = 150; // diary.historyPosts
 
@@ -225,12 +201,6 @@ function emptyGuild() {
     learnedNextId: 1, // the next id a learned item gets -- never reused, even after a remove
     emojiUsage: {}, // { [emojiId]: { name, count, last } } -- members' custom emoji uses, see recordEmojiUsage
     emojiBackfill: null, // { at, channels, messages } once src/memory/emoji-backfill.js has read the history
-    ownLines: [], // the persona's own recent lines in server channels, a ring -- see pushOwnLine
-    worn: null, // { at, key, channelId, lines, patterns } -- the variety pass's latest list, see setWorn
-    wornLong: null, // { at, lines, patterns } -- the long variety pass's list, in force until the next one, see setWornLong
-    wornHistory: [], // { at, channelId, lines, patterns: [{ shape, count }] } per pass -- see appendWornHistory
-    fillers: [], // { text, prefix, pinned, weight, lastSeen, lastUsedAt, lastUsedAtMessage, uses } -- see learnFillers
-    ownMessageCount: 0, // how many messages the persona has posted, only ever grows -- see countOwnMessages
     pingsOff: [], // ids of the members who turned the persona's notifications off (`/nep pings`) -- see setPingsOff
     updatedAt: null,
     notesUpdatedAt: null, // when patterns, starters or injokes last changed -- see updateGuild
@@ -355,15 +325,18 @@ function normalizePrivate(priv) {
   if (!Array.isArray(priv.buffer)) priv.buffer = [];
 }
 
-/** Normalize a guild's `learned`/`learnedNextId`/`emojiUsage`/`emojiBackfill`/`ownLines`/`worn`/`wornLong`/`wornHistory`/
- * `fillers`/`ownMessageCount` fields in place: a
+/** Fields a guild.json may still hold from features the engine no longer has; dropped on read. */
+const STALE_GUILD_FIELDS = ['ownLines', 'worn', 'wornLong', 'wornHistory', 'fillers', 'ownMessageCount'];
+
+/** Normalize a guild's `learned`/`learnedNextId`/`emojiUsage`/`emojiBackfill` fields in place: a
  * guild.json written before this list existed loads it as empty, a
  * hand-edited one is validated via src/memory/details.js#normalizeDetails
  * (fresh ids off `learnedNextId` when needed). The two notes stamps
  * (`notesUpdatedAt`, `notesCheckedAt`) are kept when they read as a time and
  * are null otherwise: a guild.json written before them has never been
- * stamped, which readers take as stale notes. Every other field is left
- * exactly as stored; a non-object value is left alone entirely. Never marks
+ * stamped, which readers take as stale notes. The keys in
+ * STALE_GUILD_FIELDS are deleted (they reach disk at the next write). Every
+ * other field is left exactly as stored; a non-object value is left alone entirely. Never marks
  * anything dirty -- same contract as `normalizeProfile`. */
 function normalizeGuild(guild) {
   if (!guild || typeof guild !== 'object' || Array.isArray(guild)) return;
@@ -375,14 +348,7 @@ function normalizeGuild(guild) {
   guild.emojiUsage = normalizeEmojiUsage(guild.emojiUsage);
   // Missing or hand-broken -> null: the history backfill has not run.
   guild.emojiBackfill = normalizeBackfillStamp(guild.emojiBackfill);
-  // The variety pass's fields (src/behavior/variety.js): missing or hand-broken -> empty.
-  guild.ownLines = normalizeOwnLines(guild.ownLines);
-  guild.worn = normalizeWorn(guild.worn);
-  guild.wornLong = normalizeWornLong(guild.wornLong);
-  guild.wornHistory = normalizeWornHistory(guild.wornHistory);
-  // The filler guard's fields (src/behavior/fillers.js): missing or hand-broken -> no filler, a count of 0.
-  guild.fillers = normalizeFillers(guild.fillers);
-  guild.ownMessageCount = normalizeOwnMessageCount(guild.ownMessageCount);
+  for (const key of STALE_GUILD_FIELDS) delete guild[key];
   // Missing or hand-broken -> []: nobody turned pings off. Non-empty string ids only, each once.
   guild.pingsOff = Array.isArray(guild.pingsOff) ? [...new Set(guild.pingsOff.filter((id) => typeof id === 'string' && id))] : [];
   // Missing or hand-broken -> null: never stamped.
@@ -1514,10 +1480,7 @@ export function createStore({ dataDir }) {
      * through `applyLearnedOps`, which merges incrementally instead of
      * overwriting wholesale (mirrors `updateUser`); `emojiUsage` likewise
      * only through `recordEmojiUsage`/`clearEmojiUsage`, `emojiBackfill` only
-     * through `setEmojiBackfill`, `ownLines`/`worn`/`wornLong`/`wornHistory` only through
-     * `pushOwnLine`/`setWorn`/`setWornLong`/`appendWornHistory`/`pinWornPattern`/`removeWornPattern`,
-     * `fillers` only through `pinFiller`/`removeFiller`/`learnFillers`/`markFillers`, `ownMessageCount` only through
-     * `countOwnMessages`, `pingsOff` only through `setPingsOff`, and the notes stamps only
+     * through `setEmojiBackfill`, `pingsOff` only through `setPingsOff`, and the notes stamps only
      * through this write and `markNotesChecked`. `notesUpdatedAt` gets the
      * same stamp when one of the server notes (`patterns`, `starters`,
      * `injokes`) really changes; `self` alone never moves it, and neither do
@@ -1534,12 +1497,6 @@ export function createStore({ dataDir }) {
         learnedNextId,
         emojiUsage,
         emojiBackfill,
-        ownLines,
-        worn,
-        wornLong,
-        wornHistory,
-        fillers,
-        ownMessageCount,
         pingsOff,
         notesUpdatedAt,
         notesCheckedAt,
@@ -1760,227 +1717,6 @@ export function createStore({ dataDir }) {
       item.value.emojiBackfill = normalizeBackfillStamp(stamp);
       item.dirty = true;
       return item.value.emojiBackfill;
-    },
-
-    /**
-     * Remember one message the persona posted in a server channel: appended
-     * to the guild's `ownLines` ring (src/behavior/variety.js#appendOwnLine,
-     * capped from `window`, `variety.window`, and `longLines`,
-     * `variety.longLines`). A line without text or time changes nothing.
-     * Never stamps `updatedAt` (a counter, like `touchUser`).
-     * @param {string} guildId
-     * @param {{ id?: string, ts: number, channelId?: string, text: string, to?: string }} line
-     * @param {number} window
-     * @param {number} [longLines]
-     * @returns {boolean} whether the line was stored
-     */
-    pushOwnLine(guildId, line, window, longLines) {
-      const item = entry(guildFile(guildId), emptyGuild);
-      normalizeGuild(item.value);
-      const usable = typeof line?.text === 'string' && line.text.trim() !== '' && Number.isFinite(line?.ts);
-      if (!usable) return false;
-      item.value.ownLines = appendOwnLine(item.value.ownLines, line, window, longLines);
-      item.dirty = true;
-      return true;
-    },
-
-    /**
-     * Store the long variety pass's list (`wornLong`: `{ at, lines,
-     * patterns }`, normalised like on read), replacing the previous one --
-     * except the patterns the owner pinned in it, which are carried forward
-     * ahead of the new ones (src/behavior/variety.js#carryPinned: the new
-     * patterns fill what `room` leaves beside the pins). Never stamps `updatedAt`.
-     * @param {string} guildId
-     * @param {object} wornLong
-     * @param {number} [room]  `variety.longMaxPatterns`; not an integer caps nothing.
-     * @returns {object|null} The stored value.
-     */
-    setWornLong(guildId, wornLong, room) {
-      const item = entry(guildFile(guildId), emptyGuild);
-      normalizeGuild(item.value);
-      const next = normalizeWornLong(wornLong);
-      const patterns = carryPinned(item.value.wornLong?.patterns, next?.patterns, room);
-      item.value.wornLong = next ? { ...next, patterns } : patterns.length > 0 ? { at: null, lines: 0, patterns } : null;
-      item.dirty = true;
-      return item.value.wornLong;
-    },
-
-    /**
-     * Store the variety pass's latest list (`worn`: `{ at, key, channelId,
-     * lines, patterns }`, normalised like on read). Never stamps `updatedAt`.
-     * @param {string} guildId
-     * @param {object} worn
-     * @returns {object|null} The stored value.
-     */
-    setWorn(guildId, worn) {
-      const item = entry(guildFile(guildId), emptyGuild);
-      normalizeGuild(item.value);
-      item.value.worn = normalizeWorn(worn);
-      item.dirty = true;
-      return item.value.worn;
-    },
-
-    /**
-     * Append one pass to the guild's `wornHistory` (shapes and counts only,
-     * src/behavior/variety.js#appendWornHistory), the oldest dropped past
-     * `max` (`variety.history`). Never stamps `updatedAt`.
-     * @param {string} guildId
-     * @param {{ at: number, channelId?: string|null, lines: number, patterns: object[] }} pass
-     * @param {number} max
-     * @returns {object[]} The stored history.
-     */
-    appendWornHistory(guildId, pass, max) {
-      const item = entry(guildFile(guildId), emptyGuild);
-      normalizeGuild(item.value);
-      item.value.wornHistory = appendWornHistory(item.value.wornHistory, pass, max);
-      item.dirty = true;
-      return item.value.wornHistory;
-    },
-
-    /**
-     * Pin a pattern in the guild's long list (`wornLong`,
-     * src/behavior/variety.js#pinPattern): kept through every later long pass
-     * until removed. A list that does not exist yet is created around it (no
-     * pass time, so the next long pass is due as before). Never stamps `updatedAt`.
-     * @param {string} guildId
-     * @param {string} shape
-     * @returns {{ added: boolean }}  false when a pattern of that shape was already there (now pinned).
-     */
-    pinWornPattern(guildId, shape) {
-      const item = entry(guildFile(guildId), emptyGuild);
-      normalizeGuild(item.value);
-      const current = item.value.wornLong ?? { at: null, lines: 0, patterns: [] };
-      const { patterns, added } = pinPattern(current.patterns, shape);
-      item.value.wornLong = { ...current, patterns };
-      item.dirty = true;
-      return { added };
-    },
-
-    /**
-     * Remove one pattern by shape (whitespace collapsed, case ignored) from the
-     * long list, else from the short one (`worn`). Marked dirty only when removed.
-     * Never stamps `updatedAt`.
-     * @param {string} guildId
-     * @param {string} shape
-     * @returns {{ removed: object|null, list: 'long'|'short'|null }}
-     */
-    removeWornPattern(guildId, shape) {
-      const item = entry(guildFile(guildId), emptyGuild);
-      normalizeGuild(item.value);
-      for (const [field, list] of [['wornLong', 'long'], ['worn', 'short']]) {
-        const current = item.value[field];
-        if (!current) continue;
-        const { patterns, removed } = dropPattern(current.patterns, shape);
-        if (!removed) continue;
-        item.value[field] = { ...current, patterns };
-        item.dirty = true;
-        return { removed, list };
-      }
-      return { removed: null, list: null };
-    },
-
-    /**
-     * Pin one filler (src/behavior/fillers.js#pinFiller): an entry already
-     * there is pinned in place, a new one may evict the weakest unpinned entry
-     * past `settings.max`. Never stamps `updatedAt`.
-     * @param {string} guildId
-     * @param {{ text: string, prefix: boolean }} parsed  fillers.js#parseFiller's entry.
-     * @param {number} nowMs
-     * @param {{ max: number, halfLifeDays: number }} settings  `variety.fillers`, read by the caller.
-     * @returns {{ entry: object|null, added: boolean, full: boolean }}
-     */
-    pinFiller(guildId, parsed, nowMs, settings) {
-      const item = entry(guildFile(guildId), emptyGuild);
-      normalizeGuild(item.value);
-      const out = pinFiller(item.value.fillers, parsed, { now: nowMs, max: settings.max, halfLifeDays: settings.halfLifeDays });
-      if (out.entry) {
-        item.value.fillers = out.list;
-        item.dirty = true;
-      }
-      return { entry: out.entry, added: out.added, full: out.full };
-    },
-
-    /**
-     * Remove one filler by key (its text, `*` for a prefix entry), pinned or
-     * not. Marked dirty only when removed. Never stamps `updatedAt`.
-     * @param {string} guildId
-     * @param {string} key
-     * @returns {object|null} The removed entry.
-     */
-    removeFiller(guildId, key) {
-      const item = entry(guildFile(guildId), emptyGuild);
-      normalizeGuild(item.value);
-      const { list, removed } = removeFiller(item.value.fillers, key);
-      if (removed) {
-        item.value.fillers = list;
-        item.dirty = true;
-      }
-      return removed;
-    },
-
-    /**
-     * Feed the filler list from a variety pass's patterns
-     * (src/behavior/fillers.js#learnFillers: a pattern's `word` bumps the
-     * entry covering it or adds an unpinned one, the weakest evicted past
-     * `settings.max`). Marked dirty only when something was added or bumped.
-     * Never stamps `updatedAt`.
-     * @param {string} guildId
-     * @param {object[]} patterns
-     * @param {number} nowMs
-     * @param {{ max: number, halfLifeDays: number }} settings
-     * @returns {{ added: number, bumped: number }}
-     */
-    learnFillers(guildId, patterns, nowMs, settings) {
-      const item = entry(guildFile(guildId), emptyGuild);
-      normalizeGuild(item.value);
-      const out = learnFillers(item.value.fillers, patterns, { now: nowMs, max: settings.max, halfLifeDays: settings.halfLifeDays });
-      if (out.added + out.bumped > 0) {
-        item.value.fillers = out.list;
-        item.dirty = true;
-      }
-      return { added: out.added, bumped: out.bumped };
-    },
-
-    /**
-     * Stamp a use of fillers the persona just posted
-     * (src/behavior/fillers.js#markUsed): `lastUsedAt` = `nowMs`,
-     * `lastUsedAtMessage` = the guild's `ownMessageCount` now, `uses` + 1. A
-     * key the list does not hold is skipped. Marked dirty only when an entry
-     * was stamped. Never stamps `updatedAt` (a counter, like `touchUser`).
-     * @param {string} guildId
-     * @param {string[]} keys  fillers.js#fillerKey of each used entry.
-     * @param {number} nowMs  Epoch milliseconds.
-     * @returns {object[]} The stored `fillers`.
-     */
-    markFillers(guildId, keys, nowMs) {
-      const item = entry(guildFile(guildId), emptyGuild);
-      normalizeGuild(item.value);
-      const held = new Set(item.value.fillers.map(fillerKey));
-      const used = (Array.isArray(keys) ? keys : []).filter((key) => held.has(key));
-      if (used.length === 0 || !Number.isFinite(nowMs)) return item.value.fillers;
-      item.value.fillers = markUsed(item.value.fillers, used, { now: nowMs, ownMessages: item.value.ownMessageCount });
-      item.dirty = true;
-      return item.value.fillers;
-    },
-
-    /**
-     * Count `posted` more messages of the persona in the guild's
-     * `ownMessageCount` (src/behavior/fillers.js#ownMessageCounter: it only ever
-     * grows). A `posted` that is no positive integer changes nothing. Never
-     * stamps `updatedAt`.
-     * @param {string} guildId
-     * @param {number} posted
-     * @returns {number} The stored count.
-     */
-    countOwnMessages(guildId, posted) {
-      const item = entry(guildFile(guildId), emptyGuild);
-      normalizeGuild(item.value);
-      const count = ownMessageCounter(item.value.ownMessageCount, posted);
-      if (count !== item.value.ownMessageCount) {
-        item.value.ownMessageCount = count;
-        item.dirty = true;
-      }
-      return count;
     },
 
     /**
@@ -2567,9 +2303,7 @@ export function createStore({ dataDir }) {
      * member's private layer), the whole `versions/` directory (every prose version
      * history, owner lore's included), `guild.json` -- and with it everything it holds:
      * patterns, starters, in-jokes, self facts, `learned`, `emojiUsage`, the
-     * `emojiBackfill` stamp, `ownLines`, the variety pass's `worn` /
-     * `wornLong` (the owner's pinned patterns included) / `wornHistory`, the `fillers` (the
-     * owner's pinned ones included) and `ownMessageCount`, and the notes stamps -- every channel entry (its writers
+     * `emojiBackfill` stamp, `pingsOff` and the notes stamps -- every channel entry (its writers
      * tally included), the live observation buffer, the
      * voice queue (`voice.json`), the recent store (`recent.json`), and
      * lorebook entries whose `source` is `'analyzer'` (every entry, owner

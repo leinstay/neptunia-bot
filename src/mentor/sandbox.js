@@ -69,7 +69,6 @@ export const SANDBOX_OMITS = Object.freeze({
   focus: 'no room question: a live turn has no caller for it either',
   tasks: 'no part of a split message, no queued or folded call: a stored moment records none',
   recentAudience: 'no guild to compare audiences in: <recent> shows the lines of the turn\'s own channel only',
-  fillers: 'no filler list is read: <worn> shows the patterns of the variety pass of the situation only',
   diaryChannel: 'no diary is offered: a sandbox turn never posts, so <senses> has no diary line',
   diary: 'never a diary post: no <world>, <diary>, <plan> or <found> block',
 });
@@ -333,7 +332,6 @@ export function sandboxRequestInput({
   at,
   descriptions,
   videos,
-  worn = null,
   customEmoji,
   gifs = null,
   mediaCache = null,
@@ -376,7 +374,6 @@ export function sandboxRequestInput({
     customEmoji: Array.isArray(customEmoji) ? customEmoji : [],
     gifs,
     mediaCache,
-    worn,
     pulled,
     source,
     elsewhereDestination: typeof elsewhereDestination?.name === 'string' && elsewhereDestination.name ? { name: elsewhereDestination.name } : null,
@@ -396,7 +393,6 @@ export function sandboxRequestInput({
     focus: null,
     tasks: null,
     recentAudience: null,
-    fillers: null,
     diaryChannel: null,
     diary: null,
   };
@@ -452,8 +448,6 @@ export function sandboxRequestInput({
  * @param {(usage: object|null, estimated: number) => void} [input.onUsage]  Called after every completion.
  * @param {Map<string, string>} [input.descriptions]  Item id -> caption, rendered as the live transcript does.
  * @param {Map<string, object>} [input.videos]  Item id -> video state (`{ state: 'watched', text }`), likewise.
- * @param {{ shape: string, examples: string[] }[]|null} [input.worn]  What the situation's variety pass
- *   named (src/mentor/mentor.js), rendered as `<worn>` exactly as in a live turn; omitted, no block.
  * @param {{ id: string, name: string, animated?: boolean }[]} [input.customEmoji]  The served guild's
  *   custom emoji (src/discord/emoji.js#createEmojiIndex `list()`); omitted, no `<emoji>`.
  * @param {object|null} [input.gifs]  The guild's GIF library (store.getGifs); omitted, no `<gifs>` and no `<gif>` kept.
@@ -480,7 +474,6 @@ export async function answerReply({
   onUsage,
   descriptions,
   videos,
-  worn = null,
   customEmoji,
   gifs = null,
   mediaCache = null,
@@ -489,7 +482,7 @@ export async function answerReply({
 }) {
   const config = view.config;
   const request = buildRequest(
-    sandboxRequestInput({ view, situation, selfId, selfName, channel, at, descriptions, videos, worn, customEmoji, gifs, mediaCache, elsewhereDestination, searchAvailable }),
+    sandboxRequestInput({ view, situation, selfId, selfName, channel, at, descriptions, videos, customEmoji, gifs, mediaCache, elsewhereDestination, searchAvailable }),
   );
 
   // No pictures: a user message with image parts is sent as its text-only re-render.

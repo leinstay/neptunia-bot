@@ -242,8 +242,7 @@ export function verdict(scores, passCfg, groups, anchorNs) {
 
 /**
  * Where a proposed change may land: the prompt files (`rules`, `prompt`,
- * `card`), `labels.json` (`labels`), the variety pass's `<worn>` (`variety`),
- * and the stored memory (`self`, `learned`, `guild`, `profile`, `lore`, a
+ * `card`), `labels.json` (`labels`), and the stored memory (`self`, `learned`, `guild`, `profile`, `lore`, a
  * channel note `channel`, the last hours `recent`).
  */
 export const CHANGE_LAYERS = Object.freeze([
@@ -251,7 +250,6 @@ export const CHANGE_LAYERS = Object.freeze([
   'prompt',
   'card',
   'labels',
-  'variety',
   'self',
   'learned',
   'guild',
@@ -322,7 +320,7 @@ export function readDiagnosis(raw) {
  * The mentor model's opinion of why a case failed, validated. `summary` must
  * be a non-empty string (clipped to 1500 characters); `causes` and `changes`
  * must be arrays. A cause's `layer` is one of `CAUSE_LAYERS` (rules, prompt,
- * card, labels, variety, self, learned, guild, profile, lore, channel, recent
+ * card, labels, self, learned, guild, profile, lore, channel, recent
  * or missing); a change's one of `CHANGE_LAYERS` (the same without missing).
  * An item with another layer or without a non-empty `why` is dropped; at most
  * five of each are kept, in the order given. Strings are clipped (excerpt 300,

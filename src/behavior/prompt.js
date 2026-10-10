@@ -20,8 +20,7 @@
 //   6. memory about other people present in the transcript
 //   6b. the members the persona feels most strongly about that the request
 //       does not describe (`<attitudes>`, one piece: names and bands)
-//   6c. the devices the persona has worn out in its own recent lines (`<worn>`, one piece)
-//   6d. a diary post only (mode `diary`): the persona's world (`<world>`, one piece, under
+//   6c. a diary post only (mode `diary`): the persona's world (`<world>`, one piece, under
 //       `diary.world`), then its past diary posts (`<diary>`, the oldest lines cut first);
 //       the post's `<plan>` is never cut, and what its search found (`<found>`) ranks
 //       right after `<lookup>`
@@ -62,7 +61,6 @@ import { channelActivity, renderChannel } from '../memory/channels.js';
 import { selectPictures, mediaProxyUrl, fitBox } from '../discord/media.js';
 import { ID_DIGITS, fromTokens, isWordChar, occursAsWholeWord } from '../memory/mentions.js';
 import { mergeProfiles } from './private.js';
-import { renderWorn } from './variety.js';
 import { gifWatchBlocker } from '../memory/gif-watch.js';
 import { renderDiaryBlock, renderKindsBlock } from './diary.js';
 
@@ -900,8 +898,6 @@ function assembleUser({ now, timezone, labels, sensesText, kept, tempoText, task
     block('other_channels', kept.neighbors.join('\n\n')),
     // Another channel pulled into this turn, one item per channel.
     block('channel_view', (kept.pulled ?? []).join('\n\n')),
-    // The persona's own worn-out devices, just ahead of the chat where its own lines are.
-    block('worn', (kept.worn ?? []).join('\n')),
     // A diary post: the persona's world, its past posts, this post's plan and what its search found.
     block('world', (kept.world ?? []).join('\n')),
     block('diary', (kept.diary ?? []).length > 0 ? [diary?.intro, ...kept.diary].filter(Boolean).join('\n') : ''),
@@ -1778,16 +1774,6 @@ export function usesFollowUpTask({ mode, triggerKind, taggedCall = null, routed 
  *   on (a missing key counts as on) and at least one entry, `<gifs>` renders (see `gifItems`),
  *   `<senses>` carries `senses.gifs`, and a GIF of the library in the transcript carries its
  *   handle (`transcript.gifKnownFields`/`gifKnown`/`gifKnownNoText`). Omitted or empty -> none of it.
- * @param {{ shape: string, examples: string[] }[]|null} [input.worn]  What this turn's variety pass
- *   (src/behavior/variety-pass.js, or the mentor's sandbox) named in the persona's own recent
- *   lines; with `features.variety` on (a missing key counts as on) and `labels.variety.intro`
- *   present, rendered as `<worn>` (see src/behavior/variety.js#renderWorn). Omitted, null or
- *   empty -> no block.
- * @param {{ list: object[], ownMessages: number, now: number }|null} [input.fillers]  The guild's
- *   filler list (guild memory `fillers`), its `ownMessageCount` and the clock: the resting
- *   fillers are listed in the same `<worn>` block after the patterns, as advice before the reply
- *   (see src/behavior/variety.js#renderWorn); the block also renders with filler lines alone.
- *   Omitted or null -> no filler lines.
  * @param {PulledChannel[]} [input.pulled]  Other channels pulled into this turn, rendered as
  *   `<channel_view>` (one item per channel, see `fitPulledChannel`) after `<other_channels>`:
  *   lines numbered on after the chat's (and after each earlier pulled channel), captions only
@@ -1857,12 +1843,12 @@ export function usesFollowUpTask({ mode, triggerKind, taggedCall = null, routed 
  * @param {{ posts?: object[], plan?: { kind: string|null, brief: string, picture: boolean, topic?: string }|null,
  *   found?: string|null }|null} [input.diary]  A diary post's own input, read only with `mode:
  *   'diary'` (whose task text is `prompts.diary`): `<world>` (prompts/world.md, `{{name}}` filled,
- *   only with `diary.world === true`, see `worldText`; one piece, fitted right after `<worn>`),
+ *   only with `diary.world === true`, see `worldText`; one piece, fitted right after `<attitudes>`),
  *   `<diary>` (the past posts through src/behavior/diary.js#renderDiaryBlock, the newest
  *   `diary.historyPosts` (150 when unset) oldest first, fitted after `<world>` and losing its
  *   oldest lines first), `<plan>` (`labels.diary.plan`, then the plan as one JSON line with `kind`,
  *   `brief`, `picture` and, with an owner's topic, `topic`; never cut) and `<found>` (`labels.diary.found`, then what the search
- *   found; one piece, fitted right after `<lookup>`). They render after `<worn>` and before
+ *   found; one piece, fitted right after `<lookup>`). They render after `<channel_view>` and before
  *   `<chat>`. `<world>` never renders outside a diary post.
  * @returns {{ messages: object[], stats: object, idByIndex: Map<number, string>, tempo: object,
  *   pictures: object[], textFallback: string|null, pulledIds: Map<string, string>,
@@ -2467,8 +2453,6 @@ export function buildRequest(input) {
       peopleSection,
       // One piece, kept or dropped whole: right below the people it leaves out.
       { name: 'attitudes', cap: caps.attitudes ?? 400, items: [attitudesText].filter(Boolean) },
-      // One small piece, kept or dropped whole: below the chat and the people, above the rest.
-      { name: 'worn', items: [renderWorn(input.worn, labels, config, input.fillers ?? null)].filter(Boolean) },
       // A diary post: the persona's world whole, then its past posts, the oldest cut first.
       { name: 'world', items: [worldItem].filter(Boolean) },
       { name: 'diary', keep: 'newest', items: diaryLines },

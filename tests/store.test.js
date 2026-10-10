@@ -135,9 +135,40 @@ test('getGuild: an old guild.json without learned loads it as empty, every other
 
   const store = createStore({ dataDir: dir });
   const guild = store.getGuild('g1');
-  assert.deepEqual(guild, { ...old, learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornLong: null, wornHistory: [], fillers: [], ownMessageCount: 0, pingsOff: [], notesUpdatedAt: null, notesCheckedAt: null, notesFlaggedAt: null, notesSampleReviewedAt: null, notesAttemptAt: null });
+  assert.deepEqual(guild, { ...old, learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, pingsOff: [], notesUpdatedAt: null, notesCheckedAt: null, notesFlaggedAt: null, notesSampleReviewedAt: null, notesAttemptAt: null });
   store.flush();
   assert.equal(fs.readFileSync(file, 'utf8'), raw, 'reading alone never rewrites the file');
+});
+
+test('getGuild: the keys of the removed variety pass are dropped on read, every other field kept, gone from disk at the next write', () => {
+  const dir = tmpDataDir();
+  const file = path.join(dir, 'guilds', 'g1', 'guild.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const stale = {
+    ownLines: [{ id: 'm1', ts: 1, channelId: 'c1', text: 'λέξη' }],
+    worn: { at: 1, key: 'k', channelId: 'c1', lines: 3, patterns: [] },
+    wornLong: { at: 1, lines: 60, patterns: [] },
+    wornHistory: [{ at: 1, channelId: 'c1', lines: 3, patterns: [] }],
+    fillers: [{ text: 'bof', prefix: false }],
+    ownMessageCount: 12,
+  };
+  const kept = { patterns: 'μιμίδια', self: ['likes tea'], custom: 7, pingsOff: ['u1'] };
+  fs.writeFileSync(file, JSON.stringify({ ...kept, ...stale }, null, 2));
+
+  const store = createStore({ dataDir: dir });
+  const guild = store.getGuild('g1');
+  for (const key of Object.keys(stale)) assert.equal(key in guild, false, key);
+  assert.equal(guild.patterns, 'μιμίδια');
+  assert.deepEqual(guild.self, ['likes tea']);
+  assert.equal(guild.custom, 7);
+  assert.deepEqual(guild.pingsOff, ['u1']);
+
+  store.updateGuild('g1', { starters: 'γεια' });
+  store.flush();
+  const onDisk = JSON.parse(fs.readFileSync(file, 'utf8'));
+  for (const key of Object.keys(stale)) assert.equal(key in onDisk, false, key);
+  assert.equal(onDisk.custom, 7);
+  assert.equal(onDisk.starters, 'γεια');
 });
 
 test('getGuild: a hand-edited learned list is validated, ids assigned off learnedNextId', () => {
@@ -2781,145 +2812,6 @@ test('store: recent lines survive a pause and a restart; nothing but a write, a 
 
   const restarted = createStore({ dataDir: dir });
   assert.deepEqual(recentTexts(restarted, 'g1'), ['μία', 'δύο'], 'long past the window, still stored until a write');
-});
-
-test('pushOwnLine: the ring keeps variety.longLines across a restart; without it, three windows as before', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  for (let i = 0; i < 40; i += 1) store.pushOwnLine('g1', { id: 'm' + i, ts: i, channelId: 'c1', text: 'λέξη ' + i, to: 'q' }, 2, 30);
-  store.flush();
-  const ring = createStore({ dataDir: dir }).getGuild('g1').ownLines;
-  assert.equal(ring.length, 30);
-  assert.deepEqual([ring[0].id, ring[29].id], ['m10', 'm39']);
-  assert.equal(ring.filter((line) => 'to' in line).length, 6, 'only the newest three windows keep what they answered');
-  store.pushOwnLine('g2', { id: 'x', ts: 1, channelId: 'c1', text: 'ένα' }, 2);
-  for (let i = 0; i < 10; i += 1) store.pushOwnLine('g2', { id: 'y' + i, ts: i + 2, channelId: 'c1', text: 'δύο' }, 2);
-  assert.equal(store.getGuild('g2').ownLines.length, 6);
-});
-
-// ---------------------------------------------------------------------------
-// The reply guard's fields: fillers and ownMessageCount (src/behavior/fillers.js),
-// and the patterns the owner pins in the long list.
-
-const FILLER_SETTINGS = { max: 3, halfLifeDays: 14 };
-
-test('pinFiller / removeFiller: pinned entries kept across a restart; an existing entry pinned in place', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  assert.deepEqual(store.getGuild('g1').fillers, []);
-  assert.equal(store.getGuild('g1').ownMessageCount, 0);
-  const added = store.pinFiller('g1', { text: 'equit', prefix: true }, 1000, FILLER_SETTINGS);
-  assert.deepEqual([added.added, added.full, added.entry.pinned], [true, false, true]);
-  assert.equal(store.pinFiller('g1', { text: 'equit', prefix: true }, 2000, FILLER_SETTINGS).added, false);
-  store.pinFiller('g1', { text: 'bof', prefix: false }, 1000, FILLER_SETTINGS);
-  store.flush();
-  const restarted = createStore({ dataDir: dir });
-  assert.deepEqual(
-    restarted.getGuild('g1').fillers.map((e) => [e.text, e.prefix, e.pinned, e.weight]),
-    [['equit', true, true, 1], ['bof', false, true, 1]],
-  );
-  assert.equal(restarted.removeFiller('g1', 'bof').text, 'bof');
-  assert.equal(restarted.removeFiller('g1', 'bof'), null);
-  assert.equal(restarted.removeFiller('g1', 'equit'), null, 'the exact key is not the prefix entry');
-  assert.deepEqual(restarted.getGuild('g1').fillers.map((e) => e.text), ['equit']);
-});
-
-test('learnFillers: pattern words add and bump unpinned entries, evicting the weakest past max, persisted', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.pinFiller('g1', { text: 'franc', prefix: true }, Date.UTC(2026, 9, 1), FILLER_SETTINGS);
-  const first = store.learnFillers('g1', [{ shape: 's', count: 2, word: 'Franchement' }, { shape: 't', count: 2, word: 'bof' }, { shape: 'u', count: 2 }], Date.UTC(2026, 9, 2), FILLER_SETTINGS);
-  assert.deepEqual(first, { added: 1, bumped: 1 }, 'the pinned prefix covers the learned word');
-  store.learnFillers('g1', [{ shape: 'v', count: 2, word: 'genre' }], Date.UTC(2026, 9, 3), FILLER_SETTINGS);
-  const crowded = store.learnFillers('g1', [{ shape: 'w', count: 9, word: 'voilà' }], Date.UTC(2026, 9, 4), FILLER_SETTINGS);
-  assert.deepEqual(crowded, { added: 1, bumped: 0 });
-  assert.deepEqual(store.learnFillers('g1', [{ shape: 'x', count: 2 }], Date.UTC(2026, 9, 4), FILLER_SETTINGS), { added: 0, bumped: 0 });
-  store.flush();
-  const fillers = createStore({ dataDir: dir }).getGuild('g1').fillers;
-  assert.deepEqual(
-    fillers.map((e) => [e.text, e.prefix, e.pinned, e.weight]),
-    [['franc', true, true, 3], ['genre', true, false, 2], ['voilà', true, false, 9]],
-    'of two learned entries of one weight the older (bof) went; the pin stayed',
-  );
-});
-
-test('countOwnMessages / markFillers: the count only grows; a use stamps the time and the count now', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  store.pinFiller('g1', { text: 'equit', prefix: true }, 1000, FILLER_SETTINGS);
-  assert.equal(store.countOwnMessages('g1', 3), 3);
-  assert.equal(store.countOwnMessages('g1', 0), 3);
-  assert.equal(store.countOwnMessages('g1', -5), 3);
-  assert.equal(store.countOwnMessages('g1', 2), 5);
-  store.markFillers('g1', ['equit*', 'unknown'], 1234);
-  store.markFillers('g1', ['equit*'], 'later');
-  store.flush();
-  const guild = createStore({ dataDir: dir }).getGuild('g1');
-  assert.equal(guild.ownMessageCount, 5);
-  assert.deepEqual(
-    guild.fillers.map((e) => [e.text, e.lastUsedAt, e.lastUsedAtMessage, e.uses]),
-    [['equit', 1234, 5, 1]],
-    'no entry added, no stamp without a time',
-  );
-});
-
-test('updateGuild: never writes fillers or ownMessageCount, nor stamps updatedAt for them', () => {
-  const store = createStore({ dataDir: tmpDataDir() });
-  store.pinFiller('g1', { text: 'equit', prefix: true }, 1000, FILLER_SETTINGS);
-  store.countOwnMessages('g1', 4);
-  const guild = store.updateGuild('g1', { fillers: [], ownMessageCount: 0 });
-  assert.deepEqual(guild.fillers.map((e) => e.text), ['equit']);
-  assert.equal(guild.ownMessageCount, 4);
-  assert.equal(guild.updatedAt, null);
-});
-
-test('getGuild: a hand-broken fillers list or ownMessageCount reads as repaired', () => {
-  const dir = tmpDataDir();
-  fs.mkdirSync(path.join(dir, 'guilds', 'g1'), { recursive: true });
-  fs.writeFileSync(
-    path.join(dir, 'guilds', 'g1', 'guild.json'),
-    JSON.stringify({ fillers: [{ text: ' Équit* ', pinned: true }, { text: 'franc', weight: 2, uses: 1, lastUsedAt: 7, lastUsedAtMessage: 2 }, 'x', { text: 'ab*' }], ownMessageCount: -3 }),
-  );
-  const guild = createStore({ dataDir: dir }).getGuild('g1');
-  assert.deepEqual(
-    guild.fillers.map((e) => [e.text, e.prefix, e.pinned, e.weight, e.uses, e.lastUsedAt, e.lastUsedAtMessage]),
-    [['équit', true, true, 0, 0, null, null], ['franc', false, false, 2, 1, 7, 2]],
-  );
-  assert.equal(guild.ownMessageCount, 0);
-});
-
-test('pinWornPattern / setWornLong: a pinned pattern survives every long pass, the pass filling the rest of its room', () => {
-  const dir = tmpDataDir();
-  const store = createStore({ dataDir: dir });
-  assert.deepEqual(store.pinWornPattern('g1', '  quotes   a film line '), { added: true });
-  assert.deepEqual(store.getGuild('g1').wornLong, { at: null, lines: 0, patterns: [{ shape: 'quotes a film line', count: 0, examples: [], pinned: true }] });
-
-  const pass = (shapes) => ({ at: 5000, lines: 80, patterns: shapes.map((shape) => ({ shape, examples: ['ex'], count: 3 })) });
-  store.setWornLong('g1', pass(['ends on a question', 'QUOTES A FILM LINE', 'opens with a sigh', 'one more']), 3);
-  const long = store.getGuild('g1').wornLong;
-  assert.equal(long.at, 5000);
-  assert.deepEqual(
-    long.patterns.map((p) => [p.shape, p.pinned === true]),
-    [['quotes a film line', true], ['ends on a question', false], ['opens with a sigh', false]],
-    'the pin first, its duplicate dropped, the pass filling the two places left',
-  );
-  store.flush();
-  const restarted = createStore({ dataDir: dir });
-  restarted.setWornLong('g1', pass(['later habit']), 3);
-  assert.deepEqual(restarted.getGuild('g1').wornLong.patterns.map((p) => p.shape), ['quotes a film line', 'later habit']);
-});
-
-test('pinWornPattern / removeWornPattern: pin a listed pattern in place; remove from the long list, else the short one', () => {
-  const store = createStore({ dataDir: tmpDataDir() });
-  store.setWornLong('g1', { at: 1, lines: 60, patterns: [{ shape: 'ends on a question', examples: ['non ?'], count: 3 }] });
-  store.setWorn('g1', { at: 2, key: 'k', channelId: 'c1', lines: 8, patterns: [{ shape: 'opens with a sigh', examples: ['bof'], count: 2 }] });
-  assert.deepEqual(store.pinWornPattern('g1', 'Ends On A Question'), { added: false });
-  assert.deepEqual(store.getGuild('g1').wornLong.patterns[0], { shape: 'ends on a question', count: 3, examples: ['non ?'], pinned: true });
-
-  assert.equal(store.removeWornPattern('g1', 'opens with a sigh').list, 'short');
-  assert.equal(store.removeWornPattern('g1', 'ends on a question').list, 'long');
-  assert.deepEqual(store.removeWornPattern('g1', 'ends on a question'), { removed: null, list: null });
-  assert.deepEqual([store.getGuild('g1').wornLong.patterns, store.getGuild('g1').worn.patterns], [[], []]);
 });
 
 // ---- version history of prose fields ---------------------------------------

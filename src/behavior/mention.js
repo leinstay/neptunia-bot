@@ -245,7 +245,7 @@ export function roomPreFilter(normalized) {
 
 /**
  * The text classifier model (the address classifier, the search classifier,
- * the re-watch classifier, the variety pass, the link reader, the search
+ * the re-watch classifier, the link reader, the search
  * summary): `classifier.text`, else the media model (classifierMediaModel);
  * `undefined` when none is set.
  * @param {object|undefined} config  the full hot config

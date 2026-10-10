@@ -547,15 +547,6 @@ test('answerReply: reads everything through the view, so another view of the sam
   assert.ok(result.request.user.includes('OVERLAY_CHARACTER'));
 });
 
-test('answerReply: a situation\'s variety patterns render as <worn> as in a live turn; none, no block', async () => {
-  const worn = [{ shape: 'mock promise ending in (no)', examples: ['fix it (no)'], count: 2 }];
-  const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
-  const withBlock = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm('<msg>ok</msg>'), samples: 1, at: NOW, worn });
-  assert.ok(withBlock.request.user.includes(`<worn>\n${labels.variety.intro}\n- mock promise ending in (no)\n</worn>`));
-  const without = await answerReply({ view, situation: twoLines(), selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, llm: fakeLlm('<msg>ok</msg>'), samples: 1, at: NOW });
-  assert.ok(!without.request.user.includes('<worn>'));
-});
-
 // ---- a stored moment replayed as the turn it was ----------------------------
 
 /** The task texts of the reply, overheard and interject prompts, each naming itself. */
@@ -820,7 +811,7 @@ function buildRequestInputs() {
 test('sandboxRequestInput: names every input buildRequest reads; what it leaves out is SANDBOX_OMITS, passed as absent', () => {
   const view = liveView({ hot: fakeHot(), store: fakeStore(), guildId: 'g1' });
   const wanted = buildRequestInputs();
-  assert.ok(wanted.has('history') && wanted.has('pulled') && wanted.has('worn'), 'the reader finds both kinds of key');
+  assert.ok(wanted.has('history') && wanted.has('pulled') && wanted.has('gifs'), 'the reader finds both kinds of key');
   for (const situation of [twoLines(), { ...storedMoment(), mode: 'interject' }]) {
     const input = sandboxRequestInput({ view, situation, selfId: SELF_ID, selfName: 'Zoë', channel: CHANNEL, at: NOW });
     assert.deepEqual(Object.keys(input).sort(), [...wanted].sort());

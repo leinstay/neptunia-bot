@@ -6,7 +6,7 @@
 
 | 命令 | 说明 |
 |---|---|
-| `/nep status` | 模型、校准、配额（今日午夜后的 LLM 请求数、图片计数和图像模型、GIF 观看数、已刷新画像数）、每服务器记忆状态（档案、缓冲区、下次自发）、语音队列大小和今日语音请求数（两阶段开启时）、多样性过程（开关、手法数和时间）、私聊开关和私有文件数 |
+| `/nep status` | 模型、校准、配额（今日午夜后的 LLM 请求数、图片计数和图像模型、GIF 观看数、已刷新画像数）、每服务器记忆状态（档案、缓冲区、下次自发）、语音队列大小和今日语音请求数（两阶段开启时）、私聊开关和私有文件数 |
 | `/nep reload` | 立即重新加载配置和提示 |
 | `/nep ping [role]` | 向一个或所有模型角色（`voice`、`analyzer`、`classifier.text`、`classifier.media`、`classifier.video`、`mentor`、`image`）发送最小请求，遵循每个角色的 `llm.providerByModel` 路由，并报告模型、延迟、provider、token 或错误；`/nep ping classifier` 同时 ping 三个 classifier 角色。模型行统一输出，然后是 API 密钥检查：`youtube: API key — {status}`（如 `ok`、`not needed (yt-dlp ok)`、`missing (blocked)`）和 `web: API key — {status}`（`ok`、`missing` 或 `off`）。`role:image` 检查 `image.model` 是否在 provider 的公开模型列表中且支持图片输出（一次免费 GET，不进行生成）；检查通过不代表生成一定成功。不指定 role 时 image 检查排在其他模型行之后。不计入 `llm.maxRequestsPerDay`，在暂停或预热期间均可使用 |
 | `/nep pause` | 停止所有活动，将记忆刷入磁盘并卸载；进行中的 mentor 运行会被停止，其报告在刷盘前发布。暂停期间可安全编辑 `data/` |
@@ -31,7 +31,7 @@
 | `/nep memory refresh <user>` | 强制刷新成员画像。token 限制下调整采样量。计入 `memory.portraitRefreshPerDay`。当该成员有排队的角色文本语音条目（`voice-pending`）时，回复会说明并拒绝，除非强制刷新 |
 | `/nep memory forget <user>` | 删除存储的档案、私有记忆和排队的语音条目（包括该成员教授的课程）。等待正在运行的分析器批次完成后再执行 |
 | `/nep memory affinity <user> [score] [reason]` | 查看或设置态度（-100..100） |
-| `/nep memory wipe <confirm>` | 清除该服务器的所有分析器记忆；输入准确的服务器名称以确认。删除项：成员档案及其私有记忆、服务器习惯（模式、开场白、内部梗）、所学条目、语音队列、近期记事、表情排名、多样性历史、频道地图、分析器世界书、预热进度。保留项：所有者世界书条目、媒体描述缓存、GIF 库、token 校准、每日计数器、自发时间表。等待正在运行的分析器批次完成后再执行 |
+| `/nep memory wipe <confirm>` | 清除该服务器的所有分析器记忆；输入准确的服务器名称以确认。删除项：成员档案及其私有记忆、服务器习惯（模式、开场白、内部梗）、所学条目、语音队列、近期记事、表情排名、频道地图、分析器世界书、预热进度。保留项：所有者世界书条目、媒体描述缓存、GIF 库、token 校准、每日计数器、自发时间表。等待正在运行的分析器批次完成后再执行 |
 | `/nep private show <user>` | 显示成员的私有记忆：关系、兴趣、细节、回忆、私有和有效好感度、今日回复数。无私有层则为普通回答。仅限所有者；不可授权 |
 | `/nep private forget <user>` | 仅删除成员的私有记忆；公共档案保留。等待正在运行的分析器批次完成后再执行。仅限所有者；不可授权 |
 | `/nep private purge <user>` | 删除机器人在与成员的私信对话中发送的消息（扫描最多 `private.purgeMaxMessages` 条），然后删除该成员的私有记忆。成员自己的消息保留。暂停时拒绝。仅限所有者；不可授权 |

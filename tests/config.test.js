@@ -195,16 +195,6 @@ test('config.json: the code fallback of memory.analyzerEpisodes is the shipped v
   assert.equal(analyzerEpisodes({ memory: {} }), shipped.memory.analyzerEpisodes);
 });
 
-test('config.json: the code fallbacks of the variety group, the long pass included, are the shipped values', async () => {
-  const { VARIETY_DEFAULTS, varietySettings } = await import('../src/behavior/variety.js');
-  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-  const shipped = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
-  assert.deepEqual(varietySettings({}), shipped.variety);
-  assert.deepEqual(varietySettings({ variety: {} }), shipped.variety);
-  assert.deepEqual({ ...VARIETY_DEFAULTS }, shipped.variety);
-  for (const key of ['longLines', 'longEveryHours', 'longMinLines', 'longMaxPatterns']) assert.ok(Object.hasOwn(shipped.variety, key), key);
-});
-
 test('config.json: the code fallbacks of the split group are the shipped values, and splitTasks ships on', () => {
   const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
   const shipped = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));

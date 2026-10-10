@@ -105,7 +105,7 @@ const HELPER_TIMEOUT_MS_FALLBACK = 30000;
 
 /**
  * The options of one in-turn helper request -- a short call made on the way to
- * a reply (the `classifier.text` passes: address, variety, re-watch, search,
+ * a reply (the `classifier.text` passes: address, re-watch, search,
  * link read, search summary; the picture describer) -- so every helper is
  * spelled the same way: counted against `llm.maxRequestsPerDay`, never fed to
  * the calibration (a short or a vision prompt says nothing about the text
@@ -124,13 +124,13 @@ const HELPER_TIMEOUT_MS_FALLBACK = 30000;
  * @param {string} [request.role]             The subprocess, e.g. `classifier.text` (see `complete`).
  * @param {number} [request.maxOutputTokens]  Undefined leaves `llm.maxOutputTokens` in charge.
  * @param {string} [request.purpose]          What the request is for, a kebab-case code for the
- *   `llm: usage` line (`address`, `variety`, `rewatch`, `lookup`, `read-link`, `search-summary`, `route-channel`, `variety-long`,
+ *   `llm: usage` line (`address`, `rewatch`, `lookup`, `read-link`, `search-summary`, `route-channel`,
  *   `describe`); never sent.
  * @param {AbortSignal} [request.signal]      The caller's own abort signal, if it has one.
  * @param {number} [request.timeoutMs]        A helper with a clock of its own; else
  *   `llm.helperTimeoutMs`, else 30000 (config.json's value).
  * @param {boolean} [request.long]            True for a helper whose answer is a summary of several
- *   hundred tokens (recall, link read, search summary, variety): hedged, its whole call is limited by
+ *   hundred tokens (recall, link read, search summary): hedged, its whole call is limited by
  *   `llm.hedge.longTimeoutMs` instead of `llm.hedge.timeoutMs`. Only `true` puts `long: true` in the
  *   set (never sent); anything else leaves the key out.
  * @returns {{ role: string|undefined, maxOutputTokens: number|undefined, countAgainstDailyCap: true,
@@ -934,7 +934,7 @@ export function createLlm({
    * in charge. Exists for the reply of a turn with a bar (`pace.replyHedgeMs`): a provider stall
    * must not let a direct call pass its bar unanswered.
    * `options.purpose` — what the request is for, a kebab-case code (`reply`,
-   * `memory-voice`, `address`, `variety`, `rewatch`, `lookup`, `read-link`,
+   * `memory-voice`, `address`, `rewatch`, `lookup`, `read-link`,
    * `search-summary`, `describe`, ...): the requests that share one role are told
    * apart by it in the journal (the reply and the memory wording both go out as
    * role `voice`).

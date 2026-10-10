@@ -47,9 +47,6 @@ Every key in `config.json` with its default, grouped by section.
 | `channelLinks` | `true` | When the persona writes `#channel-name` of a server channel in a message, the sent message carries a real channel link instead of the literal text. Names are matched longest first; an existing link stays. Off: text goes as written. A missing key counts as on |
 | `pauseNotice` | `true` | Post a short notice when the persona is called while paused. A missing key counts as on. See `mention.pauseNoticeMinutes` and `labels.limits.paused` |
 | `diary` | `true` | The persona posts in one owner-chosen channel on its own, on a random schedule. A missing key counts as on; with no `diary.channelId` set, nothing happens. See [Diary](diary.md) |
-| `variety` | `true` | A model pass names the devices the persona is overusing in their own recent lines. The result becomes a `<worn>` block in the turn's request. A missing key counts as on |
-| `varietyPrecompute` | `true` | Start the variety pass right after the persona posts text, so the next turn finds the result ready. Off: the pass runs only at the turn, but a late answer is still stored for later. A missing key counts as on |
-| `stickyGuard` | `true` | After each post, find phrases the persona stuck on (repeated in 3+ recent lines, rare in older ones) and add them as filler entries so the next turn sees them in the advice list. No model needed. A missing key counts as on |
 | `splitTasks` | `true` | Split a long structured direct call into separate parts, each answered in its own turn. A missing key counts as on. Needs `prompts/split.md` and `labels.task.part` |
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
@@ -116,7 +113,7 @@ The three helper model roles, grouped under one key. Each is set independently, 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `text` | `"anthropic/claude-sonnet-4.6"` | Runs the address classifier (`features.followUp`), the search classifier, the link reader, the search condenser and the recall summary (`features.webLookup`, `features.recall`), the re-watch classifier (`features.videoRewatch`), the room classifier (`spontaneous.roomQuestionChance`), the channel route classifier (`features.channelRoute`) and the variety pass (`features.variety`) |
+| `text` | `"anthropic/claude-sonnet-4.6"` | Runs the address classifier (`features.followUp`), the search classifier, the link reader, the search condenser and the recall summary (`features.webLookup`, `features.recall`), the re-watch classifier (`features.videoRewatch`), the room classifier (`spontaneous.roomQuestionChance`) and the channel route classifier (`features.channelRoute`) |
 | `media` | `"anthropic/claude-haiku-4.5"` | Picture describer (`features.mediaDescriptions`): one-line descriptions for pictures, GIF frames, video posters, stickers, custom emoji and link thumbnails |
 | `video` | `"google/gemini-3.8-flash"` | Video describer (`features.videoDescriptions`): watches short clips, re-watches on a question, retries on request. Must accept both video and audio input |
 
@@ -210,7 +207,7 @@ How long each stage of a turn may take when someone is waiting for the answer. A
 
 | Key | Default | Meaning |
 |---|---|---|
-| `prepareMs` | `6000` | Milliseconds from the turn's start before the voice request. Everything that runs before the LLM call (history, captions, the variety pass, the route and search classifiers) must finish within this window. `0` or a non-number removes the limit |
+| `prepareMs` | `6000` | Milliseconds from the turn's start before the voice request. Everything that runs before the LLM call (history, captions, the route and search classifiers) must finish within this window. `0` or a non-number removes the limit |
 | `prepareSearchMs` | `12000` | The deadline extends to this limit while the search classifier is deciding and while any search it requests runs. A 'no search' verdict releases the hold at once. Never shorter than `prepareMs`. `0` or a non-number removes the limit |
 | `prepareMediaMs` | `20000` | Extended deadline on a direct call whose trigger message (or the line it replies to) carries a picture, GIF or video the describer or video stage will work on. Never shorter than `prepareMs`; when the search extension also applies, the larger limit wins. `0` or a non-number removes the extension |
 | `dropAfterMs` | `60000` | Milliseconds from the turn's start. If the finished answer has not arrived by this time, the turn is dropped unposted (`turn: dropped`). `0` or a non-number removes the bar |
@@ -678,54 +675,6 @@ Default `windows`:
 
 Morning (7–11) is off. Day (12–16) draws 0 or 1 post. Evening (18–01 the next day) draws 0, 1 or 2. Night (01–05) draws 0 or 1. All times are in `bot.timezone`. A window whose `to` is not after its `from` wraps past midnight: `{ "from": 18, "to": 1 }` runs from 18:00 today to 01:00 tomorrow.
 
-## `variety`
-
-Settings for the variety pass (`features.variety`). The persona's own recent lines go to the `classifier.text` model, which names the repeated devices. With `features.varietyPrecompute` on, the pass starts right after the persona posts text so the next turn finds the answer ready; at the turn, a ready answer is used from cache, or the turn joins a pass already in flight and waits at most `variety.timeoutMs`. The result becomes a `<worn>` block in the turn's request. A timeout or a failed pass never delays or fails the turn; the turn simply goes without the block. A second, longer pass (`variety.longLines`) runs at most once per `variety.longEveryHours` over the ring of the persona's own lines across all channels, using `prompts/variety-long.md` on the `classifier.text` model. Its patterns are stored as `wornLong` in guild memory and stay in force until the next long pass; a turn receives them ahead of the short pass's patterns. All hot-reloaded.
-
-| Key | Default | Meaning |
-|---|---|---|
-| `window` | `16` | Own lines the pass looks at, taken from the turn's channel first, then from other channels |
-| `recentMinutes` | `180` | A line older than this many minutes is left out |
-| `minLines` | `3` | Fewer lines than this skips the pass |
-| `contextChars` | `120` | Characters kept from the message each line answered (the `(to: ...)` context) |
-| `maxPatterns` | `4` | Most patterns one pass may name |
-| `shapeChars` | `140` | Max characters for one shape description |
-| `examplesInBlock` | `false` | Show example quotes alongside the shape in the `<worn>` block. Off: the block lists only the shape. A missing key counts as off |
-| `maxOutputTokens` | `500` | Max output tokens for the pass |
-| `timeoutMs` | `8000` | How long a turn waits for a pass result (ms). A pass that outlives this wait keeps running to `requestTimeoutMs`; a late answer is stored and serves the next turn. The mentor sandbox uses this value as its request timeout |
-| `requestTimeoutMs` | `30000` | Request timeout for the variety model call (ms). The pass is cut at this time; `variety.timeoutMs` is only how long a turn waits for it |
-| `history` | `20` | Passes kept in the history ring in guild memory |
-| `longLines` | `300` | Own lines the long pass reads from the ring, across all channels with no age limit. `0` turns the long pass off |
-| `longEveryHours` | `6` | Hours between long passes; a failure counts so it is not retried after every post |
-| `longMinLines` | `60` | Fewer lines than this in the ring skips the long pass |
-| `longMaxPatterns` | `3` | Most patterns the long pass may name |
-
-### `variety.fillers`
-
-Settings for the filler advice list. Two kinds of entry: a PREFIX entry ends with `*` (at least 3 letters before the `*`) and matches every word starting with that prefix on a word boundary; an EXACT entry (no `*`) matches the word or phrase whole. The variety passes are the main source: a word-type habit the pass finds becomes an entry with weight equal to its count. The list is ranked with eviction like interests: capacity `max`, weight with recency decay (`halfLifeDays`), the weakest evicted when full. Owner-added entries are pinned: never evicted or decayed. Entries on cooldown (used within `cooldownHours` or `cooldownMessages` of the persona's own posts; pinned entries always) are shown to the persona in the `<worn>` block before the reply, ranked, at most `max`. The persona sees them before writing and avoids them on its own. State in guild memory: `fillers` and `ownMessageCount`.
-
-| Key | Default | Meaning |
-|---|---|---|
-| `cooldownHours` | `36` | Hours since an entry's last use before it is free again |
-| `cooldownMessages` | `300` | The persona's own posted messages since an entry's last use before it is free again |
-| `max` | `12` | Entries kept in the list; the weakest by rank is evicted when full |
-| `halfLifeDays` | `14` | Recency half-life for the entry ranking (days); same decay formula as interests |
-
-### `variety.sticky`
-
-Settings for the mechanical sticky-token detector (`features.stickyGuard`). After each of the persona's posts (or when the short variety pass lands), code scans two windows: the persona's last `lines` own lines (the recent window) and the older part of the ring up to `variety.longLines` (the baseline). A phrase of 1 to `maxWords` words counts as sticky when it occurs in at least `minRepeats` recent lines and in at most `baselineMax` older lines, so ordinary vocabulary the persona always uses never qualifies. A one-word phrase needs `minChars` characters, or at least 2 characters if it contains a digit. With fewer than `baselineMin` older lines available, a single word counts only when it contains a digit. Words in the `ignore` list are never counted. The longest overlapping phrase wins. Each match becomes an exact filler entry with weight equal to its count and cooldown already started, so the next turn's advice list includes it. Logged as `fillers: sticky`.
-
-| Key | Default | Meaning |
-|---|---|---|
-| `minRepeats` | `3` | Minimum recent lines a phrase must appear in to count |
-| `minRepeatsWord` | `4` | A single word without a digit must appear in this many recent lines to count as sticky. Phrases of two or more words and digit tokens use `minRepeats` |
-| `lines` | `40` | Recent own lines scanned |
-| `maxWords` | `3` | Maximum words in one phrase |
-| `minChars` | `4` | Minimum characters for a one-word phrase unless it contains a digit |
-| `baselineMax` | `1` | Maximum occurrences in the older ring for a phrase to count as sticky |
-| `baselineMin` | `100` | With fewer older lines than this, a single word counts only when it contains a digit |
-| `ignore` | `[]` | Words never counted as a sticky token |
-
 ## `private`
 
 Settings for private chat (`features.privateMessages`). All hot-reloaded. The gate checks these locally with zero tokens before any LLM request.
@@ -809,7 +758,7 @@ Role `analyzer`. Reasons over long transcripts and returns strict JSON. Needs th
 
 ### Text classifiers (`classifier.text`)
 
-The cheapest text model that can answer "yes" or "no" reliably. Runs the address classifier (`features.followUp`), the search classifier, the link reader, the search condenser and the recall summary (`features.webLookup`, `features.recall`), the re-watch classifier (`features.videoRewatch`), the room classifier (`spontaneous.roomQuestionChance`), the channel route classifier (`features.channelRoute`) and the variety pass (`features.variety`). Default: `anthropic/claude-sonnet-4.6`.
+The cheapest text model that can answer "yes" or "no" reliably. Runs the address classifier (`features.followUp`), the search classifier, the link reader, the search condenser and the recall summary (`features.webLookup`, `features.recall`), the re-watch classifier (`features.videoRewatch`), the room classifier (`spontaneous.roomQuestionChance`) and the channel route classifier (`features.channelRoute`). Default: `anthropic/claude-sonnet-4.6`.
 
 ### Pictures (`classifier.media`)
 
