@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isAllowed, grant, revoke, hasGrant, isOwnerId, isOwnerOnly } from '../src/discord/access.js';
+import { isAllowed, grant, revoke, hasGrant, isOwnerId, isOwnerOnly, isMemberCommand } from '../src/discord/access.js';
 
 // ---------------------------------------------------------------------------
 // isOwnerId / hasGrant
@@ -191,6 +191,29 @@ test('isAllowed: the owner-only groups refuse every non-owner even with a * gran
     // the same wildcard still opens everything else
     assert.equal(isAllowed({ commandKey: 'memory.show', userId: '2', roleIds: [], owners: ['1'], access }), true, `${label}: memory.show`);
   }
+});
+
+test('isMemberCommand: the bare pings key only, never a group, a dotted key or an owner command', () => {
+  assert.equal(isMemberCommand('pings'), true);
+  for (const other of ['pings.on', 'ping', 'status', 'access', '*', '', undefined, 7]) {
+    assert.equal(isMemberCommand(other), false, String(other));
+  }
+});
+
+test('isAllowed: a member command passes for anyone, with no owners and no access at all', () => {
+  assert.equal(isAllowed({ commandKey: 'pings', userId: '2' }), true);
+  assert.equal(isAllowed({ commandKey: 'pings', userId: '2', roleIds: [], owners: [], access: undefined }), true);
+  assert.equal(isAllowed({ commandKey: 'pings', userId: '2', roleIds: [], owners: ['1'], access: {} }), true);
+  assert.equal(isAllowed({ commandKey: 'pings', userId: '2', roleIds: [], owners: ['1'], access: {}, memberCommands: true }), true);
+  // it opens nothing else
+  assert.equal(isAllowed({ commandKey: 'status', userId: '2', roleIds: [], owners: ['1'], access: {} }), false);
+});
+
+test('isAllowed: memberCommands false closes a member command to everyone but an owner, a * grant included', () => {
+  const open = { '*': { everyone: true, roles: [], users: [] } };
+  assert.equal(isAllowed({ commandKey: 'pings', userId: '2', roleIds: [], owners: ['1'], access: {}, memberCommands: false }), false);
+  assert.equal(isAllowed({ commandKey: 'pings', userId: '2', roleIds: [], owners: ['1'], access: open, memberCommands: false }), false);
+  assert.equal(isAllowed({ commandKey: 'pings', userId: '1', roleIds: [], owners: ['1'], access: {}, memberCommands: false }), true);
 });
 
 // ---------------------------------------------------------------------------

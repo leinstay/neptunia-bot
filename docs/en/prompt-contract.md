@@ -846,7 +846,7 @@ The mentor sandbox runs one variety pass per situation, charged to the mentor's 
 
 A ranked list of words and phrases the persona overuses, shown inside the `<worn>` block BEFORE the reply so the persona can avoid them on its own. Nothing rewrites the reply after the model writes it.
 
-**Data sources.** The variety passes are the main feeder: a word-type habit the pass finds becomes an entry with weight equal to its count. A mechanical detector (`features.stickyGuard`) also feeds the list after each post, finding phrases that recur in 3+ recent lines but rarely in the older ring, and adding each as an exact entry with cooldown already started (log `fillers: sticky`). The owner can pin entries with `/nep variety add type:filler` as a fallback.
+**Data sources.** The variety passes are the main feeder: a word-type habit the pass finds becomes an entry with weight equal to its count. A mechanical detector (`features.stickyGuard`) also feeds the list after each post, finding phrases that recur in 3+ recent lines but rarely in the older ring, and adding each as an exact entry with cooldown already started (log `fillers: sticky`).
 
 **Ranking.** The list is ranked with eviction like interests: capacity `variety.fillers.max` (default 12), weight with recency decay (`variety.fillers.halfLifeDays`, default 14), the weakest evicted when full; owner-added entries are pinned (never evicted or decayed).
 

@@ -69,10 +69,14 @@
 | `/nep mentor show <id>` | 上次运行的报告：场景、回答、分数、评论、以及诊断（如有） |
 | `/nep mentor wrong <id> <reason>` | 告知 mentor 对该案例判断有误以及原因；作为反例保存供未来评分 |
 | `/nep mentor status` | 模型、是否启用、今日 token 使用量/上限、各状态的案例数、进行中的运行（停止待处理时显示 `, stopping`），以及最近完成的运行（`last:`）：案例、结果、overall 中位数、已评分回答数、token 数和完成时间 |
-| `/nep variety show` | 多样性过程：最新短列表含示例，长过程的列表含其行数，然后是从新到旧的历史过程。只读，可通过权限授予 |
-| `/nep variety list type:<pattern\|filler>` | 编号列表。`type:pattern` 显示长过程的固定和自动检测的手法。`type:filler` 显示填充词条目：文本、类型（前缀或精确）、是否固定、权重、使用次数、最后使用时间、处于冷却或可用 |
-| `/nep variety add type:<pattern\|filler> text:<text>` | 手动添加条目。`type:pattern` 将手法固定在长列表中（不被下次过程删除）。`type:filler` 固定填充词条目（不淘汰、不衰减）；末尾 `*` 使其成为前缀。多样性过程自动填充两个列表；此命令是过程遗漏情况的备选方案 |
-| `/nep variety remove type:<pattern\|filler> id:<n>` | 按 `/nep variety list` 的编号删除条目。也接受条目文本代替编号 |
 | `/nep access grant <command> [role] [user]` | 将命令、命令组或 `*` 开放给所有人（默认）、某个身份组或某个用户。`private.*`、`mentor.*` 和 `access.*` 被排除；见上文 |
 | `/nep access revoke <command> [role] [user]` | 从所有人（默认）、某个身份组或某个用户撤销授权 |
 | `/nep access list` | 列出所有当前访问授权 |
+
+## 成员命令
+
+`/nep pings` 是所有服务器成员无需 `bot.access` 授权即可运行的唯一命令。`features.memberCommands: false` 将其限制为仅限所有者。
+
+| 命令 | 说明 |
+|---|---|
+| `/nep pings [mode]` | 查看或更改角色的消息是否通知你。不带 `mode`：显示当前设置。`on` / `off`：设置偏好。关闭时，对你消息的回复不带回复提醒，角色文本中对你的 @提及仍然显示但不发送通知。角色的措辞不受影响。仅自己可见的回复：`Pings: on` 或 `Pings: off`。按服务器存储，重启后保留，仅 `/nep memory wipe` 时清除 |

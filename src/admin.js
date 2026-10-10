@@ -3,7 +3,9 @@
 // without ever touching data/: live rules (prompts.local/rules.md, seeded
 // from prompts/rules.md), config overrides (config.local.json, hot-reloaded),
 // status, a manual interject/initiate of the spontaneous scheduler, and
-// profile inspection/deletion. This is the ONLY place in the project that ever
+// profile inspection/deletion, plus one member command, `/nep pings` (cmdPings: a
+// member's own notification switch, open to everyone while
+// `features.memberCommands` is on). This is the ONLY place in the project that ever
 // deletes stored memory, through the three functions store.js allows for it:
 // store.forgetUser (one profile, private layer included), store.forgetPrivate
 // (one member's private layer only, `/nep private forget` and
@@ -39,11 +41,12 @@ import { rankEmojiUsage } from './memory/emoji-usage.js';
 import { rankGifs } from './memory/gifs.js';
 import { gifCaptionCounts, gifFormatCounts } from './memory/gif-recache.js';
 import { gifPostsToday, gifWatchesToday } from './memory/gif-watch.js';
-import { commandKeys, leafPaths, MEMORY_SHOW_SECTIONS, MODEL_ROLES, MODEL_SET_PATHS, MODEL_SET_ROLES } from './discord/commands.js';
+import { commandKeys, leafPaths, MEMORY_SHOW_SECTIONS, MODEL_ROLES, MODEL_SET_PATHS, MODEL_SET_ROLES, PINGS_MODES } from './discord/commands.js';
 import {
   isAllowed as accessIsAllowed,
   isOwnerId,
   isOwnerOnly,
+  isMemberCommand,
   grant as accessGrant,
   revoke as accessRevoke,
   hasGrant,
@@ -53,8 +56,7 @@ import { classifierTextModel, classifierMediaModel, classifierVideoModel } from 
 import { buildDrawPrompt } from './behavior/prompt.js';
 import { imageFileName } from './behavior/turn.js';
 import { initiateCooldownUntil } from './behavior/spontaneous.js';
-import { normalizeWorn, normalizeWornLong, renderVarietyReport, varietySettings, varietyStatusLine } from './behavior/variety.js';
-import { fillerKey, fillersOnCooldown, fillersSettings, parseFiller, rankFillers } from './behavior/fillers.js';
+import { varietyStatusLine } from './behavior/variety.js';
 import { effectiveAffinity, privateRepliesToday } from './behavior/private.js';
 import { ImageCapError, ImageGenError, UnsupportedImageModelError, familyOf as imageFamilyOf, IMAGE_ROLE } from './llm/images.js';
 import { matchRoute, resolveProvider, llmCountToday } from './llm/openrouter.js';
@@ -63,8 +65,8 @@ import { backfillDiary } from './behavior/diary.js';
 import { anchorMax, checkCaseText } from './mentor/cases.js';
 import { renderCard, renderFile, renderLastRun } from './mentor/report.js';
 import { log } from './log.js';
-import { clampChars, oneLine } from './memory/clamp.js';
-import { HOUR_MS, countToday, utcDay, zonedDay } from './time.js';
+import { clampChars } from './memory/clamp.js';
+import { countToday, utcDay, zonedDay } from './time.js';
 import { formatClock } from './discord/format.js';
 import { liveRecent, recentSettings } from './memory/recent.js';
 import { VOICE_DAILY } from './memory/update.js';
@@ -94,8 +96,6 @@ const READ_ONLY_ACCESS_KEYS = new Set([
   'warmup.people',
   'route.list',
   'diary.show',
-  'variety.show',
-  'variety.list',
 ]);
 
 /** Command keys whose every call spends OpenRouter balance outside `llm.maxRequestsPerDay`
@@ -929,7 +929,8 @@ export function createAdmin({
   mentorBudget,
   diary,
 }) {
-  /** Owner, or `bot.access` granted the command by exact key, group, or `*` — see
+  /** Owner, or `bot.access` granted the command by exact key, group, or `*`, or a member
+   * command while `features.memberCommands` is on (read now) — see
    * src/discord/access.js#isAllowed. `roleIds` -- the caller's Discord role ids -- comes from
    * src/discord/commands.js#createInteractionHandler, which reads them off the interaction. */
   function isAllowed(commandKey, { userId, roleIds } = {}) {
@@ -939,6 +940,7 @@ export function createAdmin({
       roleIds,
       owners: hot.config?.bot?.owners ?? [],
       access: hot.config?.bot?.access ?? {},
+      memberCommands: hot.config?.features?.memberCommands !== false,
     });
   }
 
@@ -973,7 +975,7 @@ export function createAdmin({
    * paused, with a hint to resume first. Guards interject, initiate,
    * alias.add, alias.remove, memory.forget, private.forget, private.purge, memory.wipe, memory.affinity (when
    * setting a score), memory.refresh, lore.add, lore.remove, learned.add,
-   * learned.remove, variety.add, variety.remove, warmup.run, warmup.users, warmup.channels, warmup.server,
+   * learned.remove, warmup.run, warmup.users, warmup.channels, warmup.server,
    * warmup.reset, emoji.rescan, gifs.rescan, gifs.recache, draw (it counts against the image rail in state.json) and
    * mentor.add, mentor.anchor, mentor.remove, mentor.run, mentor.check and mentor.wrong.
    */
@@ -2960,13 +2962,14 @@ export function createAdmin({
   }
 
   /** The command keys a grant of `key` opens: every one for `*`, a group's commands for a group,
-   * else the key itself -- owner-only ones never (src/discord/access.js#isOwnerOnly). */
+   * else the key itself -- owner-only ones never (src/discord/access.js#isOwnerOnly), nor the
+   * member commands, open without a grant (src/discord/access.js#isMemberCommand). */
   function keysOpenedBy(key) {
     const { keys, groups } = commandKeys();
     let opened = [key];
     if (key === '*') opened = [...keys];
     else if (groups.has(key)) opened = [...keys].filter((full) => full.startsWith(`${key}.`));
-    return opened.filter((full) => !isOwnerOnly(full));
+    return opened.filter((full) => !isOwnerOnly(full) && !isMemberCommand(full));
   }
 
   /** `bot.access` as of the last write (`localOrLive`): config.local.json already holds the whole
@@ -2997,9 +3000,36 @@ export function createAdmin({
     return { what: { everyone: true }, label: 'everyone' };
   }
 
+  // ---------------------------------------------------------------------
+  // pings: a member's own notification switch (`/nep pings`)
+  // ---------------------------------------------------------------------
+
+  /** `/nep pings [on|off]`: the caller's own notifications from the persona in this guild
+   * (store.setPingsOff; src/behavior/turn.js reads them when it posts). No mode shows the state.
+   * A member's own switch, not memory: it works while paused too (read fresh off disk then, and
+   * written at once by the store). */
+  function cmdPings(args, context) {
+    const guildId = requireGuildId(context);
+    const userId = context?.userId;
+    if (!userId) throw new Error('no user');
+    const mode = args?.mode;
+    freshenIfPaused();
+    if (mode === undefined || mode === null || mode === '') return pingsText(!store.isPingsOff(guildId, userId));
+    if (!PINGS_MODES.includes(mode)) throw new Error(`mode must be one of: ${PINGS_MODES.join(', ')}`);
+    const off = store.setPingsOff(guildId, userId, mode === 'off');
+    log.info('admin: pings set', { guildId, userId, off });
+    return pingsText(!off);
+  }
+
+  /** The one reply of `/nep pings`: the caller's state after the call. */
+  function pingsText(on) {
+    return on ? 'Pings: on' : 'Pings: off';
+  }
+
   function cmdAccessGrant(args) {
     const key = String(args?.command ?? '').trim();
     if (!key) throw new Error('a command key is required');
+    if (isMemberCommand(key)) throw new Error(`${key} is open to every member and cannot be granted`);
     if (!isKnownAccessKey(key)) throw new Error(`unknown command key: ${key}`);
     if (isOwnerOnly(key)) {
       const group = key.split('.')[0];
@@ -3048,153 +3078,6 @@ export function createAdmin({
         return `${key}: ${parts.join(', ')}`;
       })
       .join('\n');
-  }
-
-  /** `/nep variety show`: the variety pass's latest list with its examples, the long pass's list, then the history newest first. */
-  function cmdVariety(_args, context) {
-    freshenIfPaused();
-    const guildId = requireGuildId(context);
-    const guild = store.getGuild(guildId);
-    return renderVarietyReport(guild?.worn, guild?.wornHistory, hot.config, Date.now(), guild?.wornLong);
-  }
-
-  // The owner's fallback over the two lists the `<worn>` block shows: worn patterns
-  // (the long list, where a pinned pattern lives, then the short one) and fillers
-  // (src/behavior/fillers.js). The variety passes fill both by themselves; these
-  // commands pin, show and remove.
-
-  /** `type` of a variety list command: `pattern` or `filler`, else an Error. */
-  function varietyType(args) {
-    const type = String(args?.type ?? '');
-    if (type !== 'pattern' && type !== 'filler') throw new Error('type must be pattern or filler');
-    return type;
-  }
-
-  /** The stored patterns in list order: the long list's (pins first), then the short list's. */
-  function patternRows(guild) {
-    const long = normalizeWornLong(guild?.wornLong)?.patterns ?? [];
-    const short = normalizeWorn(guild?.worn)?.patterns ?? [];
-    return [...long.map((pattern) => ({ pattern, list: 'long' })), ...short.map((pattern) => ({ pattern, list: 'short' }))];
-  }
-
-  /** The fillers in list order (pinned first, then by rank, `variety.fillers.halfLifeDays` read now). */
-  function fillerRows(guild) {
-    return rankFillers(Array.isArray(guild?.fillers) ? guild.fillers : [], fillersSettings(hot.config).halfLifeDays);
-  }
-
-  /** `#n <shape> · <list>[, pinned] · seen <count>[ · word <word>]` for `/nep variety list type:pattern`. */
-  function patternLine({ pattern, list }, index) {
-    const seen = pattern.pinned === true ? '' : ` · seen ${pattern.count}`;
-    const word = pattern.word ? ` · word ${pattern.word}` : '';
-    return `#${index + 1} ${pattern.shape} · ${list} list${pattern.pinned === true ? ', pinned' : ''}${seen}${word}`;
-  }
-
-  /**
-   * `/nep variety list`: one numbered list. `type:pattern` -- the patterns the
-   * `<worn>` block shows (patternRows). `type:filler` -- a header (the
-   * cooldown read now, the persona's own message count), then each filler:
-   * its text (`*` = prefix), kind, pinned, weight, uses, last use, own
-   * messages since and whether it rests now, with what releases it first.
-   */
-  function cmdVarietyList(args, context) {
-    freshenIfPaused();
-    const guildId = requireGuildId(context);
-    const type = varietyType(args);
-    const guild = store.getGuild(guildId);
-    if (type === 'pattern') {
-      const rows = patternRows(guild);
-      return rows.length === 0 ? NONE : rows.map(patternLine).join('\n');
-    }
-    const settings = fillersSettings(hot.config);
-    const count = Number.isInteger(guild?.ownMessageCount) ? guild.ownMessageCount : 0;
-    const now = Date.now();
-    const header =
-      `cooldown ${settings.cooldownHours}h or ` +
-      `${settings.cooldownMessages} own messages · own messages: ${count} · max ${settings.max}`;
-    const rows = fillerRows(guild);
-    if (rows.length === 0) return `${header}\n${NONE}`;
-    const resting = new Set(fillersOnCooldown(rows, { now, ownMessages: count, ...settings }));
-    const lines = rows.map((entry, index) => {
-      const since = Number.isInteger(entry.lastUsedAtMessage) ? count - entry.lastUsedAtMessage : null;
-      const last = Number.isFinite(entry.lastUsedAt) ? `last ${isoDay(entry.lastUsedAt)}` : 'never used';
-      const sinceText = since === null ? '' : ` · ${since} messages since`;
-      let state = 'free';
-      if (resting.has(entry)) {
-        const hoursLeft = Math.ceil((entry.lastUsedAt + settings.cooldownHours * HOUR_MS - now) / HOUR_MS);
-        state = `resting: free in ${hoursLeft}h or ${settings.cooldownMessages - since} messages`;
-      }
-      const kind = `${entry.prefix ? 'prefix' : 'exact'}${entry.pinned ? ', pinned' : ''}`;
-      return `#${index + 1} ${fillerKey(entry)} · ${kind} · weight ${entry.weight} · uses ${entry.uses} · ${last}${sinceText} · ${state}`;
-    });
-    return [header, ...lines].join('\n');
-  }
-
-  /** Why parseFiller refused a filler, as the owner reads it. */
-  function fillerRefusal(reason) {
-    if (reason === 'short-prefix') return 'a prefix needs at least 3 letters before the *';
-    if (reason === 'star-inside') return 'a * may only end a prefix';
-    if (reason === 'too-long') return 'a filler is a word or a short phrase (at most 40 characters)';
-    return 'a filler needs at least one letter or digit';
-  }
-
-  /**
-   * `/nep variety add`: `type:pattern` pins a pattern (`text` = its shape) in
-   * the long list, kept through every long pass until removed;
-   * `type:filler` pins a filler (`text`, a trailing `*` = prefix), never
-   * evicted. Both are fallbacks: the variety passes fill the lists by themselves.
-   */
-  function cmdVarietyAdd(args, context) {
-    assertNotPaused();
-    const guildId = requireGuildId(context);
-    const type = varietyType(args);
-    const text = oneLine(String(args?.text ?? ''));
-    if (!text) throw new Error('text is required');
-    if (type === 'pattern') {
-      const shapeChars = varietySettings(hot.config).shapeChars;
-      if ([...text].length < 3 || [...text].length > shapeChars) throw new Error(`a pattern is 3 to ${shapeChars} characters (variety.shapeChars)`);
-      const { added } = store.pinWornPattern(guildId, text);
-      return added ? `Pinned pattern: ${text}` : `Pinned the listed pattern: ${text}`;
-    }
-    const { entry, reason } = parseFiller(text);
-    if (!entry) throw new Error(fillerRefusal(reason));
-    const settings = fillersSettings(hot.config);
-    const out = store.pinFiller(guildId, entry, Date.now(), settings);
-    if (out.full) throw new Error(`the filler list already holds ${settings.max} pinned entries (variety.fillers.max)`);
-    return out.added ? `Pinned filler: ${fillerKey(entry)}` : `Pinned the listed filler: ${fillerKey(entry)}`;
-  }
-
-  /**
-   * `/nep variety remove`: deletes one entry by its number in
-   * `/nep variety list` (`id`) or by its text (`text`: a pattern's shape; a
-   * filler as listed, the `*` optional when only the prefix entry exists),
-   * pinned or not. An id or a text that names nothing is an error.
-   */
-  function cmdVarietyRemove(args, context) {
-    assertNotPaused();
-    const guildId = requireGuildId(context);
-    const type = varietyType(args);
-    const id = Number.isInteger(args?.id) ? args.id : null;
-    const text = oneLine(String(args?.text ?? ''));
-    if (id === null && !text) throw new Error('an id or the text is required');
-    const guild = store.getGuild(guildId);
-    if (type === 'pattern') {
-      const rows = patternRows(guild);
-      const key = text.toLowerCase();
-      const row = id !== null ? rows[id - 1] : rows.find(({ pattern }) => oneLine(pattern.shape).toLowerCase() === key);
-      if (!row) throw new Error(id !== null ? `no pattern #${id}` : `no pattern: ${text}`);
-      store.removeWornPattern(guildId, row.pattern.shape);
-      return `Removed pattern: ${row.pattern.shape}`;
-    }
-    const rows = fillerRows(guild);
-    let target = id !== null ? rows[id - 1] : null;
-    if (id === null) {
-      const { entry } = parseFiller(text);
-      const keys = entry ? [fillerKey(entry), ...(entry.prefix ? [] : [`${entry.text}*`])] : [];
-      target = keys.map((key) => rows.find((row) => fillerKey(row) === key)).find(Boolean) ?? null;
-    }
-    if (!target) throw new Error(id !== null ? `no filler #${id}` : `no filler: ${text}`);
-    store.removeFiller(guildId, fillerKey(target));
-    return `Removed filler: ${fillerKey(target)}`;
   }
 
   // ---------------------------------------------------------------------
@@ -3328,6 +3211,7 @@ export function createAdmin({
   const commands = {
     status: () => cmdStatus(),
     ping: (args) => cmdPing(args),
+    pings: (args, context) => cmdPings(args, context),
     reload: () => cmdReload(),
     pause: () => cmdPause(),
     resume: () => cmdResume(),
@@ -3394,10 +3278,6 @@ export function createAdmin({
     'access.grant': (args) => cmdAccessGrant(args),
     'access.revoke': (args) => cmdAccessRevoke(args),
     'access.list': () => cmdAccessList(),
-    'variety.show': (args, context) => cmdVariety(args, context),
-    'variety.list': (args, context) => cmdVarietyList(args, context),
-    'variety.add': (args, context) => cmdVarietyAdd(args, context),
-    'variety.remove': (args, context) => cmdVarietyRemove(args, context),
   };
 
   /**

@@ -54,6 +54,7 @@
 | `followUp` | `true` | 角色回复后对未标记消息进行分类以延续对话 |
 | `typingSimulation` | `true` | 模拟输入速度 |
 | `adminCommands` | `true` | 所有者斜杠命令；设为 `false` 时注销命令 |
+| `memberCommands` | `true` | `/nep pings` 命令，所有成员可用；`false` 仅限所有者 |
 
 ## `bot`
 
@@ -691,7 +692,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 | `maxOutputTokens` | `500` | 过程的最大输出 token 数 |
 | `timeoutMs` | `8000` | 回合等待过程结果的时间（毫秒）。超过此等待的过程继续运行至 `requestTimeoutMs`；迟到的结果会保存并在下一回合使用。Mentor 沙盒将此值用作请求超时 |
 | `requestTimeoutMs` | `30000` | 多样性模型调用的请求超时（毫秒）。过程在此时间截止；`variety.timeoutMs` 仅为回合的等待时间 |
-| `history` | `20` | `/nep variety` 显示的历史过程环的容量 |
+| `history` | `20` | 服务器记忆中历史过程环保留的过程数 |
 | `longLines` | `300` | 长过程从环中读取的角色消息数，跨所有频道无时间限制。`0` 关闭长过程 |
 | `longEveryHours` | `6` | 两次长过程之间的小时数；失败也计入，避免每次发帖后重试 |
 | `longMinLines` | `60` | 环中消息少于此数时跳过长过程 |
@@ -699,7 +700,7 @@ YouTube 链接的时长通过以下链式探测获取：首先尝试 yt-dlp，�
 
 ### `variety.fillers`
 
-填充词建议列表的设置。条目分两种类型：PREFIX 条目以 `*` 结尾（`*` 前至少 3 个字母），在词边界匹配所有以该前缀开头的词；EXACT 条目（无 `*`）精确匹配整个词或短语。多样性过程是主要来源：过程发现的词类习惯会成为条目，权重等于其计数。所有者可通过 `/nep variety add type:filler` 固定条目作为备选方案。列表的排名与淘汰机制类似兴趣：容量 `max`，权重带时间衰减（`halfLifeDays`），满时淘汰最弱的。所有者添加的条目被固定（不淘汰、不衰减）。冷却中的条目（在 `cooldownHours` 小时内或 `cooldownMessages` 条自身消息内使用过的；固定条目始终）在回复前以 `<worn>` 块显示给角色，按排名排列，最多 `max` 条。角色提前看到并自行避免。服务器记忆中的状态：`fillers` 和 `ownMessageCount`。
+填充词建议列表的设置。条目分两种类型：PREFIX 条目以 `*` 结尾（`*` 前至少 3 个字母），在词边界匹配所有以该前缀开头的词；EXACT 条目（无 `*`）精确匹配整个词或短语。多样性过程是主要来源：过程发现的词类习惯会成为条目，权重等于其计数。列表的排名与淘汰机制类似兴趣：容量 `max`，权重带时间衰减（`halfLifeDays`），满时淘汰最弱的。所有者添加的条目被固定（不淘汰、不衰减）。冷却中的条目（在 `cooldownHours` 小时内或 `cooldownMessages` 条自身消息内使用过的；固定条目始终）在回复前以 `<worn>` 块显示给角色，按排名排列，最多 `max` 条。角色提前看到并自行避免。服务器记忆中的状态：`fillers` 和 `ownMessageCount`。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
