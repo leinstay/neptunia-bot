@@ -71,10 +71,14 @@ Channels, roles and users are picked from Discord's own pickers; `set`/`unset` a
 | `/nep mentor show <id>` | The report of the last run: situations, answers, scores, comments, and the diagnosis when present |
 | `/nep mentor wrong <id> <reason>` | Tell the mentor it judged that case wrongly and why; kept as a counter-example for future scoring |
 | `/nep mentor status` | Model, enabled or not, tokens used today / cap, cases by state, the run in flight (shows `, stopping` while a stop is pending), and the most recent finished run (`last:`): its case, outcome, median overall, scored answers, tokens and finish time |
-| `/nep variety show` | The variety pass: latest short list with examples, the long pass's list with its line count, then the history of passes newest first. Read-only, grantable |
-| `/nep variety list type:<pattern\|filler>` | Numbered list. `type:pattern` shows the long pass's pinned and auto-detected patterns. `type:filler` shows filler entries: text, kind (prefix or exact), pinned, weight, uses, last use time, and whether the entry is on cooldown or free |
-| `/nep variety add type:<pattern\|filler> text:<text>` | Add an entry by hand. `type:pattern` pins a pattern in the long list (never dropped by the next pass). `type:filler` pins a filler entry (never evicted or decayed); a trailing `*` makes it a prefix. The variety passes feed both lists automatically; these commands are a fallback for cases the passes miss |
-| `/nep variety remove type:<pattern\|filler> id:<n>` | Remove an entry by its number from `/nep variety list`. The entry's text is accepted in place of its id |
 | `/nep access grant <command> [role] [user]` | Open a command, group or `*` to everyone (default), a role, or a user. `private.*`, `mentor.*` and `access.*` are excluded; see above |
 | `/nep access revoke <command> [role] [user]` | Revoke a previous grant from everyone (default), a role, or a user |
 | `/nep access list` | List every current access grant |
+
+## Member commands
+
+`/nep pings` is the one command every server member may run without a `bot.access` grant. `features.memberCommands: false` restricts it to owners.
+
+| Command | What it does |
+|---|---|
+| `/nep pings [mode]` | Show or change whether the persona's messages notify you. Without `mode`: your current setting. `on` / `off`: set the preference. When off, replies to your messages carry no reply ping and @mentions of you in the persona's text still render but send no notification. The wording is the same either way. Ephemeral reply: `Pings: on` or `Pings: off`. Stored per server, survives restarts, cleared by `/nep memory wipe` |

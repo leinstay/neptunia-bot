@@ -1221,6 +1221,53 @@ test('createTurnRunner: when every picture downloads fine, all are kept as data:
 // touches the target channel; instead it logs, and optionally mirrors, what
 // it would have done.
 
+/** fakeStore whose guild keeps `pingsOff`, the members who turned the persona's notifications off. */
+function storeWithPingsOff(pingsOff) {
+  const store = fakeStore();
+  store.pingsCalls = [];
+  store.isPingsOff = (guildId, userId) => {
+    store.pingsCalls.push([guildId, userId]);
+    return pingsOff.includes(userId);
+  };
+  return store;
+}
+
+/** One reply turn in c1: Bob's older line, then Alice's trigger; the persona replies to the reply="#2" line. */
+async function runPingsTurn(store, answer) {
+  const bob = rawMessage({ id: 'm0', authorId: 'u2', authorName: 'Bob', ts: NOW - 5000, content: 'ola' });
+  const raw = rawMessage({ id: 'm1', authorId: 'u1', authorName: 'Alice' });
+  const channel = fakeTurnChannel({ id: 'c1', historyMessages: [bob, raw] });
+  const turns = createTurnRunner({ hot: fakeHot(), store, llm: fakeLlm(answer), calibrator: identityCalibrator(), client: fakeClient() });
+  const result = await turns.runTurn({ channel, mode: 'reply', trigger: normalizedTrigger(raw), triggerKind: 'mention' });
+  assert.equal(result.outcome, 'spoke');
+  return channel;
+}
+
+test('runTurn: a reply to a member with pings off does not ping them; their mention stays in the text but notifies nobody', async () => {
+  const store = storeWithPingsOff(['u1']);
+  const channel = await runPingsTurn(store, '<msg reply="#2">@Alice @Bob ναι</msg>');
+
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].content, '<@u1> <@u2> ναι', 'the text is never changed');
+  assert.deepEqual(channel.sent[0].reply, { messageReference: 'm1', failIfNotExists: false });
+  assert.deepEqual(channel.sent[0].allowedMentions, { parse: [], users: ['u2'], repliedUser: false });
+  assert.ok(store.pingsCalls.every(([guildId]) => guildId === 'g1'));
+});
+
+test('runTurn: a mentioned member with pings off is left out of users while the replied author with pings on is still pinged', async () => {
+  const channel = await runPingsTurn(storeWithPingsOff(['u2']), '<msg reply="#2">@Bob ναι</msg>');
+
+  assert.equal(channel.sent[0].content, '<@u2> ναι');
+  assert.deepEqual(channel.sent[0].allowedMentions, { parse: [], users: [], repliedUser: true });
+});
+
+test('runTurn: with nobody in pingsOff the reply and the mentions notify as before', async () => {
+  const channel = await runPingsTurn(storeWithPingsOff([]), '<msg reply="#2">@Alice @Bob ναι</msg>');
+
+  assert.deepEqual(channel.sent[0].reply, { messageReference: 'm1', failIfNotExists: false });
+  assert.deepEqual(channel.sent[0].allowedMentions, { parse: [], users: ['u1', 'u2'], repliedUser: true });
+});
+
 test('createTurnRunner: features.dryRun=true sends and reacts nowhere, only logs, and paces itself as if it had spoken', async () => {
   const raw = rawMessage({ id: 'm1', authorName: 'Alice' });
   const channel = fakeTurnChannel({ id: 'c1', name: 'general', historyMessages: [raw] });

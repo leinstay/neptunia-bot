@@ -75,6 +75,17 @@ test('MODEL_ROLES: the model-set, route and ping role choices are all derived fr
 // commandKeys
 // ---------------------------------------------------------------------------
 
+test('buildCommandTree: pings is a top-level subcommand with an optional mode of on or off', () => {
+  const pings = findOption(buildCommandTree('nep')[0].options, 'pings');
+  assert.equal(pings.type, 1);
+  assert.equal(pings.options.length, 1);
+  const [mode] = pings.options;
+  assert.equal(mode.name, 'mode');
+  assert.equal(mode.required, false);
+  assert.deepEqual(mode.choices, [{ name: 'on', value: 'on' }, { name: 'off', value: 'off' }]);
+  assert.ok(commandKeys().keys.has('pings'));
+});
+
 test('commandKeys: every group and every leaf command key, derived from the tree', () => {
   const { keys, groups } = commandKeys();
   assert.ok(groups.has('memory'));
@@ -461,6 +472,30 @@ test('interaction handler: a top-level subcommand maps to its bare command key',
   assert.equal(interaction.replies[0].content, 'ok: status');
 });
 
+test('interaction handler: pings maps mode (undefined when omitted) and runs for a member with no grant', async () => {
+  const admin = fakeAdmin({ owners: ['owner1'], access: {} });
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const off = fakeInteraction({ subcommand: 'pings', user: { id: 'member1' }, optionValues: { mode: 'off' } });
+  await handler(off);
+  await handler(fakeInteraction({ subcommand: 'pings', user: { id: 'member1' } }));
+
+  assert.deepEqual(admin.runCalls.map(([key, args]) => [key, args]), [['pings', { mode: 'off' }], ['pings', { mode: undefined }]]);
+  assert.deepEqual(admin.runCalls[0][2], { guildId: 'g1', channelId: 'c1', userId: 'member1' });
+  assert.deepEqual(off.replies, [{ content: 'ok: pings', flags: MessageFlags.Ephemeral }], 'answered at once, not deferred');
+});
+
+test('interaction handler: features.adminCommands false disables pings too', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot({ adminCommands: false }), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ subcommand: 'pings', user: { id: 'member1' } });
+  await handler(interaction);
+
+  assert.equal(admin.runCalls.length, 0);
+  assert.match(interaction.replies[0].content, /disabled/i);
+});
+
 test('interaction handler: memory.show maps the user option to userId, section/limit/order undefined when omitted', async () => {
   const admin = fakeAdmin();
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
@@ -756,6 +791,15 @@ test('autocomplete: command-option choices never offer the owner-only private an
   }
 });
 
+test('autocomplete: command-option choices never offer the member command pings', async () => {
+  const admin = fakeAdmin();
+  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
+
+  const interaction = fakeInteraction({ kind: 'autocomplete', group: 'access', subcommand: 'grant', focused: { name: 'command', value: 'pings' } });
+  await handler(interaction);
+  assert.deepEqual(interaction.respondCalls[0], []);
+});
+
 test('autocomplete: a non-owner granted * by role gets path choices, never command-key choices (access is owner-only)', async () => {
   const admin = fakeAdmin({ owners: ['owner1'], access: { '*': { everyone: false, roles: ['staff'], users: [] } } });
   const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
@@ -1019,47 +1063,4 @@ test('autocomplete: the route model option offers the route prefixes and the mod
   const typed = fakeInteraction({ kind: 'autocomplete', group: 'route', subcommand: 'remove', focused: { name: 'model', value: 'GOO' } });
   await handler(typed);
   assert.deepEqual(typed.respondCalls[0].map((c) => c.value), ['google/', 'google/gemini-3.8-flash']);
-});
-
-// ---------------------------------------------------------------------------
-// variety: the worn patterns and the fillers
-// ---------------------------------------------------------------------------
-
-test('buildCommandTree: variety is a group of show, list, add and remove; type a pattern|filler choice; no root or filler group', () => {
-  const { keys, groups } = commandKeys();
-  assert.ok(groups.has('variety'));
-  assert.ok(!groups.has('root') && !groups.has('filler'));
-  assert.ok(!keys.has('variety'), 'the bare key is now the group');
-  for (const key of ['variety.show', 'variety.list', 'variety.add', 'variety.remove']) assert.ok(keys.has(key), key);
-  const group = buildCommandTree('nep')[0].options.find((option) => option.name === 'variety');
-  const options = (name) => group.options.find((option) => option.name === name).options ?? [];
-  assert.deepEqual(options('show'), []);
-  for (const name of ['list', 'add', 'remove']) {
-    const type = options(name).find((option) => option.name === 'type');
-    assert.deepEqual([type.required, type.choices.map((choice) => choice.value)], [true, ['pattern', 'filler']], name);
-  }
-  assert.deepEqual(options('add').map((option) => [option.name, option.required]), [['type', true], ['text', true]]);
-  assert.deepEqual(options('remove').map((option) => [option.name, option.type, option.required]), [['type', 3, true], ['id', 4, false], ['text', 3, false]]);
-});
-
-test('interaction handler: variety show, list, add and remove map their options to admin.run', async () => {
-  const admin = fakeAdmin();
-  const handler = createInteractionHandler({ hot: baseHot(), admin, getGuildId: () => 'g1' });
-
-  await handler(fakeInteraction({ group: 'variety', subcommand: 'show' }));
-  await handler(fakeInteraction({ group: 'variety', subcommand: 'list', optionValues: { type: 'filler' } }));
-  await handler(fakeInteraction({ group: 'variety', subcommand: 'add', optionValues: { type: 'filler', text: 'équit*' } }));
-  await handler(fakeInteraction({ group: 'variety', subcommand: 'remove', optionValues: { type: 'pattern', id: 2 } }));
-  await handler(fakeInteraction({ group: 'variety', subcommand: 'remove', optionValues: { type: 'filler', text: 'bof' } }));
-
-  assert.deepEqual(
-    admin.runCalls.map(([key, args]) => [key, args]),
-    [
-      ['variety.show', {}],
-      ['variety.list', { type: 'filler' }],
-      ['variety.add', { type: 'filler', text: 'équit*' }],
-      ['variety.remove', { type: 'pattern', id: 2, text: undefined }],
-      ['variety.remove', { type: 'filler', id: undefined, text: 'bof' }],
-    ],
-  );
 });

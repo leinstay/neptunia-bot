@@ -1659,6 +1659,8 @@ export function createTurnRunner({
    * `history` and `sourceId`.
    *
    * The messages are posted as the model wrote them: nothing rewrites them.
+   * A member with pings off (store.isPingsOff) is mentioned and replied to
+   * without a notification: only allowedMentions changes, never the text.
    * After the reactions, the GIF picker (pickGif) runs alongside the first
    * message's typing imitation: both start together, the first message waits
    * for both; a GIF it picks is posted in place of the first message (that
@@ -1764,6 +1766,11 @@ export function createTurnRunner({
     const gif = picked ? null : parsed.gif;
     // Every message but the first one as written waits and is typed here; that one was typed alongside the picker.
     const typedAbove = (index) => index === 0 && !replaced;
+    // Members who turned the persona's notifications off (`/nep pings off`), read from the store at
+    // each send: their `<@id>` stays in the text but notifies nobody, and a reply to their line
+    // does not ping them (server channels only).
+    const pingsOff = (userId) =>
+      !privateChat && Boolean(userId) && typeof store.isPingsOff === 'function' && store.isPingsOff(guildId, userId);
     for (const [index, message] of messages.entries()) {
       if (!typedAbove(index) && typingOn) await sleep(between(cfg.betweenMessagesMs, rng));
 
@@ -1771,6 +1778,7 @@ export function createTurnRunner({
       const link = linkFor(pulledId);
       const mentioned = resolveMentions(message.text, lines, knownNames);
       const { userIds } = mentioned;
+      const repliedAuthorId = replyId ? (lines.find((line) => line.id === replyId)?.authorId ?? (trigger?.id === replyId ? trigger.authorId : null)) : null;
       // Custom emoji after the mentions: `<@id>` has no `:name:` in it to break.
       const spoken = renderCustomEmoji(mentioned.text, emojiLookup());
       // Channel links on the text sent; the typing time stays on the text as written.
@@ -1783,7 +1791,7 @@ export function createTurnRunner({
         posted = await channel.send({
           content: text,
           reply: replyId ? { messageReference: replyId, failIfNotExists: false } : undefined,
-          allowedMentions: { parse: [], users: userIds, repliedUser: true },
+          allowedMentions: { parse: [], users: userIds.filter((id) => !pingsOff(id)), repliedUser: !pingsOff(repliedAuthorId) },
         });
       } catch (err) {
         log.warn('turn: send failed', { channel: channel.id, index: replaced ? index + 1 : index, error: err });

@@ -657,6 +657,78 @@ test('isAllowed: a non-owner reads bot.access off the live hot.config, role gran
   assert.equal(admin.isAllowed('status', { userId: '999', roleIds: ['other'] }), false);
 });
 
+test('isAllowed: pings is open to a member with no grant while features.memberCommands is on, read live', async () => {
+  const rootDir = makeRoot();
+  const hot = makeHot(rootDir);
+  const { admin } = makeAdmin(rootDir, { hot });
+
+  assert.equal(admin.isAllowed('pings', { userId: '999', roleIds: [] }), true, 'no features key counts as on');
+  hot.config.features = { memberCommands: false };
+  assert.equal(admin.isAllowed('pings', { userId: '999', roleIds: [] }), false);
+  assert.equal(admin.isAllowed('pings', { userId: '42', roleIds: [] }), true, 'an owner still passes');
+  hot.config.features = { memberCommands: true };
+  assert.equal(admin.isAllowed('pings', { userId: '999', roleIds: [] }), true);
+  assert.equal(admin.isAllowed('status', { userId: '999', roleIds: [] }), false, 'it opens nothing else');
+});
+
+/** makeStore with the pings-off list of one guild, the way src/memory/store.js keeps it. */
+function storeWithPings() {
+  const store = makeStore();
+  store.pingsOff = new Set();
+  store.isPingsOff = (guildId, userId) => store.pingsOff.has(`${guildId}:${userId}`);
+  store.setPingsOff = (guildId, userId, off) => {
+    if (off) store.pingsOff.add(`${guildId}:${userId}`);
+    else store.pingsOff.delete(`${guildId}:${userId}`);
+    return store.pingsOff.has(`${guildId}:${userId}`);
+  };
+  return store;
+}
+
+test('run: pings with no mode shows the state of the caller; off and on change only the caller, in the guild of the interaction', async () => {
+  const rootDir = makeRoot();
+  const store = storeWithPings();
+  const { admin } = makeAdmin(rootDir, { store });
+  const context = { guildId: 'g1', channelId: 'c1', userId: '999' };
+
+  assert.equal(await admin.run('pings', {}, context), 'Pings: on');
+  assert.equal(await admin.run('pings', { mode: 'off' }, context), 'Pings: off');
+  assert.equal(await admin.run('pings', { mode: undefined }, context), 'Pings: off');
+  assert.deepEqual([...store.pingsOff], ['g1:999']);
+  assert.equal(await admin.run('pings', {}, { ...context, userId: '777' }), 'Pings: on', 'another member is untouched');
+  assert.equal(await admin.run('pings', { mode: 'on' }, context), 'Pings: on');
+  assert.deepEqual([...store.pingsOff], []);
+});
+
+test('run: pings refuses an unknown mode, writing nothing', async () => {
+  const rootDir = makeRoot();
+  const store = storeWithPings();
+  const { admin } = makeAdmin(rootDir, { store });
+
+  await assert.rejects(() => admin.run('pings', { mode: 'maybe' }, { guildId: 'g1', userId: '999' }), /mode must be one of: on, off/);
+  assert.deepEqual([...store.pingsOff], []);
+});
+
+test('run: pings works while paused, a change included, reading fresh off disk first', async () => {
+  const rootDir = makeRoot();
+  const store = storeWithPings();
+  const { admin } = makeAdmin(rootDir, { store });
+  const context = { guildId: 'g1', channelId: 'c1', userId: '999' };
+  store.state.data.paused = true;
+
+  assert.equal(await admin.run('pings', { mode: 'off' }, context), 'Pings: off');
+  assert.equal(await admin.run('pings', {}, context), 'Pings: off');
+  assert.deepEqual([...store.pingsOff], ['g1:999']);
+  assert.equal(store.dropCachesCalls, 2, 'each call reads past the caches while paused');
+});
+
+test('run: access.grant refuses pings, writing nothing', async () => {
+  const rootDir = makeRoot();
+  const { admin } = makeAdmin(rootDir);
+
+  await assert.rejects(() => admin.run('access.grant', { command: 'pings' }, {}), /pings is open to every member and cannot be granted/);
+  assert.equal(fs.existsSync(path.join(rootDir, 'config.local.json')), false);
+});
+
 // ---------------------------------------------------------------------------
 // access.grant / access.revoke / access.list
 // ---------------------------------------------------------------------------
@@ -775,7 +847,7 @@ test('access.grant: ping says it spends balance; * says both notes; a write comm
   const spends = 'Note: this opens ping, whose every call spends OpenRouter balance outside llm.maxRequestsPerDay.';
   const writes = 'Note: this opens commands that change memory or config.';
 
-  // Keep every row: draw, emoji.status, gifs.status, gifs.recache and variety are each the only catcher
+  // Keep every row: draw, emoji.status, gifs.status and gifs.recache are each the only catcher
   // of that key slipping into (or out of) the read-only set.
   for (const [command, roleId, notes] of [
     ['ping', undefined, [spends]],
@@ -787,7 +859,6 @@ test('access.grant: ping says it spends balance; * says both notes; a write comm
     ['gifs.recache', 'staff', [writes]],
     ['gifs.status', 'staff', []],
     ['gifs.rescan', 'staff', [writes]],
-    ['variety.show', undefined, []],
   ]) {
     const target = roleId ? `role id:${roleId}` : 'everyone';
     assert.equal(
@@ -3989,189 +4060,4 @@ test('run: memory.recent works while paused, writes nothing and is open to a gra
   assert.equal(store.flushCalls, 0);
   assert.equal(admin.isAllowed('memory.recent', { userId: '7', roleIds: ['123'] }), true);
   assert.equal(admin.isAllowed('memory.recent', { userId: '7', roleIds: [] }), false);
-});
-
-test("run: variety.show shows the long pass's list under its own mark beside the latest one", async () => {
-  const rootDir = makeRoot();
-  const { admin, store } = makeAdmin(rootDir);
-  const at = Date.now() - 60_000;
-  store.guilds.set('g1', {
-    worn: { at, key: 'k', lines: 3, patterns: [{ shape: 'short device', examples: ['ένα'], count: 2 }] },
-    wornLong: { at, lines: 70, patterns: [{ shape: 'long habit', examples: ['δύο'], count: 6 }] },
-    wornHistory: [],
-  });
-  const lines = (await admin.run('variety.show', {}, {})).split('\n');
-  const long = lines.findIndex((line) => line.startsWith('long (') && line.endsWith(' UTC, 70 lines):'));
-  assert.ok(long > lines.findIndex((line) => line.startsWith('latest (')), lines.join('\n'));
-  assert.equal(lines[long + 1], '  - long habit x6: "δύο"');
-  store.guilds.set('g1', { worn: null, wornHistory: [] });
-  assert.ok(!(await admin.run('variety.show', {}, {})).includes('long ('), 'no long pass yet: no long section');
-});
-
-// ---------------------------------------------------------------------------
-// variety.list / variety.add / variety.remove -- real store.js, fillers.js and
-// variety.js: the owner's fallback over the worn patterns and the fillers.
-// ---------------------------------------------------------------------------
-
-test('run: variety.add type:filler pins a prefix or an exact filler; refusals name the rule', async () => {
-  const rootDir = makeRoot();
-  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
-  try {
-    assert.equal(await admin.run('variety.add', { type: 'filler', text: '  Équit* ' }, { guildId: 'g1' }), 'Pinned filler: équit*');
-    assert.equal(await admin.run('variety.add', { type: 'filler', text: 'à vrai dire' }, { guildId: 'g1' }), 'Pinned filler: à vrai dire');
-    assert.equal(await admin.run('variety.add', { type: 'filler', text: 'ÉQUIT*' }, { guildId: 'g1' }), 'Pinned the listed filler: équit*');
-    assert.deepEqual(
-      store.getGuild('g1').fillers.map((e) => [e.text, e.prefix, e.pinned]),
-      [['équit', true, true], ['à vrai dire', false, true]],
-    );
-    await assert.rejects(admin.run('variety.add', { type: 'filler', text: 'ab*' }, { guildId: 'g1' }), /at least 3 letters before the \*/);
-    await assert.rejects(admin.run('variety.add', { type: 'filler', text: 'a*b' }, { guildId: 'g1' }), /may only end a prefix/);
-    await assert.rejects(admin.run('variety.add', { type: 'filler', text: ' -- ' }, { guildId: 'g1' }), /at least one letter or digit/);
-    await assert.rejects(admin.run('variety.add', { type: 'filler', text: '' }, { guildId: 'g1' }), /text is required/);
-    await assert.rejects(admin.run('variety.add', { type: 'word', text: 'x' }, { guildId: 'g1' }), /type must be pattern or filler/);
-  } finally {
-    fs.rmSync(dataDir, { recursive: true, force: true });
-  }
-});
-
-test('run: variety.add type:filler refuses past variety.fillers.max pinned entries', async () => {
-  const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  hot.config.variety = { fillers: { max: 1 } };
-  const { admin, dataDir } = makeRealStoreAdmin(rootDir, { hot });
-  try {
-    await admin.run('variety.add', { type: 'filler', text: 'bof' }, { guildId: 'g1' });
-    await assert.rejects(admin.run('variety.add', { type: 'filler', text: 'genre' }, { guildId: 'g1' }), /already holds 1 pinned entries/);
-  } finally {
-    fs.rmSync(dataDir, { recursive: true, force: true });
-  }
-});
-
-test('run: variety.add type:pattern pins a shape in the long list; its length follows variety.shapeChars', async () => {
-  const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  hot.config.variety = { shapeChars: 20 };
-  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir, { hot });
-  try {
-    assert.equal(await admin.run('variety.add', { type: 'pattern', text: ' quotes  a film line ' }, { guildId: 'g1' }), 'Pinned pattern: quotes a film line');
-    assert.equal(await admin.run('variety.add', { type: 'pattern', text: 'Quotes a film line' }, { guildId: 'g1' }), 'Pinned the listed pattern: Quotes a film line');
-    assert.deepEqual(store.getGuild('g1').wornLong.patterns, [{ shape: 'quotes a film line', count: 0, examples: [], pinned: true }]);
-    await assert.rejects(admin.run('variety.add', { type: 'pattern', text: 'ab' }, { guildId: 'g1' }), /3 to 20 characters/);
-    await assert.rejects(admin.run('variety.add', { type: 'pattern', text: 'x'.repeat(21) }, { guildId: 'g1' }), /3 to 20 characters/);
-  } finally {
-    fs.rmSync(dataDir, { recursive: true, force: true });
-  }
-});
-
-test('run: variety.list type:pattern numbers the long list (pins first), then the short one, with the learned word', async () => {
-  const rootDir = makeRoot();
-  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
-  try {
-    assert.equal(await admin.run('variety.list', { type: 'pattern' }, { guildId: 'g1' }), '(none)');
-    store.setWornLong('g1', { at: 1, lines: 60, patterns: [{ shape: 'ends on a question', examples: ['non ?'], count: 3, word: 'non' }] });
-    store.setWorn('g1', { at: 2, key: 'k', channelId: 'c1', lines: 8, patterns: [{ shape: 'opens with a sigh', examples: ['bof'], count: 2 }] });
-    store.pinWornPattern('g1', 'quotes a film line');
-    assert.equal(
-      await admin.run('variety.list', { type: 'pattern' }, { guildId: 'g1' }),
-      [
-        '#1 quotes a film line · long list, pinned',
-        '#2 ends on a question · long list · seen 3 · word non',
-        '#3 opens with a sigh · short list · seen 2',
-      ].join('\n'),
-    );
-  } finally {
-    fs.rmSync(dataDir, { recursive: true, force: true });
-  }
-});
-
-test('run: variety.list type:filler numbers pinned first, then by rank, with kind, weight, uses, last use and cooldown', async () => {
-  const rootDir = makeRoot();
-  const hot = makeHot(rootDir);
-  hot.config.variety = { fillers: { cooldownHours: 10, cooldownMessages: 50, max: 12, halfLifeDays: 14 } };
-  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir, { hot });
-  try {
-    assert.equal(await admin.run('variety.list', { type: 'filler' }, { guildId: 'g1' }), 'cooldown 10h or 50 own messages · own messages: 0 · max 12\n(none)');
-    const settings = { max: 12, halfLifeDays: 14 };
-    store.learnFillers('g1', [{ count: 2, word: 'genre' }, { count: 6, word: 'voilà' }], Date.now(), settings);
-    store.pinFiller('g1', { text: 'bof', prefix: false }, Date.now(), settings);
-    store.countOwnMessages('g1', 20);
-    const usedAt = Date.now() - 2 * 3_600_000 - 1000;
-    store.markFillers('g1', ['voilà*'], usedAt);
-    store.countOwnMessages('g1', 5);
-
-    const lines = (await admin.run('variety.list', { type: 'filler' }, { guildId: 'g1' })).split('\n');
-    assert.equal(lines[0], 'cooldown 10h or 50 own messages · own messages: 25 · max 12');
-    assert.equal(lines[1], '#1 bof · exact, pinned · weight 1 · uses 0 · never used · free');
-    assert.equal(
-      lines[2],
-      `#2 voilà* · prefix · weight 6 · uses 1 · last ${new Date(usedAt).toISOString().slice(0, 10)} · 5 messages since · resting: free in 8h or 45 messages`,
-    );
-    assert.equal(lines[3], '#3 genre* · prefix · weight 2 · uses 0 · never used · free');
-
-    hot.config.variety = { fillers: { cooldownHours: 10, cooldownMessages: 5 } };
-    const later = (await admin.run('variety.list', { type: 'filler' }, { guildId: 'g1' })).split('\n');
-    assert.ok(later[0].startsWith('cooldown 10h or 5 own messages'));
-    assert.match(later[2], /· free$/, 'enough own messages release it, the cooldown read now');
-  } finally {
-    fs.rmSync(dataDir, { recursive: true, force: true });
-  }
-});
-
-test('run: variety.remove deletes by number or by text, pinned or not; a name that matches nothing is an error', async () => {
-  const rootDir = makeRoot();
-  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
-  try {
-    const settings = { max: 12, halfLifeDays: 14 };
-    store.pinFiller('g1', { text: 'franc', prefix: true }, Date.now(), settings);
-    store.pinFiller('g1', { text: 'bof', prefix: false }, Date.now(), settings);
-    store.learnFillers('g1', [{ count: 2, word: 'genre' }], Date.now(), settings);
-    assert.equal(await admin.run('variety.remove', { type: 'filler', text: 'Franc' }, { guildId: 'g1' }), 'Removed filler: franc*', 'the * is optional');
-    assert.equal(await admin.run('variety.remove', { type: 'filler', id: 2 }, { guildId: 'g1' }), 'Removed filler: genre*', 'numbered as listed: bof, then genre*');
-    await assert.rejects(admin.run('variety.remove', { type: 'filler', id: 5 }, { guildId: 'g1' }), /no filler #5/);
-    await assert.rejects(admin.run('variety.remove', { type: 'filler', text: 'voilà' }, { guildId: 'g1' }), /no filler: voilà/);
-    await assert.rejects(admin.run('variety.remove', { type: 'filler' }, { guildId: 'g1' }), /an id or the text is required/);
-    assert.deepEqual(store.getGuild('g1').fillers.map((e) => e.text), ['bof']);
-
-    store.setWorn('g1', { at: 2, key: 'k', channelId: 'c1', lines: 8, patterns: [{ shape: 'opens with a sigh', examples: ['bof'], count: 2 }] });
-    store.pinWornPattern('g1', 'quotes a film line');
-    assert.equal(await admin.run('variety.remove', { type: 'pattern', text: 'Opens With A Sigh' }, { guildId: 'g1' }), 'Removed pattern: opens with a sigh');
-    assert.equal(await admin.run('variety.remove', { type: 'pattern', id: 1 }, { guildId: 'g1' }), 'Removed pattern: quotes a film line');
-    await assert.rejects(admin.run('variety.remove', { type: 'pattern', id: 1 }, { guildId: 'g1' }), /no pattern #1/);
-    assert.deepEqual(store.getGuild('g1').wornLong.patterns, []);
-  } finally {
-    fs.rmSync(dataDir, { recursive: true, force: true });
-  }
-});
-
-test('run: variety.add and variety.remove are refused while paused, variety.list still answers', async () => {
-  const rootDir = makeRoot();
-  const { admin, store, dataDir } = makeRealStoreAdmin(rootDir);
-  try {
-    store.pinFiller('g1', { text: 'bof', prefix: false }, Date.now(), { max: 12, halfLifeDays: 14 });
-    store.flush(); // what /nep pause does first
-    store.state.data.paused = true;
-    await assert.rejects(admin.run('variety.add', { type: 'filler', text: 'genre' }, { guildId: 'g1' }), /paused/);
-    await assert.rejects(admin.run('variety.remove', { type: 'filler', text: 'bof' }, { guildId: 'g1' }), /paused/);
-    assert.match(await admin.run('variety.list', { type: 'filler' }, { guildId: 'g1' }), /^#1 bof · exact, pinned /m);
-  } finally {
-    fs.rmSync(dataDir, { recursive: true, force: true });
-  }
-});
-
-test('access.grant: variety.show and variety.list open no write command; variety.add and the variety group do', async () => {
-  const rootDir = makeRoot();
-  const { admin } = makeAdmin(rootDir);
-  const writes = 'Note: this opens commands that change memory or config.';
-  for (const [command, notes] of [
-    ['variety.show', []],
-    ['variety.list', []],
-    ['variety.add', [writes]],
-    ['variety', [writes]],
-  ]) {
-    assert.equal(
-      await admin.run('access.grant', { command, roleId: 'staff' }, {}),
-      [`Granted ${command} to role id:staff (reload ok)`, ...notes].join('\n'),
-      command,
-    );
-  }
 });

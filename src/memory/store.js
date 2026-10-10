@@ -231,6 +231,7 @@ function emptyGuild() {
     wornHistory: [], // { at, channelId, lines, patterns: [{ shape, count }] } per pass -- see appendWornHistory
     fillers: [], // { text, prefix, pinned, weight, lastSeen, lastUsedAt, lastUsedAtMessage, uses } -- see learnFillers
     ownMessageCount: 0, // how many messages the persona has posted, only ever grows -- see countOwnMessages
+    pingsOff: [], // ids of the members who turned the persona's notifications off (`/nep pings`) -- see setPingsOff
     updatedAt: null,
     notesUpdatedAt: null, // when patterns, starters or injokes last changed -- see updateGuild
     notesCheckedAt: null, // when the analyzer was last asked to look at them again -- see markNotesChecked
@@ -382,6 +383,8 @@ function normalizeGuild(guild) {
   // The filler guard's fields (src/behavior/fillers.js): missing or hand-broken -> no filler, a count of 0.
   guild.fillers = normalizeFillers(guild.fillers);
   guild.ownMessageCount = normalizeOwnMessageCount(guild.ownMessageCount);
+  // Missing or hand-broken -> []: nobody turned pings off. Non-empty string ids only, each once.
+  guild.pingsOff = Array.isArray(guild.pingsOff) ? [...new Set(guild.pingsOff.filter((id) => typeof id === 'string' && id))] : [];
   // Missing or hand-broken -> null: never stamped.
   guild.notesUpdatedAt = isoStampOrNull(guild.notesUpdatedAt);
   guild.notesCheckedAt = isoStampOrNull(guild.notesCheckedAt);
@@ -1514,7 +1517,7 @@ export function createStore({ dataDir }) {
      * through `setEmojiBackfill`, `ownLines`/`worn`/`wornLong`/`wornHistory` only through
      * `pushOwnLine`/`setWorn`/`setWornLong`/`appendWornHistory`/`pinWornPattern`/`removeWornPattern`,
      * `fillers` only through `pinFiller`/`removeFiller`/`learnFillers`/`markFillers`, `ownMessageCount` only through
-     * `countOwnMessages`, and the notes stamps only
+     * `countOwnMessages`, `pingsOff` only through `setPingsOff`, and the notes stamps only
      * through this write and `markNotesChecked`. `notesUpdatedAt` gets the
      * same stamp when one of the server notes (`patterns`, `starters`,
      * `injokes`) really changes; `self` alone never moves it, and neither do
@@ -1537,6 +1540,7 @@ export function createStore({ dataDir }) {
         wornHistory,
         fillers,
         ownMessageCount,
+        pingsOff,
         notesUpdatedAt,
         notesCheckedAt,
         ...safeFields
@@ -1551,6 +1555,45 @@ export function createStore({ dataDir }) {
       Object.assign(item.value, safeFields, stamps);
       item.dirty = true;
       return item.value;
+    },
+
+    /**
+     * Whether `userId` turned the persona's notifications off in this guild (`/nep pings off`).
+     * @param {string} guildId
+     * @param {string} userId
+     * @returns {boolean}
+     */
+    isPingsOff(guildId, userId) {
+      const list = store.getGuild(guildId)?.pingsOff;
+      return Array.isArray(list) && list.includes(String(userId));
+    },
+
+    /**
+     * Turn the persona's notifications to `userId` off (`off` true) or back on, in the guild's
+     * `pingsOff` list. A change is written at once (a member's own switch, allowed while paused,
+     * when the next flush could otherwise land on a hand-edited file or be dropped with the
+     * caches); no change writes nothing. Nothing else is touched, never `updatedAt`. Persists like
+     * every guild field and is never reset implicitly.
+     * @param {string} guildId
+     * @param {string} userId
+     * @param {boolean} off
+     * @returns {boolean}  The state now: true when the member's pings are off.
+     */
+    setPingsOff(guildId, userId, off) {
+      const item = entry(guildFile(guildId), emptyGuild);
+      normalizeGuild(item.value);
+      if (!isPlainObject(item.value)) return false;
+      const id = String(userId);
+      const has = item.value.pingsOff.includes(id);
+      if (off === true && !has) {
+        item.value.pingsOff = [...item.value.pingsOff, id];
+        item.dirty = true;
+      } else if (off !== true && has) {
+        item.value.pingsOff = item.value.pingsOff.filter((other) => other !== id);
+        item.dirty = true;
+      }
+      flushEntry(guildFile(guildId), item);
+      return item.value.pingsOff.includes(id);
     },
 
     /**

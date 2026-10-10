@@ -11,9 +11,24 @@
 // and reads the grants it is given. The groups in OWNER_ONLY_GROUPS (private
 // memory, the mentor, access management itself) are never opened by any
 // grant, the `*` wildcard included: only an owner decides who may run what.
+// The commands in MEMBER_COMMANDS (`pings`: a member's own notifications) are
+// the opposite: open to every member with no grant, while
+// `features.memberCommands` is on; off, only an owner runs them.
 
 /** Command groups only an owner may ever run: no `bot.access` grant opens them. */
 export const OWNER_ONLY_GROUPS = Object.freeze(['private', 'mentor', 'access', 'diary']);
+
+/** Bare command keys every member may run with no grant (a member's own settings), while
+ * `features.memberCommands` is on. Never offered by `/nep access grant`. */
+export const MEMBER_COMMANDS = Object.freeze(['pings']);
+
+/** True when `key` is a member command (see MEMBER_COMMANDS): the exact bare key, nothing under it.
+ * @param {unknown} key
+ * @returns {boolean}
+ */
+export function isMemberCommand(key) {
+  return typeof key === 'string' && MEMBER_COMMANDS.includes(key);
+}
 
 /** The group of a dotted command key (`memory` for `memory.show`), or null for a bare key or a non-string. */
 function groupOf(key) {
@@ -50,14 +65,17 @@ export function isOwnerId(config, userId) {
  * key, its group, or `*`) may run `commandKey`. Owners always pass, even with
  * no `access` at all. A missing/invalid `access` denies everyone else, and
  * an owner-only command (see `isOwnerOnly`) denies everyone else whatever
- * `access` says.
+ * `access` says. A member command (see `isMemberCommand`) passes for anyone
+ * while `memberCommands` is true (`features.memberCommands`, read by the
+ * caller at the moment of use); false, only an owner runs it, no grant.
  * @param {{ commandKey: string, userId: string, roleIds?: (string|number)[],
- *   owners?: (string|number)[], access?: object }} args
+ *   owners?: (string|number)[], access?: object, memberCommands?: boolean }} args
  * @returns {boolean}
  */
-export function isAllowed({ commandKey, userId, roleIds, owners, access }) {
+export function isAllowed({ commandKey, userId, roleIds, owners, access, memberCommands = true }) {
   if (listsOwner(owners, userId)) return true;
 
+  if (isMemberCommand(commandKey)) return memberCommands !== false;
   if (isOwnerOnly(commandKey)) return false;
   if (!access || typeof access !== 'object') return false;
 

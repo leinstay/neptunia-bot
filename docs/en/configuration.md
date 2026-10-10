@@ -54,6 +54,7 @@ Every key in `config.json` with its default, grouped by section.
 | `followUp` | `true` | Classify untagged messages after the persona answers to continue a conversation |
 | `typingSimulation` | `true` | Simulate typing speed |
 | `adminCommands` | `true` | Owner slash commands; `false` unregisters them |
+| `memberCommands` | `true` | The `/nep pings` command, open to every member; `false` restricts it to owners |
 
 ## `bot`
 
@@ -693,7 +694,7 @@ Settings for the variety pass (`features.variety`). The persona's own recent lin
 | `maxOutputTokens` | `500` | Max output tokens for the pass |
 | `timeoutMs` | `8000` | How long a turn waits for a pass result (ms). A pass that outlives this wait keeps running to `requestTimeoutMs`; a late answer is stored and serves the next turn. The mentor sandbox uses this value as its request timeout |
 | `requestTimeoutMs` | `30000` | Request timeout for the variety model call (ms). The pass is cut at this time; `variety.timeoutMs` is only how long a turn waits for it |
-| `history` | `20` | Passes kept in the history ring for `/nep variety` |
+| `history` | `20` | Passes kept in the history ring in guild memory |
 | `longLines` | `300` | Own lines the long pass reads from the ring, across all channels with no age limit. `0` turns the long pass off |
 | `longEveryHours` | `6` | Hours between long passes; a failure counts so it is not retried after every post |
 | `longMinLines` | `60` | Fewer lines than this in the ring skips the long pass |
@@ -701,7 +702,7 @@ Settings for the variety pass (`features.variety`). The persona's own recent lin
 
 ### `variety.fillers`
 
-Settings for the filler advice list. Two kinds of entry: a PREFIX entry ends with `*` (at least 3 letters before the `*`) and matches every word starting with that prefix on a word boundary; an EXACT entry (no `*`) matches the word or phrase whole. The variety passes are the main source: a word-type habit the pass finds becomes an entry with weight equal to its count. The owner can pin entries with `/nep variety add type:filler` as a fallback. The list is ranked with eviction like interests: capacity `max`, weight with recency decay (`halfLifeDays`), the weakest evicted when full. Owner-added entries are pinned: never evicted or decayed. Entries on cooldown (used within `cooldownHours` or `cooldownMessages` of the persona's own posts; pinned entries always) are shown to the persona in the `<worn>` block before the reply, ranked, at most `max`. The persona sees them before writing and avoids them on its own. State in guild memory: `fillers` and `ownMessageCount`.
+Settings for the filler advice list. Two kinds of entry: a PREFIX entry ends with `*` (at least 3 letters before the `*`) and matches every word starting with that prefix on a word boundary; an EXACT entry (no `*`) matches the word or phrase whole. The variety passes are the main source: a word-type habit the pass finds becomes an entry with weight equal to its count. The list is ranked with eviction like interests: capacity `max`, weight with recency decay (`halfLifeDays`), the weakest evicted when full. Owner-added entries are pinned: never evicted or decayed. Entries on cooldown (used within `cooldownHours` or `cooldownMessages` of the persona's own posts; pinned entries always) are shown to the persona in the `<worn>` block before the reply, ranked, at most `max`. The persona sees them before writing and avoids them on its own. State in guild memory: `fillers` and `ownMessageCount`.
 
 | Key | Default | Meaning |
 |---|---|---|

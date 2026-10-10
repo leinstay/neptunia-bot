@@ -47,7 +47,8 @@
     "diary": true,
     "typingSimulation": true,
     "pauseNotice": true,
-    "adminCommands": true
+    "adminCommands": true,
+    "memberCommands": true
   },
   "bot": {
     "timezone": "UTC",

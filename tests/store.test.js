@@ -135,7 +135,7 @@ test('getGuild: an old guild.json without learned loads it as empty, every other
 
   const store = createStore({ dataDir: dir });
   const guild = store.getGuild('g1');
-  assert.deepEqual(guild, { ...old, learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornLong: null, wornHistory: [], fillers: [], ownMessageCount: 0, notesUpdatedAt: null, notesCheckedAt: null, notesFlaggedAt: null, notesSampleReviewedAt: null, notesAttemptAt: null });
+  assert.deepEqual(guild, { ...old, learned: [], learnedNextId: 1, emojiUsage: {}, emojiBackfill: null, ownLines: [], worn: null, wornLong: null, wornHistory: [], fillers: [], ownMessageCount: 0, pingsOff: [], notesUpdatedAt: null, notesCheckedAt: null, notesFlaggedAt: null, notesSampleReviewedAt: null, notesAttemptAt: null });
   store.flush();
   assert.equal(fs.readFileSync(file, 'utf8'), raw, 'reading alone never rewrites the file');
 });
@@ -165,6 +165,55 @@ test('getGuild: learned that is not an array or a garbage learnedNextId never th
   assert.deepEqual(guild.learned, []);
   assert.equal(guild.learnedNextId, 1);
   assert.equal(guild.patterns, 'x');
+});
+
+test('pingsOff: empty on a fresh guild; setPingsOff adds and removes once, returns the state, survives a flush and reload', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  assert.deepEqual(store.getGuild('g1').pingsOff, []);
+  assert.equal(store.isPingsOff('g1', 'u1'), false);
+
+  assert.equal(store.setPingsOff('g1', 'u1', true), true);
+  assert.equal(store.setPingsOff('g1', 'u1', true), true);
+  assert.equal(store.setPingsOff('g1', 'u2', true), true);
+  assert.deepEqual(store.getGuild('g1').pingsOff, ['u1', 'u2']);
+  assert.equal(store.isPingsOff('g1', 'u1'), true);
+  store.flush();
+
+  const again = createStore({ dataDir: dir });
+  assert.equal(again.isPingsOff('g1', 'u1'), true);
+  assert.equal(again.isPingsOff('g1', 'u3'), false);
+  assert.equal(again.setPingsOff('g1', 'u1', false), false);
+  assert.equal(again.setPingsOff('g1', 'u1', false), false);
+  again.flush();
+  assert.deepEqual(createStore({ dataDir: dir }).getGuild('g1').pingsOff, ['u2']);
+});
+
+test('pingsOff: a change is on disk at once, with no flush, and survives dropped caches', () => {
+  const dir = tmpDataDir();
+  const store = createStore({ dataDir: dir });
+  store.setPingsOff('g1', 'u1', true);
+  const file = path.join(dir, 'guilds', 'g1', 'guild.json');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).pingsOff, ['u1']);
+  store.dropCaches();
+  assert.equal(store.isPingsOff('g1', 'u1'), true);
+});
+
+test('pingsOff: updateGuild from the analyzer never overwrites it', () => {
+  const store = createStore({ dataDir: tmpDataDir() });
+  store.setPingsOff('g1', 'u1', true);
+  store.updateGuild('g1', { patterns: 'x', pingsOff: [] });
+  assert.deepEqual(store.getGuild('g1').pingsOff, ['u1']);
+});
+
+test('pingsOff: a hand-broken field reads as [], junk entries dropped, duplicates kept once', () => {
+  for (const [stored, expected] of [['u1', []], [{ u1: true }, []], [['u1', 7, null, '', 'u1', { id: 'u2' }, 'u3'], ['u1', 'u3']]]) {
+    const dir = tmpDataDir();
+    const file = path.join(dir, 'guilds', 'g1', 'guild.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ patterns: '', pingsOff: stored }));
+    assert.deepEqual(createStore({ dataDir: dir }).getGuild('g1').pingsOff, expected, JSON.stringify(stored));
+  }
 });
 
 test('applyLearnedOps: adds items with per-guild ids, from kept, returns the new list, persists across a restart', () => {

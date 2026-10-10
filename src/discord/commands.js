@@ -4,7 +4,9 @@
 // -tested. `registerCommands` pushes that tree to the single guild this
 // instance serves; `createInteractionHandler` turns a discord.js interaction
 // into an `admin.run(commandKey, args, context)` call and replies, always
-// ephemerally, never letting an error escape into discord.js.
+// ephemerally, never letting an error escape into discord.js. One
+// subcommand, `pings`, is a member's own notification switch, open to every
+// member (src/discord/access.js#isMemberCommand).
 //
 // Every option → args mapping lives in one place (OPTION_MAPPERS): adding a
 // command here means one tree entry and one mapper, plus a SLOW_COMMANDS
@@ -12,7 +14,7 @@
 // src/admin.js.
 
 import { MessageFlags } from 'discord.js';
-import { isOwnerOnly } from './access.js';
+import { isMemberCommand, isOwnerOnly } from './access.js';
 import { isPlainObject } from '../config.js';
 import { log } from '../log.js';
 
@@ -116,11 +118,11 @@ function choicesOf(values) {
   return values.map((value) => ({ name: value, value }));
 }
 
-/** The lists of `/nep variety list|add|remove`. */
-const VARIETY_TYPES = Object.freeze(['pattern', 'filler']);
-
 const ROUTE_ROLES = MODEL_SET_ROLES;
 const PING_ROLES = Object.freeze([...ROUTE_ROLES, 'classifier']);
+
+/** `/nep pings`'s `mode` choices (src/admin.js#cmdPings reads the same list). */
+export const PINGS_MODES = Object.freeze(['on', 'off']);
 
 const DISABLED_MESSAGE = 'Owner commands are disabled (features.adminCommands is off).';
 const NOT_ALLOWED_MESSAGE = 'Not allowed';
@@ -190,36 +192,11 @@ export function buildCommandTree(commandName) {
         },
         { type: SUBCOMMAND, name: 'reload', description: 'Reload config and prompts now.' },
         {
-          type: SUBCOMMAND_GROUP,
-          name: 'variety',
-          description: 'Worn patterns and filler words.',
+          type: SUBCOMMAND,
+          name: 'pings',
+          description: "Choose whether the bot's messages notify you.",
           options: [
-            { type: SUBCOMMAND, name: 'show', description: 'Worn devices: latest list and history.' },
-            {
-              type: SUBCOMMAND,
-              name: 'list',
-              description: 'Numbered patterns or fillers.',
-              options: [{ type: STRING, name: 'type', description: 'Which list.', required: true, choices: choicesOf(VARIETY_TYPES) }],
-            },
-            {
-              type: SUBCOMMAND,
-              name: 'add',
-              description: 'Pin an entry (filler: trailing * = prefix).',
-              options: [
-                { type: STRING, name: 'type', description: 'Which list.', required: true, choices: choicesOf(VARIETY_TYPES) },
-                { type: STRING, name: 'text', description: 'Shape, or filler word/phrase.', required: true },
-              ],
-            },
-            {
-              type: SUBCOMMAND,
-              name: 'remove',
-              description: 'Remove an entry by number or text.',
-              options: [
-                { type: STRING, name: 'type', description: 'Which list.', required: true, choices: choicesOf(VARIETY_TYPES) },
-                { type: INTEGER, name: 'id', description: 'Number from the list.', required: false, min_value: 1 },
-                { type: STRING, name: 'text', description: 'Or the entry text.', required: false },
-              ],
-            },
+            { type: STRING, name: 'mode', description: 'on or off; leave empty to see your current setting.', required: false, choices: choicesOf(PINGS_MODES) },
           ],
         },
         {
@@ -867,6 +844,7 @@ function commandKeyFor(interaction) {
 const OPTION_MAPPERS = {
   status: () => ({}),
   ping: (options) => ({ role: options.getString('role') ?? undefined }),
+  pings: (options) => ({ mode: options.getString('mode') ?? undefined }),
   reload: () => ({}),
   pause: () => ({}),
   resume: () => ({}),
@@ -963,14 +941,6 @@ const OPTION_MAPPERS = {
     userId: options.getUser('user')?.id,
   }),
   'access.list': () => ({}),
-  'variety.show': () => ({}),
-  'variety.list': (options) => ({ type: options.getString('type', true) }),
-  'variety.add': (options) => ({ type: options.getString('type', true), text: options.getString('text', true) }),
-  'variety.remove': (options) => ({
-    type: options.getString('type', true),
-    id: options.getInteger('id') ?? undefined,
-    text: options.getString('text') ?? undefined,
-  }),
 };
 
 function buildArgs(commandKey, interaction) {
@@ -1029,10 +999,11 @@ function roleIdsFor(interaction) {
 
 /** `command`-option autocomplete choices for `/nep access grant|revoke`: every known command key,
  * every group name, and `*`, filtered by the typed text. The owner-only commands
- * (src/discord/access.js#isOwnerOnly) are never offered: no grant can open them. */
+ * (src/discord/access.js#isOwnerOnly) are never offered: no grant can open them; nor is a
+ * member command (src/discord/access.js#isMemberCommand), open without one. */
 function accessKeyChoices(typed) {
   const { keys, groups } = commandKeys();
-  const all = ['*', ...groups, ...keys].filter((key) => !isOwnerOnly(key));
+  const all = ['*', ...groups, ...keys].filter((key) => !isOwnerOnly(key) && !isMemberCommand(key));
   return all
     .filter((key) => key.toLowerCase().includes(typed))
     .slice(0, MAX_AUTOCOMPLETE_CHOICES)
